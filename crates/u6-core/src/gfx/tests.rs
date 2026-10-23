@@ -1,13 +1,18 @@
 //! Unit tests on synthetic tiles, and a real-data test that skips without the user's zip.
+//!
+//! Sizes and places on the map come from [`crate::geom`] (spec 13): the tests run in both builds.
+
+use std::ops::Range;
 
 use u6_formats::gfx::{AnimOverlay, Span, Tile, TileKind};
-use u6_render::Framebuffer;
+use u6_render::{Framebuffer, HEIGHT, WIDTH};
 
 use super::GfxState;
 use super::anim::{merge_shores, set_frame, substitute};
 use super::blit::{
-    blit_back, copy_window, dissolve, dissolve_order, outline_colour, plot, set_plot_colour,
+    UI, blit_back, copy_window, dissolve, dissolve_order, outline_colour, plot, set_plot_colour,
 };
+use crate::geom::{MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
 
 mod adv;
 mod cache;
@@ -16,8 +21,41 @@ mod idle;
 mod plane;
 mod plane_parity;
 mod real;
+mod shown;
 mod sprite;
 mod view;
+
+/// The frame pixel of the view's pixel (x, y): the map's corner plus (x, y) (the same pixel in
+/// Original, where the map is at (0, 0)).
+pub(super) fn at_map(x: usize, y: usize) -> (usize, usize) {
+    (usize::from(MAP_X) + x, usize::from(MAP_Y) + y)
+}
+
+/// [`at_map`] as the blitter's pixel words.
+pub(super) fn at_map16(x: usize, y: usize) -> (u16, u16) {
+    let (x, y) = at_map(x, y);
+    (x as u16, y as u16)
+}
+
+/// The frame's columns and rows of the whole view, its cells with the border (0..176 both in
+/// Original).
+pub(super) fn view_rect() -> (Range<usize>, Range<usize>) {
+    let (x, y) = at_map(0, 0);
+    (x..x + VIEW_W * 16, y..y + VIEW_H * 16)
+}
+
+/// The frame's columns and rows of the shown map, [`SHOWN`] (8..168 both in Original).
+pub(super) fn shown() -> (Range<usize>, Range<usize>) {
+    let (x0, y0, x1, y1) = SHOWN;
+    let [x0, y0, x1, y1] = [x0, y0, x1, y1].map(usize::from);
+    (x0..x1 + 1, y0..y1 + 1)
+}
+
+/// Pixel (x, y) is in [`shown`].
+pub(super) fn in_shown(x: usize, y: usize) -> bool {
+    let (xs, ys) = shown();
+    xs.contains(&x) && ys.contains(&y)
+}
 
 /// A map record: rows `first..first+rows` opaque with colour `colour(r, c)`.
 pub(super) fn map_tile(first: u8, rows: u8, colour: impl Fn(usize, usize) -> u8) -> Tile {
@@ -92,7 +130,7 @@ fn map_tile_writes_only_its_rows_on_8_pixel_steps() {
     assert_eq!(fb.get(80, 45), Some(31), "row 5 is past the record");
     assert_eq!(fb.get(79, 42), Some(31));
     assert_eq!(fb.get(96, 42), Some(31));
-    assert_eq!(count(&fb, 31), 320 * 200 - 3 * 16);
+    assert_eq!(count(&fb, 31), WIDTH * HEIGHT - 3 * 16);
 }
 
 #[test]
@@ -101,21 +139,34 @@ fn tiles_wrap_into_the_next_row_and_drop_past_the_screen() {
     install(&mut gfx, 1, map_tile(0, 16, |_, c| c as u8 + 1));
     let mut fb = Framebuffer::new();
     blit_back(&gfx, &mut fb, 1, 312, 10);
-    // Columns 0..8 on row 10 at x 312..320, columns 8..16 on row 11 at x 0..8.
+    // Columns 0..8 on row 10 at x 312..320; columns 8..16 on row 11 at x 0..8 on the UI's own
+    // screen (Original), dropped in Wide, where x 320.. on row 10 is the map (spec 13 Design 4).
     assert_eq!(fb.get(312, 10), Some(1));
     assert_eq!(fb.get(319, 10), Some(8));
-    assert_eq!(fb.get(0, 11), Some(9));
-    assert_eq!(fb.get(7, 11), Some(16));
+    let wrapped = if (WIDTH, HEIGHT) == UI {
+        [Some(9), Some(16)]
+    } else {
+        [Some(0), Some(0)]
+    };
+    assert_eq!([fb.get(0, 11), fb.get(7, 11)], wrapped);
+    assert_eq!(
+        count(&fb, 0),
+        WIDTH * HEIGHT - 16 * if wrapped[0] == Some(0) { 8 } else { 16 }
+    );
     let mut fb = Framebuffer::new();
     blit_back(&gfx, &mut fb, 1, 0, 192);
     assert_eq!(
         count(&fb, 0),
-        320 * 200 - 8 * 16,
+        WIDTH * HEIGHT - 8 * 16,
         "rows past 199 are dropped"
     );
     let mut fb = Framebuffer::new();
     blit_back(&gfx, &mut fb, 1, 0, 200);
-    assert_eq!(count(&fb, 0), 320 * 200, "y = 200 is past the row table");
+    assert_eq!(
+        count(&fb, 0),
+        WIDTH * HEIGHT,
+        "y = 200 is past the row table (past the UI's screen in Wide)"
+    );
 }
 
 #[test]
@@ -349,18 +400,28 @@ fn dissolve_ends_on_any_feedback_word_and_on_wrapped_corners() {
     let mut front = Framebuffer::new();
     front.clear(3);
     dissolve(&taps, &back, &mut front, (20, 30), (19, 41));
-    assert_eq!(count(&front, 3), 320 * 200);
+    assert_eq!(count(&front, 3), WIDTH * HEIGHT);
 }
 
+/// 0x151f5a copies exactly the shown map, pixels 8..168 both ways in Original ([`SHOWN`]).
 #[test]
 fn window_copy_moves_exactly_pixels_8_to_168() {
     let mut back = Framebuffer::new();
     back.clear(4);
     let mut front = Framebuffer::new();
     copy_window(&back, &mut front);
-    assert_eq!(count(&front, 4), 160 * 160);
-    assert_eq!((front.get(8, 8), front.get(167, 167)), (Some(4), Some(4)));
-    assert_eq!((front.get(7, 8), front.get(168, 167)), (Some(0), Some(0)));
+    let (xs, ys) = shown();
+    assert_eq!(count(&front, 4), xs.len() * ys.len());
+    let (x0, y0, x1, y1) = (xs.start, ys.start, xs.end - 1, ys.end - 1);
+    assert_eq!((front.get(x0, y0), front.get(x1, y1)), (Some(4), Some(4)));
+    assert_eq!(
+        (front.get(x0 - 1, y0), front.get(x1 + 1, y1)),
+        (Some(0), Some(0))
+    );
+    assert_eq!(
+        (front.get(x0, y0 - 1), front.get(x1, y1 + 1)),
+        (Some(0), Some(0))
+    );
 }
 
 #[test]

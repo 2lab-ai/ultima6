@@ -2,6 +2,7 @@
 //! experience, and what an attacked bystander or a monster's special does.
 
 use crate::engine::with_current_io;
+use crate::geom::{HALF_H, HALF_W, VIEW_H, VIEW_W};
 use crate::image::A4;
 use crate::main_loop::Pending;
 use crate::objects;
@@ -41,14 +42,21 @@ fn member(s: &State, i: usize) -> i16 {
 
 /// Original: 0x1230ce (combat: flash a hit: tile 0x101 over the object's window cell, shown at
 /// once; the actor is marked as hit (movement flag 0x08) and woken up)
+///
+/// The flash only for an object in the view (spec 13 Decision 5: its view cell, the centre at
+/// ([`HALF_W`], [`HALF_H`]), inside [`VIEW_W`] × [`VIEW_H`]; 0..11 both in Original).
 pub fn flash(s: &mut State, target: i16) {
     let t = target as usize;
     if s.combat.flash != 0 {
         let c = s.map.centre;
         let p = s.objects.location[t];
-        let col = (p.x as i16).wrapping_sub(c.x as i16).wrapping_add(5);
-        let row = (p.y as i16).wrapping_sub(c.y as i16).wrapping_add(5);
-        if (0..11).contains(&col) && (0..11).contains(&row) {
+        let col = (p.x as i16)
+            .wrapping_sub(c.x as i16)
+            .wrapping_add(HALF_W as i16);
+        let row = (p.y as i16)
+            .wrapping_sub(c.y as i16)
+            .wrapping_add(HALF_H as i16);
+        if (0..VIEW_W as i16).contains(&col) && (0..VIEW_H as i16).contains(&row) {
             objects::build_draw_lists(s);
             super::seams::add_tile(s, 0x101, col, row, 1);
             with_current_io(|io| crate::gfx::render_window(s, io, true));
@@ -489,9 +497,11 @@ pub fn lie_down(s: &mut State, actor: i16) {
                     let p = s.objects.location[a];
                     objects::remove(s, actor);
                     let c = s.map.centre;
-                    let near =
-                        |u: u16, v: u16| (u as i16).wrapping_sub(v as i16).wrapping_abs() <= 5;
-                    if flags & 0x1000 != 0 && near(p.x, c.x) && near(p.y, c.y) {
+                    // In the view (spec 13 Decision 5; within 5 in Original).
+                    let near = |u: u16, v: u16, half: usize| {
+                        (u as i16).wrapping_sub(v as i16).wrapping_abs() <= half as i16
+                    };
+                    if flags & 0x1000 != 0 && near(p.x, c.x, HALF_W) && near(p.y, c.y, HALF_H) {
                         with_current_io(|io| crate::gfx::render_window(s, io, true));
                         present::capture_window(s, present::WINDOW_MS);
                         objects::build_draw_lists(s);

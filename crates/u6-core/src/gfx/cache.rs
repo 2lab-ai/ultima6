@@ -2,8 +2,9 @@
 //! image and the state as without it.
 //!
 //! The map window render 0x102c90 ([`super::view::render_window`]) draws into the back buffer
-//! only in 16 × 16 boxes at multiples of 16: each cell's tile and objects (and a clock's hands)
-//! at (16·col, 16·row), the target cursor at its cell, each border tile at an edge cell. The
+//! only in 16 × 16 boxes at multiples of 16 from the map's corner: each cell's tile and objects
+//! (and a clock's hands) at ([`MAP_X`] + 16·col, [`MAP_Y`] + 16·row), the target cursor at its
+//! cell, each border tile at an edge cell. The
 //! blitter writes a record's 16 × 16 pixels from the box's byte address, the overlay's rows below
 //! its first row, the outline 8 pixels further left within the record ([`super::blit`]); so
 //! every draw stays in its box, which [`WindowKey::of`] checks where the data decides it (the
@@ -34,13 +35,14 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use super::GfxState;
-use super::view::{ViewWindow, WINDOW_TILES};
+use super::view::{ViewWindow, cell_pixel};
+use crate::geom::{MAP_X, MAP_Y, VIEW_H, VIEW_W};
 use crate::state::State;
 use u6_formats::gfx::{ANIM_FRAMES, TILE_COUNT, TILE_H, TILE_W};
 use u6_render::Src;
 
 /// Boxes of the window: its cells.
-pub(super) const BOXES: usize = WINDOW_TILES * WINDOW_TILES;
+pub(super) const BOXES: usize = VIEW_W * VIEW_H;
 
 /// Port-only, no original address: what the last map window render of the refresh drew, and the
 /// records' versions. A cache, not game state: equal whatever it holds (the same game with and
@@ -233,14 +235,14 @@ impl WindowKey {
         key.values.push(clock.map_or(u32::MAX, u32::from));
         for (row, tiles) in window.tiles.iter().enumerate() {
             for (col, &tile) in tiles.iter().enumerate() {
-                let b = row * WINDOW_TILES + col;
+                let b = row * VIEW_W + col;
                 key.word(gfx, tile)?;
                 let objects = &window.objects[b];
                 key.values.push(objects.len() as u32);
                 for &w in objects {
                     key.word(gfx, w)?;
                     if Some(w & 0x7ff) == clock {
-                        let (x, y) = ((col * 16) as u16, (row * 16) as u16);
+                        let (x, y) = cell_pixel(col, row);
                         let cal = &state.actors.calendar;
                         let points = super::view::clock_points(cal, &gfx.tables, x, y);
                         if points
@@ -308,9 +310,10 @@ impl WindowKey {
 
 /// The box of the cell whose top left is (x, y), if it is one.
 pub(super) fn cell_box(x: u16, y: u16) -> Option<usize> {
-    let (col, row) = (usize::from(x / 16), usize::from(y / 16));
-    (x.is_multiple_of(16) && y.is_multiple_of(16) && col < WINDOW_TILES && row < WINDOW_TILES)
-        .then_some(row * WINDOW_TILES + col)
+    let (dx, dy) = (x.checked_sub(MAP_X)?, y.checked_sub(MAP_Y)?);
+    let (col, row) = (usize::from(dx / 16), usize::from(dy / 16));
+    (dx.is_multiple_of(16) && dy.is_multiple_of(16) && col < VIEW_W && row < VIEW_H)
+        .then_some(row * VIEW_W + col)
 }
 
 /// The boxes the render of `key` must draw over what the back buffer holds: those whose values

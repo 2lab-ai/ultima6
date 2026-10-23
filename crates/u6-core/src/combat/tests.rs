@@ -1,5 +1,8 @@
 //! Unit tests of the combat code on synthetic states (no `game`: tables are written by hand,
-//! the values are the shape of the originals, not their contents).
+//! the values are the shape of the originals, not their contents). The map window's pixels and
+//! sizes come from [`crate::geom`] (spec 13).
+
+use std::ops::RangeInclusive;
 
 use u6_formats::position::Position;
 
@@ -7,6 +10,7 @@ use super::present::{Said, flight};
 use super::tables::CombatTables;
 use super::*;
 use crate::actors::tail;
+use crate::geom::{MAP_X, MAP_Y, SHOWN};
 use crate::image::A4;
 use crate::main_loop::test_support::link_placed_objects;
 use crate::rng::Rng;
@@ -259,14 +263,35 @@ fn combat_mode_on_and_off() {
     assert_eq!(s.actors.worktype[2], 0);
 }
 
+/// The shown map's columns and rows ([`SHOWN`], 8..=0xa7 both in Original) as the flight's words.
+fn shown_px() -> (RangeInclusive<i16>, RangeInclusive<i16>) {
+    let (x0, y0, x1, y1) = SHOWN;
+    (x0 as i16..=x1 as i16, y0 as i16..=y1 as i16)
+}
+
+/// The frame pixel of the window's pixel (x, y): from the map's corner.
+fn at_map(x: i16, y: i16) -> (i16, i16) {
+    (MAP_X as i16 + x, MAP_Y as i16 + y)
+}
+
 #[test]
 fn dirty_rectangle_clips_to_the_window() {
     let mut s = world();
-    s.combat.dirty = [0xa8, 0xa8, 7, 7];
-    present::extend_dirty(&mut s, 40, 50);
-    assert_eq!(s.combat.dirty, [32, 42, 48, 58]);
-    present::extend_dirty(&mut s, 10, 0xa0);
-    assert_eq!(s.combat.dirty, [8, 42, 48, 0xa7]);
+    let (xs, ys) = shown_px();
+    s.combat.dirty = present::NO_DIRTY;
+    assert_eq!(
+        s.combat.dirty,
+        [xs.end() + 1, ys.end() + 1, xs.start() - 1, ys.start() - 1],
+        "empty: from past the far corner to before the near one ([0xa8, 0xa8, 7, 7])"
+    );
+    let (x, y) = at_map(40, 50);
+    present::extend_dirty(&mut s, x, y);
+    assert_eq!(s.combat.dirty, [x - 8, y - 8, x + 8, y + 8]);
+    // Near the left and bottom edges: held to the shown map ([8, 42, 48, 0xa7] in Original).
+    let (x, y) = (xs.start() + 2, ys.end() - 7);
+    present::extend_dirty(&mut s, x, y);
+    let (cx, cy) = at_map(40, 50);
+    assert_eq!(s.combat.dirty, [*xs.start(), cy - 8, cx + 8, *ys.end()]);
 }
 
 #[test]
@@ -509,18 +534,27 @@ fn tame_looks_for_the_party_within_the_roster_only() {
     assert!(s.objects.location[0x10].x >= 59, "it ambled or waited");
 }
 
-/// The colour of window pixel (88, 88) in the frame the engine shows.
+/// The colour of window pixel (88, 88) (from the map's corner) in the frame the engine shows.
 fn centre(e: &crate::Engine) -> u8 {
-    e.frame().get(88, 88).unwrap_or(0)
+    let (x, y) = at_map(88, 88);
+    e.frame().get(x as usize, y as usize).unwrap_or(0)
 }
 
-/// Fills the map window's inside (8..168) on the screen with colour `c`.
+/// The shown map's pixels ([`SHOWN`], 8..168 both ways in Original).
+fn shown_pixels() -> impl Iterator<Item = (usize, usize)> {
+    let (xs, ys) = shown_px();
+    let (xs, ys) = (
+        *xs.start() as usize..=*xs.end() as usize,
+        *ys.start() as usize..=*ys.end() as usize,
+    );
+    ys.flat_map(move |y| xs.clone().map(move |x| (x, y)))
+}
+
+/// Fills the map window's inside (8..168 in Original) on the screen with colour `c`.
 fn fill_window(io: &crate::engine::Io, c: u8) {
     io.draw(|fb| {
-        for y in 8..168 {
-            for x in 8..168 {
-                fb.set(x, y, c);
-            }
+        for (x, y) in shown_pixels() {
+            fb.set(x, y, c);
         }
     });
 }
@@ -881,8 +915,8 @@ fn an_uneven_host_tick_loses_no_time_over_a_run() {
 }
 
 /// A window recorded dissolving (colour 5 over colour 0) with `cost` ms and played at ticks of
-/// `tick_ms`: per tick, how many of its 160 × 160 dissolving pixels the published frame shows,
-/// and the engine time the playback took.
+/// `tick_ms`: per tick, how many of its dissolving pixels (the shown map, 160 × 160 in Original)
+/// the published frame shows, and the engine time the playback took.
 fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
     let done = std::rc::Rc::new(std::cell::Cell::new(None));
     let out = std::rc::Rc::clone(&done);
@@ -890,15 +924,7 @@ fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
         State::empty(),
         crate::Files::default(),
         move |st, io| async move {
-            let fill = |c: u8| {
-                io.draw(|fb| {
-                    for y in 8..168 {
-                        for x in 8..168 {
-                            fb.set(x, y, c);
-                        }
-                    }
-                })
-            };
+            let fill = |c: u8| fill_window(&io, c);
             fill(0);
             io.present();
             io.vblank().await;
@@ -917,8 +943,7 @@ fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
         }
         e.tick(&[], tick_ms);
         let f = e.frame();
-        let n = (8..168)
-            .flat_map(|y| (8..168).map(move |x| (x, y)))
+        let n = shown_pixels()
             .filter(|&(x, y)| f.get(x, y) == Some(5))
             .count();
         shown.push(n);
@@ -930,16 +955,18 @@ fn dissolve_run(cost: u16, tick_ms: u32) -> (Vec<usize>, u64) {
 fn a_dissolving_window_is_revealed_over_its_time() {
     // The original copies a dissolving window pixel by pixel for 171 frames (0x1520e2): the
     // playback shows it growing over its time, not all at once at the end, at any tick size.
+    // Spec 13 Decision 7: the same time over the bigger shown map of Wide.
     let cost = present::DISSOLVE_MS;
     let (shown, at16) = dissolve_run(cost, 16);
     let (_, at8) = dissolve_run(cost, 8);
-    let partial = shown.iter().filter(|&&n| n > 0 && n < 160 * 160).count();
+    let all = shown_pixels().count();
+    let partial = shown.iter().filter(|&&n| n > 0 && n < all).count();
     println!(
         "dissolve of {cost} ms: done at {at16} ms (16 ms ticks), {at8} ms (8 ms); \
          {partial} ticks partly shown"
     );
     assert!(shown.windows(2).all(|w| w[0] <= w[1]), "it only grows");
-    assert_eq!(*shown.last().unwrap(), 160 * 160, "all of it at the end");
+    assert_eq!(*shown.last().unwrap(), all, "all of it at the end");
     assert!(
         partial > shown.len() / 2,
         "most ticks show part of it: {partial} of {}",

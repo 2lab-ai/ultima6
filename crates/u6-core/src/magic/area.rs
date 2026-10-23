@@ -8,7 +8,9 @@ use std::cell::RefCell;
 use super::effects::{FMT_NL_S_NL, FMT_S, NEWLINE, print_at, say};
 use super::seams;
 use super::tables::Msg;
+use crate::combat::tables::SPREAD_SIDE;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN};
 use crate::objects::Slot;
 use crate::state::State;
 
@@ -367,12 +369,21 @@ pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
         falling = false;
         if frame >= 4 {
             let c = s.map.centre;
-            let (ox, oy) = ((c.x as i16 - 5) << 4, (c.y as i16 - 5) << 4);
+            // The world pixel at frame pixel (0, 0): view cell 0's, less the map's corner.
+            let ox = ((c.x as i16 - HALF_W as i16) << 4) - MAP_X as i16;
+            let oy = ((c.y as i16 - HALF_H as i16) << 4) - MAP_Y as i16;
+            // Inside the shown map by the original's margins (0xf < p < 0x98 in Original).
+            let (x0, y0, x1, y1) = (
+                SHOWN.0 as i16,
+                SHOWN.1 as i16,
+                SHOWN.2 as i16,
+                SHOWN.3 as i16,
+            );
             let shown: Vec<(i16, i16)> = stones
                 .iter()
                 .flatten()
                 .map(|st| (st.at.0 - ox, st.at.1 - oy))
-                .filter(|&(px, py)| px > 0xf && px < 0x98 && py > 0xf && py < 0x98)
+                .filter(|&(px, py)| px > x0 + 7 && px < x1 - 0xf && py > y0 + 7 && py < y1 - 0xf)
                 .collect();
             seams::draw_hail(s, io, &shown);
             frame = 0;
@@ -393,9 +404,13 @@ pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
                 if o < 0x100 {
                     exp = exp.wrapping_add(seams::hurt(s, o as u16, 1));
                     let c = s.map.centre;
-                    let px = ((tx - c.x as i16 + 5) << 4) + 8;
-                    let py = ((ty - c.y as i16 + 5) << 4) + 8;
-                    if (8..0xa8).contains(&px) && (8..0xa8).contains(&py) {
+                    // The cell's centre in the frame, shown when in the shown map (8..0xa8 in
+                    // Original).
+                    let px = ((tx - c.x as i16 + HALF_W as i16) << 4) + 8 + MAP_X as i16;
+                    let py = ((ty - c.y as i16 + HALF_H as i16) << 4) + 8 + MAP_Y as i16;
+                    let xs = SHOWN.0 as i16..=SHOWN.2 as i16;
+                    let ys = SHOWN.1 as i16..=SHOWN.3 as i16;
+                    if xs.contains(&px) && ys.contains(&py) {
                         seams::hail_hit(s, io, px, py);
                     }
                 }
@@ -412,9 +427,13 @@ pub fn hail(s: &mut State, io: &Io, x: i16, y: i16) -> i16 {
 /// the two directions the A4-0x6929 grid gives for the offset (high and low nibble of the byte
 /// at A4-0x6924 + 11 dy + dx) spreading them: (x, y), one step either way, two steps either
 /// way; range 7, flags 6 (0x132706); returns the actors passed (A4+0x186e))
+///
+/// The grid is the 11 × 11 spread table round its centre (A4-0x6924 is its byte (5, 5);
+/// [`SPREAD_SIDE`]): the target stays in the original's box (spec 13 Decision 4).
 pub fn wind_flight(s: &mut State, io: &Io, actor: u16, x: i16, y: i16, tile: u16) -> Vec<i16> {
     let (ax, ay) = xy(s, actor);
-    let off = 11 * i32::from(y.wrapping_sub(ay)) + i32::from(x.wrapping_sub(ax));
+    let side = SPREAD_SIDE as i32;
+    let off = side * i32::from(y.wrapping_sub(ay)) + i32::from(x.wrapping_sub(ax));
     let dirs = seams::a4_bytes(io, -0x6924 + off, 1)[0];
     let (d1, d2) = (usize::from(dirs >> 4), usize::from(dirs & 0xf));
     let d = &s.objects.defs;

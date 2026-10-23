@@ -21,6 +21,7 @@
 use std::cell::RefCell;
 
 use crate::engine::{Io, with_current_io};
+use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
 use crate::gfx::blit::{blit_back, copy_rect};
 use crate::gfx::cache::Sources;
 use crate::state::State;
@@ -74,8 +75,25 @@ pub const DISSOLVE_MS: u16 = 3422;
 /// dissolving, then the window without it, dissolving too): half of its 345.83 PAL frames, timed
 /// at the prompt on the hero (tools/oracle/timeit.mjs actor, the same on the CPU clock).
 pub const ACTOR_FLASH_MS: u16 = 3458;
-/// The map window with its border, in screen pixels.
-const WINDOW: (usize, usize) = (176, 176);
+/// The map window with its border, in frame pixels: its top left, the map's corner (0, 0 in
+/// Original), and its size, the view's cells (176 × 176 in Original).
+const WINDOW_AT: (usize, usize) = (MAP_X as usize, MAP_Y as usize);
+const WINDOW: (usize, usize) = (VIEW_W * 16, VIEW_H * 16);
+/// The shown map ([`SHOWN`], (8, 8)..(0xa7, 0xa7) in Original) as the flight's pixel words.
+const SHOWN_PX: (i16, i16, i16, i16) = (
+    SHOWN.0 as i16,
+    SHOWN.1 as i16,
+    SHOWN.2 as i16,
+    SHOWN.3 as i16,
+);
+/// The flight's changed rectangle A4+0x1900.. when nothing changed: from past the shown map's far
+/// corner to before its near one ([0xa8, 0xa8, 7, 7] in Original, 0x132706).
+pub(crate) const NO_DIRTY: [i16; 4] = [
+    SHOWN_PX.2 + 1,
+    SHOWN_PX.3 + 1,
+    SHOWN_PX.0 - 1,
+    SHOWN_PX.1 - 1,
+];
 
 /// Port: waits until the original would have spent `ms` more on what it draws, on the engine
 /// clock, and at least one display frame, so what was presented before is published.
@@ -209,7 +227,8 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
 
 /// Records the whole map window, shown after `cost` ms.
 pub(crate) fn capture_window(s: &mut State, cost: u16) {
-    capture(s, 0, 0, WINDOW.0 - 1, WINDOW.1 - 1, cost);
+    let (x, y) = WINDOW_AT;
+    capture(s, x, y, x + WINDOW.0 - 1, y + WINDOW.1 - 1, cost);
 }
 
 /// Records the whole map window presented dissolving (0x102c90 with A4-0x6578 set), revealed in
@@ -425,7 +444,7 @@ fn rect_of(
 
 /// The map window's pixels (with its border), row-major, with their sources ([`rect_of`]).
 fn window_of(fb: &crate::Framebuffer) -> (Vec<u8>, Sources) {
-    rect_of(fb, (0, 0), WINDOW)
+    rect_of(fb, WINDOW_AT, WINDOW)
 }
 
 /// Puts back pixel `(x, y)` in `colour`, naming `src` when there is one (else classic).
@@ -442,20 +461,23 @@ fn put(
 }
 
 fn put_window(fb: &mut crate::Framebuffer, (pixels, src): &(Vec<u8>, Sources)) {
+    let (x0, y0) = WINDOW_AT;
     for y in 0..WINDOW.1 {
         for x in 0..WINDOW.0 {
             let k = y * WINDOW.0 + x;
-            put(fb, (x, y), pixels[k], src.at(k));
+            put(fb, (x0 + x, y0 + y), pixels[k], src.at(k));
         }
     }
 }
 
 /// A window presented dissolving, as the original shows it: the old picture while the window
 /// renders ([`WINDOW_MS`]), then its pixels in the dissolve's order (0x1520e2: 160 × 160 from
-/// (8, 8), [`crate::gfx::blit::dissolve_order`]) at an even rate up to the end of its time.
+/// (8, 8) in Original; spec 13 Decision 7, [`crate::gfx::blit::MapDissolve`]: that order's steps
+/// over the shown map) at an even rate of steps up to the end of its time.
 async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
     let taps = state.borrow().gfx.tables.dissolve_taps;
-    let order = crate::gfx::blit::dissolve_order(160, 160, &taps);
+    let order = crate::gfx::blit::MapDissolve::new(&taps);
+    let steps = order.steps();
     let wait = schedule(state, io, e.cost);
     let render = u64::from(WINDOW_MS.min(e.cost));
     let mut done = 0;
@@ -464,17 +486,20 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
         let due = wait.at(tick);
         let begin = due - u64::from(e.cost) + render;
         let upto = if now >= due {
-            order.len()
+            steps
         } else {
-            let part = now.saturating_sub(begin) * order.len() as u64 / (due - begin).max(1);
+            let part = now.saturating_sub(begin) * steps as u64 / (due - begin).max(1);
             part as usize
         };
         if upto > done {
             io.draw(|fb| {
-                for &(c, r) in &order[done..upto] {
-                    let (x, y) = (8 + usize::from(c), 8 + usize::from(r));
-                    let k = y * e.w + x;
-                    put(fb, (e.x + x, e.y + y), e.pixels[k], e.src.at(k));
+                for step in done..upto {
+                    for (x, y) in order.step(step) {
+                        let x = usize::from(x) - WINDOW_AT.0;
+                        let y = usize::from(y) - WINDOW_AT.1;
+                        let k = y * e.w + x;
+                        put(fb, (e.x + x, e.y + y), e.pixels[k], e.src.at(k));
+                    }
                 }
             });
             io.present();
@@ -488,26 +513,27 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
 }
 
 /// Original: 0x13242e (ui: grow the flight's changed rectangle A4+0x1900.. to the 16 × 16
-/// sprite centred on (x, y), clipped to the window 8..0xa7)
+/// sprite centred on (x, y), clipped to the window 8..0xa7; the shown map [`SHOWN`], spec 13)
 pub fn extend_dirty(s: &mut State, x: i16, y: i16) {
+    let (x0, y0, x1, y1) = SHOWN_PX;
     let d = &mut s.combat.dirty;
-    if x < 16 {
-        d[0] = 8;
+    if x < x0 + 8 {
+        d[0] = x0;
     } else if x - 8 < d[0] {
         d[0] = x - 8;
     }
-    if y < 16 {
-        d[1] = 8;
+    if y < y0 + 8 {
+        d[1] = y0;
     } else if y - 8 < d[1] {
         d[1] = y - 8;
     }
-    if x > 0x9f {
-        d[2] = 0xa7;
+    if x > x1 - 8 {
+        d[2] = x1;
     } else if x + 8 > d[2] {
         d[2] = x + 8;
     }
-    if y > 0x9f {
-        d[3] = 0xa7;
+    if y > y1 - 8 {
+        d[3] = y1;
     } else if y + 8 > d[3] {
         d[3] = y + 8;
     }
@@ -518,33 +544,29 @@ fn back_blit(s: &State, tile: u16, x: u16, y: u16) {
 }
 
 /// Original: 0x1324ae (ui: redraw the window border (tiles 0x1b0..0x1b7) along the edges the
-/// rectangle (x0, y0)..(x1, y1) touches)
+/// rectangle (x0, y0)..(x1, y1) touches: the left edge for x0 < 16, the top for y0 < 16, the
+/// right for x1 > 0x9f, the bottom for y1 > 0x9f; within 8 pixels of [`SHOWN`]'s edges, spec 13)
+///
+/// The tiles, their places and their order are the render's ([`crate::gfx::view::border_tiles`]:
+/// the corners, then the edge cells from the first).
 pub fn draw_borders(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
-    let (left, top, right, bottom) = (x0 < 16, y0 < 16, x1 > 0x9f, y1 > 0x9f);
-    if left && top {
-        back_blit(s, 0x1b0, 0, 0);
-    }
-    if right && top {
-        back_blit(s, 0x1b2, 0xa0, 0);
-    }
-    if left && bottom {
-        back_blit(s, 0x1b3, 0, 0xa0);
-    }
-    if right && bottom {
-        back_blit(s, 0x1b5, 0xa0, 0xa0);
-    }
-    for i in 1..10u16 {
-        if top {
-            back_blit(s, 0x1b1, i * 16, 0);
-        }
-        if bottom {
-            back_blit(s, 0x1b4, i * 16, 0xa0);
-        }
-        if left {
-            back_blit(s, 0x1b6, 0, i * 16);
-        }
-        if right {
-            back_blit(s, 0x1b7, 0xa0, i * 16);
+    let (sx0, sy0, sx1, sy1) = SHOWN_PX;
+    let (left, top) = (x0 < sx0 + 8, y0 < sy0 + 8);
+    let (right, bottom) = (x1 > sx1 - 8, y1 > sy1 - 8);
+    for (tile, x, y) in crate::gfx::view::border_tiles() {
+        let on = match tile {
+            0x1b0 => left && top,
+            0x1b2 => right && top,
+            0x1b3 => left && bottom,
+            0x1b5 => right && bottom,
+            0x1b1 => top,
+            0x1b4 => bottom,
+            0x1b6 => left,
+            0x1b7 => right,
+            _ => false,
+        };
+        if on {
+            back_blit(s, tile, x, y);
         }
     }
 }
@@ -552,20 +574,26 @@ pub fn draw_borders(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
 /// Original: 0x1325e4 (ui: redraw what lies over a flight in the rectangle (x0, y0)..(x1, y1):
 /// per window cell the draw-list tiles with flags2 bit 4 (on top), darkness (tile 0xff) on a
 /// cell whose base is 0xff or 0x1bc, then the border)
+///
+/// Cells by view cell from the map's corner, `row * VIEW_W + col` (spec 13 C2).
 pub fn redraw_over(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
     let d = &s.objects.draw;
-    for col in (x0 >> 4)..=(x1 >> 4) {
-        for row in (y0 >> 4)..=(y1 >> 4) {
-            let cell = (row * 11 + col) as usize;
+    let (mx, my) = (MAP_X as i16, MAP_Y as i16);
+    let at = |col: i16, row: i16| ((mx + col * 16) as u16, (my + row * 16) as u16);
+    for col in ((x0 - mx) >> 4)..=((x1 - mx) >> 4) {
+        for row in ((y0 - my) >> 4)..=((y1 - my) >> 4) {
+            let cell = (row * VIEW_W as i16 + col) as usize;
             let mut n = d.cell.get(cell).copied().unwrap_or(0);
             let mut guard = 0;
-            while n != 0 && guard < 256 {
+            // At most the pool's nodes (256 in Original; spec 13 Design 2 sizes it in Wide).
+            while n != 0 && guard < crate::objects::DRAW_NODES {
                 let t = d.node_tile[usize::from(n)];
                 if t != 0 {
                     let tile = t & 0x7ff;
                     let f2 = s.tables.tileflags.flags2.get(usize::from(tile)).copied();
                     if f2.unwrap_or(0) & 0x10 != 0 {
-                        back_blit(s, tile, (col * 16) as u16, (row * 16) as u16);
+                        let (x, y) = at(col, row);
+                        back_blit(s, tile, x, y);
                     }
                 }
                 n = d.node_next[usize::from(n)];
@@ -573,11 +601,24 @@ pub fn redraw_over(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
             }
             let base = d.base.get(cell).copied().unwrap_or(0);
             if base == 0xff || base == 0x1bc {
-                back_blit(s, 0xff, (col * 16) as u16, (row * 16) as u16);
+                let (x, y) = at(col, row);
+                back_blit(s, 0xff, x, y);
             }
         }
     }
     draw_borders(s, x0, y0, x1, y1);
+}
+
+/// Where 0x132706 draws a missile at map pixel (px, py) (16 a cell) for the view centre `c`: its
+/// frame pixel, when that lies in the shown map (`px - (c - 5)·16` in 8..0xa8 in Original; spec
+/// 13 Decision 5: from the view's corner, [`HALF_W`] and [`HALF_H`] cells off the centre, inside
+/// [`SHOWN`]).
+pub(crate) fn on_screen(c: u6_formats::position::Position, px: i16, py: i16) -> Option<(i16, i16)> {
+    let (left, top) = (c.x as i16 - HALF_W as i16, c.y as i16 - HALF_H as i16);
+    let sx = px.wrapping_sub(left * 16).wrapping_add(MAP_X as i16);
+    let sy = py.wrapping_sub(top * 16).wrapping_add(MAP_Y as i16);
+    let (x0, y0, x1, y1) = SHOWN_PX;
+    ((x0..=x1).contains(&sx) && (y0..=y1).contains(&sy)).then_some((sx, sy))
 }
 
 /// Per-missile state of a flight (the 16-entry stack arrays of 0x132706).
@@ -723,7 +764,7 @@ pub fn fly(
     let spin = i16::from(at(&t.missile_spin, kind));
     let mut round: i16 = 0;
     while round < longest {
-        s.combat.dirty = [0xa8, 0xa8, 7, 7];
+        s.combat.dirty = NO_DIRTY;
         let mut visible = false;
         'missiles: for i in 0..n {
             if round >= m[i].steps {
@@ -738,10 +779,7 @@ pub fn fly(
             m[i].px = m[i].px.wrapping_add(m[i].sx[k]);
             m[i].py = m[i].py.wrapping_add(m[i].sy[k]);
             if tile != 0 && step != 0 && round % step == 0 {
-                let c = s.map.centre;
-                let sx = m[i].px.wrapping_sub((c.x as i16 - 5) * 16);
-                let sy = m[i].py.wrapping_sub((c.y as i16 - 5) * 16);
-                if (8..0xa8).contains(&sx) && (8..0xa8).contains(&sy) {
+                if let Some((sx, sy)) = on_screen(s.map.centre, m[i].px, m[i].py) {
                     visible = true;
                     extend_dirty(s, sx, sy);
                     if flags & flight::TRAIL != 0 {

@@ -1,4 +1,8 @@
 //! Window render, refresh, animation tick and the view-window fallback on a synthetic world.
+//!
+//! Places from [`crate::geom`] (spec 13): the leader's cell is ([`HALF_W`], [`HALF_H`]), (5, 5)
+//! in Original, its pixels from the map's corner ([`at_map`]). The world goes through the map's
+//! window and the object draw lists (spec 13 C1, C2).
 
 use u6_formats::animdata::{AnimData, AnimEntry};
 use u6_formats::basetile::BaseTiles;
@@ -8,9 +12,10 @@ use u6_formats::map::{SURFACE_CHUNKS, WorldMap};
 use u6_formats::position::Position;
 use u6_formats::tileflag::TileFlags;
 
-use super::{install, map_tile, object_tile};
+use super::{at_map, install, map_tile, object_tile, shown};
 use crate::Files;
 use crate::engine::Engine;
+use crate::geom::{HALF_H, HALF_W, SHOWN, VIEW_H, VIEW_W};
 use crate::gfx::GfxState;
 use crate::state::State;
 
@@ -40,7 +45,7 @@ pub(super) const HERO_TYPE: usize = 0x19a;
 pub(super) const HERO_BASE: u16 = 1000;
 
 /// Surface of chunk 1 everywhere, chunk 1 tile (col, row) = row·8 + col; map tile n has colour
-/// n % 32 + 1 in every pixel; the leader (actor 1) stands at (19, 10).
+/// n % 32 + 1 in every pixel ([`colour_at`]); the leader (actor 1) stands at (19, 10).
 pub(super) fn world() -> (State, GfxState) {
     let mut s = State::empty();
     s.map.world = WorldMap {
@@ -100,22 +105,36 @@ fn with_io(f: impl FnOnce(&crate::engine::Io) + 'static) -> Engine {
     e
 }
 
+/// The colour [`world`] draws for world cell (x, y): its chunk tile `(y % 8)·8 + x % 8`, plus 1.
+fn colour_at(x: u16, y: u16) -> u8 {
+    ((y % 8 * 8 + x % 8) % 32 + 1) as u8
+}
+
+/// The frame pixel of the leader's cell's top left plus (dx, dy).
+fn leader_px(dx: usize, dy: usize) -> (usize, usize) {
+    at_map(HALF_W * 16 + dx, HALF_H * 16 + dy)
+}
+
 #[test]
 fn window_cells_follow_the_centre_and_the_leader_sits_at_80_96() {
     let (mut s, mut g) = world();
     let e = with_io(move |io| render_window(&mut s, &mut g, io, true));
     let fb = e.frame();
-    // Cell (5, 5) = world (19, 10): chunk tile 2·8 + 3 = 19 → colour 20.
-    assert_eq!(fb.get(80, 81), Some(20));
-    assert_eq!(fb.get(95, 95), Some(20));
-    // Cell (0, 0) = world (14, 5): tile 5·8 + 6 = 46 → colour 46 % 32 + 1 = 15; only pixels
-    // 8..168 reach the screen (0x151f5a).
-    assert_eq!(fb.get(8, 8), Some(15));
-    assert_eq!(fb.get(0, 0), Some(0));
+    let get = |(x, y): (usize, usize)| fb.get(x, y);
+    // The leader's cell (5, 5 in Original: pixels 80..96) = world (19, 10): chunk tile
+    // 2·8 + 3 = 19 → colour 20.
+    assert_eq!(get(leader_px(0, 1)), Some(20));
+    assert_eq!(get(leader_px(15, 15)), Some(20));
+    // Cell (0, 0) = world (19 - HALF_W, 10 - HALF_H) ((14, 5) in Original: tile 5·8 + 6 = 46 →
+    // colour 46 % 32 + 1 = 15); only the shown map reaches the screen (0x151f5a).
+    let corner = colour_at(19 - HALF_W as u16, 10 - HALF_H as u16);
+    assert_eq!(get(at_map(8, 8)), Some(corner));
+    assert_eq!(get(at_map(0, 0)), Some(0));
     // The hero's one opaque pixel, over the map tile.
-    assert_eq!(fb.get(88, 88), Some(30));
-    // Nothing past the 11 cells.
-    assert_eq!(fb.get(176, 100), Some(0));
+    assert_eq!(get(leader_px(8, 8)), Some(30));
+    // Nothing past the cells.
+    let (xs, ys) = shown();
+    assert_eq!(fb.get(xs.end, ys.start + 92), Some(0));
 }
 
 #[test]
@@ -130,11 +149,16 @@ fn border_tiles_and_dissolve_flag() {
     });
     let fb = e.frame();
     // The border's outer half (x or y below 8) stays in the back buffer: 0x1520e2 dissolves only
-    // (8, 8)..(0xa7, 0xa7) to the screen.
-    assert_eq!((fb.get(8, 8), fb.get(7, 8)), (Some(25), Some(0)));
-    // 0x1b7 at (0xa0, 16 i), left half: x 160..168 for y 16..160.
-    assert_eq!((fb.get(160, 16), fb.get(167, 159)), (Some(26), Some(26)));
-    assert_ne!(fb.get(160, 15), Some(26));
+    // (8, 8)..(0xa7, 0xa7) to the screen (the shown map, [`SHOWN`]).
+    let get = |(x, y): (usize, usize)| fb.get(x, y);
+    assert_eq!((get(at_map(8, 8)), get(at_map(7, 8))), (Some(25), Some(0)));
+    // 0x1b7 at the last column of cells (0xa0 in Original), on rows 1..VIEW_H - 1, left half:
+    // x 160..168 for y 16..160 in Original.
+    let (right, last) = ((VIEW_W - 1) * 16, (VIEW_H - 1) * 16);
+    let ends = (get(at_map(right, 16)), get(at_map(right + 7, last - 1)));
+    assert_eq!(ends, (Some(26), Some(26)));
+    assert_ne!(get(at_map(right, 15)), Some(26));
+    assert_eq!(usize::from(SHOWN.2), at_map(right + 7, 0).0);
     let hits = e.stub_hits();
     assert!(
         !hits
@@ -149,8 +173,10 @@ fn sparkle_draws_two_randoms_per_pixel() {
     let (mut s, mut g) = world();
     g.sparkle = 1;
     let mut rng = s.rng;
-    for _ in 0..200 {
-        rng.range(8, 0xa7);
+    let (x0, y0, x1, y1) = SHOWN;
+    for _ in 0..100 {
+        rng.range(x0, x1);
+        rng.range(y0, y1);
     }
     let e = with_io(move |io| {
         render_window(&mut s, &mut g, io, false);
@@ -158,7 +184,8 @@ fn sparkle_draws_two_randoms_per_pixel() {
         assert_eq!((g.plot_colour, g.plot_xor, g.plot_back), (8, false, false));
     });
     // Unframed: drawn into the back buffer, never presented.
-    assert_eq!(e.frame().get(80, 80), Some(0));
+    let (x, y) = leader_px(0, 0);
+    assert_eq!(e.frame().get(x, y), Some(0));
 }
 
 #[test]
@@ -177,7 +204,8 @@ fn refresh_runs_the_tick_and_the_window_only_when_shown() {
         refresh_view(&mut s, &mut g, io);
         assert_eq!(g.anim_counter, 1);
     });
-    assert_eq!(e.frame().get(80, 81), Some(20));
+    let (x, y) = leader_px(0, 1);
+    assert_eq!(e.frame().get(x, y), Some(20));
     assert!(!e.stub_hits().keys().any(|k| k.starts_with("0x133a1a")));
 }
 
@@ -247,26 +275,34 @@ fn flash_outlines_the_actor_then_shows_the_window_without_it() {
     assert_eq!(fx.len(), 2, "the flashed window, then the plain one");
     let flash_ms = crate::combat::present::ACTOR_FLASH_MS;
     assert_eq!((fx[0].cost, fx[1].cost), (flash_ms, flash_ms));
-    assert_eq!((fx[0].w, fx[0].h), (176, 176));
+    // The whole window from the map's corner: its cells (176 × 176 in Original).
+    let (w, h) = (VIEW_W * 16, VIEW_H * 16);
+    assert_eq!((fx[0].x, fx[0].y), at_map(0, 0));
+    assert_eq!((fx[0].w, fx[0].h), (w, h));
     // Bright: the outline colour of 0x1800 at the hero's pixel; the plain window has the tile.
-    assert_eq!((at(&fx[0], 88, 88), at(&fx[1], 88, 88)), (3, 0));
-    let differ = (0..176 * 176)
+    let (hx, hy) = (HALF_W * 16 + 8, HALF_H * 16 + 8);
+    assert_eq!((at(&fx[0], hx, hy), at(&fx[1], hx, hy)), (3, 0));
+    let differ = (0..w * h)
         .filter(|&i| fx[0].pixels[i] != fx[1].pixels[i])
         .count();
     assert_eq!(differ, 1, "only the outlined pixel differs");
     assert_eq!(a.gfx.dissolve, 0, "both presents dissolved");
     assert!(
-        a.objects.draw.tiles(5, 5).iter().all(|&w| w & 0x1800 == 0),
+        a.objects
+            .draw
+            .tiles(HALF_W, HALF_H)
+            .iter()
+            .all(|&w| w & 0x1800 == 0),
         "the lists are rebuilt without the flash"
     );
     // Not bright: the 0x1000 outline colour.
     let b = flash(s.clone(), 1, false);
-    assert_eq!(at(&b.combat.effects[0], 88, 88), 4);
-    // Off the map, or six cells from the centre: nothing.
+    assert_eq!(at(&b.combat.effects[0], hx, hy), 4);
+    // Off the map, or one cell past the view (six cells from the centre in Original): nothing.
     let mut off = s.clone();
     off.objects.obj_status[1] = crate::objects::IN_INVENTORY;
     assert!(flash(off, 1, true).combat.effects.is_empty());
     let mut far = s;
-    far.objects.location[1].x += 6;
+    far.objects.location[1].x += HALF_W as u16 + 1;
     assert!(flash(far, 1, true).combat.effects.is_empty());
 }

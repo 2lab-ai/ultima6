@@ -14,11 +14,13 @@ use std::rc::Rc;
 
 use u6_formats::font::BitFont;
 use u6_formats::gfx::{Span, TileKind};
-use u6_render::{Framebuffer, Kind, Src, WIDTH};
+use u6_render::{Framebuffer, HEIGHT, Kind, Src, WIDTH};
 
-use super::adv::{self, Lists, X};
+use super::adv::{self, CELLS, Lists, X};
+use super::{at_map, at_map16, shown, view_rect};
 use crate::Files;
 use crate::engine::{Engine, InputEvent, Io};
+use crate::geom::{VIEW_H, VIEW_W};
 use crate::state::State;
 
 /// What the window cache decided so far: renders left out, renders of some boxes, boxes drawn.
@@ -64,10 +66,10 @@ fn check_coverage(back: &Framebuffer, s: &State, what: &str) -> usize {
     let clock = s.tables.basetile.base.get(0x9f).copied();
     let mut hands = BTreeSet::new();
     let mut covered = BTreeSet::new();
-    for row in 0..11 {
-        for col in 0..11 {
-            let (x0, y0) = (col * 16, row * 16);
-            let objects = &w.objects[row * 11 + col];
+    for row in 0..VIEW_H {
+        for col in 0..VIEW_W {
+            let (x0, y0) = at_map(col * 16, row * 16);
+            let objects = &w.objects[row * VIEW_W + col];
             for (k, &word) in std::iter::once(&w.tiles[row][col])
                 .chain(objects)
                 .enumerate()
@@ -133,8 +135,8 @@ fn plane_parity(seed: u64, steps: u32) -> Counts {
     let mut ios = three_ios();
     let mut rng = X(seed | 1);
     let mut lists = [0, 1, 2].map(|_| Lists {
-        base: vec![0; 121],
-        lists: vec![Vec::new(); 121],
+        base: vec![0; CELLS],
+        lists: vec![Vec::new(); CELLS],
     });
     let mut n = Counts::default();
     for i in 0..steps {
@@ -267,8 +269,8 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
         let mut x = X(seed | 1);
         let mut lists = Lists {
-            base: vec![0; 121],
-            lists: vec![Vec::new(); 121],
+            base: vec![0; CELLS],
+            lists: vec![Vec::new(); CELLS],
         };
         let font = BitFont {
             glyphs: vec![[0x5A; 8]; 256],
@@ -291,7 +293,8 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
                 crate::gfx::refresh_view(&mut s, &io);
                 if plane && s.gfx.window_shown != 0 {
                     let rect = |f: &Framebuffer| {
-                        let at = (8..168).flat_map(|y| (8..168).map(move |x| (x, y)));
+                        let (xs, ys) = shown();
+                        let at = ys.flat_map(|y| xs.clone().map(move |x| (x, y)));
                         at.map(|(x, y)| f.src_at(x, y)).collect::<Vec<_>>()
                     };
                     let (back, front) = (io.peek_back(rect), io.draw(|f| rect(f)));
@@ -303,7 +306,8 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
                 }
                 if step % 17 == 5 {
                     let gfx = &mut s.gfx;
-                    let (fx, fy) = (40 + (step % 7) as u16 * 16, 56 + (step % 3) as u16 * 8);
+                    let (fx, fy) =
+                        at_map16(40 + (step % 7) as usize * 16, 56 + (step % 3) as usize * 8);
                     crate::gfx::sprite::prepare(gfx, 2, 64 + (step % 18) as u16, 0, 128, 128);
                     io.draw_back(|b| crate::gfx::sprite::save(gfx, b, 3, fx, fy));
                     io.draw_back(|b| crate::gfx::sprite::draw(gfx, b, 2, fx, fy));
@@ -332,7 +336,8 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
                     if pause {
                         crate::combat::present::capture_pause(&mut s, 40);
                         io.draw(|f| {
-                            for (x, y) in (0..176).flat_map(|y| (0..176).map(move |x| (x, y))) {
+                            let (xs, ys) = view_rect();
+                            for (x, y) in ys.flat_map(|y| xs.clone().map(move |x| (x, y))) {
                                 let colour = f.get(x, y).expect("on the screen");
                                 f.set(x, y, colour);
                             }
@@ -355,14 +360,16 @@ fn paired(seed: u64, plane: bool) -> (Engine, Rc<Cell<u32>>, Rc<Cell<bool>>) {
     (e, windows, still)
 }
 
-/// The pixels the pointer sprite covers in the shown frame.
+/// The pixels the pointer sprite covers in the shown frame: those of the frame
+/// (`ui/pointer.rs` `SpriteFrame::draw`).
 fn sprite_pixels(e: &Engine) -> BTreeSet<usize> {
     let mut at = BTreeSet::new();
+    let (w, h) = (WIDTH as i32, HEIGHT as i32);
     if let Some(sp) = e.sprite() {
         for (r, row) in sp.rows.iter().enumerate() {
             for (c, &v) in row.iter().enumerate() {
                 let (x, y) = (i32::from(sp.x) + c as i32, i32::from(sp.y) + r as i32);
-                if v != 0 && (0..WIDTH as i32).contains(&x) && (0..200).contains(&y) {
+                if v != 0 && (0..w).contains(&x) && (0..h).contains(&y) {
                     at.insert(y as usize * WIDTH + x as usize);
                 }
             }
@@ -517,8 +524,8 @@ fn quake_run(amp: i16, unshare: bool) -> (Engine, Rc<std::cell::RefCell<Shared>>
         {
             let mut s = st.borrow_mut();
             let mut lists = Lists {
-                base: vec![0; 121],
-                lists: vec![Vec::new(); 121],
+                base: vec![0; CELLS],
+                lists: vec![Vec::new(); CELLS],
             };
             adv::edit(&mut s, &io, &mut X(0x9E37_79B9), &mut lists, &words, 0);
             crate::gfx::refresh_view(&mut s, &io);

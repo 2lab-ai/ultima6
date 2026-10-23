@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use super::tests::{run, world, world_with};
 use crate::engine::Key;
+use crate::geom::{MAP_X, MAP_Y, VIEW_W};
 use crate::objects::Slot;
 use crate::rng::Rng;
 use crate::state::State;
@@ -246,6 +247,27 @@ fn slime_and_tremor_strike_evil_actors_only() {
     );
 }
 
+/// Spec 13 Decision 3: Tremor's area is the original's box round the leader in both builds, not
+/// the view (wider in Wide): an evil actor 4 cells east is hurt, one 8 cells east (in the Wide
+/// view) is spared.
+#[test]
+fn tremor_hurts_within_the_original_box_and_spares_past_it() {
+    let mut s = world_with(&[(5, 0x178, 104, 100), (6, 0x178, 108, 100)]);
+    for a in [5, 6] {
+        s.actors.attrs.status[a] = 0x20;
+        s.actors.attrs.hp[a] = 50;
+    }
+    s.actors.attrs.intelligence[1] = 30;
+    s.rng = Rng::seeded(3);
+    let s = run(s, &[], |st, io| async move {
+        super::creatures::tremor(&st, &io).await;
+    });
+    let hp = (s.actors.attrs.hp[5], s.actors.attrs.hp[6]);
+    println!("hit points after the tremor: {hp:?}");
+    assert!((20..50).contains(&hp.0), "4 cells away: 1..30 damage");
+    assert_eq!(hp.1, 50, "8 cells away: spared");
+}
+
 #[test]
 fn armageddon_spares_the_hero_and_actor_5() {
     let mut s = world_with(&[
@@ -276,16 +298,22 @@ fn spell_0x80_turns_the_caster_invisible() {
 
 #[test]
 fn wing_strike_hits_on_the_foe_s_column() {
-    // No `game`: the step sign reads 0, so the dragon stays on the centre column all ten steps
-    // and a foe on that column is struck every step.
+    // No `game`: the step sign reads 0, so the dragon stays on the centre column all its steps
+    // (one fewer than the view's columns: ten in Original) and a foe on that column is struck
+    // every step. The seed is the first from 5 whose strikes leave the foe alive.
+    let steps = VIEW_W - 1;
+    let strikes = |seed: u16| {
+        let mut r = Rng::seeded(seed);
+        (0..steps).map(|_| r.range(1, 0x14) as i16).sum::<i16>()
+    };
+    let seed = (5u16..).find(|&k| strikes(k) < 0xff).expect("a seed");
     let mut s = world_with(&[(5, 0x178, 100, 97), (6, 0x178, 102, 97)]);
     s.actors.attrs.status[5] = 0x20;
     s.actors.attrs.status[6] = 0x40;
     s.actors.attrs.hp[5] = 0xff;
     s.actors.attrs.hp[6] = 0xff;
-    s.rng = Rng::seeded(5);
-    let mut r = s.rng;
-    let total: i16 = (0..10).map(|_| r.range(1, 0x14) as i16).sum();
+    s.rng = Rng::seeded(seed);
+    let total = strikes(seed);
     let s = run(s, &[], |st, io| async move {
         super::creatures::wing_strike(&st, &io).await;
     });
@@ -308,10 +336,13 @@ fn hail_stones_and_the_hit_mark_reach_the_screen_only() {
     s.gfx.records[0x101].transparent = vec![false; 256];
     let seen: Rc<RefCell<Option<Seen>>> = Rc::new(RefCell::new(None));
     let out = Rc::clone(&seen);
+    // Window pixels from the map's corner (spec 13); the background over the whole frame.
+    let (mx, my) = (MAP_X as i16, MAP_Y as i16);
+    let m = move |x: i16, y: i16| ((mx + x) as usize, (my + y) as usize);
     run(s, &[], move |st, io| async move {
         io.draw_back(|b| {
-            for y in 0..200 {
-                for x in 0..320 {
+            for y in 0..u6_render::HEIGHT {
+                for x in 0..u6_render::WIDTH {
                     b.set(x, y, ((x + y) % 7) as u8);
                 }
             }
@@ -324,17 +355,17 @@ fn hail_stones_and_the_hit_mark_reach_the_screen_only() {
         stone.fill(0xff);
         stone[0] = 9;
         stone[17] = 0x2a;
-        super::seams::draw_hail(&mut s, &io, &[(40, 50)]);
+        super::seams::draw_hail(&mut s, &io, &[(mx + 40, my + 50)]);
         let stone_px = io.draw(|f| {
-            let g = |x, y| f.get(x, y).unwrap_or(0xee);
-            (g(32, 42), g(33, 43), g(34, 42), g(56, 42))
+            let g = |(x, y): (usize, usize)| f.get(x, y).unwrap_or(0xee);
+            (g(m(32, 42)), g(m(33, 43)), g(m(34, 42)), g(m(56, 42)))
         });
         let restored = io.draw_back(dump) == back0;
         let rect = s.combat.dirty;
-        super::seams::hail_hit(&mut s, &io, 88, 88);
+        super::seams::hail_hit(&mut s, &io, mx + 88, my + 88);
         let cell = io.draw(|f| {
             (80..96)
-                .flat_map(|y| (80..96).map(move |x| (x, y)))
+                .flat_map(|y| (80..96).map(move |x| m(x, y)))
                 .map(|(x, y)| f.get(x, y).unwrap_or(0xee))
                 .collect()
         });
@@ -349,9 +380,10 @@ fn hail_stones_and_the_hit_mark_reach_the_screen_only() {
         ));
     });
     let (stone_px, restored, still, cell, rect, frames) = seen.borrow_mut().take().unwrap();
+    let (bx, by) = m(34, 42);
     assert_eq!(
         stone_px,
-        (9, 0x0a, (34 + 42) % 7, 0),
+        (9, 0x0a, ((bx + by) % 7) as u8, 0),
         "the stone's pixels (5 bits), its background, nothing past the copied bytes"
     );
     assert!(
@@ -360,7 +392,7 @@ fn hail_stones_and_the_hit_mark_reach_the_screen_only() {
     );
     assert_eq!(
         rect,
-        [32, 42, 48, 58],
+        [mx + 32, my + 42, mx + 48, my + 58],
         "the restore grew the rectangle again"
     );
     assert!(cell.iter().all(|&p| p == 5), "the hit mark on the screen");

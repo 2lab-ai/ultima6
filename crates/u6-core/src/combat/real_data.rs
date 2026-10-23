@@ -200,9 +200,11 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
             let input = &mut s.ui.input;
             input.targeting = 1;
             input.cursor_by_tab = false;
+            // The target's view cell: the centre at (HALF_W, HALF_H) ((5, 5) in Original).
+            let (hw, hh) = (crate::geom::HALF_W as i16, crate::geom::HALF_H as i16);
             input.cursor = (
-                (target.x as i16 - c.x as i16 + 5) as i8,
-                (target.y as i16 - c.y as i16 + 5) as i8,
+                (target.x as i16 - c.x as i16 + hw) as i8,
+                (target.y as i16 - c.y as i16 + hh) as i8,
             );
             s.main.attack_target = foes[0];
             rep.borrow_mut().push(format!(

@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W, RULE_HALF};
 use crate::image::A4;
 use crate::objects;
 use crate::state::State;
@@ -109,13 +110,15 @@ fn current_weapon(s: &State, attacker: i16) -> i16 {
     }
 }
 
-/// The cross-hair range for `weapon`; a cursor further out goes back to the centre.
+/// The cross-hair range for `weapon`; a cursor further out goes back to the centre (the
+/// leader's view cell, ([`HALF_W`], [`HALF_H`]); (5, 5) in Original, spec 13 Decision 4).
 fn aim(s: &mut State, weapon: i16) {
     let r = leaves::range(s, weapon);
     s.ui.input.range = r as i8;
     let (cx, cy) = s.ui.input.cursor;
-    if leaves::cell_distance(s, i16::from(cx), i16::from(cy), 5, 5) > i16::from(r as i8) {
-        s.ui.input.cursor = (5, 5);
+    let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+    if leaves::cell_distance(s, i16::from(cx), i16::from(cy), hw, hh) > i16::from(r as i8) {
+        s.ui.input.cursor = (HALF_W as i8, HALF_H as i8);
     }
 }
 
@@ -587,7 +590,9 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
     if wt == 0x32 {
         let dx = x.wrapping_sub(ax);
         let dy = y.wrapping_sub(ay);
-        let i = (i32::from(dy) + 5) * 11 + i32::from(dx) + 5;
+        // The 11 × 11 table round the attacker (spec 13 Decision 4: the original's box).
+        let (half, side) = (i32::from(RULE_HALF), super::tables::SPREAD_SIDE as i32);
+        let i = (i32::from(dy) + half) * side + i32::from(dx) + half;
         let b = usize::try_from(i)
             .ok()
             .and_then(|i| s.combat.tables.spread.get(i).copied())

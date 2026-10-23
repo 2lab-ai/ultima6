@@ -4,6 +4,7 @@
 use super::leaves::party_size;
 use crate::actors::tail;
 use crate::engine::with_current_io;
+use crate::geom::{HALF_H, HALF_W};
 use crate::state::State;
 
 /// Command-bar icons of combat on / off, drawn over the bar at (0x98, 0xb0).
@@ -100,8 +101,8 @@ pub fn break_off(s: &mut State) {
 }
 
 /// Original: 0x121e88 (combat: move `actor` to a random tile it may stand on within 3 tiles
-/// (two `random(1, 4)` per axis), 8 tries; with `away` not inside the 11 × 11 view; true when
-/// it moved)
+/// (two `random(1, 4)` per axis), 8 tries; with `away` not inside the view (11 × 11 in Original;
+/// spec 13 Decision 5: [`HALF_W`] and [`HALF_H`] round the centre); true when it moved)
 pub fn scatter(s: &mut State, actor: i16, away: bool) -> bool {
     if actor < 0 {
         return false;
@@ -118,7 +119,8 @@ pub fn scatter(s: &mut State, actor: i16, away: bool) -> bool {
         if away {
             let c = s.map.centre;
             let (cx, cy) = (c.x as i16, c.y as i16);
-            let inside = (cx - 5..=cx + 5).contains(&nx) && (cy - 5..=cy + 5).contains(&ny);
+            let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+            let inside = (cx - hw..=cx + hw).contains(&nx) && (cy - hh..=cy + hh).contains(&ny);
             if inside {
                 continue;
             }

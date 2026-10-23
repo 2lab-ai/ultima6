@@ -61,6 +61,8 @@ mod real_data;
 mod tests;
 #[cfg(test)]
 mod tests_pace;
+#[cfg(test)]
+mod tests_view;
 
 pub use present::{Effect, play_effects};
 pub use tables::CombatTables;

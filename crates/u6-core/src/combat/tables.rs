@@ -8,6 +8,7 @@
 
 use u6_formats::FormatError;
 
+use crate::geom::RULE_HALF;
 use crate::image::{A4, GameImage};
 
 /// Original: A4-0x69a0 (8 × 8 bytes: distance by |dx| row, |dy| column; 9 past it)
@@ -61,6 +62,9 @@ const BLAST_DY: i32 = -0x63d6;
 /// Original: A4-0x6960 (11 × 11 bytes: the triple crossbow's side bolts by target cell (dy + 5,
 /// dx + 5); high and low nibble = the directions of the two side bolts)
 const SPREAD: i32 = -0x6960;
+/// Side of the spread table (11): the original's targeting box round the leader, ±[`RULE_HALF`]
+/// (spec 13 Decision 4), in both builds.
+pub const SPREAD_SIDE: usize = 2 * RULE_HALF as usize + 1;
 
 /// Tables the combat code reads, as extracted from `game`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -156,7 +160,7 @@ impl CombatTables {
             missile_cx: bytes(&img, MISSILE_CX, MISSILE_KINDS)?,
             missile_cy: bytes(&img, MISSILE_CY, MISSILE_KINDS)?,
             missile_spin: bytes(&img, MISSILE_SPIN, MISSILE_KINDS)?,
-            spread: bytes(&img, SPREAD, 121)?,
+            spread: bytes(&img, SPREAD, SPREAD_SIDE * SPREAD_SIDE)?,
             peer_colours: [
                 words(&img, PEER_COLOURS[0], 1)?[0] as i16,
                 words(&img, PEER_COLOURS[1], 1)?[0] as i16,

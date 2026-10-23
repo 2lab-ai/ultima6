@@ -10,9 +10,10 @@
 use u6_formats::animdata::{AnimData, AnimEntry};
 use u6_formats::gfx::{AnimOverlay, Rgb, Span};
 
-use super::{install, map_tile, object_tile};
+use super::{at_map, install, map_tile, object_tile};
 use crate::Files;
 use crate::engine::Io;
+use crate::geom::{VIEW_H, VIEW_W};
 use crate::gfx::anim::set_frame;
 use crate::state::State;
 
@@ -190,11 +191,15 @@ fn word(x: &mut X) -> u16 {
     t | bits
 }
 
-/// Writes per-cell base words and object lists into the draw lists.
+/// The view's cells (121 in Original), by view cell `row * VIEW_W + col` (spec 13 C2).
+pub(super) const CELLS: usize = VIEW_W * VIEW_H;
+
+/// Writes per-cell base words and object lists into the draw lists ([`CELLS`] of each).
 fn write_lists(s: &mut State, base: &[u16], lists: &[Vec<u16>]) {
     let d = &mut s.objects.draw;
-    d.base.copy_from_slice(base);
-    d.cell.fill(0);
+    d.base.clear();
+    d.base.extend_from_slice(base);
+    d.cell = vec![0; base.len()];
     d.node_next.fill(0);
     d.node_tile.fill(0);
     let mut n = 1usize;
@@ -224,13 +229,13 @@ pub(super) struct Lists {
 /// Step `step`'s random edits (the same stream on both sides).
 pub(super) fn edit(s: &mut State, io: &Io, x: &mut X, l: &mut Lists, words: &[u16], step: u32) {
     if step == 0 || x.pm(15) {
-        for b in 0..121 {
+        for b in 0..CELLS {
             l.base[b] = word(x) & if x.pm(800) { 0x7ff } else { 0xffff };
             l.lists[b] = (0..x.below(3)).map(|_| word(x)).collect();
         }
     } else if x.pm(400) {
         for _ in 0..1 + x.below(3) {
-            let b = x.below(121) as usize;
+            let b = x.below(CELLS as u64) as usize;
             if x.pm(500) {
                 l.base[b] = word(x);
             } else {
@@ -240,7 +245,7 @@ pub(super) fn edit(s: &mut State, io: &Io, x: &mut X, l: &mut Lists, words: &[u1
     }
     if x.pm(8) {
         // The overlay that leaves its box, somewhere.
-        l.base[x.below(121) as usize] = TALL as u16;
+        l.base[x.below(CELLS as u64) as usize] = TALL as u16;
     }
     write_lists(s, &l.base, &l.lists);
     let g = &mut s.gfx;
@@ -318,7 +323,8 @@ pub(super) fn edit(s: &mut State, io: &Io, x: &mut X, l: &mut Lists, words: &[u1
         input.target_pending = x.below(2) as u16;
         input.targeting = x.below(3) as u8;
         input.cursor_by_tab = x.pm(200);
-        input.cursor = (x.below(15) as i8 - 2, x.below(15) as i8 - 2);
+        let (w, h) = (VIEW_W as u64 + 4, VIEW_H as u64 + 4);
+        input.cursor = (x.below(w) as i8 - 2, x.below(h) as i8 - 2);
         input.range = if x.pm(500) { -1 } else { 2 };
     }
     let g = &mut s.gfx;
@@ -349,20 +355,16 @@ pub(super) fn edit(s: &mut State, io: &Io, x: &mut X, l: &mut Lists, words: &[u1
             b: 2,
         };
     }
+    // A pixel of the window (its cells, 176 × 176 in Original), on either buffer.
+    let (w, h) = (VIEW_W as u64 * 16, VIEW_H as u64 * 16);
     if x.pm(10) {
-        let (px, py, c) = (
-            x.below(176) as usize,
-            x.below(176) as usize,
-            x.below(32) as u8,
-        );
+        let (px, py, c) = (x.below(w) as usize, x.below(h) as usize, x.below(32) as u8);
+        let (px, py) = at_map(px, py);
         io.draw_back(|b| b.set(px, py, c));
     }
     if x.pm(20) {
-        let (px, py, c) = (
-            x.below(176) as usize,
-            x.below(176) as usize,
-            x.below(32) as u8,
-        );
+        let (px, py, c) = (x.below(w) as usize, x.below(h) as usize, x.below(32) as u8);
+        let (px, py) = at_map(px, py);
         io.draw(|f| f.set(px, py, c));
     }
 }
@@ -376,8 +378,8 @@ fn run(seed: u64, steps: u32) -> (u64, u64, u64) {
     io_off.set_window_cache(false);
     let mut rng = X(seed | 1);
     let mut l = Lists {
-        base: vec![0; 121],
-        lists: vec![Vec::new(); 121],
+        base: vec![0; CELLS],
+        lists: vec![Vec::new(); CELLS],
     };
     let counts = |s: &State| {
         let c = &s.gfx.cache;

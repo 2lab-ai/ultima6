@@ -633,10 +633,15 @@ fn the_window_flash_is_on_the_screen_for_a_frame() {
     // the display (the engine publishes the last present of each poll).
     let mut s = world();
     s.gfx.tables.window_colour = 5;
+    // A pixel of the window (from the map's corner, spec 13).
+    let (x, y) = (
+        usize::from(crate::geom::MAP_X) + 50,
+        usize::from(crate::geom::MAP_Y) + 50,
+    );
     let seen = ticks(
         s,
         &[],
-        |e| e.frame().get(50, 50),
+        move |e| e.frame().get(x, y),
         |st, io| async move {
             super::spells::flash_window(&st, &io, 1).await;
         },
