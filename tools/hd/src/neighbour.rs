@@ -35,8 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use u6_formats::gfx::{TILE_COUNT, TILE_W};
 use u6_hdpack::ImageId;
-use u6_render::hd::{Scale, mmpx};
-use u6_render::{HEIGHT, WIDTH};
+use u6_render::hd::{IMAGE_MAX, Scale, mmpx};
 
 use crate::atlas::MASTER;
 use crate::game::{DOUBLE_HEIGHT, DOUBLE_WIDTH, Game};
@@ -303,11 +302,11 @@ pub fn pairs(game: &Game) -> Pairs {
 
 /// MMPX ×4 of a classic image (the compositor's scaler and its input words: the colour opaque,
 /// a transparent pixel clear, `u6_render::hd`'s resolve). `None` for an image the compositor
-/// does not scale: one of no pixel, larger than the screen, or whose pixels are not its
-/// `width × height`.
+/// does not scale: one of no pixel, larger than the screen ([`IMAGE_MAX`]), or whose pixels are
+/// not its `width × height`.
 pub fn mmpx4(c: &Classic) -> Option<Rgba> {
     gate::classic_len(c)?;
-    if c.width as usize > WIDTH || c.height as usize > HEIGHT {
+    if c.width as usize > IMAGE_MAX.0 || c.height as usize > IMAGE_MAX.1 {
         return None;
     }
     let input: Vec<u32> =

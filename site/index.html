@@ -60,15 +60,16 @@
     @supports (height: 100dvh) {
       #screen-box.full canvas { width: min(100vw, 160dvh); }
     }
-    /* The HD layout in effect (spec 10, data-layout on the body): the canvas box 16:9, on the
-       page as wide as the column allows up to 1280 CSS px (the column widened to hold that), in
-       fullscreen as large as the screen allows with 16:9, at any size. */
-    body[data-layout="hd"] main { max-width: 1312px; }
-    body[data-layout="hd"] #screen { aspect-ratio: 16 / 9; }
-    body[data-layout="hd"] #screen-box:fullscreen canvas,
-    body[data-layout="hd"] #screen-box.full canvas { width: min(100vw, calc(100vh * 16 / 9)); }
+    /* The HD layout in effect (spec 10, data-layout on the body), and the Wide layout (spec 13,
+       the Wide build): the canvas box 16:9, on the page as wide as the column allows up to 1280
+       CSS px (the column widened to hold that), in fullscreen as large as the screen allows with
+       16:9, at any size. */
+    body:is([data-layout="hd"], [data-layout="wide"]) main { max-width: 1312px; }
+    body:is([data-layout="hd"], [data-layout="wide"]) #screen { aspect-ratio: 16 / 9; }
+    body:is([data-layout="hd"], [data-layout="wide"]) #screen-box:fullscreen canvas,
+    body:is([data-layout="hd"], [data-layout="wide"]) #screen-box.full canvas { width: min(100vw, calc(100vh * 16 / 9)); }
     @supports (height: 100dvh) {
-      body[data-layout="hd"] #screen-box.full canvas { width: min(100vw, calc(100dvh * 16 / 9)); }
+      body:is([data-layout="hd"], [data-layout="wide"]) #screen-box.full canvas { width: min(100vw, calc(100dvh * 16 / 9)); }
     }
     #fullscreen-exit { position: absolute; top: 8px; right: 8px; margin: 0; }
     #fullscreen-exit[hidden] { display: none; }
@@ -146,8 +147,9 @@
         <legend>HD</legend>
         <p><label><input type="checkbox" id="hd" checked> <span data-i18n="hdOn">HD on</span></label></p>
         <p id="layout-choice" role="radiogroup" aria-labelledby="layout-title"><span id="layout-title"
-          data-i18n="layout">Screen layout</span>: <label><input type="radio" name="layout" value="hd" checked>
-          HD 16:9</label> <label><input type="radio" name="layout" value="original"> <span
+          data-i18n="layout">Screen layout</span>: <label><input type="radio" name="layout" value="wide" checked>
+          <span data-i18n="layoutWide">Wide (larger map)</span></label> <label><input type="radio" name="layout"
+          value="hd"> HD 16:9</label> <label><input type="radio" name="layout" value="original"> <span
           data-i18n="layoutOriginal">Original 16:10</span></label></p>
         <p id="font-choice" role="radiogroup" aria-labelledby="font-title"><span id="font-title"
           data-i18n="font">Font</span>: <label><input type="radio" name="font" value="hd" checked> <span

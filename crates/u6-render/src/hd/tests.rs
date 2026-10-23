@@ -1071,28 +1071,43 @@ fn an_image_reached_from_another_mask_shape_is_counted_again() {
 #[test]
 #[should_panic(expected = "an image past")]
 fn mmpx_refuses_an_image_past_twice_the_screen() {
-    mmpx2x(&[], 2 * WIDTH + 1, 1, &mut Vec::new());
+    mmpx2x(&[], 2 * IMAGE_MAX.0 + 1, 1, &mut Vec::new());
+}
+
+/// The largest image is twice the screen at 2× in both builds, the screen the paper's 320 × 200
+/// (not the Wide frame, spec 13).
+#[test]
+fn mmpx_takes_an_image_of_twice_the_screen() {
+    assert_eq!(IMAGE_MAX, (320, 200));
+    let (w, h) = mmpx::MAX_2X;
+    assert_eq!((w, h), (640, 400));
+    let mut out = Vec::new();
+    mmpx2x(&vec![7; w * h], w, h, &mut out);
+    assert_eq!(out.len(), 4 * w * h);
+    mmpx(&vec![7; 320 * 200], 320, 200, Scale::X4, &mut out);
+    assert_eq!(out.len(), 16 * 320 * 200);
 }
 
 #[test]
 #[should_panic(expected = "an image past the screen")]
 fn mmpx_refuses_an_image_past_the_screen() {
-    mmpx(&[], WIDTH, HEIGHT + 1, Scale::X4, &mut Vec::new());
+    mmpx(
+        &[],
+        IMAGE_MAX.0,
+        IMAGE_MAX.1 + 1,
+        Scale::X4,
+        &mut Vec::new(),
+    );
 }
 
 #[test]
 fn an_image_past_the_screen_is_shown_classic() {
+    let w = IMAGE_MAX.0 + 1;
     let mut pics = Pics::default();
-    pics.put(
-        Kind::Bitmap,
-        0,
-        (WIDTH + 1, 1),
-        art(3, WIDTH + 1, 1, 4),
-        None,
-    );
+    pics.put(Kind::Bitmap, 0, (w, 1), art(3, w, 1, 4), None);
     let mut fb = plane();
     fb.palette = palette(8);
-    for x in 0..WIDTH {
+    for x in 0..IMAGE_MAX.0 {
         fb.set_src(
             x,
             0,
