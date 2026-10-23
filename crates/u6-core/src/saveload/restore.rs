@@ -121,6 +121,12 @@ pub fn restore(s: &mut State, io: &Io) -> Result<(), LoadError> {
     s.ui.panel.mode = PANEL_ROSTER;
     s.ui.panel.member = 0;
     s.ui.panel.dirty = true;
+    // Spec 14 Design 3 (Wide): the inventory view's kept bag and page, and its slot's cells,
+    // name slots of the game before; the next draw starts them again.
+    #[cfg(feature = "wide")]
+    {
+        s.ui.panel.slots = Default::default();
+    }
     s.objects.save_mode = MODE_PLAY;
     crate::objects::delete_tmp_files(&mut s.objects);
     s.objects.tmp_flag.fill(0);

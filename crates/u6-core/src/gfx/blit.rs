@@ -6,11 +6,11 @@
 //! the Amiga. Writes past the last pixel (the original would land in the next plane) are
 //! dropped, and so is any call with y ≥ 200 (the original indexes past its row table).
 //!
-//! Spec 13 Wide mode: the buffer is the [`WIDTH`] × [`HEIGHT`] frame (912 × 336), its rows that
-//! long; the UI keeps its 320 × 200 in the frame's top-left corner ([`UI`]) and the map lies
-//! beside it. A write that starts in the UI's columns stays in the UI (Design 4): its pixels past
-//! x = 319, which the Amiga wraps into the next row, would land in the map, and are dropped, as
-//! are those past y = 199, where the Amiga's row table ends ([`stays`]: the tile blitter, the
+//! Spec 13 Wide mode: the buffer is the [`WIDTH`] × [`HEIGHT`] frame (912 × 408, spec 14), its
+//! rows that long; the UI keeps its 320 × 200 in the frame's top-left corner ([`UI`]) and the map
+//! lies beside it. A write that starts in the UI's columns stays in the UI (Design 4): its pixels
+//! past x = 319, which the Amiga wraps into the next row, would land in the map, and are dropped,
+//! as are those past y = 199, where the Amiga's row table ends ([`stays`]: the tile blitter, the
 //! fill, the rect copy, the bitmap blit, the plot, the flight sprites). In Original the frame is
 //! the UI's and nothing changes.
 //!
