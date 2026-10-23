@@ -139,11 +139,17 @@ async function run(args, send, extra = {}) {
   return { code, text: out.text };
 }
 
-// Nothing the tool printed names an NPC, a note, a line, a script's item or a hash.
+// The path of a preview the tool printed: its name holds the run's pid and a random part, either
+// of which may hold a fixture's item number by chance.
+const PREVIEW_PATH = /\S*first-request-[0-9]+-[0-9a-f]{12}\.json/g;
+
+// Nothing the tool printed names an NPC, a note, a line, a script's item or a hash (the item
+// numbers read past the preview's path).
 function nothingTold(printed) {
   assert.ok(!printed.includes(SENTINEL) && !printed.includes(NOTE) && !printed.includes(LINE), 'no name, note or line printed');
+  const told = printed.replace(PREVIEW_PATH, '');
   for (const n of [...ITEMS, 7999]) {
-    assert.ok(!new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(printed), 'no item printed');
+    assert.ok(!new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(told), 'no item printed');
     assert.ok(!printed.includes(hashOf(n)), 'no hash printed');
   }
 }
@@ -301,7 +307,7 @@ test('every answer as asked: exit 0; the requests in batches of at most BATCH_SC
   assert.ok(file.speakers.every((s) => s.age === 'adult' && s.class === 'guard' && s.note === ''));
   assert.match(r.text, /Not answered: none\./);
   nothingTold(r.text);
-  assert.ok(!many.some((b) => new RegExp(`(^|[^0-9])${b.item}([^0-9]|$)`).test(r.text)), 'no item printed');
+  assert.ok(!many.some((b) => new RegExp(`(^|[^0-9])${b.item}([^0-9]|$)`).test(r.text.replace(PREVIEW_PATH, ''))), 'no item printed');
   // The characters' budget: long descriptions and notes (cut to LOOK_MAX and SPEAKER_NOTE_MAX).
   const long = Array.from({ length: 12 }, (_, i) => bundle('a', 7300 + i, `${SENTINEL}Long${i}`, { look: 'x'.repeat(LOOK_MAX + 50) }));
   const notes = readNotes({ format: NOTES_FORMAT, notes: long.map((b) => ({ archive: 'a', item: b.item, note: 'y'.repeat(SPEAKER_NOTE_MAX + 50) })) });

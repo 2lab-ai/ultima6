@@ -141,6 +141,11 @@ Incantation syllables, runic text and the credits are not translated.
   ASCII (`. , ! ? " ' - :`).
 - Transliterate names by 외래어 표기법, the same way every time in the script (a name's keyword too,
   above).
+- A name the request lists under `names` takes exactly its Korean form every time, a particle
+  after it, never another spelling, a title or a pronoun in its place. Given the made-up
+  `{"en": "Lord Redmont", "ko": "로드 레드몬트"}`, `Lord Redmont awaits thee.` is
+  `로드 레드몬트가 그대를 기다리오.`, not `레드먼트 경이`, `영주가` or `그분이`; the form keeps its
+  space, as listed.
 
 ## Made-up examples
 

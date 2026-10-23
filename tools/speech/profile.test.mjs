@@ -17,7 +17,8 @@
 //   another server is not followed; and on a real
 //   terminal (a pty, through Python's pty module where python3 is there), Ctrl-C at the prompt
 //   sends nothing;
-// - nothing the tool prints holds a name, a line, an actor number or a script's item.
+// - nothing the tool prints holds a name, a line, an actor number or a script's item (the numbers
+//   read past the preview's path, whose pid and random part may hold one by chance).
 //
 //   node --test tools/speech/profile.test.mjs
 import assert from 'node:assert/strict';
@@ -107,11 +108,17 @@ async function fixture() {
   return { dir, bundles, out: join(dir, 'voice') };
 }
 
-// Nothing the tool printed names an NPC, a line, a note, an actor or an item.
+// The path of a preview the tool printed: its name holds the run's pid and a random part, either
+// of which may hold an actor number or an item of the fixture by chance.
+const PREVIEW_PATH = /\S*first-request-[0-9]+-[0-9a-f]{12}\.json/g;
+
+// Nothing the tool printed names an NPC, a line, a note, an actor or an item (the numbers read past
+// the preview's path).
 function nothingTold(printed) {
   assert.ok(!printed.includes(SENTINEL) && !printed.includes(LINE), 'no name, line or note printed');
+  const told = printed.replace(PREVIEW_PATH, '');
   for (const n of [...Object.values(ACTORS).flat(), ...ITEMS]) {
-    assert.ok(!new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(printed), 'no actor number or item printed');
+    assert.ok(!new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(told), 'no actor number or item printed');
   }
 }
 
@@ -137,6 +144,13 @@ async function previewChecked(out, printed, first = null) {
   if (first !== null) assert.equal(preview, first, 'the preview is the exact first payload sent');
   return preview;
 }
+
+test('the check of what the tool printed reads past the preview\'s path, whose pid and random part may hold an actor number or an item of the fixture; a number printed elsewhere still fails it', () => {
+  const printed = `The exact first request: /tmp/u6-voice-profile-x/voice/preview/first-request-${ITEMS[0]}-0${ACTORS.good[0]}${ITEMS[1]}ab.json (10 bytes).\n`;
+  nothingTold(printed);
+  assert.throws(() => nothingTold(`${printed}Actor ${ACTORS.good[0]}.\n`), 'an actor number elsewhere');
+  assert.throws(() => nothingTold(`${printed}Item ${ITEMS[1]}.\n`), 'an item elsewhere');
+});
 
 test('zero requests: no terminal and no --send', async () => {
   const f = await fixture();
