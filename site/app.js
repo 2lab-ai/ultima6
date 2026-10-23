@@ -57,16 +57,21 @@
 // layout. With Original, or HD off, the page is as without the HD layout.
 //
 // Wide mode (spec 13): the engine comes in two builds, site/pkg (Original: the 320 × 200 frame)
-// and site/pkg-wide (Wide: a 912 × 336 frame, the UI's 320 × 200 at its top left and a 37 × 21
-// map beside it), and the page imports one at its engine's operation: Wide when the kept screen
+// and site/pkg-wide (Wide: a 912 × 408 frame, the UI's 320 × 200 at its top left, a 37 × 21
+// map beside it and under the UI the side panel's three views, spec 14), and the page imports
+// one at its engine's operation (the frame's size read from the engine): Wide when the kept screen
 // (`u6.layout`) is `wide` or none (a new visitor), else Original. The chooser's and Settings'
 // "Screen layout" is Wide / HD 16:9 / Original 16:10; a choice across the builds is noted, and
 // the chooser's OK, once it kept the chooser's other choices, keeps it and loads the page again,
 // once, after the operations admitted before (the game starts from the kept files and its own
 // stored save, as at any load). In Wide, HD on or off, the canvas is 1920 × 1080 in the HD layout's 16:9 box: the
-// engine's shown map scaled to cover it, and over it four framed windows with a title each (the
-// date line top right, the side panel under it, the message scroll bottom right, the command bar
-// bottom left), each the size of its spec 10 region; the HD frame scaled smoothly (the
+// engine's shown map scaled to cover it, and over it framed windows with a title each (the date
+// line top right, the message scroll bottom right, the command bar bottom left, each the size of
+// its spec 10 region; spec 14's actor windows: the party under the date line, the attributes
+// left of it, the paper doll and the backpack under the attributes, the one the side panel's
+// mode shows marked, and the side panel itself in a window of its own while its mode is another
+// or a conversation runs);
+// the HD frame scaled smoothly (the
 // compositor at WIDE_S), with HD off the classic frame pixelated. A window is dragged by its
 // title strip, its place kept (`u6.layout.windows`). The pointer reaches a window's content
 // before the map, its frame and title strip are gaps as in the HD layout; every other screen
@@ -1330,12 +1335,15 @@ let drawnHd = false; // that frame was its HD frame
 // and so clears, the canvas, and its first frame is drawn whole). Over the HD frame it drew
 // last, only the rect the compositions since then wrote is drawn. With the HD layout the frame
 // goes to the offscreen ×4 frame and the canvas is composed from it (`compose`), also when only
-// the screen changed (the opening's end: the game's regions in place of the whole frame).
+// the screen changed (the opening's end: the game's regions in place of the whole frame). In
+// Wide in `game` the side panel's view is read first (`pollPanel`): when it changed, the canvas
+// is composed whole, with no new frame too.
 function draw() {
   const version = game.frame_version();
   const hd = game.hd_on();
   const view = viewFor(hd);
-  if (game === drawnGame && version === drawnVersion && view === shownView) return;
+  if (WIDE && view === REGIONS_VIEW && pollPanel()) wideStale = true;
+  if (game === drawnGame && version === drawnVersion && view === shownView && !wideStale) return;
   if (WIDE) {
     composeWide(view, hd, version);
     return;
@@ -1782,7 +1790,9 @@ function layoutToCanvas(gx, gy) {
 // what the canvas shows, the regions (in Wide the map, then the windows), the paper round them
 // and the rects of the ×4 frame that paint it whole (`paperSources`, spec 10's), the letterbox
 // and the rest of the screen, the canvas's size and the compositor's scale of the layout; in
-// Wide (`wide`) the windows too, each with its frame (`outer`) and its title strip (`bar`).
+// Wide (`wide`) the windows shown too, each with its frame (`outer`), its title strip (`bar`), the
+// panel mode it shows (`view`), its title as painted (before the fit), whether it is the active
+// one and whether it is dimmed, and the side panel's view the page read last (`panel`).
 globalThis.__u6Layout = {
   toGame: (px, py, held = false) => layoutToGame(px, py, held),
   toCanvas: (gx, gy) => layoutToCanvas(gx, gy),
@@ -1791,11 +1801,19 @@ globalThis.__u6Layout = {
   },
   wide: WIDE,
   get regions() {
-    const regions = WIDE ? [...(wideMap ? [wideMap] : []), ...wideWindows] : LAYOUT_REGIONS;
+    const regions = WIDE ? [...(wideMap ? [wideMap] : []), ...shownWindows()] : LAYOUT_REGIONS;
     return regions.map(({ name, from, to }) => ({ name, from: [...from], to: [...to] }));
   },
   get windows() {
-    return wideWindows.map(({ name, from, to, outer, bar }) => ({ name, from: [...from], to: [...to], outer: [...outer], bar: [...bar] }));
+    return shownWindows().map((win) => ({
+      name: win.name, from: [...win.from], to: [...win.to], outer: [...win.outer], bar: [...win.bar],
+      view: win.view ?? null, title: windowTitle(win), active: windowActive(win), dimmed: windowDimmed(win),
+    }));
+  },
+  // The side panel's view as the page read it at its last paint in `game` (Game.panel_view), or
+  // null before one.
+  get panel() {
+    return panelView === null ? null : [...panelView];
   },
   paper: {
     pieces: LAYOUT_PAPER.map(({ name, from, to, flip }) => ({ name, from: [...from], to: [...to], flip: flip ?? null })),
@@ -1914,13 +1932,20 @@ const WIDE_H = 1080;
 const WIDE_S = 4;
 // The windows' frames, U7-style in colours of our own (no art of another program's): a dark
 // border WINDOW_BORDER wide (a lighter line along its inside), then a title strip WINDOW_TITLE
-// tall with the window's name in the page's font, over the window's content, WINDOW_EDGE from
-// the canvas's edges, the side panel WINDOW_GAP under the date line.
+// tall with the window's name in the page's font (WINDOW_TITLE_PAD in from either end of the
+// strip, cut short with an ellipsis where it would reach past that), over the window's content,
+// WINDOW_EDGE from the canvas's edges, WINDOW_GAP from the window it is placed by. The active
+// window (spec 14 Design 6: the one that shows the side panel's mode) is lighter: its border the
+// inside line's ink, its line the title's, its strip `active`. An actor window while the side
+// panel's own window shows shows its content at WINDOW_DIM over the border's ink (its paper),
+// dimmed.
 const WINDOW_BORDER = 4;
 const WINDOW_TITLE = 20;
+const WINDOW_TITLE_PAD = 6;
 const WINDOW_EDGE = 8;
 const WINDOW_GAP = 8;
-const WINDOW_INK = { border: '#16130f', line: '#6b5a3e', bar: '#2e271d', title: '#ecdfbf' };
+const WINDOW_INK = { border: '#16130f', line: '#6b5a3e', bar: '#2e271d', title: '#ecdfbf', active: '#5c4a2c' };
+const WINDOW_DIM = 0.5;
 // The page's font for the titles (index.html's body's, read once), at this size in canvas pixels.
 const WINDOW_FONT_PX = 13;
 let windowFont = '';
@@ -1928,31 +1953,76 @@ let windowFont = '';
 // smoothed scale reads the source pixels round each it shows, so a changed source pixel changes
 // the canvas a little past the rect it maps to.
 const WIDE_PAD = 8;
+// The actor windows' scale (spec 14 Design 7), content canvas pixels per frame pixel: 3 puts
+// each of their rects (144 x 98, 72 x 88) on whole pixels, and at their default places leaves
+// the leader's cell, at the canvas's centre, under none of them (at spec 13's 3.5 the attributes
+// left of the party reach x 880 and the paper doll under them covers the centre).
+const ACTOR_S = 3;
 
-// The windows (Design 5): the engine's date line, side panel, message scroll and command bar,
-// each its spec 10 region's `from` and the size of its `to` there (the panel's column at 3.5, the
-// command bar at 4, one to one with the ×4 frame), framed (`outer`, the title strip `bar`, the
-// content `to`): the date line at the top right, the side panel under it, the message scroll at
-// the bottom right, the command bar at the bottom left. `title`: the key of its name.
+// The windows (spec 13 Design 5, spec 14 Design 7), framed (`outer`, the title strip `bar`, the
+// content `to`), each showing the frame's rect `from`: the engine's date line, message scroll
+// and command bar, each its spec 10 region (`region`: its `from` at the size of its `to` there,
+// the column at 3.5, the command bar at 4, one to one with the ×4 frame); spec 14's actor
+// windows, the side panel's three views the engine keeps under the UI (the roster's slot, the
+// stats', the inventory's cut at its x 72 into the paper doll and the backpack list, its name
+// row left out), and the side panel itself (`other`: shown only while its mode is none of the
+// three or a conversation runs), each at ACTOR_S. `title`: the key of its name; `view`: the panel mode whose view it
+// shows; `named`: the shown member's name follows the title. The default places, in this order,
+// each by the ones before it: `corner` (WINDOW_EDGE from the canvas's edges there; with
+// `under`, WINDOW_GAP under that window), `leftOf` and `rightOf` (WINDOW_GAP beside that
+// window, the tops in line), `below` (WINDOW_GAP under that window, the left edges in line):
+// the date line at the top right, the party under it, the attributes left of the party, the
+// paper doll and the backpack side by side under the attributes, the message scroll at the
+// bottom right, the command bar at the bottom left, the side panel at the top left.
 const WIDE_WINDOWS = [
-  { name: 'date', title: 'windowDate', corner: 'top-right' },
-  { name: 'panel', title: 'windowPanel', corner: 'top-right', under: 'date' },
-  { name: 'messages', title: 'windowMessages', corner: 'bottom-right' },
-  { name: 'commands', title: 'windowCommands', corner: 'bottom-left' },
+  { name: 'date', title: 'windowDate', region: 'date', corner: 'top-right' },
+  { name: 'party', title: 'windowParty', from: [8, 206, 144, 98], view: 0x91, corner: 'top-right', under: 'date' },
+  { name: 'stats', title: 'windowAttributes', from: [160, 206, 144, 98], view: 0x90, named: true, leftOf: 'party' },
+  { name: 'doll', title: 'windowDoll', from: [8, 320, 72, 88], view: 0x92, named: true, below: 'stats' },
+  { name: 'backpack', title: 'windowBackpack', from: [80, 320, 72, 88], view: 0x92, named: true, rightOf: 'doll' },
+  { name: 'messages', title: 'windowMessages', region: 'messages', corner: 'bottom-right' },
+  { name: 'commands', title: 'windowCommands', region: 'commands', corner: 'bottom-left' },
+  { name: 'other', title: 'windowPanel', from: [168, 6, 144, 98], other: true, corner: 'top-left' },
 ];
-const wideWindows = WIDE ? WIDE_WINDOWS.map(({ name, title, corner, under }) => {
-  const { from, to } = LAYOUT_REGIONS.find((r) => r.name === name);
-  const [w, h] = [to[2], to[3]];
-  return { name, title, corner, under, from: [...from], to: [0, 0, w, h], outer: [0, 0, w + 2 * WINDOW_BORDER, h + WINDOW_TITLE + 2 * WINDOW_BORDER], bar: [0, 0, w, WINDOW_TITLE] };
+const wideWindows = WIDE ? WIDE_WINDOWS.map((spec) => {
+  const region = spec.region ? LAYOUT_REGIONS.find((r) => r.name === spec.region) : null;
+  const from = region ? region.from : spec.from;
+  const [w, h] = region ? [region.to[2], region.to[3]] : [from[2] * ACTOR_S, from[3] * ACTOR_S];
+  return { ...spec, from: [...from], to: [0, 0, w, h], outer: [0, 0, w + 2 * WINDOW_BORDER, h + WINDOW_TITLE + 2 * WINDOW_BORDER], bar: [0, 0, w, WINDOW_TITLE] };
 }) : [];
+// The side panel's modes the actor windows show (0x90 stats, 0x91 roster, 0x92 inventory).
+const ACTOR_VIEWS = new Set(WIDE_WINDOWS.filter((w) => w.view !== undefined).map((w) => w.view));
+// What the side panel shows as the engine said at the last paint in `game` (`pollPanel`):
+// `panelView` its [mode, member, actor, talking] (Game.panel_view; null before the first),
+// `panelName` the shown member's name (Game.panel_name).
+let panelView = null;
+let panelName = '';
+// The side panel shows what no actor window does (spec 14 Design 6): its mode is none of theirs,
+// or a conversation runs (its portrait in the panel area, whatever the mode).
+const otherMode = () => panelView !== null && panelView.length > 0
+  && (!ACTOR_VIEWS.has(panelView[0]) || panelView[3] === 1);
+// The windows shown now, in the order they are painted (the last in front): every window but
+// the side panel's own, which shows only while the mode is another or a conversation runs.
+const shownWindows = () => wideWindows.filter((win) => !win.other || otherMode());
+// Window `win` is the active one: the side panel's own while it shows, else the one that shows the
+// side panel's mode (both halves of the inventory).
+const windowActive = (win) => (win.other
+  ? otherMode()
+  : !otherMode() && win.view !== undefined && panelView !== null && win.view === panelView[0]);
+// Window `win` is dimmed: an actor window while the side panel's own window shows.
+const windowDimmed = (win) => win.view !== undefined && otherMode();
+// Window `win`'s title in the page's language: its name, the shown member's name after it
+// where it shows that member (`named`).
+const windowTitle = (win) => (win.named && panelName ? `${t(win.title)} — ${panelName}` : t(win.title));
 // The map (Design 5): the engine's shown rect (`shown_map`) scaled to cover the canvas, centred
 // (`placeWide`, once the engine loaded).
 let wideMap = null;
 // Where a press, a release or a held move in a gap (a window's frame or title strip, a drag)
 // reaches the game in Wide (as LAYOUT_REST): the UI's top-left pixel, the rest of the screen for
-// the click map (in none of its map, command bar and side panel: a cancel, at the prompt a
-// pass), whose arrow lies in the UI's paper top left, which no window shows (the first window
-// columns and rows the arrow could reach start at x 168 and y 6, the side panel's), nor the map.
+// the click map (in none of its map, command bar, side panel and the actor views' slots: a
+// cancel, at the prompt a pass), whose arrow lies in the UI's paper top left, which no window
+// shows (the arrow is 16 px at most; the rects nearest it start at x 168, the side panel's, and
+// at y 206, the party's), nor the map.
 const WIDE_REST = [0, 0];
 // Every other screen (a program other than `game`): the UI's 320 × 200 scaled to the canvas's
 // height, centred, the sides dark (as LAYOUT_WHOLE).
@@ -1960,15 +2030,16 @@ const WIDE_WHOLE = [Math.round((WIDE_W - (SCREEN_W * WIDE_H) / SCREEN_H) / 2), 0
   Math.round((SCREEN_W * WIDE_H) / SCREEN_H), WIDE_H];
 
 // localStorage: where the viewer dragged the windows, {name: [x, y]} (each frame's top-left
-// corner on the canvas); a window not named, or named with anything but two numbers, stays at
-// its corner. A window is dragged by its title strip and stays whole on the canvas.
+// corner on the canvas); a window not named (a window new since the places were kept too), or
+// named with anything but two numbers, stays at its default place. A window is dragged by its
+// title strip and stays whole on the canvas.
 const WINDOWS_KEY = 'u6.layout.windows';
 let dragged = null; // the window being dragged: { win, dx, dy } (the press's place in its frame)
 
 let wideSrc = null; // the offscreen canvas of the frame the Wide layout is drawn from
 let wideSrcGame = null; // the game whose frame it holds (null: none, or stale)
 let wideSrcScale = 0; // that frame's scale: 1 the classic frame (HD off), else the HD frame's
-let wideStale = false; // the next paint is whole (the titles' language changed, a window moved)
+let wideStale = false; // the next paint is whole (the titles changed, a window moved)
 
 // Window `win` with its frame's top-left corner at canvas pixel (x, y).
 function placeWindow(win, x, y) {
@@ -1997,7 +2068,7 @@ function keptWindows() {
   }
 }
 
-// The windows' places kept (WINDOWS_KEY).
+// The windows' places kept (WINDOWS_KEY), the side panel's own window's too while it is hidden.
 function keepWindows() {
   try {
     localStorage.setItem(WINDOWS_KEY, JSON.stringify(Object.fromEntries(wideWindows.map((w) => [w.name, w.outer.slice(0, 2)]))));
@@ -2007,18 +2078,29 @@ function keepWindows() {
 }
 
 // The map's region from the engine's shown rect `[x, y, width, height]` (frame pixels), and the
-// windows at their corners, or where the viewer dragged them (`keptWindows`).
+// windows at their default places (WIDE_WINDOWS), or where the viewer dragged them
+// (`keptWindows`).
 function placeWide([x, y, w, h]) {
   const k = Math.max(WIDE_W / w, WIDE_H / h);
   const [cw, ch] = [Math.round(w * k), Math.round(h * k)];
   wideMap = { name: 'map', from: [x, y, w, h], to: [Math.round((WIDE_W - cw) / 2), Math.round((WIDE_H - ch) / 2), cw, ch] };
-  for (const win of wideWindows) {
+  const named = (name) => wideWindows.find((o) => o.name === name).outer;
+  for (const { name } of WIDE_WINDOWS) {
+    const win = wideWindows.find((o) => o.name === name);
     const [, , ow, oh] = win.outer;
-    const right = win.corner.endsWith('right');
-    const bottom = win.corner.startsWith('bottom');
-    const above = win.under ? wideWindows.find((o) => o.name === win.under) : null;
-    const top = above ? above.outer[1] + above.outer[3] + WINDOW_GAP : WINDOW_EDGE;
-    placeWindow(win, right ? WIDE_W - WINDOW_EDGE - ow : WINDOW_EDGE, bottom ? WIDE_H - WINDOW_EDGE - oh : top);
+    if (win.leftOf || win.rightOf) {
+      const [bx, by, bw] = named(win.leftOf ?? win.rightOf);
+      placeWindow(win, win.leftOf ? bx - WINDOW_GAP - ow : bx + bw + WINDOW_GAP, by);
+    } else if (win.below) {
+      const [bx, by, , bh] = named(win.below);
+      placeWindow(win, bx, by + bh + WINDOW_GAP);
+    } else {
+      const right = win.corner.endsWith('right');
+      const bottom = win.corner.startsWith('bottom');
+      const above = win.under ? named(win.under) : null;
+      const top = above ? above[1] + above[3] + WINDOW_GAP : WINDOW_EDGE;
+      placeWindow(win, right ? WIDE_W - WINDOW_EDGE - ow : WINDOW_EDGE, bottom ? WIDE_H - WINDOW_EDGE - oh : top);
+    }
   }
   const kept = keptWindows();
   for (const win of wideWindows) {
@@ -2037,7 +2119,7 @@ function dragWindow(e, px, py) {
   if (e.type === 'pointerdown') {
     dragged = null;
     if (e.button !== 0 || shownView !== REGIONS_VIEW) return false;
-    const win = wideWindows.findLast(({ outer }) => inRect(px, py, outer));
+    const win = shownWindows().findLast(({ outer }) => inRect(px, py, outer));
     if (!win || !inRect(px, py, win.bar)) return false;
     wideWindows.splice(wideWindows.indexOf(win), 1);
     wideWindows.push(win);
@@ -2107,10 +2189,10 @@ function composeWide(view, hd, version) {
 // screen (WIDE_WHOLE). The game's: within one clip rect of the canvas (all of it with `dirty`
 // null; else the box round the canvas rects that show the part of the frame `dirty` touches: of
 // the map that part, WIDE_PAD wider, all of it with cells listed in it now or at the paint
-// before; of a window its whole content) the map, then each window over it: its frame, its title
-// and its content; then the HD font's characters over each region copied (`paintGlyphs`, within
-// the clip: copied again just before). The HD frame is scaled smoothly (a one-to-one window
-// copied as it is), the classic frame pixelated.
+// before; of a window shown its whole content) the map, then each window shown over it: its
+// frame, its title and its content; then the HD font's characters over each region copied
+// (`paintGlyphs`, within the clip: copied again just before). The HD frame is scaled smoothly (a
+// one-to-one window copied as it is), the classic frame pixelated.
 function paintWide(view, dirty) {
   const ctx = canvas.getContext('2d');
   const s = wideSrcScale;
@@ -2141,7 +2223,7 @@ function paintWide(view, dirty) {
       const y1 = Math.ceil(map.to[1] + (part[1] + part[3] - map.from[1] * s) * ky) + WIDE_PAD;
       rects.push([x0, y0, x1 - x0, y1 - y0]);
     }
-    for (const win of wideWindows) {
+    for (const win of shownWindows()) {
       if (overlap(win.from.map((v) => v * s), dirty)) rects.push(win.to);
     }
     if (rects.length === 0) return;
@@ -2160,24 +2242,27 @@ function paintWide(view, dirty) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(wideSrc, ...wideMap.from.map((v) => v * s), ...wideMap.to);
   if (glyphs.length > 0) paintGlyphs(ctx, glyphs, wideMap.from, wideMap.to, overlap(wideMap.to, clip));
-  for (const win of wideWindows) {
+  for (const win of shownWindows()) {
     if (overlap(win.outer, clip)) paintWindow(ctx, win, s, smooth, glyphs, clip);
   }
   ctx.restore();
   paintedGlyphs = glyphs;
 }
 
-// Window `win` on the canvas (within the clip `clip` the caller set): its frame, its title, its
-// content from the offscreen frame at scale `s` (`smooth`: the HD frame, scaled smoothly unless
-// one to one), the HD font's characters over the content (`glyphs`).
+// Window `win` on the canvas (within the clip `clip` the caller set): its frame, its title
+// (`windowTitle`, fitted to its strip), lighter while it is the active one, its content from the
+// offscreen frame at scale `s` (`smooth`: the HD frame, scaled smoothly unless one to one), the
+// HD font's characters over the content (`glyphs`); the content and the characters at
+// WINDOW_DIM over the border's ink while it is dimmed.
 function paintWindow(ctx, win, s, smooth, glyphs, clip) {
   const [x, y, w, h] = win.outer;
-  ctx.fillStyle = WINDOW_INK.border;
+  const active = windowActive(win);
+  ctx.fillStyle = active ? WINDOW_INK.line : WINDOW_INK.border;
   ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = WINDOW_INK.line;
+  ctx.strokeStyle = active ? WINDOW_INK.title : WINDOW_INK.line;
   ctx.lineWidth = 1;
   ctx.strokeRect(x + 1.5, y + 1.5, w - 3, h - 3);
-  ctx.fillStyle = WINDOW_INK.bar;
+  ctx.fillStyle = active ? WINDOW_INK.active : WINDOW_INK.bar;
   ctx.fillRect(...win.bar);
   ctx.save();
   ctx.beginPath();
@@ -2188,18 +2273,45 @@ function paintWindow(ctx, win, s, smooth, glyphs, clip) {
   ctx.font = windowFont;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(t(win.title), win.bar[0] + 6, win.bar[1] + WINDOW_TITLE / 2 + 1);
+  const title = fitText(ctx, windowTitle(win), win.bar[2] - 2 * WINDOW_TITLE_PAD);
+  ctx.fillText(title, win.bar[0] + WINDOW_TITLE_PAD, win.bar[1] + WINDOW_TITLE / 2 + 1);
   ctx.restore();
+  const dim = windowDimmed(win);
+  if (dim) ctx.globalAlpha = WINDOW_DIM;
   const source = win.from.map((v) => v * s);
   ctx.imageSmoothingEnabled = smooth && (win.to[2] !== source[2] || win.to[3] !== source[3]);
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(wideSrc, ...source, ...win.to);
   const copied = overlap(win.to, clip);
   if (glyphs.length > 0 && copied) paintGlyphs(ctx, glyphs, win.from, win.to, copied);
+  if (dim) ctx.globalAlpha = 1;
 }
 
-// The Wide layout painted whole (the titles' language changed, a window moved), at once with a
-// game shown.
+// `text` as it fits `room` canvas pixels in the context's font: as it is, else cut short with an
+// ellipsis (whole characters).
+function fitText(ctx, text, room) {
+  if (ctx.measureText(text).width <= room) return text;
+  const chars = [...text];
+  while (chars.length > 0 && ctx.measureText(`${chars.join('')}…`).width > room) chars.pop();
+  return `${chars.join('')}…`;
+}
+
+// What the side panel shows now (spec 14 Design 7), read at each paint in `game`: the engine's
+// Game.panel_view ([mode, member, actor, talking]) and Game.panel_name (the shown member's name) into
+// `panelView` and `panelName`; true when either changed (the windows' titles and marks, and
+// whether the side panel's own window shows, go with them: the paint is whole).
+function pollPanel() {
+  const view = [...game.panel_view()];
+  const name = game.panel_name();
+  const same = panelView !== null && view.length === panelView.length && view.every((v, i) => v === panelView[i]);
+  if (same && name === panelName) return false;
+  panelView = view;
+  panelName = name;
+  return true;
+}
+
+// The Wide layout painted whole (the titles changed, a window moved), at once with a game
+// shown.
 function repaintWide() {
   if (!WIDE) return;
   wideStale = true;
@@ -2211,16 +2323,16 @@ function repaintWide() {
 
 // The game pixel canvas pixel (px, py) reaches in the Wide layout (as `layoutToGame`). Every
 // other screen: the UI's screen letterboxed, a point on a dark side at the nearest edge. The
-// game's: a window first (each in front of the map, the one painted last in front): in its
-// content that pixel of its classic rect; on its frame or its title strip (a gap), a move with no
-// button the nearest pixel of its content, anything else the rest of the screen (WIDE_REST);
-// elsewhere the map, at its pixel.
+// game's: a window shown first (each in front of the map, the one painted last in front; a dimmed
+// one too, whose press the engine ignores): in its content that pixel of its frame rect; on its
+// frame or its title strip (a gap), a move with no button the nearest pixel of its content,
+// anything else the rest of the screen (WIDE_REST); elsewhere the map, at its pixel.
 function wideToGame(px, py, held) {
   const through = ([fx, fy, fw, fh], [x, y, w, h]) => [
     clamp(fx + Math.floor(((px - x) * fw) / w), fx, fx + fw - 1),
     clamp(fy + Math.floor(((py - y) * fh) / h), fy, fy + fh - 1)];
   if (shownView === WHOLE_VIEW) return through([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
-  const win = wideWindows.findLast(({ outer }) => inRect(px, py, outer));
+  const win = shownWindows().findLast(({ outer }) => inRect(px, py, outer));
   if (win && !inRect(px, py, win.to) && held) return [...WIDE_REST];
   if (win) return through(win.from, win.to);
   return through(wideMap.from, wideMap.to);
@@ -2228,15 +2340,16 @@ function wideToGame(px, py, held) {
 
 // The canvas pixel (the centre of what shows game pixel (gx, gy)) in the Wide layout (as
 // `layoutToCanvas`); null for a pixel that does not show: on every other screen outside the UI's
-// 320 × 200; in `game` outside the windows and the map, under a window in front of it, or of the
-// map past the canvas's edges.
+// 320 × 200; in `game` outside the windows shown and the map, under a window in front of it, or
+// of the map past the canvas's edges.
 function wideToCanvas(gx, gy) {
   const at = ([fx, fy, fw, fh], [x, y, w, h]) => [x + ((gx - fx + 0.5) * w) / fw, y + ((gy - fy + 0.5) * h) / fh];
   if (shownView === WHOLE_VIEW) {
     return inRect(gx, gy, [0, 0, SCREEN_W, SCREEN_H]) ? at([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE) : null;
   }
-  const i = wideWindows.findIndex(({ from }) => inRect(gx, gy, from));
-  const [region, before] = i >= 0 ? [wideWindows[i], wideWindows.slice(i + 1)] : [wideMap, wideWindows];
+  const shown = shownWindows();
+  const i = shown.findIndex(({ from }) => inRect(gx, gy, from));
+  const [region, before] = i >= 0 ? [shown[i], shown.slice(i + 1)] : [wideMap, shown];
   if (!inRect(gx, gy, region.from)) return null;
   const [cx, cy] = at(region.from, region.to);
   if (!inRect(cx, cy, [0, 0, WIDE_W, WIDE_H])) return null;
