@@ -5,20 +5,26 @@
 //! next to their addresses): the command loop's prompts and results
 //! ([`crate::main_loop::commands::PRINTED`]), Look, Get, Drop, Move and the keys'
 //! ([`crate::objects::commands::PRINTED`]), Use's ([`crate::usecmd::PRINTED`]), Rest's
-//! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]), the lines
-//! the actors' and objects' own code prints (the clock's with the status area's date line
-//! ([`crate::actors::clock::PRINTED`]), the world turn's ([`crate::actors::turn::PRINTED`]), the
-//! party's ([`crate::actors::party::PRINTED`]), the NPC turn's ([`crate::actors::npc::PRINTED`]),
-//! the step test's ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
+//! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]), combat's
+//! other lines (2026-10-24: a hit's graze, death line, specials and wound report
+//! ([`crate::combat::damage::PRINTED`]), and the refusal of a staff's or a wand's cast
+//! ([`crate::combat::seams::PRINTED`])), the lines the actors' and objects' own code prints (the
+//! clock's with the status area's date line ([`crate::actors::clock::PRINTED`]), the world
+//! turn's ([`crate::actors::turn::PRINTED`]), the party's ([`crate::actors::party::PRINTED`]),
+//! the NPC turn's ([`crate::actors::npc::PRINTED`]), the step test's
+//! ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
 //! ([`crate::objects::PRINTED`])) and the conversation's own messages
 //! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format. And
 //! the strings a loader table holds that game code shows through an escape (labels): the command
 //! names before their dash ([`crate::main_loop::commands::LABELS`]), the shared messages Use and
 //! the object commands print through `%s` ([`SHARED_MESSAGES`]), the wind's names the date line
 //! prints through `%s` ([`crate::actors::clock::LABELS`]), and the conversation's `$G`, `$T` and
-//! `$Y` words. Every other string of the executable is not catalogued, and never substituted:
-//! the panels (but the date line), magic, the inventory, combat's other lines, object names and
-//! articles. A string shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`), is not
+//! `$Y` words. Every other string of the executable is not catalogued: the panels (but the date
+//! line), magic, the inventory, object names and articles. It is substituted only where its bytes
+//! are a catalogued string's, as the lookup is by content: magic's not-possible line is the
+//! string of the staff's refusal (the one address 0x1159f8, [`crate::combat::seams::PRINTED`]),
+//! so it shows the pack's form too (2026-10-24). A string
+//! shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`, a name and a space), is not
 //! catalogued either; but (2026-10-21) a label of a pointer table, read through
 //! [`super::shown`], is catalogued from 1 byte (a wind's name is 2). The conversation's words
 //! keep the minimum: its display reads them as the print hooks do.
@@ -291,6 +297,8 @@ impl Catalogue {
             .chain(crate::usecmd::PRINTED)
             .chain(crate::actors::rest::PRINTED)
             .chain(crate::combat::attack::PRINTED)
+            .chain(crate::combat::damage::PRINTED)
+            .chain(crate::combat::seams::PRINTED)
             .chain(crate::actors::clock::PRINTED)
             .chain(crate::actors::turn::PRINTED)
             .chain(crate::actors::party::PRINTED)

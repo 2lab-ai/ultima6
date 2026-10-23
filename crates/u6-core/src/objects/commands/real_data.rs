@@ -798,6 +798,42 @@ fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
     );
 }
 
+/// Spec 08 (slice K2, 2026-10-24): the string export of the owner's files holds combat's lines,
+/// by the hashes of the strings at a hit's sites (`combat::damage`): the wound report's critical
+/// line, its three degrees and its wounded word, the graze and the death line; and the two lines
+/// that start with a newline, printed after Attack's held newline whole (the refusal of a
+/// staff's cast, `combat::seams`; the next weapon's prompt, `combat::attack`). Prints pass/fail
+/// only: a failure names the site, never its text.
+#[test]
+fn the_string_export_of_the_owners_game_holds_combats_wound_report_graze_and_death() {
+    use crate::combat::{attack, damage, seams};
+    use crate::image::{A4, GameImage};
+    let Some(files) = files() else { return };
+    let export = crate::locale::strings::export(&files).quiet();
+    let img = GameImage::parse(files.get("game").quiet()).quiet();
+    for (site, at, list) in [
+        ("CRITICAL", A4 - 0x7750, damage::PRINTED),
+        ("HEAVILY", A4 - 0x7745, damage::PRINTED),
+        ("LIGHTLY", A4 - 0x773d, damage::PRINTED),
+        ("BARELY", A4 - 0x7735, damage::PRINTED),
+        ("WOUNDED", A4 - 0x772e, damage::PRINTED),
+        ("GRAZED", A4 - 0x7723, damage::PRINTED),
+        ("KILLED", A4 - 0x7716, damage::PRINTED),
+        ("CAST_REFUSED", 0x0011_59f8, seams::PRINTED),
+        ("NEXT_WEAPON", A4 - 0x76ac, attack::PRINTED),
+    ] {
+        assert!(list.contains(&at), "{site} is in its site's list");
+        let h = crate::converse::disasm::catalog::hash64(&img.cstr(at).quiet());
+        assert!(
+            export.strings.iter().any(|e| e.hash == h),
+            "{site} in the export"
+        );
+    }
+    eprintln!(
+        "string export holds combat's wound report, graze and death lines and its two newline-led lines: pass"
+    );
+}
+
 /// The keys (type 0x40) of quality `q` the port holds, anywhere (the slot list).
 fn keys_of(s: &State, q: u8) -> Vec<Slot> {
     let o = &s.objects;

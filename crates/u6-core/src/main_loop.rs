@@ -65,7 +65,7 @@ pub use main_hunk::*;
 use crate::engine::Io;
 use crate::image::A4;
 use crate::state::State;
-use crate::ui::printf::{Arg, printf};
+use crate::ui::printf::{Arg, printf, printf_swallowed};
 
 /// One queued `printf` argument (owned: the queue outlives the caller's borrows).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +79,11 @@ pub enum PrintArg {
 pub enum Pending {
     /// printf 0x108658 of a format with its arguments.
     Print(Vec<u8>, Vec<PrintArg>),
+    /// Port (spec 08, 2026-10-24): [`Pending::Print`] of a combat line queued while Attack's
+    /// newline is held (A4-0x7a48, [`crate::combat::CombatState::swallow`]): the format whole,
+    /// as the user's `game` holds it, so the locale layer finds it; the leading newlines of the
+    /// text it puts are dropped then ([`crate::ui::printf::printf_swallowed`]).
+    PrintSwallowed(Vec<u8>, Vec<PrintArg>),
     /// 0x107dd8: make a window current.
     Window(crate::ui::WindowId),
     /// 0x107e00: move the current window's cursor to (col, row).
@@ -133,19 +138,23 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
             Some(Pending::Cursor(col, row)) => {
                 crate::ui::panels::set_cursor(state, io, col, row).await
             }
-            Some(Pending::Print(fmt, args)) => {
-                let args: Vec<Arg<'_>> = args
-                    .iter()
-                    .map(|a| match a {
-                        PrintArg::Word(w) => Arg::Word(*w),
-                        PrintArg::Str(s) => Arg::Str(s),
-                    })
-                    .collect();
-                printf(state, io, &fmt, &args).await;
+            Some(Pending::Print(fmt, args)) => printf(state, io, &fmt, &print_args(&args)).await,
+            Some(Pending::PrintSwallowed(fmt, args)) => {
+                printf_swallowed(state, io, &fmt, &print_args(&args)).await
             }
         }
         crate::combat::present::printed_one(&mut state.borrow_mut());
     }
+}
+
+/// The queued arguments as `printf` takes them.
+fn print_args(args: &[PrintArg]) -> Vec<Arg<'_>> {
+    args.iter()
+        .map(|a| match a {
+            PrintArg::Word(w) => Arg::Word(*w),
+            PrintArg::Str(s) => Arg::Str(s),
+        })
+        .collect()
 }
 
 /// The NUL-terminated string at image address `addr` of the user's `game` (empty when the file

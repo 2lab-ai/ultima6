@@ -343,7 +343,10 @@ async fn print_paced(state: &RefCell<State>, io: &Io, n: usize) {
     for _ in 0..n {
         let text = matches!(
             state.borrow().main.pending_print.first(),
-            Some(crate::main_loop::Pending::Print(..))
+            Some(
+                crate::main_loop::Pending::Print(..)
+                    | crate::main_loop::Pending::PrintSwallowed(..)
+            )
         );
         if text {
             pace(state, io, PRINT_MS).await;
@@ -998,6 +1001,12 @@ const SAID_KEPT: usize = 64;
 
 /// [ui] 0x108658 with the string at image address `at` of the user's `game` as the format:
 /// queued for the command loop like the actor code's lines, and kept in `combat.said`.
+///
+/// While Attack's newline is held (`combat.swallow`) the line's leading newlines are dropped
+/// when it is printed, and the newline stays held while the English is nothing but newlines.
+/// Port (spec 08, 2026-10-24): the format is queued whole
+/// ([`crate::main_loop::Pending::PrintSwallowed`]) so the locale layer finds it; the newlines
+/// are dropped from the text it puts ([`crate::ui::printf::printf_swallowed`]).
 pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
     let said = &mut s.combat.said;
     if said.len() >= SAID_KEPT {
@@ -1008,13 +1017,10 @@ pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
         args: args.clone(),
     });
     let fmt = with_current_io(|io| crate::main_loop::game_string(io, at));
-    if let Some(mut fmt) = fmt {
-        if s.combat.swallow {
-            let n = fmt.iter().take_while(|&&b| b == b'\n').count();
-            fmt.drain(..n);
-            if !fmt.is_empty() {
-                s.combat.swallow = false;
-            }
+    if let Some(fmt) = fmt {
+        let swallowed = s.combat.swallow;
+        if swallowed && fmt.iter().any(|&b| b != b'\n') {
+            s.combat.swallow = false;
         }
         let args = args
             .into_iter()
@@ -1023,7 +1029,12 @@ pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
                 Text::Word(w) => crate::main_loop::PrintArg::Word(w as u16),
             })
             .collect();
-        crate::main_loop::queue_print(s, fmt, args);
+        if swallowed {
+            let q = &mut s.main.pending_print;
+            q.push(crate::main_loop::Pending::PrintSwallowed(fmt, args));
+        } else {
+            crate::main_loop::queue_print(s, fmt, args);
+        }
     }
 }
 

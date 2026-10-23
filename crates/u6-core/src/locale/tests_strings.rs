@@ -757,3 +757,431 @@ fn a_print_of_the_two_bytes_of_a_short_label_stays_english() {
         "the label read of the same state finds it"
     );
 }
+
+/// Combat's sites the wound report (0x12395a) prints, the test's own copies of
+/// `combat::damage`'s addresses (pinned to its list in the tests): the name-and-space format,
+/// the critical line, the three degrees and the wounded word; and the roster's number line.
+const NAME_SPACE: u32 = 0x0012_1b9a;
+const HP_NUMBER: u32 = 0x0012_1b94;
+const CRITICAL: u32 = crate::image::A4 - 0x7750;
+const HEAVILY: u32 = crate::image::A4 - 0x7745;
+const LIGHTLY: u32 = crate::image::A4 - 0x773d;
+const BARELY: u32 = crate::image::A4 - 0x7735;
+const WOUNDED: u32 = crate::image::A4 - 0x772e;
+
+/// The strings combat prints as its format, by its sites' lists (a hit's, the refused cast's).
+fn combat_sites() -> Vec<u32> {
+    crate::combat::damage::PRINTED
+        .iter()
+        .chain(crate::combat::seams::PRINTED)
+        .copied()
+        .collect()
+}
+
+/// The synthetic text at each of [`combat_sites`] (`Zc` and two digits: the sites lie 6 bytes
+/// apart at least), but two formats of no word of their own: a name and a space at the wound
+/// report's first and a number line at the roster's.
+fn combat_texts() -> SiteLines {
+    combat_sites()
+        .into_iter()
+        .enumerate()
+        .map(|(i, at)| {
+            let text = match at {
+                NAME_SPACE => b"%s ".to_vec(),
+                HP_NUMBER => b"%d\n".to_vec(),
+                _ => format!("Zc{i:02}").into_bytes(),
+            };
+            (at, text)
+        })
+        .collect()
+}
+
+/// The text [`combat_texts`] puts at `at`.
+fn combat_text(at: u32) -> String {
+    let (_, text) = combat_texts()
+        .into_iter()
+        .find(|&(a, _)| a == at)
+        .expect("a combat site");
+    String::from_utf8(text).unwrap()
+}
+
+/// A synthetic `game` (one CODE hunk from the image base) holding [`combat_texts`], each string
+/// NUL-ended at its site.
+fn combat_game() -> Vec<u8> {
+    game_of(&combat_texts())
+}
+
+/// A synthetic `game` (one CODE hunk from the image base) holding `lines`, each string NUL-ended
+/// at its site.
+fn game_of(lines: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let base = crate::image::IMAGE_BASE;
+    let end = lines
+        .iter()
+        .map(|(at, text)| (at - base) as usize + text.len() + 1)
+        .max()
+        .unwrap_or(0);
+    let mut hunk = vec![0u8; end.next_multiple_of(4)];
+    for (at, text) in lines {
+        let o = (at - base) as usize;
+        hunk[o..o + text.len()].copy_from_slice(text);
+    }
+    crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build()
+}
+
+#[test]
+fn combats_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
+    for at in [
+        NAME_SPACE, HP_NUMBER, CRITICAL, HEAVILY, LIGHTLY, BARELY, WOUNDED,
+    ] {
+        assert!(
+            crate::combat::damage::PRINTED.contains(&at),
+            "{at:#x} is in a hit's list"
+        );
+    }
+    // Both lists in full, as the test's own literals (a constant dropped, added twice or moved
+    // fails here): the graze, the death line, dragged, dissolves, robbed, poisoned, the critical
+    // line, the three degrees, the wounded word, the slime, the vine, broken, the yell, the name
+    // and space and the number line; and the refusal.
+    let a4 = crate::image::A4;
+    let sorted = |list: &[u32]| {
+        let mut v = list.to_vec();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        sorted(crate::combat::damage::PRINTED),
+        sorted(&[
+            a4 - 0x7723,
+            a4 - 0x7716,
+            a4 - 0x75c3,
+            a4 - 0x75a0,
+            a4 - 0x7585,
+            a4 - 0x75af,
+            a4 - 0x7750,
+            a4 - 0x7745,
+            a4 - 0x773d,
+            a4 - 0x7735,
+            a4 - 0x772e,
+            a4 - 0x7760,
+            a4 - 0x755a,
+            a4 - 0x7361,
+            a4 - 0x7318,
+            0x0012_1b9a,
+            0x0012_1b94,
+        ]),
+        "a hit's list"
+    );
+    assert_eq!(
+        crate::combat::seams::PRINTED,
+        [0x0011_59f8],
+        "the refused cast's list"
+    );
+    let cat = Catalogue::from_game(&combat_game());
+    let lines = combat_texts();
+    assert_eq!(lines.len(), 18, "a hit's 17, the refused cast's 1");
+    for (at, text) in &lines {
+        let kind = cat.of(text).map(|e| e.kind);
+        if [NAME_SPACE, HP_NUMBER].contains(at) {
+            assert_eq!(kind, None, "the format at {at:#x} has no word of its own");
+        } else {
+            assert_eq!(kind, Some(Kind::Message), "the line at {at:#x}");
+        }
+    }
+    assert_eq!(cat.len(), 16, "every line but the two formats");
+}
+
+/// The wound report (0x12395a) of party member `Zm` (actor 1, level 2: 60 hit points at most)
+/// at `hp` hit points in an engine over [`combat_game`], with `pack` installed over its
+/// catalogue (or no pack), and the lines it queued printed: the scroll's text and the counts.
+fn wound_report(pack: Option<Pack>, hp: u8) -> (String, [u32; 2]) {
+    let game = combat_game();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    s.objects.type_frame[1] = 0x17a;
+    s.actors.attrs.status[1] = 0x80;
+    s.actors.attrs.level[1] = 2;
+    s.actors.attrs.hp[1] = hp;
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    s.actors.party.names = vec!["Zm".into()];
+    if let Some(p) = pack {
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            None,
+            Catalogue::from_game(&game),
+        )
+        .expect("the pack checks");
+    }
+    let mut e = crate::engine::Engine::with_game(s, files, |st, io| async move {
+        crate::combat::damage::report_wounds(&mut st.borrow_mut(), 1);
+        crate::main_loop::flush_prints(&st, &io).await;
+    });
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    let t = &s.ui.text;
+    let mut lines = s.ui.messages.clone();
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    let cells = t.transcript_line.iter().chain(pending);
+    lines.push(cells.map(|&c| crate::ui::wide::cell_char(c)).collect());
+    (lines.join("\n"), s.locale.texts.get())
+}
+
+#[test]
+fn the_wound_report_prints_the_packs_forms_in_order_and_without_a_pack_the_english() {
+    let ko = || {
+        Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+            .unwrap()
+            .with_strings([
+                string(&combat_text(CRITICAL), "빈사"),
+                string(&combat_text(HEAVILY), "중상"),
+                string(&combat_text(LIGHTLY), "경상"),
+                string(&combat_text(BARELY), "찰과상"),
+                string(&combat_text(WOUNDED), "을 입음"),
+            ])
+            .unwrap()
+    };
+    let (heavily, wounded) = (combat_text(HEAVILY), combat_text(WOUNDED));
+    // A quarter of its hit points: the name and a space (no word: as it is), then the pack's
+    // degree and its wounded word, in that order, both looked up and found.
+    let (screen, counts) = wound_report(Some(ko()), 15);
+    assert_eq!(screen.trim_end(), "Zm 중상을 입음");
+    assert_eq!(
+        counts,
+        [2, 0],
+        "the degree and the wounded word from the pack"
+    );
+    // Without a pack the English, nothing counted.
+    let (screen, counts) = wound_report(None, 15);
+    assert_eq!(screen.trim_end(), format!("Zm {heavily}{wounded}"));
+    assert_eq!(counts, [0, 0]);
+    // The other quarters likewise: the critical line alone, the lighter degrees with the word.
+    for (hp, ko_line, en_line) in [
+        (14, "Zm 빈사", format!("Zm {}", combat_text(CRITICAL))),
+        (
+            30,
+            "Zm 경상을 입음",
+            format!("Zm {}{wounded}", combat_text(LIGHTLY)),
+        ),
+        (
+            45,
+            "Zm 찰과상을 입음",
+            format!("Zm {}{wounded}", combat_text(BARELY)),
+        ),
+    ] {
+        assert_eq!(
+            wound_report(Some(ko()), hp).0.trim_end(),
+            ko_line,
+            "hp {hp}"
+        );
+        assert_eq!(wound_report(None, hp).0.trim_end(), en_line, "hp {hp}");
+    }
+    // Unhurt: no report.
+    assert_eq!(wound_report(Some(ko()), 60), (String::new(), [0, 0]));
+}
+
+/// The two combat lines whose English starts with a newline, the test's own copies of their
+/// addresses (pinned to their sites' lists in the test): the refusal of a staff's or a wand's
+/// cast (`combat::seams`) and the next weapon's prompt (`combat::attack`).
+const CAST_REFUSED: u32 = 0x0011_59f8;
+const NEXT_WEAPON: u32 = crate::image::A4 - 0x76ac;
+
+/// A pack of a form for each line of [`after_a_held_newline`]'s `game`, the newline kept.
+fn held_ko() -> Pack {
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings([string("\nZr1", "\n거부"), string("\nZn %s", "\n%s 차례")])
+        .unwrap()
+}
+
+/// In an engine over a synthetic `game` of the two lines (`\nZr1`, `\nZn %s`), with `pack`
+/// installed over its catalogue (or no pack): `Zp` printed (no newline after it), Attack's
+/// newline held (`combat.swallow`) when `held`, then `line` run and the lines it queued printed:
+/// the scroll's text, the counts, and whether the newline is still held.
+fn after_a_held_newline(
+    pack: Option<Pack>,
+    held: bool,
+    line: fn(&mut State),
+) -> (String, [u32; 2], bool) {
+    let game = game_of(&[
+        (CAST_REFUSED, b"\nZr1".to_vec()),
+        (NEXT_WEAPON, b"\nZn %s".to_vec()),
+    ]);
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    if let Some(p) = pack {
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            None,
+            Catalogue::from_game(&game),
+        )
+        .expect("the pack checks");
+    }
+    let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
+        crate::ui::printf::printf(&st, &io, b"Zp", &[]).await;
+        {
+            let mut s = st.borrow_mut();
+            s.combat.swallow = held;
+            line(&mut s);
+        }
+        crate::main_loop::flush_prints(&st, &io).await;
+    });
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    (
+        scroll(&s).trim_end().to_string(),
+        s.locale.texts.get(),
+        s.combat.swallow,
+    )
+}
+
+/// The scroll's text: the lines so far, the one being written last.
+fn scroll(s: &State) -> String {
+    let t = &s.ui.text;
+    let mut lines = s.ui.messages.clone();
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    let cells = t.transcript_line.iter().chain(pending);
+    lines.push(cells.map(|&c| crate::ui::wide::cell_char(c)).collect());
+    lines.join("\n")
+}
+
+#[test]
+fn a_line_after_attacks_held_newline_shows_the_packs_form_without_its_newline() {
+    use crate::combat::present::Text;
+    assert!(crate::combat::seams::PRINTED.contains(&CAST_REFUSED));
+    assert!(crate::combat::attack::PRINTED.contains(&NEXT_WEAPON));
+    let refused: fn(&mut State) = crate::combat::seams::cast_from_item;
+    let next: fn(&mut State) = |s| {
+        crate::combat::present::say(s, NEXT_WEAPON, vec![Text::Str(b"Zb".to_vec())]);
+    };
+    // Attack's newline held: each line is looked up whole, its pack form put without its
+    // newline, and the newline is no longer held.
+    assert_eq!(
+        after_a_held_newline(Some(held_ko()), true, refused),
+        ("Zp거부".to_string(), [1, 0], false),
+        "the refusal"
+    );
+    assert_eq!(
+        after_a_held_newline(Some(held_ko()), true, next),
+        ("ZpZb 차례".to_string(), [1, 0], false),
+        "the next weapon's prompt"
+    );
+    // Without a pack the English without its newline, as before.
+    assert_eq!(
+        after_a_held_newline(None, true, refused),
+        ("ZpZr1".to_string(), [0, 0], false)
+    );
+    assert_eq!(
+        after_a_held_newline(None, true, next),
+        ("ZpZn Zb".to_string(), [0, 0], false)
+    );
+    // No newline held: the pack's form with its newline.
+    assert_eq!(
+        after_a_held_newline(Some(held_ko()), false, refused),
+        ("Zp\n거부".to_string(), [1, 0], false)
+    );
+}
+
+/// Where [`said_after_a_held_newline`]'s synthetic `game` keeps its lines (the n-th 0x20 bytes
+/// after this; no catalogued site).
+const HELD_LINES: u32 = crate::image::IMAGE_BASE + 0x100;
+
+/// In an engine over a synthetic `game` of `lines` (no pack): `Zp` printed (no newline after
+/// it), Attack's newline held (`combat.swallow`), then each line said in turn: through
+/// [`crate::combat::present::say`], or (`old`) as `say` queued it before 2026-10-24, the leading
+/// newlines drained from the English at the queue and the newline held while nothing was left;
+/// the queue printed after each. The scroll's text (not trimmed) and whether the newline is held
+/// after each line.
+fn said_after_a_held_newline(lines: &[&[u8]], old: bool) -> (String, Vec<bool>) {
+    let at = |i: usize| HELD_LINES + 0x20 * i as u32;
+    let sites: Vec<(u32, Vec<u8>)> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (at(i), l.to_vec()))
+        .collect();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game_of(&sites))]));
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    let held = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let out = Rc::clone(&held);
+    let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
+        crate::ui::printf::printf(&st, &io, b"Zp", &[]).await;
+        st.borrow_mut().combat.swallow = true;
+        for (i, english) in sites.iter().map(|(_, l)| l).enumerate() {
+            {
+                let mut s = st.borrow_mut();
+                if old {
+                    let mut fmt = english.clone();
+                    if s.combat.swallow {
+                        let n = fmt.iter().take_while(|&&b| b == b'\n').count();
+                        fmt.drain(..n);
+                        if !fmt.is_empty() {
+                            s.combat.swallow = false;
+                        }
+                    }
+                    crate::main_loop::queue_print(&mut s, fmt, Vec::new());
+                } else {
+                    crate::combat::present::say(&mut s, at(i), Vec::new());
+                }
+                out.borrow_mut().push(s.combat.swallow);
+            }
+            crate::main_loop::flush_prints(&st, &io).await;
+        }
+    });
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let screen = scroll(&e.state());
+    (screen, held.borrow().clone())
+}
+
+/// One case of the held newline: its name, the lines said in turn, the scroll after them and
+/// whether the newline is held after each.
+type HeldCase<'a> = (&'a str, &'a [&'a [u8]], &'a str, &'a [bool]);
+
+#[test]
+fn a_line_said_after_a_held_newline_shows_and_holds_as_the_old_drain_did() {
+    let cases: [HeldCase; 4] = [
+        ("an empty format", &[b""], "Zp", &[true]),
+        ("a newline only", &[b"\n"], "Zp", &[true]),
+        ("two newlines, then text", &[b"\n\nZt"], "ZpZt", &[false]),
+        (
+            "a newline only, then text",
+            &[b"\n", b"Zs"],
+            "ZpZs",
+            &[true, false],
+        ),
+    ];
+    for (case, lines, screen, held) in cases {
+        let now = said_after_a_held_newline(lines, false);
+        assert_eq!(
+            now,
+            said_after_a_held_newline(lines, true),
+            "{case}: as before"
+        );
+        assert_eq!(now, (screen.to_string(), held.to_vec()), "{case}");
+    }
+}
