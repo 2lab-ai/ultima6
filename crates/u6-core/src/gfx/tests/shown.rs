@@ -207,6 +207,26 @@ fn the_map_dissolve_reveals_every_shown_pixel_once_in_the_original_steps() {
     }
 }
 
+/// Original: the map's dissolve is 0x1520e2 over (8, 8)..(0xa7, 0xa7) itself, one tile: step k
+/// reveals (8, 8) plus the k-th pixel of the 160 × 160 order, and only it, for a full-period
+/// word and for one that ends the register early.
+#[cfg(not(feature = "wide"))]
+#[test]
+fn original_map_dissolve_steps_are_the_160_order_from_8_8() {
+    let mut full = vec![0u16; 15];
+    full[13] = full_period_word(15);
+    for taps in [full, vec![0x1234u16; 15]] {
+        let order = crate::gfx::blit::dissolve_order(DISSOLVE_SIDE, DISSOLVE_SIDE, &taps);
+        let d = MapDissolve::new(&taps);
+        assert_eq!(d.steps(), order.len());
+        for (k, &(dx, dy)) in order.iter().enumerate() {
+            let step: Vec<(u16, u16)> = d.step(k).collect();
+            assert_eq!(step, [(8 + dx, 8 + dy)], "step {k}");
+        }
+        println!("{} steps checked", order.len());
+    }
+}
+
 /// Spec 13 Design 4: the tile blitter, the fill, the rect copy and the bitmap blit starting in
 /// the UI's columns write only on the UI's screen (in Original the frame is that screen; the
 /// Amiga's wrap into the next row stays there).

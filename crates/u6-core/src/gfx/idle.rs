@@ -1,8 +1,8 @@
 //! The actor idle-frame pass of 0x10202e (`0x001020E4..0x00102BE8`).
 //!
 //! For each actor slot 0..256 with a non-zero type/frame word, on the view centre's level and
-//! in the view or its ring (less than 6 tiles from the centre on both axes in Original, signed
-//! 16-bit differences; spec 13 Decision 5: [`HALF_W`] + 1 and [`HALF_H`] + 1), while
+//! in the view (less than 6 tiles from the centre on both axes in Original, signed 16-bit
+//! differences; spec 13 Decision 5: at most [`HALF_W`] and [`HALF_H`] tiles), while
 //! [`GfxState::actor_anim_due`] (A4-0x7afa) is set and the actor's status byte (A4+0x3d0c) has
 //! none of bits 0x16: pick a new frame by object type, drawing RNG values in the original's
 //! order. `e` is the frame word being built (local -0xa), `base` the frame bits kept (local

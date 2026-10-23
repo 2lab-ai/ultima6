@@ -58,8 +58,8 @@ fn word(s: &State, slot: u16) -> (u16, u16) {
     (w & 0x3ff, w >> 10)
 }
 
-/// Skipped: past the view's ring on either axis (6 tiles from the centre in Original; the view's
-/// half and one more, spec 13 Decision 5), on another level, dead, or with the due flag clear.
+/// Skipped: outside the view on either axis (6 tiles from the centre in Original; one tile past
+/// the view's half, spec 13 Decision 5), on another level, dead, or with the due flag clear.
 #[test]
 fn pre_checks_skip_without_drawing() {
     let (mut s, mut g) = world();
@@ -80,7 +80,7 @@ fn pre_checks_skip_without_drawing() {
     let before = s.rng;
     assert!(!actor_idle_frames(&mut s, &g));
     assert_eq!(s.rng, before);
-    // In the view's ring, but the due flag is clear.
+    // On the view's edge (in the view), but the due flag is clear.
     put(
         &mut s,
         5,
