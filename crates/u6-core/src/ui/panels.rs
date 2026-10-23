@@ -1,6 +1,7 @@
 //! The side panel (screen pixels 168..312 × 6..103, the status window): the redraw 0x103f64 and
 //! its three modes — party roster 0x1109e0, member stats 0x110d2c, inventory 0x111c30 — with the
-//! combat-mode line 0x110c76 and the tile helpers they use.
+//! combat-mode line 0x110c76 and the tile helpers they use. Wide (spec 14): the three views drawn
+//! into their slots below the UI at every redraw, and the presses in those slots.
 
 use std::cell::RefCell;
 
@@ -91,8 +92,9 @@ fn half(d: i16) -> i16 {
     if d < 0 { (d + 1) >> 1 } else { d >> 1 }
 }
 
-/// The roster name of party member `i` (14-byte names at A4+0x470c).
-fn name(s: &State, i: i16) -> Vec<u8> {
+/// The roster name of party member `i` (14-byte names at A4+0x470c). Spec 14 Design 6: the page
+/// titles the actor windows with the shown member's ([`panel_view`]); it is shown, never logged.
+pub fn name(s: &State, i: i16) -> Vec<u8> {
     let names = &s.actors.party.names;
     usize::try_from(i)
         .ok()
@@ -101,7 +103,7 @@ fn name(s: &State, i: i16) -> Vec<u8> {
 }
 
 /// The actor slot of party member `i` (A4+0x47ec).
-pub(crate) fn member_actor(s: &State, i: i16) -> u8 {
+pub fn member_actor(s: &State, i: i16) -> u8 {
     usize::try_from(i)
         .ok()
         .and_then(|i| s.actors.party.members.get(i))
@@ -109,19 +111,63 @@ pub(crate) fn member_actor(s: &State, i: i16) -> u8 {
         .unwrap_or(0)
 }
 
+/// Spec 14 Design 7: what the page's actor windows show: the panel mode (the active view while
+/// it is one of the three and no conversation runs), the party member the panel shows, that
+/// member's actor slot, and whether a conversation runs (its portrait is in the panel area,
+/// Design 6). The windows' titles carry the member's name ([`panel_name`]).
+pub fn panel_view(s: &State) -> (u16, i16, u8, bool) {
+    let member = s.ui.panel.member;
+    (
+        s.ui.panel.mode,
+        member,
+        member_actor(s, member),
+        s.converse.active,
+    )
+}
+
+/// Spec 14 Design 7: the roster name of the member the panel shows ([`name`]).
+pub fn panel_name(s: &State) -> Vec<u8> {
+    name(s, s.ui.panel.member)
+}
+
 /// Original: 0x103f64 (ui: redraw the side panel for the panel mode, if it is marked dirty)
+///
+/// Wide (spec 14 Design 2): in the roster, stats or inventory mode all three views are drawn,
+/// each into its slot ([`redraw_views`]). Not while a conversation runs (Design 6): its portrait
+/// stays in the panel area, the panel stays dirty, and the redraw after the Talk command draws
+/// it.
 pub async fn redraw_panel(state: &RefCell<State>, io: &Io) {
-    let mode = {
-        let mut s = state.borrow_mut();
-        if !s.ui.panel.dirty {
-            return;
-        }
-        let solo = solo_member(&s.actors);
-        if solo >= 0 {
-            s.ui.panel.member = i16::from(solo);
-        }
-        s.ui.panel.mode
+    let Some(mode) = redraw_mode(state) else {
+        return;
     };
+    #[cfg(feature = "wide")]
+    if let Some(slot) = slot_of(mode) {
+        if !state.borrow().converse.active {
+            redraw_views(state, io, mode, slot).await;
+        }
+        return;
+    }
+    draw_mode(state, io, mode).await;
+    panel_cursor(state, io, 1);
+    state.borrow_mut().ui.panel.dirty = false;
+}
+
+/// The panel mode 0x103f64 draws, the solo member made the one shown; `None` when the panel is
+/// not dirty.
+fn redraw_mode(state: &RefCell<State>) -> Option<u16> {
+    let mut s = state.borrow_mut();
+    if !s.ui.panel.dirty {
+        return None;
+    }
+    let solo = solo_member(&s.actors);
+    if solo >= 0 {
+        s.ui.panel.member = i16::from(solo);
+    }
+    Some(s.ui.panel.mode)
+}
+
+/// 0x103f64's draw of panel mode `mode` (nothing for a mode it has no case for).
+async fn draw_mode(state: &RefCell<State>, io: &Io, mode: u16) {
     let member = state.borrow().ui.panel.member;
     match mode {
         0x91 => {
@@ -136,6 +182,233 @@ pub async fn redraw_panel(state: &RefCell<State>, io: &Io) {
         }
         _ => {}
     }
+}
+
+/// The views of the slots, by slot ([`crate::geom::SLOTS`]): roster, stats, inventory.
+#[cfg(feature = "wide")]
+pub const VIEWS: [u16; 3] = [0x91, 0x90, 0x92];
+
+/// The slot of view `mode`, if it is one of [`VIEWS`].
+#[cfg(feature = "wide")]
+pub fn slot_of(mode: u16) -> Option<usize> {
+    VIEWS.iter().position(|&v| v == mode)
+}
+
+/// Spec 14 Design 2 (Wide): 0x103f64 in the roster, stats or inventory mode `mode` (slot
+/// `slot`). The two other views are drawn into the panel area first, each with its mode set, and
+/// copied into its slot; then `mode`'s as the original draws it, its cursor, its copy.
+///
+/// The other views leave the state as a draw of `mode` alone would, but for the inventory
+/// context (Design 3: the page and the container, which the inventory view keeps): the panel
+/// area is cleared by each view and drawn last by `mode`'s; the pending line is flushed once
+/// before them, as `mode`'s first window switch would, and what they write besides is put back
+/// after each ([`Drawn`]). The inventory view's cells are kept for a press in its slot.
+#[cfg(feature = "wide")]
+async fn redraw_views(state: &RefCell<State>, io: &Io, mode: u16, slot: usize) {
+    super::print::put_raw(state, io, -1).await;
+    for (other, &view) in VIEWS.iter().enumerate() {
+        if other == slot {
+            continue;
+        }
+        let saved = Drawn::of(&state.borrow());
+        state.borrow_mut().ui.panel.mode = view;
+        draw_mode(state, io, view).await;
+        copy_to_slot(io, other);
+        let mut s = state.borrow_mut();
+        if view == 0x92 {
+            let cells = super::globals::ViewCells::of(&s);
+            s.ui.panel.slots.inventory = cells;
+        }
+        saved.put(&mut s);
+    }
+    draw_mode(state, io, mode).await;
+    panel_cursor(state, io, 1);
+    copy_to_slot(io, slot);
+    let mut s = state.borrow_mut();
+    if mode == 0x92 {
+        let cells = super::globals::ViewCells::of(&s);
+        s.ui.panel.slots.inventory = cells;
+    }
+    s.ui.panel.dirty = false;
+}
+
+/// What a view's draw writes outside the panel area and the inventory context (spec 14 Design
+/// 2), as it was before: the text layer (windows, cursors, inks, the line; 0x107dd8, 0x107e00,
+/// 0x107e5a), the speech tap's marks of the line's cells, the plot colour and buffer (0x1059d4),
+/// the child cursor (0x10aea4 / 0x10aed6), the wind (the sky bar's 0x103632), the random state,
+/// the inventory view's cells, count, weights and both-hands flags (0x1112cc, 0x1118c6,
+/// 0x111c30), and the panel mode.
+#[cfg(feature = "wide")]
+struct Drawn {
+    text: super::TextState,
+    speech: crate::speech::SpeechTap,
+    plot: (u16, bool),
+    children: crate::objects::ChildCursor,
+    wind: u8,
+    rng: crate::Rng,
+    cells: super::globals::ViewCells,
+    mode: u16,
+}
+
+#[cfg(feature = "wide")]
+impl Drawn {
+    fn of(s: &State) -> Drawn {
+        Drawn {
+            text: s.ui.text.clone(),
+            speech: s.speech.clone(),
+            plot: (s.gfx.plot_colour, s.gfx.plot_back),
+            children: s.objects.children,
+            wind: s.actors.wind,
+            rng: s.rng,
+            cells: super::globals::ViewCells::of(s),
+            mode: s.ui.panel.mode,
+        }
+    }
+
+    fn put(self, s: &mut State) {
+        s.ui.text = self.text;
+        s.speech = self.speech;
+        (s.gfx.plot_colour, s.gfx.plot_back) = self.plot;
+        s.objects.children = self.children;
+        s.actors.wind = self.wind;
+        s.rng = self.rng;
+        self.cells.put(s);
+        s.ui.panel.mode = self.mode;
+    }
+}
+
+/// Each slot lies a multiple of 8 pixels from the panel area on both axes, so the text copied
+/// into it stays on the HD font's 8-pixel grid (spec 14 rev 3, `u6_render::hd` `glyph_cell`).
+const _: () = assert!(
+    slots_on_grid(),
+    "the slots on the panel's 8-pixel text grid"
+);
+
+/// The check of the assertion above.
+const fn slots_on_grid() -> bool {
+    let slots = crate::geom::SLOTS;
+    let mut i = 0;
+    while i < slots.len() {
+        let (dx, dy) = (slots[i].0 as i32 - PANEL.0, slots[i].1 as i32 - PANEL.1);
+        if dx % 8 != 0 || dy % 8 != 0 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Spec 14 Design 2: the side panel area (144 × 98 from [`PANEL`]'s top left) copied into slot
+/// `slot`, each pixel with its source ([`u6_render::Framebuffer::copy_px_within`]).
+#[cfg(feature = "wide")]
+fn copy_to_slot(io: &Io, slot: usize) {
+    use crate::geom::{SLOT_H, SLOT_W, SLOTS};
+    use u6_render::WIDTH;
+    let (x0, y0) = (PANEL.0 as usize, PANEL.1 as usize);
+    let (sx, sy) = (usize::from(SLOTS[slot].0), usize::from(SLOTS[slot].1));
+    io.draw(|fb| {
+        for dy in 0..usize::from(SLOT_H) {
+            for dx in 0..usize::from(SLOT_W) {
+                fb.copy_px_within((y0 + dy) * WIDTH + x0 + dx, (sy + dy) * WIDTH + sx + dx);
+            }
+        }
+    });
+}
+
+/// Spec 14 Design 4 (Wide): a draw into the panel area outside a redraw (the panel cursor, the
+/// combat-mode line) reaches the slot of the view shown there. Not while a slot press holds
+/// another view's mode (the panel area then shows the panel's own view, and the press ends with
+/// a redraw), nor while a conversation runs (the panel area holds its portrait or the
+/// inventory it opened, Design 6).
+#[cfg(feature = "wide")]
+pub(crate) fn mirror_view(s: &State, io: &Io) {
+    if s.ui.panel.slots.press.is_some() || s.converse.active {
+        return;
+    }
+    if let Some(slot) = slot_of(s.ui.panel.mode) {
+        copy_to_slot(io, slot);
+    }
+}
+
+/// Spec 14 Design 5 (Wide): the start of a press in slot `slot`, the pointer in it. Ignored
+/// (false) unless it is a press, the panel mode is one of [`VIEWS`], no conversation runs
+/// (Design 6) and no other slot press is still being handled. Else: the pointer moved to the same place in the panel
+/// area, the panel mode the slot's view, for the inventory slot while another view is the
+/// panel's the inventory state its last draw left (the cells its click reads, as the panel's
+/// own would after that draw), and the press recorded to be put back ([`end_slot_press`]).
+#[cfg(feature = "wide")]
+pub(crate) fn begin_slot_press(s: &mut State, slot: usize) -> bool {
+    let mode = s.ui.panel.mode;
+    if !s.ui.pointer.pressed
+        || slot_of(mode).is_none()
+        || s.converse.active
+        || s.ui.panel.slots.press.is_some()
+    {
+        return false;
+    }
+    let view = VIEWS[slot];
+    let (sx, sy) = crate::geom::SLOTS[slot];
+    let pointer = s.ui.input.pointer;
+    s.ui.input.pointer = (
+        pointer.0 - sx as i16 + PANEL.0 as i16,
+        pointer.1 - sy as i16 + PANEL.1 as i16,
+    );
+    let cells = (view == 0x92 && mode != 0x92).then(|| {
+        let live = super::globals::ViewCells::of(s);
+        s.ui.panel.slots.inventory.clone().put(s);
+        live
+    });
+    s.ui.panel.mode = view;
+    s.ui.panel.slots.press = Some(super::globals::SlotPress {
+        mode,
+        view,
+        pointer,
+        cells,
+        claimed: false,
+    });
+    true
+}
+
+/// The key read takes the slot press that gave the code it just read, if one did (true): the
+/// press is put back once that code is handled ([`end_slot_press`]). A press taken by an outer
+/// key read is not this one's.
+#[cfg(feature = "wide")]
+pub(crate) fn claim_slot_press(s: &mut State) -> bool {
+    match &mut s.ui.panel.slots.press {
+        Some(p) if !p.claimed => {
+            p.claimed = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Spec 14 Design 5 (Wide): the end of a slot press, its code handled: the panel mode back
+/// unless the code changed it (the codes switch the panel as today), the inventory state the
+/// press replaced back, the pointer back where the press was, the panel dirty.
+#[cfg(feature = "wide")]
+pub(crate) fn end_slot_press(s: &mut State) {
+    let Some(p) = s.ui.panel.slots.press.take() else {
+        return;
+    };
+    if s.ui.panel.mode == p.view {
+        s.ui.panel.mode = p.mode;
+    }
+    if let Some(cells) = p.cells {
+        cells.put(s);
+    }
+    s.ui.input.pointer = p.pointer;
+    s.ui.panel.dirty = true;
+}
+
+/// A redraw of the current view alone, as 0x103f64 draws it in Original: what spec 14 Design
+/// 2's redraw is compared with.
+#[cfg(all(test, feature = "wide"))]
+pub(crate) async fn redraw_alone(state: &RefCell<State>, io: &Io) {
+    let Some(mode) = redraw_mode(state) else {
+        return;
+    };
+    draw_mode(state, io, mode).await;
     panel_cursor(state, io, 1);
     state.borrow_mut().ui.panel.dirty = false;
 }
@@ -232,6 +505,8 @@ pub async fn combat_mode_line(state: &RefCell<State>, io: &Io) {
     set_cursor(state, io, col, 0x0b).await;
     printf(state, io, &fmt, &[Arg::Str(&name)]).await;
     select_window(state, io, saved).await;
+    #[cfg(feature = "wide")]
+    mirror_view(&state.borrow(), io);
 }
 
 /// One `printf` at a cell of the current window.
@@ -333,10 +608,16 @@ pub async fn stats(state: &RefCell<State>, io: &Io, member: i16) {
 ///
 /// Name, figure frame, the weight labels, the bottom icons; the equipment, the list and the
 /// weights are drawn by 0x111be0 ([`crate::inventory::panel_contents`]).
+///
+/// Wide (spec 14 Design 3): the page and the container shown stay while the member shown (or
+/// the open container) does: a bag opened in the panel (0xa0) stays open and a scrolled list on
+/// its page through every redraw. When it changes (0x90, 0x92, 0x99, 0x9a, 0x91, a solo member,
+/// Drop's or Tab's leader, a conversation) they start again as the original's
+/// ([`kept_container`]).
 pub async fn inventory(state: &RefCell<State>, io: &Io) {
     let (open, member, n, p) = {
         let mut s = state.borrow_mut();
-        s.ui.panel.inventory_first = 0;
+        first_row(&mut s);
         clear_panel(&s, io);
         let member = s.ui.panel.member;
         (
@@ -374,6 +655,8 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
         } else {
             open
         };
+        #[cfg(feature = "wide")]
+        let (base, shown) = (shown, kept_container(&mut s, shown));
         s.ui.panel.container = shown;
         if let Some(f) = usize::try_from(member)
             .ok()
@@ -381,11 +664,57 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
         {
             *f = 0;
         }
+        // A kept bag: the equipment, the readied weight and the both-hands flag are the
+        // member's, as 0x111c30 left them before the bag opened (0x9f / 0xa0 recount the bag
+        // only, which keeps them).
+        #[cfg(feature = "wide")]
+        if shown != base {
+            crate::inventory::recount(&mut s, base as i16);
+        }
         shown
     };
     crate::inventory::panel_contents(state, io, shown as i16).await;
     combat_mode_line(state, io).await;
     select_window(state, io, WindowId::Messages).await;
+}
+
+/// 0x111c30 lists from the first row. Wide (spec 14 Design 3): the row is kept, and starts again
+/// with the container ([`kept_container`]).
+fn first_row(s: &mut State) {
+    if !cfg!(feature = "wide") {
+        s.ui.panel.inventory_first = 0;
+    }
+}
+
+/// Spec 14 Design 3 (Wide): the container the inventory view shows for `base`, the member's actor
+/// or the open container: the panel's container as the last draw left it, the page kept, while
+/// `base` is the last draw's; else `base`, from the first page. Also from the first page when
+/// the kept container is held by another actor (its chain of containers, as
+/// `inventory::weight::holder` walks it, ends at an actor other than `base`: it was taken, or
+/// is the panel's start value 0).
+#[cfg(feature = "wide")]
+fn kept_container(s: &mut State, base: u16) -> u16 {
+    let kept = s.ui.panel.container;
+    let same = s.ui.panel.slots.base.is_none_or(|b| b == base);
+    s.ui.panel.slots.base = Some(base);
+    let o = &s.objects;
+    let mut c = kept as i16;
+    let mut elsewhere = false;
+    for _ in 0..crate::objects::OBJECT_SLOTS {
+        if c == base as i16 || (c >= crate::objects::ACTOR_SLOTS as i16 && o.place(c) == 0) {
+            break;
+        }
+        if c < crate::objects::ACTOR_SLOTS as i16 {
+            elsewhere = true;
+            break;
+        }
+        c = o.parent(c);
+    }
+    if same && !elsewhere {
+        return kept;
+    }
+    s.ui.panel.inventory_first = 0;
+    base
 }
 
 /// Bytes of the objlist block at A4-0x7b84 the sky bar reads.

@@ -272,14 +272,15 @@ fn the_side_panel_and_the_bar_keep_their_regions_beside_the_shown_map() {
     );
 }
 
-/// Wide: the view's last column and row lie at the frame's right and bottom edges, so a press on
+/// Wide: the view's last column and row lie at the frame's right edge and at the bottom of its
+/// top 336 rows (spec 13; the side panel's view slots of spec 14 are below the UI), so a press on
 /// the frame's last shown pixel walks to the view cell `(VIEW_W - 1, VIEW_H - 1)`: columns
-/// counted across the frame beside the UI, rows down it. Fails with `VIEW_W` and `VIEW_H`
+/// counted across the frame beside the UI, rows down those 336. Fails with `VIEW_W` and `VIEW_H`
 /// swapped.
 #[cfg(feature = "wide")]
 #[test]
 fn wide_the_last_shown_pixel_is_the_cell_at_the_frames_corner() {
-    let (w, h) = (u6_render::WIDTH as i16, u6_render::HEIGHT as i16);
+    let (w, h) = (u6_render::WIDTH as i16, 336);
     let (cols, rows) = ((w - MAP_X as i16) / 16, (h - MAP_Y as i16) / 16);
     let mut s = st();
     s.main.reading = 1;
