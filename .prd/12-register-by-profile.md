@@ -6,7 +6,7 @@ tags: [ultima6, i18n, korean, npc]
 
 # 12 — Korean register by profile: each speaker's age and station decide the speech level
 
-Status: in progress (2026-10-22). User item 3 of `hd-layout-font-register/ssot.md`, verbatim: "npc들의 프로파일에 맞게 영어 다시 번역해줘. 특히 어린얘들이 어른처럼 말하는거 수정해줘." It amends 08 §7 (the register guide) and the translation tool; the engine and the pack format do not change.
+Status: shipped (2026-10-23, in production at https://ultima6.2lab.ai with the Korean pack ko-1023f; deploys 1, 5, 7 and 9 of `hd-layout-font-register/loop.md`: by age (ko-1023a), every script by its speaker with keyword words per script (ko-1023d), block keys by meaning and quotes kept (ko-1023e), one Korean form per name (ko-1023f); tool changes in spec 08 revs 15-19). User item 3 of `hd-layout-font-register/ssot.md`, verbatim: "npc들의 프로파일에 맞게 영어 다시 번역해줘. 특히 어린얘들이 어른처럼 말하는거 수정해줘." It amends 08 §7 (the register guide) and the translation tool; the engine and the pack format do not change.
 
 ## Measured facts (main 6e4e337)
 
