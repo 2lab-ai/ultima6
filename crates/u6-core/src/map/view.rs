@@ -1,13 +1,18 @@
 //! View window: sight and light flood (0x109ab8, 0x109bae, 0x109c12) and the per-turn view
 //! update 0x109e74 that turns the window cache into the 11 × 11 tiles 0x102c90 draws.
 //!
-//! Grids are the window's 40 × 40 cells ([`super::cell`]). The view is the 11 × 11 block at
-//! [`MapState::view_offset`]; the leader stands at view cell (5, 5).
+//! Grids are the window's 40 × 40 cells ([`super::cell`]; [`WINDOW`] × [`WINDOW`] in the port).
+//! The view is the 11 × 11 block at [`MapState::view_offset`] ([`VIEW_W`] × [`VIEW_H`]); the
+//! leader stands at view cell (5, 5) ([`HALF_W`], [`HALF_H`]). The original's cells 8..32 of
+//! each axis, the inner block 0x109e74 clears and lights, are [`BLOCK_X`] × [`BLOCK_Y`].
+
+use std::ops::Range;
 
 use super::flags::*;
 use super::seams;
 use super::tables::MapTables;
-use super::{MapState, VIEW, WINDOW, WINDOW_CELLS, cell};
+use super::{MapState, WINDOW, WINDOW_CELLS, cell};
+use crate::geom::{self, BLOCK_X, BLOCK_Y, HALF_H, HALF_W, QUEUE_LEN, VIEW_H, VIEW_W};
 use crate::state::State;
 
 /// View tile of a cell nobody sees (0x109e74).
@@ -16,9 +21,14 @@ pub const NOT_VISIBLE: u16 = 0xff;
 pub const DARK: u16 = 0x1bc;
 /// Ambient light from which 0x109e74 skips the object-light pass.
 const FULL_DAYLIGHT: i8 = 7;
+/// The original's half view: the sight flood reads the distance table as if each axis of the
+/// view were this wide (spec 13 Decision 8).
+const TABLE_HALF: i16 = geom::RULE_HALF;
+/// The view's half on x and y: the leader's view cell.
+const HALF: [i16; 2] = [HALF_W as i16, HALF_H as i16];
 
 impl MapState {
-    /// Window cell of view cell (col, row), 0..11 each.
+    /// Window cell of view cell (col, row), col 0..[`VIEW_W`], row 0..[`VIEW_H`].
     pub fn view_cell(&self, col: usize, row: usize) -> usize {
         let [vx, vy] = self.view_offset;
         cell(vx as usize + col, vy as usize + row)
@@ -36,7 +46,7 @@ impl MapState {
 
     /// The tile 0x102c90 draws at view cell (col, row).
     pub fn view_tile(&self, col: usize, row: usize) -> u16 {
-        self.view_tiles[row * VIEW + col]
+        self.view_tiles[row * VIEW_W + col]
     }
 }
 
@@ -82,12 +92,47 @@ enum FloodMode {
 }
 
 /// The ring queue 0x109bae / 0x109c12 share: x at A4-0x17f2, y at A4-0x16f2 (256 bytes each),
-/// tail A4-0x790a, head A4-0x7909 (bytes). Every flood ends with it empty.
+/// tail A4-0x790a, head A4-0x7909 (bytes). Every flood ends with it empty. The port's has
+/// [`QUEUE_LEN`] entries (Wide: 1024, word indices; spec 13 Geometry).
 struct Queue {
-    x: [u8; 256],
-    y: [u8; 256],
-    head: u8,
-    tail: u8,
+    x: [u8; QUEUE_LEN],
+    y: [u8; QUEUE_LEN],
+    head: QueueIndex,
+    tail: QueueIndex,
+}
+
+/// A queue index: the original's byte.
+#[cfg(not(feature = "wide"))]
+type QueueIndex = u8;
+/// A queue index: a word, to hold Wide's [`QUEUE_LEN`].
+#[cfg(feature = "wide")]
+type QueueIndex = u16;
+/// The last queue index; indices step round the ring masked with it.
+const QUEUE_LAST: QueueIndex = (QUEUE_LEN - 1) as QueueIndex;
+const _: () = assert!(
+    QUEUE_LEN - 1 == QUEUE_LAST as usize,
+    "the index holds the queue"
+);
+
+impl Queue {
+    const fn new() -> Self {
+        Queue {
+            x: [0; QUEUE_LEN],
+            y: [0; QUEUE_LEN],
+            head: 0,
+            tail: 0,
+        }
+    }
+}
+
+/// The queue index after `i`, round the ring (the original's byte wraps at 256).
+const fn next(i: QueueIndex) -> QueueIndex {
+    i.wrapping_add(1) & QUEUE_LAST
+}
+
+/// The queue index before `i`, round the ring.
+const fn prev(i: QueueIndex) -> QueueIndex {
+    i.wrapping_sub(1) & QUEUE_LAST
 }
 
 /// One 0x109e74 pass over the window grids.
@@ -125,19 +170,31 @@ impl Flood<'_> {
             .unwrap_or(0)
     }
 
-    /// `dist[|dx|][|dy|]`. Floods in modes 0 and 1 stay within 7 cells of their start; past the
-    /// table the original would read the bytes after it, the port reads "too far".
+    /// `dist[|dx|][|dy|]`. Floods in modes 0 and 1 stay within 7 cells of their start in the
+    /// original; past the table the original would read the bytes after it, the port reads
+    /// "too far" (a light flood stops there; spec 13 Design 2).
     fn dist(&self, dx: i16, dy: i16) -> i16 {
         let (dx, dy) = (
             usize::from(dx.unsigned_abs()),
             usize::from(dy.unsigned_abs()),
         );
-        debug_assert!(dx < 8 && dy < 8, "flood left the distance table");
         self.t
             .dist
             .get(dx)
             .and_then(|r| r.get(dy))
             .map_or(i16::MAX, |&d| d.into())
+    }
+
+    /// The distance a flood in `mode` lights cell (dx, dy) from its start by. A light keeps the
+    /// cell's own distance; the leader's sight lays the table over the view, each axis scaled
+    /// from its half view to the original's 5 (`dx * 5 / HALF_W`, `dy * 5 / HALF_H`, toward
+    /// zero), so daylight and dusk reach the view's edges as they reached the original's (spec
+    /// 13 Decision 8; the identity where the half view is 5).
+    fn flood_dist(&self, dx: i16, dy: i16, mode: FloodMode) -> i16 {
+        match mode {
+            FloodMode::Light => self.dist(dx, dy),
+            FloodMode::Sight => self.dist(sight_axis(dx, HALF[0]), sight_axis(dy, HALF[1])),
+        }
     }
 
     /// Original: 0x109ab8 (map: does sight / light pass through window cell (x, y)?)
@@ -153,7 +210,7 @@ impl Flood<'_> {
             return false;
         }
         if self.tf.f2(tile) & TF2_WINDOW != 0 || f & CELL_WINDOW != 0 {
-            let (lx, ly) = (self.view[0] + 5, self.view[1] + 5);
+            let (lx, ly) = (self.view[0] + HALF[0], self.view[1] + HALF[1]);
             return (x == lx && (ly - y).abs() < 2) || (y == ly && (lx - x).abs() < 2);
         }
         if f & CELL_SEE_THROUGH != 0 {
@@ -174,9 +231,9 @@ impl Flood<'_> {
         let q = &mut self.queue;
         q.x[usize::from(q.tail)] = x as u8;
         q.y[usize::from(q.tail)] = y as u8;
-        q.tail = q.tail.wrapping_add(1);
+        q.tail = next(q.tail);
         if q.head == q.tail {
-            q.tail = q.tail.wrapping_sub(1);
+            q.tail = prev(q.tail);
         } else {
             self.flags[cell(x as usize, y as usize)] |= CELL_QUEUED;
         }
@@ -206,9 +263,9 @@ impl Flood<'_> {
         while self.queue.head != self.queue.tail {
             let h = usize::from(self.queue.head);
             let (x, y) = (i16::from(self.queue.x[h]), i16::from(self.queue.y[h]));
-            self.queue.head = self.queue.head.wrapping_add(1);
+            self.queue.head = next(self.queue.head);
             let at = cell(x as usize, y as usize);
-            let add = (4 - self.dist(x - x0, y - y0) + light).clamp(0, 4);
+            let add = (4 - self.flood_dist(x - x0, y - y0, mode) + light).clamp(0, 4);
             self.light[at] = self.light[at].wrapping_add(add as u8);
             if mode == FloodMode::Sight {
                 self.flags[at] |= CELL_VISIBLE;
@@ -228,7 +285,8 @@ impl Flood<'_> {
                 }
                 let go = match mode {
                     FloodMode::Sight => {
-                        (vx - 1..=vx + 11).contains(&nx) && (vy - 1..=vy + 11).contains(&ny)
+                        (vx - 1..=vx + VIEW_W as i16).contains(&nx)
+                            && (vy - 1..=vy + VIEW_H as i16).contains(&ny)
                     }
                     FloodMode::Light => self.dist(nx - x0, ny - y0) <= light + 3,
                 };
@@ -238,6 +296,12 @@ impl Flood<'_> {
             }
         }
     }
+}
+
+/// One axis of the sight flood's distance (`Flood::flood_dist`): `d * 5 / half`, rounded toward
+/// zero.
+fn sight_axis(d: i16, half: i16) -> i16 {
+    d * TABLE_HALF / half
 }
 
 /// Original: 0x109e74 (map: view-window flags, light and the 11×11 view tiles)
@@ -250,7 +314,8 @@ impl Flood<'_> {
 /// flooded with the ambient light (A4-0x7b79); below daylight (7) every lit visible cell floods
 /// its light; then each view cell becomes not-visible, dark, its tile, or a re-tiled wall piece.
 /// Ends with the view object lists (0x10e81e). The object pass sees what the
-/// `objects_in_rect` seam returns (see `seams.rs`).
+/// `objects_in_rect` seam returns (see `seams.rs`). The port's inner block is [`BLOCK_X`] ×
+/// [`BLOCK_Y`], its view [`VIEW_W`] × [`VIEW_H`].
 ///
 /// Port fallback when [`MapState::tables`] is not loaded: the A4-0x794c path.
 pub fn update_view(state: &mut State) {
@@ -261,8 +326,8 @@ pub fn update_view(state: &mut State) {
         return;
     };
     let m = &mut state.map;
-    for y in 8..32 {
-        let row = cell(8, y)..cell(32, y);
+    for y in BLOCK_Y {
+        let row = block_row(y);
         m.view_flags[row.clone()].fill(0);
         m.light[row].fill(0);
     }
@@ -279,15 +344,10 @@ pub fn update_view(state: &mut State) {
         view: m.view_offset,
         t: &t,
         tf: TileBytes(&state.tables.tileflags),
-        queue: Queue {
-            x: [0; 256],
-            y: [0; 256],
-            head: 0,
-            tail: 0,
-        },
+        queue: Queue::new(),
     };
     let [vx, vy] = f.view;
-    f.flood(vx + 5, vy + 5, ambient.into(), FloodMode::Sight);
+    f.flood(vx + HALF[0], vy + HALF[1], ambient.into(), FloodMode::Sight);
     if ambient < FULL_DAYLIGHT {
         flood_lights(&mut f);
     }
@@ -296,27 +356,41 @@ pub fn update_view(state: &mut State) {
     seams::build_view_objects(state);
 }
 
+/// Window cells of row `y` in the inner block.
+fn block_row(y: usize) -> Range<usize> {
+    cell(BLOCK_X.start, y)..cell(BLOCK_X.end, y)
+}
+
 /// 0x109e74 with A4-0x794c set (asm 0x109e82..0x109ef6).
 fn reveal_view(m: &mut MapState) {
     let [vx, vy] = m.view_offset;
-    for row in 0..VIEW {
-        for col in 0..VIEW {
+    for row in 0..VIEW_H {
+        for col in 0..VIEW_W {
             let at = cell(vx as usize + col, vy as usize + row);
-            m.view_tiles[row * VIEW + col] = m.window_tiles.get(at).map_or(0, |&t| t.into());
+            m.view_tiles[row * VIEW_W + col] = m.window_tiles.get(at).map_or(0, |&t| t.into());
         }
     }
-    for y in 8..32 {
-        m.light[cell(8, y)..cell(32, y)].fill(4);
+    for y in BLOCK_Y {
+        m.light[block_row(y)].fill(4);
     }
 }
 
-/// 0x109e74's object pass (asm 0x109f3a..0x10a0f4) over the block `(centre - 16) & !7` + 8..31.
+/// The window origin on one axis as 0x109e74 takes it, `(c - 16) & 0xfff8` with the port's
+/// [`geom::LEAD`]. Not the rebuild's `& 0x3f8` ([`geom::window_origin`]): where the window
+/// starts west of (north of) 0 the corner stays negative, so the block's rectangle stops at the
+/// map edge (the object walk clamps it at 0) instead of covering the far side.
+pub(super) fn block_origin(c: u16) -> u16 {
+    c.wrapping_sub(geom::LEAD) & 0xfff8
+}
+
+/// 0x109e74's object pass (asm 0x109f3a..0x10a0f4) over the block `(centre - 16) & !7` + 8..31
+/// ([`block_origin`] + [`BLOCK_X`], [`BLOCK_Y`]).
 fn mark_objects(state: &mut State) {
     let c = state.map.centre;
-    let ox = c.x.wrapping_sub(16) & 0xfff8;
-    let oy = c.y.wrapping_sub(16) & 0xfff8;
-    let (x0, y0) = (ox.wrapping_add(8) as i16, oy.wrapping_add(8) as i16);
-    let (x1, y1) = (ox.wrapping_add(31) as i16, oy.wrapping_add(31) as i16);
+    let (ox, oy) = (block_origin(c.x), block_origin(c.y));
+    let at = |o: u16, cells: usize| o.wrapping_add(cells as u16) as i16;
+    let (x0, y0) = (at(ox, BLOCK_X.start), at(oy, BLOCK_Y.start));
+    let (x1, y1) = (at(ox, BLOCK_X.end - 1), at(oy, BLOCK_Y.end - 1));
     let ids = seams::objects_in_rect(state, x0, y0, x1, y1, c.z.into());
     let State {
         map,
@@ -384,9 +458,10 @@ fn or_cell(flags: &mut [u8], i: i32, bits: u8) {
 /// next row starts as many cells early, while the coordinates handed to the flood keep
 /// counting. `p` is that pointer, kept apart from (x, y).
 fn flood_lights(f: &mut Flood<'_>) {
-    let mut p = cell(8, 8);
-    for y in 8..32i16 {
-        for x in 8..32i16 {
+    let mut p = cell(BLOCK_X.start, BLOCK_Y.start);
+    let (xs, ys) = (block_i16(BLOCK_X), block_i16(BLOCK_Y));
+    for y in ys {
+        for x in xs.clone() {
             let c = f.flags[p];
             if c & CELL_LIGHT == 0 || c & CELL_VISIBLE == 0 {
                 p += 1;
@@ -398,24 +473,34 @@ fn flood_lights(f: &mut Flood<'_>) {
             }
             for cx in x - 3..=x + 3 {
                 for cy in y - 3..=y + 3 {
-                    f.flags[cell(cx as usize, cy as usize)] &= !CELL_QUEUED;
+                    // Off the grid only where the block reaches its edge (Wide's x 0..56); the
+                    // sight that lights a cell stays a ring inside the window.
+                    if in_grid(cx, cy) {
+                        f.flags[cell(cx as usize, cy as usize)] &= !CELL_QUEUED;
+                    }
                 }
             }
             let light = i16::from(f.flags[p] & CELL_LIGHT) - 4;
             f.flood(x, y, light, FloodMode::Light);
             p += 1;
         }
-        p += WINDOW - 24;
+        p += WINDOW - BLOCK_X.len();
     }
 }
 
-/// 0x109e74's output loop (asm 0x10a1d8..0x10a3f8): the 11 × 11 view tiles.
+/// A block range as the light pass's i16 coordinates.
+fn block_i16(r: Range<usize>) -> Range<i16> {
+    r.start as i16..r.end as i16
+}
+
+/// 0x109e74's output loop (asm 0x10a1d8..0x10a3f8): the 11 × 11 view tiles ([`VIEW_W`] ×
+/// [`VIEW_H`], row-major; spec 13 C1).
 fn view_tiles(f: &Flood<'_>) -> Vec<u16> {
     let [vx, vy] = f.view;
-    let mut out = vec![0; VIEW * VIEW];
-    for row in 0..VIEW as i16 {
-        for col in 0..VIEW as i16 {
-            out[row as usize * VIEW + col as usize] = view_tile_at(f, lin(vx + col, vy + row));
+    let mut out = vec![0; VIEW_W * VIEW_H];
+    for row in 0..VIEW_H as i16 {
+        for col in 0..VIEW_W as i16 {
+            out[row as usize * VIEW_W + col as usize] = view_tile_at(f, lin(vx + col, vy + row));
         }
     }
     out
@@ -520,20 +605,16 @@ mod tests {
         }
     }
 
+    /// A flood over `g` with the leader at window cell (20, 20).
     fn flood<'a>(g: &'a mut Grids, t: &'a MapTables, tf: &'a TileFlags) -> Flood<'a> {
         Flood {
             tiles: &g.tiles,
             flags: &mut g.flags,
             light: &mut g.light,
-            view: [15, 15],
+            view: [20 - HALF[0], 20 - HALF[1]],
             t,
             tf: TileBytes(tf),
-            queue: Queue {
-                x: [0; 256],
-                y: [0; 256],
-                head: 0,
-                tail: 0,
-            },
+            queue: Queue::new(),
         }
     }
 
@@ -562,17 +643,85 @@ mod tests {
         let (t, tf) = (tables(), flags());
         let mut g = grids();
         let mut f = flood(&mut g, &t, &tf);
-        for i in 0..255i16 {
-            f.enqueue(i % 40, i / 40);
+        let (w, last) = (WINDOW as i16, QUEUE_LAST);
+        for i in 0..last as i16 {
+            f.enqueue(i % w, i / w);
         }
-        assert_eq!((f.queue.head, f.queue.tail), (0, 255));
-        f.enqueue(7, 7);
-        assert_eq!(f.queue.tail, 255);
-        assert_eq!(f.flags[cell(7, 7)], 0);
-        assert_eq!(f.flags[cell(6, 6)], CELL_QUEUED);
+        assert_eq!((f.queue.head, f.queue.tail), (0, last));
+        let (dropped, kept) = (last as i16, last as i16 - 1);
+        f.enqueue(dropped % w, dropped / w);
+        assert_eq!(f.queue.tail, last);
+        assert_eq!(
+            f.flags[cell((dropped % w) as usize, (dropped / w) as usize)],
+            0
+        );
+        assert_eq!(
+            f.flags[cell((kept % w) as usize, (kept / w) as usize)],
+            CELL_QUEUED
+        );
         f.enqueue(-1, 3);
-        f.enqueue(3, 40);
-        assert_eq!(f.queue.tail, 255);
+        f.enqueue(3, w);
+        assert_eq!(f.queue.tail, last);
+        // Round the ring: one dequeued, one more fits, and the tail wraps to 0.
+        f.queue.head = next(f.queue.head);
+        f.enqueue(dropped % w, dropped / w);
+        assert_eq!((f.queue.head, f.queue.tail), (1, 0));
+    }
+
+    /// In the original the queue is 256 entries with byte indices.
+    #[cfg(not(feature = "wide"))]
+    #[test]
+    fn the_original_queue_is_256_bytes_with_byte_indices() {
+        assert_eq!((QUEUE_LEN, QUEUE_LAST), (256, 255));
+        assert_eq!(std::mem::size_of::<QueueIndex>(), 1);
+    }
+
+    /// `map/view.rs` before spec 13, as written there, for every surface coordinate.
+    #[cfg(not(feature = "wide"))]
+    #[test]
+    fn the_original_block_origin_is_the_object_pass_formula() {
+        for c in 0..1024u16 {
+            assert_eq!(block_origin(c), c.wrapping_sub(16) & 0xfff8, "{c}");
+        }
+    }
+
+    /// The object pass's block corner is the rebuild's window origin, except where the window
+    /// starts west of (north of) 0: there it is negative and the block's rectangle starts at 0.
+    #[test]
+    fn the_block_origin_is_the_window_origin_unless_the_window_wraps() {
+        for c in 0..1024u16 {
+            let (block, window) = (block_origin(c), geom::window_origin(c));
+            if c >= geom::LEAD {
+                assert_eq!(block, window, "{c}");
+            } else {
+                assert_eq!(block, window.wrapping_sub(0x400), "{c}");
+                let x0 = block.wrapping_add(BLOCK_X.start as u16) as i16;
+                let x1 = block.wrapping_add(BLOCK_X.end as u16 - 1) as i16;
+                assert!(x1 >= c as i16 && x0.max(0) <= c as i16, "{c} in its block");
+            }
+        }
+    }
+
+    /// The sight flood's distance: the view's corner reads the table's (5, 5) and the cell next
+    /// to the leader its (1, 0) or less; a light's flood reads the cell's own distance.
+    #[test]
+    fn sight_scales_the_distance_to_the_original_view_and_light_does_not() {
+        let (t, tf) = (tables(), flags());
+        let mut g = grids();
+        let f = flood(&mut g, &t, &tf);
+        let (hx, hy) = (HALF[0], HALF[1]);
+        let r = TABLE_HALF;
+        assert_eq!(f.flood_dist(hx, hy, FloodMode::Sight), r);
+        assert_eq!(f.flood_dist(-hx, -hy, FloodMode::Sight), r);
+        assert_eq!(f.flood_dist(hx, 0, FloodMode::Sight), r);
+        assert_eq!(f.flood_dist(0, hy, FloodMode::Sight), r);
+        assert!(f.flood_dist(1, 0, FloodMode::Sight) <= 1);
+        assert_eq!(f.flood_dist(2, 1, FloodMode::Light), 2);
+        // Past the table: too far, in both floods.
+        assert_eq!(f.flood_dist(8, 0, FloodMode::Light), i16::MAX);
+        assert_eq!(f.flood_dist(0, -9, FloodMode::Light), i16::MAX);
+        let w = WINDOW as i16;
+        assert_eq!(f.flood_dist(w, w, FloodMode::Sight), i16::MAX);
     }
 
     #[test]
