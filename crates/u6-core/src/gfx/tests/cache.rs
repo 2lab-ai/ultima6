@@ -1,6 +1,7 @@
 //! Spec 06 O2 on a synthetic world: the idle refresh with the render cache against the same
 //! refresh without it, the screen, the back buffer and the whole `State` (the RNG included)
-//! compared after every step.
+//! compared after every step. The cells a tile shows in follow the view's size (spec 13,
+//! [`cells_with`]); the world goes through the map's window and the draw lists (C1, C2).
 
 use u6_formats::animdata::{AnimData, AnimEntry};
 use u6_formats::gfx::{AnimOverlay, Rgb, Span};
@@ -9,15 +10,27 @@ use super::view::{HERO_BASE, prepare, world};
 use super::{install, map_tile, object_tile};
 use crate::Files;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W, VIEW_H, VIEW_W};
 use crate::gfx::anim::set_frame;
 use crate::state::State;
 
-/// The animated tile, at world (20, 10) (window cell (6, 5)); its frames are records 100..104.
+/// The animated tile, at world (20, 10) (view cell (6, 5) in Original); its frames are records
+/// 100..104.
 const ANIMATED: usize = 20;
 /// The shore tile its record merges into, at (21, 10).
 const SHORE: usize = 21;
-/// A tile whose overlay draws while its masktype has bit 2, at (14, 10) and (22, 10).
+/// A tile whose overlay draws while its masktype has bit 2, at (14, 10) and (22, 10) (in
+/// Original's view; every 8 cells each way).
 const OVERLAID: usize = 22;
+
+/// The view cells that show map tile `tile` in [`world`]: chunk tile `(y % 8)·8 + x % 8` of each
+/// world cell of the view round the leader at (19, 10). In Original one each for [`ANIMATED`]
+/// and [`SHORE`], two for [`OVERLAID`] (one on the edge).
+fn cells_with(tile: usize) -> u64 {
+    let (x0, y0) = (19 - HALF_W, 10 - HALF_H);
+    let cells = (0..VIEW_H).flat_map(|r| (0..VIEW_W).map(move |c| (x0 + c, y0 + r)));
+    cells.filter(|&(x, y)| y % 8 * 8 + x % 8 == tile).count() as u64
+}
 /// The hero's status bit that keeps its idle frames still (one of 0x16).
 const STILL: u8 = 0x10;
 
@@ -229,22 +242,28 @@ fn the_cached_refresh_draws_what_the_every_time_refresh_draws() {
         "renders: {} nothing, {} partial ({} boxes)",
         c.window_skips, c.window_partial, c.boxes_redrawn
     );
+    let (animated, shore, overlaid) = (
+        cells_with(ANIMATED),
+        cells_with(SHORE),
+        cells_with(OVERLAID),
+    );
     assert_eq!(drawn[0], All, "the first render");
-    assert_eq!(drawn[1], Boxes(1), "the first merge: the shore's box");
+    assert_eq!(drawn[1], Boxes(shore), "the first merge: the shore's boxes");
     assert_eq!(count(2..40, &nothing), 38, "idle: nothing changes");
-    // The animated frame moves every 4 counts: its tile's box and, after the merge, the
+    // The animated frame moves every 4 counts: its tile's boxes and, after the merge, the
     // shore's are drawn, the next 3 refreshes draw nothing.
     assert_eq!(count(41..120, &nothing), 58, "animation");
     assert!(
         drawn[40..120]
             .iter()
-            .all(|&d| d == Nothing || d == Boxes(1) || d == Boxes(2)),
+            .all(|&d| d == Nothing || d == Boxes(animated) || d == Boxes(animated + shore)),
         "animation: the tile and the shore only"
     );
-    // The overlaid tile is in two cells (one on the edge, with its border tile); every fourth
-    // refresh the animated tile and the shore too.
+    // The overlaid tile is in two cells in Original (one on the edge, with its border tile);
+    // every fourth refresh the animated tile and the shore too.
+    let all_three = overlaid + animated + shore;
     assert_eq!(
-        count(121..140, &|d| d == Boxes(2) || d == Boxes(4)),
+        count(121..140, &|d| d == Boxes(overlaid) || d == Boxes(all_three)),
         19,
         "the overlay's boxes every refresh"
     );
@@ -303,7 +322,7 @@ fn the_cache_stands_aside_where_it_cannot_stand_for_the_render() {
     crate::gfx::refresh_view(&mut copy, &other);
     assert_eq!(renders(&copy), 0, "another Io: everything");
     let input = &mut copy.ui.input;
-    (input.target_pending, input.targeting, input.cursor) = (1, 1, (11, 2));
+    (input.target_pending, input.targeting, input.cursor) = (1, 1, (VIEW_W as i8, 2));
     for _ in 0..3 {
         crate::gfx::refresh_view(&mut copy, &other);
     }

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use u6_formats::bitmap::Bitmap;
 use u6_render::{BITMAP_PAPER, BITMAP_SPELLBOOK, FLAG_INK, FLAG_PAPER, Kind, WIDTH, portrait_of};
 
-use super::receipts::{Setup, boot_then, chars, files, give_book};
+use super::receipts::{Setup, boot_then, chars, files, give_book, hatch_no_eggs};
 use crate::engine::{Engine, InputEvent, Key};
 use crate::state::State;
 use crate::ui::WindowId;
@@ -38,7 +38,7 @@ struct Receipt {
     flagged: u64,
     /// Checked pixels that differ from their image.
     wrong: u64,
-    /// Map-window pixels (8..168 square) attributed to a tile, and all of them.
+    /// Pixels of the shown map ([`crate::geom::SHOWN`]) attributed to a tile, and all of them.
     window: (u64, u64),
     /// The portraits decoded so far, by id.
     portraits: BTreeMap<u16, Option<Vec<u8>>>,
@@ -66,9 +66,14 @@ impl Receipt {
         let fb = e.frame();
         let colours = &s.gfx.tables.bitmap_colours;
         let through = |b: u8| colours[usize::from(b)] & 0x1f;
+        let (x0, y0, x1, y1) = crate::geom::SHOWN;
+        let (xs, ys) = (
+            usize::from(x0)..=usize::from(x1),
+            usize::from(y0)..=usize::from(y1),
+        );
         for (i, src) in fb.src().quiet().iter().enumerate() {
             let (x, y) = (i % WIDTH, i / WIDTH);
-            if (8..168).contains(&x) && (8..168).contains(&y) {
+            if xs.contains(&x) && ys.contains(&y) {
                 self.window.1 += 1;
                 self.window.0 += u64::from(src.kind == Kind::Tile);
             }
@@ -226,6 +231,8 @@ fn the_source_plane_names_the_classic_pixels_of_the_users_game() {
         // The game-first patch of the hero's portrait byte (re/notes/oracle.md §D), so Look at
         // the hero shows a portrait.
         s.actors.objlist_tail[0x81] = 1;
+        // The walks below meet no hatchlings in either build (in Wide they move the window).
+        hatch_no_eggs(s);
     });
     let state = State::new_game(&files).quiet();
     let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {

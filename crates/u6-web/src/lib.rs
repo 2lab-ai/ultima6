@@ -12,8 +12,9 @@
 //! `=` the game takes itself.
 //!
 //! HD (spec 07 HD0): with [`Game::set_hd`] on, each present also composes the HD frame
-//! ([`Game::hd_frame_ptr`], `320·S × 200·S`, S 2 or 4) from the shown frame and the images its
-//! source plane names (`u6_render::hd::Compositor`), when the frame, its sources or the HD
+//! ([`Game::hd_frame_ptr`], `WIDTH·S × HEIGHT·S`, S 2 or 4; the frame is 320 × 200, 912 × 336
+//! in Wide mode, spec 13: [`Game::width`], [`Game::height`]) from the shown frame and the images
+//! its source plane names (`u6_render::hd::Compositor`), when the frame, its sources or the HD
 //! setting changed since the last composition; off, nothing of it runs and the RGBA frame is as
 //! without it. An HD pack (spec 07 H2): the page tells a dropped pack from game files with a
 //! [`PackProbe`] (its zip directory and manifest only), loads it once as an [`HdPack`] (checked
@@ -346,6 +347,16 @@ pub fn step_ms() -> u32 {
 #[wasm_bindgen]
 pub fn budget_ms(raf_interval_ms: f64) -> f64 {
     pacer::budget_ms(raf_interval_ms)
+}
+
+/// Spec 13: the rect of the frame the map is shown in, `[x, y, width, height]` in frame pixels
+/// ([`u6_core::geom::SHOWN`]): the game's map window, (8, 8, 160, 160), in Original; beside the
+/// UI's 320 columns, (328, 8, 576, 320), in Wide mode, where the page's layout covers its canvas
+/// with it.
+#[wasm_bindgen]
+pub fn shown_map() -> Vec<u32> {
+    let (x0, y0, x1, y1) = u6_core::geom::SHOWN;
+    [x0, y0, x1 + 1 - x0, y1 + 1 - y0].map(u32::from).to_vec()
 }
 
 /// Whether the page reads the dropped file `name` of `size` bytes through [`Game::zip_open`]
@@ -894,13 +905,13 @@ impl Game {
     /// Spec 11: every cell the HD frame shows in the HD font, and every whole space, of its last
     /// composition (the whole list, not what changed: the page that copies a rect of the HD frame
     /// draws every listed glyph over it again), 5 words per cell in raster order: the cell's x
-    /// and y in screen pixels (multiples of 8, of the 320 × 200 screen), its code (printable
-    /// ASCII but the space, or a Hangul syllable's code point, drawn in the HD font; or 0x20, a
-    /// space the text writer drew whole, for which nothing is drawn but which a run of text may
-    /// cross, its ink equal to its paper), its ink and its paper as 0xRRGGBB. Empty while HD or
-    /// the HD font is off. The list changes only with every block of the cells it adds, drops or
-    /// changes written, so with [`Game::frame_version`] moved and those cells in the rect of
-    /// [`Game::hd_take_dirty`].
+    /// and y in frame pixels (multiples of 8, of the [`Game::width`] × [`Game::height`] frame),
+    /// its code (printable ASCII but the space, or a Hangul syllable's code point, drawn in the
+    /// HD font; or 0x20, a space the text writer drew whole, for which nothing is drawn but which
+    /// a run of text may cross, its ink equal to its paper), its ink and its paper as 0xRRGGBB.
+    /// Empty while HD or the HD font is off. The list changes only with every block of the cells
+    /// it adds, drops or changes written, so with [`Game::frame_version`] moved and those cells
+    /// in the rect of [`Game::hd_take_dirty`].
     pub fn hd_glyphs(&self) -> Vec<u32> {
         let rgb = |c: u6_core::Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
         self.hd
@@ -918,8 +929,9 @@ impl Game {
             .collect()
     }
 
-    /// Address of the HD frame in wasm memory: `320·S × 200·S` RGBA8 pixels while HD is on
-    /// (S = [`Game::hd_scale`]). Views over it are invalidated when memory grows.
+    /// Address of the HD frame in wasm memory: `WIDTH·S × HEIGHT·S` RGBA8 pixels while HD is on
+    /// (S = [`Game::hd_scale`]; [`Game::width`] × [`Game::height`] the frame). Views over it are
+    /// invalidated when memory grows.
     pub fn hd_frame_ptr(&self) -> *const u8 {
         self.hd.rgba().as_ptr().cast()
     }
@@ -1148,9 +1160,9 @@ impl Game {
         }
     }
 
-    /// Queues the pointer at screen pixel (x, y) (the page maps the canvas's CSS box onto its
-    /// 320 × 200 pixels) with `buttons` held: bit 0 left, bit 1 right, as DOM `buttons`. Ignored
-    /// before the game starts.
+    /// Queues the pointer at frame pixel (x, y) (the page maps the canvas onto the frame's
+    /// [`Game::width`] × [`Game::height`] pixels) with `buttons` held: bit 0 left, bit 1 right,
+    /// as DOM `buttons`. Ignored before the game starts.
     pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         if self.engine.is_some() {
             queue_pointer(&mut self.pending, x, y, buttons);
@@ -1558,6 +1570,35 @@ mod tests {
         u6_render::WIDTH * s * u6_render::HEIGHT * s * 4
     }
 
+    /// The whole frame at `s`× as [`Game::hd_take_dirty`] gives it.
+    fn frame_rect(s: usize) -> Vec<u32> {
+        vec![
+            0,
+            0,
+            (u6_render::WIDTH * s) as u32,
+            (u6_render::HEIGHT * s) as u32,
+        ]
+    }
+
+    /// Spec 13: the shown map as the page gets it ([`shown_map`]). Original: the game's map
+    /// window. Wide: the view less half a cell, beside the UI's 320 columns and half a cell
+    /// inside the frame's right and bottom edges, 36 cells across and 20 down (fails with
+    /// `VIEW_W` and `VIEW_H` swapped: the frame is 912 × 336 either way).
+    #[test]
+    fn the_shown_map_is_the_view_less_half_a_cell_in_the_frame() {
+        let [x, y, w, h] = shown_map()[..] else {
+            panic!("four words")
+        };
+        let (fw, fh) = (u6_render::WIDTH as u32, u6_render::HEIGHT as u32);
+        if fw > 320 {
+            assert_eq!((x, y), (320 + 8, 8), "beside the UI");
+            assert_eq!((x + w + 8, y + h + 8), (fw, fh), "to the frame's edges");
+            assert_eq!((w / 16, h / 16), (36, 20), "cells across and down");
+        } else {
+            assert_eq!([x, y, w, h], [8, 8, 160, 160], "the map window");
+        }
+    }
+
     #[test]
     fn before_start_the_frame_is_black_and_keys_are_not_queued() {
         let mut game = Game::new();
@@ -1866,7 +1907,7 @@ mod tests {
         let first = game.frame_rgba();
         let rgba = |v: u8| [v, v.wrapping_mul(3), 255 - v, 255];
         let pixel = |g: &Game, x: usize, y: usize| {
-            let at = (y * 320 + x) * 4;
+            let at = (y * u6_render::WIDTH + x) * 4;
             g.frame_rgba()[at..at + 4].to_vec()
         };
         for i in 0..60u32 {
@@ -2192,11 +2233,7 @@ mod tests {
         assert!(again.game_files() == n);
         assert!(again.frame_version() > v, "the start moves the version");
         assert_eq!(again.hd_frame_len(), frame_bytes(4));
-        assert_eq!(
-            again.hd_take_dirty(),
-            vec![0, 0, 1280, 800],
-            "composed whole"
-        );
+        assert_eq!(again.hd_take_dirty(), frame_rect(4), "composed whole");
         assert!(
             again.hd_frame_rgba() == expected_hd(&again, Scale::X4),
             "the first HD frame"
@@ -3075,10 +3112,11 @@ mod tests {
         let (fb, st) = (e.frame(), e.state());
         let s = scale.factor();
         let rgba = |c: u6_core::Rgb| [c.r, c.g, c.b, 255];
-        let mut out = vec![0u8; 320 * s * 200 * s * 4];
+        let w = u6_render::WIDTH;
+        let mut out = vec![0u8; frame_bytes(s)];
         let mut made: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
-        for y in 0..200 {
-            for x in 0..320 {
+        for y in 0..u6_render::HEIGHT {
+            for x in 0..w {
                 let src = fb.src_at(x, y).unwrap();
                 let classic = rgba(fb.palette[usize::from(fb.get(x, y).unwrap())]);
                 let id = usize::from(src.id);
@@ -3120,7 +3158,7 @@ mod tests {
                     } else {
                         classic
                     };
-                    out[(sy * 320 * s + sx) * 4..][..4].copy_from_slice(&c);
+                    out[(sy * w * s + sx) * 4..][..4].copy_from_slice(&c);
                 }
             }
         }
@@ -3132,7 +3170,7 @@ mod tests {
         let rgba = game.hd_frame_rgba();
         (32 * s..48 * s)
             .flat_map(|y| {
-                let at = (y * 320 * s + col * 16 * s) * 4;
+                let at = (y * u6_render::WIDTH * s + col * 16 * s) * 4;
                 rgba[at..at + 16 * s * 4].to_vec()
             })
             .collect()
@@ -3178,9 +3216,9 @@ mod tests {
         );
         let nearest = |g: &Game, s: usize| -> Vec<u8> {
             let mut out = Vec::new();
-            for y in 0..200 * s {
-                for x in 0..320 * s {
-                    let at = ((y / s) * 320 + x / s) * 4;
+            for y in 0..u6_render::HEIGHT * s {
+                for x in 0..u6_render::WIDTH * s {
+                    let at = ((y / s) * u6_render::WIDTH + x / s) * 4;
                     out.extend_from_slice(&g.rgba[at..at + 4]);
                 }
             }
@@ -3192,7 +3230,7 @@ mod tests {
         );
         assert_eq!(
             game.hd_take_dirty(),
-            vec![0, 0, 1280, 800],
+            frame_rect(4),
             "the first composition: all"
         );
         // A present with nothing new composes nothing; a key that draws composes once.
@@ -3275,7 +3313,7 @@ mod tests {
         game.put_on_screen(tile_engine());
         assert!(game.frame_version() > v, "the start moves the version");
         assert_eq!(game.hd_frame_len(), frame_bytes(2));
-        assert_eq!(game.hd_take_dirty(), vec![0, 0, 640, 400], "composed whole");
+        assert_eq!(game.hd_take_dirty(), frame_rect(2), "composed whole");
         assert!(
             game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
             "its first frame"
@@ -3363,11 +3401,7 @@ mod tests {
             game.hd_font() && game.frame_version() > v,
             "composed at once"
         );
-        assert_eq!(
-            game.hd_take_dirty(),
-            vec![0, 0, 640, 400],
-            "the whole frame"
-        );
+        assert_eq!(game.hd_take_dirty(), frame_rect(2), "the whole frame");
         let letters = |a: u32| vec![16, 16, 0x41, a, paper, 24, 16, 0x7a, ink3, paper];
         assert_eq!(
             game.hd_glyphs(),
@@ -3564,7 +3598,7 @@ mod tests {
         let classic: Vec<u8> = (64..96)
             .flat_map(|y| {
                 (64..96).flat_map(move |x| {
-                    let at = ((y / 2) * 320 + x / 2) * 4;
+                    let at = ((y / 2) * u6_render::WIDTH + x / 2) * 4;
                     [at, at + 1, at + 2, at + 3]
                 })
             })
@@ -3617,11 +3651,12 @@ mod tests {
             image,
         }]);
         game.set_hd_pack(&pack);
+        let w = u6_render::WIDTH;
         let px = |game: &Game, s: usize, (x, y): (usize, usize)| {
-            let at = (y * 320 * s + x) * 4;
+            let at = (y * w * s + x) * 4;
             game.hd_frame_rgba()[at..at + 4].to_vec()
         };
-        assert_eq!(&game.rgba[(32 * 320 + 16) * 4..][..4], [40, 90, 254, 255]);
+        assert_eq!(&game.rgba[(32 * w + 16) * 4..][..4], [40, 90, 254, 255]);
         game.set_hd(true, 4);
         assert_eq!(px(&game, 4, (64, 128)), [200, 10, 0, 255]);
         assert_eq!(px(&game, 4, (65, 128)), [100, 30, 0, 255]);
@@ -3711,7 +3746,8 @@ mod tests {
         press(&mut game, "a");
         let src = game.hd_source_at(16 + 5, 32 + 9);
         assert_eq!(src, vec![1, 1, 0, 5, 9, 0], "record 1 at (5, 9), version 0");
-        assert!(game.hd_source_at(320, 0).is_empty());
+        assert!(game.hd_source_at(u6_render::WIDTH as u32, 0).is_empty());
+        assert!(game.hd_source_at(0, u6_render::HEIGHT as u32).is_empty());
         let e = game.engine.as_ref().unwrap();
         let rec = &e.state().gfx.records[1];
         let want = u6_hdpack::tile_hash(&rec.pixels, &rec.transparent).unwrap();

@@ -13,6 +13,7 @@ use u6_formats::FormatError;
 use u6_render::{Framebuffer, HEIGHT, WIDTH};
 
 use crate::engine::Pointer;
+use crate::geom::{self, HALF_H, HALF_W, MAP_X, MAP_Y};
 use crate::image::GameImage;
 use crate::state::State;
 
@@ -36,8 +37,60 @@ const SHOWN: u32 = 0x1624ae;
 const SHAPES: usize = 10;
 /// Palette entry before the sprite colours: sprite 0 shows pixel value v in COLOR16 + v.
 const SPRITE_COLOURS: u8 = 16;
-/// The y 0x1622d6 uses for a hidden pointer (line 0xc9: below the 200 shown).
-const HIDDEN_Y: i16 = 0xc9;
+/// The y 0x1622d6 uses for a hidden pointer: the line below the frame (0xc9, below the 200
+/// shown; in Wide below the frame's [`HEIGHT`], not over the map).
+const HIDDEN_Y: i16 = HEIGHT as i16 + 1;
+/// Pixels per map cell side.
+const CELL: i16 = 16;
+
+/// The leader's pixel, the centre of view cell ([`HALF_W`], [`HALF_H`]): where the pointer
+/// origin A4-0x7a26 rests (spec 13 Design 3). Original (0x58, 0x58), 5 · 16 + 8 on each axis.
+pub const LEADER_PIXEL: (u16, u16) = (
+    MAP_X + HALF_W as u16 * CELL as u16 + CELL as u16 / 2,
+    MAP_Y + HALF_H as u16 * CELL as u16 + CELL as u16 / 2,
+);
+
+/// The view cell under frame pixel (x, y): `((x - MAP_X) >> 4, (y - MAP_Y) >> 4)` (Original
+/// `(x >> 4, y >> 4)`, the map at the screen's top left).
+pub fn view_cell(x: i16, y: i16) -> (i16, i16) {
+    ((x - MAP_X as i16) >> 4, (y - MAP_Y as i16) >> 4)
+}
+
+/// The top-left frame pixel of view cell (col, row), where a cursor puts the pointer:
+/// `(MAP_X + col · 16, MAP_Y + row · 16)` (Original `(col << 4, row << 4)`).
+pub fn cell_pixel(col: i16, row: i16) -> (i16, i16) {
+    (MAP_X as i16 + col * CELL, MAP_Y as i16 + row * CELL)
+}
+
+/// Frame column `x` is over the map: from the view's left edge to the shown map's right edge
+/// (Original `x < 0xa8`, the map at the screen's left edge).
+pub fn map_column(x: i16) -> bool {
+    (MAP_X as i16..=geom::SHOWN.2 as i16).contains(&x)
+}
+
+/// Frame row `y` is over the map: from the view's top edge to the shown map's bottom edge
+/// (Original `y < 0xa8`).
+pub fn map_row(y: i16) -> bool {
+    (MAP_Y as i16..=geom::SHOWN.3 as i16).contains(&y)
+}
+
+/// Frame pixel (x, y) is in the shown map [`geom::SHOWN`] (Original 8..=0xa7 on both axes).
+pub fn in_shown_map(x: i16, y: i16) -> bool {
+    let (x0, y0, x1, y1) = geom::SHOWN;
+    (x0 as i16..=x1 as i16).contains(&x) && (y0 as i16..=y1 as i16).contains(&y)
+}
+
+/// Click region `i` of `tables` (x0, y0, x1, y1 inclusive), as the click map scans them. In Wide
+/// region 0, the image's map window, is the shown map [`geom::SHOWN`] beside the UI; the command bar,
+/// the side panel and the screen keep the image's rects (the UI keeps its coordinates).
+pub fn region(tables: &PointerTables, i: usize) -> Option<[i16; 4]> {
+    let r = tables.regions.get(i).copied()?;
+    if cfg!(feature = "wide") && i == 0 {
+        let (x0, y0, x1, y1) = geom::SHOWN;
+        return Some([x0, y0, x1, y1].map(|v| v as i16));
+    }
+    Some(r)
+}
 
 /// One pointer shape: 16 pixels per row, values 0..=3 (0 = clear), and the offset of its top
 /// left from the hot spot.
@@ -165,13 +218,13 @@ pub fn show(s: &mut State) {
 }
 
 /// Original: 0x1051a6 (ui: the pointer shape for the sampled position: in the map window
-/// (8..=0xa7 on both axes) the walk arrow of its direction from the pointer origin, the
-/// cross-hair on the origin's own cell or while a command waits for its target; elsewhere the
-/// arrow, or the cross-hair while a target is pending)
+/// (8..=0xa7 on both axes; the shown map [`geom::SHOWN`]) the walk arrow of its direction from the
+/// pointer origin, the cross-hair on the origin's own cell or while a command waits for its
+/// target; elsewhere the arrow, or the cross-hair while a target is pending)
 pub fn update_shape(s: &mut State) {
     let (x, y) = s.ui.pointer.at;
     let pending = s.ui.input.target_pending != 0;
-    let in_window = (8..0xa8).contains(&x) && (8..0xa8).contains(&y);
+    let in_window = in_shown_map(x, y);
     let shape = if pending {
         1
     } else if in_window {
@@ -192,8 +245,8 @@ pub struct SpriteFrame {
 }
 
 impl SpriteFrame {
-    /// Draws the sprite over `fb`: value v ≠ 0 in colour 16 + v; only the 320 × 200 display
-    /// window shows it.
+    /// Draws the sprite over `fb`: value v ≠ 0 in colour 16 + v; only the frame shows it
+    /// ([`WIDTH`] × [`HEIGHT`]: the 320 × 200 display, in Wide the map beside it too).
     pub fn draw(&self, fb: &mut Framebuffer) {
         for (r, row) in self.rows.iter().enumerate() {
             let y = i32::from(self.y) + r as i32;

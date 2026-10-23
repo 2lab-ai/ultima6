@@ -15,7 +15,9 @@ use std::cell::RefCell;
 use super::cursor::{NO_ICON, select_command, target_from_pointer};
 use super::globals::last_command;
 use super::seams;
+use super::target::LEADER_CELL;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W, RULE_HALF};
 use crate::objects::find_child;
 use crate::state::State;
 
@@ -29,21 +31,20 @@ const READY_ANYWAY: u16 = 0x39;
 const CHEST: u16 = 0x62;
 const TRAP: i16 = 0x151;
 const TRAP_QUALITY: i16 = 0x16;
+/// The Look command: its target may be any cell of the view (spec 13 Decision 5).
+const LOOK: u16 = 0x84;
 /// Image addresses of the strings 0x10619c prints (PC-relative in hunk 2).
 const MSG_LOCKED: u32 = 0x104fe6;
 const FMT_PROMPT: u32 = 0x104ff4;
 
 /// Original: 0x10658e (ui: the code of a click, by the first region A4-0x79c2 that holds the
 /// pointer: 0 the map window, 1 the command bar, 2 the side panel, 3 the rest of the screen;
-/// 0 = nothing)
+/// 0 = nothing). In Wide region 0 is the shown map beside the UI ([`super::pointer::region`]).
 pub async fn click(state: &RefCell<State>, io: &Io) -> u16 {
     let region = {
         let s = state.borrow();
         let (x, y) = s.ui.input.pointer;
-        let regions = &s.ui.pointer.tables.regions;
-        regions
-            .iter()
-            .position(|r| (r[0]..=r[2]).contains(&x) && (r[1]..=r[3]).contains(&y))
+        region_at(&s, x, y)
     };
     match region {
         Some(0) => map_click(&mut state.borrow_mut()),
@@ -61,22 +62,36 @@ pub async fn click(state: &RefCell<State>, io: &Io) -> u16 {
     }
 }
 
+/// The first click region (A4-0x79c2, [`super::pointer::region`]) that holds pixel (x, y), as
+/// 0x10658e scans them; `None` when none does.
+pub(crate) fn region_at(s: &State, x: i16, y: i16) -> Option<usize> {
+    let tables = &s.ui.pointer.tables;
+    (0..tables.regions.len()).find(|&i| {
+        super::pointer::region(tables, i)
+            .is_some_and(|r| (r[0]..=r[2]).contains(&x) && (r[1]..=r[3]).contains(&y))
+    })
+}
+
 /// 0x1065f8..0x106678: the map window. Waiting for a target: the press confirms the cell under
 /// the pointer (0x8e). Otherwise the right button with a command underlined repeats it on the
 /// cell (0xa9); any other click walks toward the pointer (0x80, A4-0x2efc = the direction), and
 /// on the origin's own cell the press passes a turn (0x8f). A held button keeps walking unless
 /// the last step was blocked in the same direction.
+///
+/// A confirm or a repeat takes only a cell the cross-hair could reach ([`in_reach`], spec 13
+/// Decision 4); on any other the press gives nothing and the wait goes on.
 fn map_click(s: &mut State) -> u16 {
     let pressed = s.ui.pointer.pressed;
     if s.ui.input.target_pending != 0 {
-        if !pressed {
+        if !pressed || !in_reach(s, s.ui.input.target_command) {
             return 0;
         }
         target_from_pointer(s);
         return 0x8e;
     }
-    if last_command(&s.actors) != NO_ICON && s.ui.pointer.buttons & RIGHT != 0 {
-        if !pressed {
+    let last = last_command(&s.actors);
+    if last != NO_ICON && s.ui.pointer.buttons & RIGHT != 0 {
+        if !pressed || !in_reach(s, u16::from(last)) {
             return 0;
         }
         target_from_pointer(s);
@@ -91,6 +106,21 @@ fn map_click(s: &mut State) -> u16 {
     }
     s.ui.input.direction = dir;
     super::wait::WALK
+}
+
+/// Spec 13 Decision 4: a map click picks a target for command `cmd` (0x81..0x8a) only in the
+/// original's 11 × 11 window round the leader ([`RULE_HALF`] each way, on each axis, of the
+/// leader's view cell [`LEADER_CELL`]), as the cross-hair moves; Look (0x84) names any cell of
+/// the view (Decision 5). In Original that window is the whole view, so every map click passes.
+fn in_reach(s: &State, cmd: u16) -> bool {
+    if cmd == LOOK {
+        return true;
+    }
+    let (px, py) = s.ui.input.pointer;
+    let (col, row) = super::pointer::view_cell(px, py);
+    let (lx, ly) = (i16::from(LEADER_CELL.0), i16::from(LEADER_CELL.1));
+    let rule = -RULE_HALF..=RULE_HALF;
+    rule.contains(&(col - lx)) && rule.contains(&(row - ly))
 }
 
 /// 0x10667c..0x1066b0: the command bar. A left press gives the command of the icon under the
@@ -146,9 +176,12 @@ async fn panel_click(state: &RefCell<State>, io: &Io) -> u16 {
 /// (0x105016); while the loop reads a command key (A4-0x7a2c) it also notes the clicked map
 /// location as the walk target A4-0x7a2a / -0x7a28, which a held button keeps while the party
 /// is still two or more cells from it along a shared row or column and the cell is the same)
+///
+/// The clicked view cell is the leader's ([`HALF_W`], [`HALF_H`]) plus its offset from it, over
+/// the whole view (spec 13 Decision 5; Original `cx + col - 5`).
 pub fn walk_direction(s: &mut State) -> i16 {
     let (px, py) = s.ui.input.pointer;
-    let (col, row) = (px >> 4, py >> 4);
+    let (col, row) = super::pointer::view_cell(px, py);
     let dir = crate::inventory::direction_to(s.inventory.pointer_origin, px, py);
     if s.main.reading == 0 {
         s.actors.work.mouse_target = (-1, -1);
@@ -164,7 +197,7 @@ pub fn walk_direction(s: &mut State) -> i16 {
         || (ty == cy && near(tx, cx))
         || s.ui.pointer.walk_cell != (col, row);
     if renew {
-        s.actors.work.mouse_target = (cx + col - 5, cy + row - 5);
+        s.actors.work.mouse_target = (cx + col - HALF_W as i16, cy + row - HALF_H as i16);
         s.ui.pointer.walk_cell = (col, row);
     }
     dir

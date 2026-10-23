@@ -9,6 +9,7 @@ use super::seams;
 use super::spells::flash_window;
 use super::tables::Msg;
 use crate::engine::Io;
+use crate::geom::{HALF_W, RULE_HALF, VIEW_W};
 use crate::objects::Slot;
 use crate::state::State;
 
@@ -31,6 +32,8 @@ fn flags_of(s: &State, o: u16) -> (i16, u16) {
 
 /// Original: 0x118382 (magic: Slime: every evil actor in view becomes a slime)
 ///
+/// "In view" is the original's 11 × 11 screen round the leader in both builds (spec 13
+/// Decision 3, [`RULE_HALF`]).
 /// For the first object of every tile within 5 of the view centre (columns outside): an actor
 /// slot below 0x100 of alignment 0x20 that does not resist (0x122076) becomes type 0x177,
 /// unless it is a creature with flag 0x0200 other than index 1; one of the temporary slots
@@ -41,8 +44,8 @@ pub async fn slime(state: &RefCell<State>, io: &Io) {
     let s = &mut *state.borrow_mut();
     let c = s.map.centre;
     let (cx, cy, z) = (c.x as i16, c.y as i16, u16::from(c.z));
-    for x in cx - 5..=cx + 5 {
-        for y in cy - 5..=cy + 5 {
+    for x in cx - RULE_HALF..=cx + RULE_HALF {
+        for y in cy - RULE_HALF..=cy + RULE_HALF {
             let o = crate::objects::begin_at(&mut s.objects, &s.tables, x as u16, y as u16, z);
             if !(0..0x100).contains(&o) {
                 continue;
@@ -170,6 +173,8 @@ pub async fn insect_swarm(state: &RefCell<State>, io: &Io, spell: u16) {
 
 /// Original: 0x119cbe (magic: Tremor: the window shakes, every evil actor in view is hurt)
 ///
+/// "In view" is the original's 11 × 11 screen round the leader in both builds (spec 13
+/// Decision 3, [`RULE_HALF`]).
 /// The caster's flash, the quake (0x133a1a, 20 shakes of 3 pixels); then for the first object
 /// of every tile within 5 of the centre (columns outside): an actor slot below 0x100 of
 /// alignment 0x20 that is not a creature with flag 0x0100 takes random 1..30 damage (0x1231be),
@@ -185,8 +190,8 @@ pub async fn tremor(state: &RefCell<State>, io: &Io) {
     super::effects::settle(state, io).await;
     let c = state.borrow().map.centre;
     let (cx, cy, z) = (c.x as i16, c.y as i16, u16::from(c.z));
-    for x in cx - 5..=cx + 5 {
-        for y in cy - 5..=cy + 5 {
+    for x in cx - RULE_HALF..=cx + RULE_HALF {
+        for y in cy - RULE_HALF..=cy + RULE_HALF {
             let o = {
                 let s = &mut *state.borrow_mut();
                 crate::objects::begin_at(&mut s.objects, &s.tables, x as u16, y as u16, z)
@@ -265,10 +270,34 @@ fn flap(s: &mut State, o: Slot) {
 /// the wound line follows. The dragon goes. None at all: the no-foes line (0x115a66).
 ///
 /// The port waits one display frame per redraw (as X-ray does), so each step is shown.
+///
+/// Spec 13: the foes are those of the original's 11 × 11 box round the leader (Decision 3,
+/// [`RULE_HALF`]); the dragon enters at the view's edge, [`HALF_W`] columns from the centre,
+/// and crosses the view in `VIEW_W - 1` one-cell steps (Decision 5; ten in Original), showing
+/// the original's ten frames ([`CROSSING_FRAMES`], [`shows_frame`]; Decision 7).
 pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
     let caster = super::cast::caster(&state.borrow());
     super::spells::flash_actor(state, io, caster, 0).await;
     let rows = seams::a4_bytes(io, -0x6b2c, 6);
+    sweep(state, io, caster, &rows).await;
+}
+
+/// The display frames a dragon's crossing shows after its first: the original's, one per step
+/// of its ten.
+const CROSSING_FRAMES: i16 = 10;
+
+/// Spec 13 Decision 7 (durations stay, rates scale): step `k` (1..=`steps`) of a crossing of
+/// `steps` one-cell steps ends on a display frame when `k * 10 / steps` advances, so a crossing
+/// shows [`CROSSING_FRAMES`] frames whatever its steps: every step in Original (ten steps), about
+/// every fourth of Wide's 36.
+fn shows_frame(k: i16, steps: i16) -> bool {
+    k * CROSSING_FRAMES / steps != (k - 1) * CROSSING_FRAMES / steps
+}
+
+/// [`wing_strike`] after the caster's flash, with the A4-0x6b2c pairs `rows` (step sign of row 0
+/// and 1, then the two frame pairs).
+pub(super) async fn sweep(state: &RefCell<State>, io: &Io, caster: u16, rows: &[u8]) {
+    let steps = VIEW_W as i16 - 1;
     let mut any = false;
     for a in 0..0x100u16 {
         let (x, y, cx, step, parts) = {
@@ -282,18 +311,19 @@ pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
                 || s.actors.attrs.status[i] & 0x10 != 0
                 || s.objects.obj_status[i] & 2 != 0
                 || (al != 0x20 && al != 0x60)
-                || x < cx - 5
-                || x > cx + 5
-                || y < cy - 5
-                || y > cy + 5
+                || x < cx - RULE_HALF
+                || x > cx + RULE_HALF
+                || y < cy - RULE_HALF
+                || y > cy + RULE_HALF
             {
                 continue;
             }
-            let row = usize::from(x - cx + 5 <= cx - x + 5);
+            let half = HALF_W as i16;
+            let row = usize::from(x - cx + half <= cx - x + half);
             let step = i16::from(rows[row] as i8);
             let (fa, fb) = (u16::from(rows[2 + row]), u16::from(rows[4 + row]));
             let z = u16::from(c.z);
-            let sx = (cx - 5 * step) as u16;
+            let sx = (cx - half * step) as u16;
             let head =
                 super::area::new_object(&mut s, DRAGON_PART | fa << 10, sx, (y - 1) as u16, z);
             let tail = super::area::new_object(&mut s, DRAGON_PART | fb << 10, sx, y as u16, z);
@@ -302,13 +332,13 @@ pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
             (x, y, cx, step, (head, tail))
         };
         io.vblank().await;
-        for k in 1..11i16 {
+        for k in 1..=steps {
             let hit = {
                 let mut s = state.borrow_mut();
                 flap(&mut s, parts.0);
                 flap(&mut s, parts.1);
                 let z = u16::from(s.map.centre.z);
-                let px = cx - (5 - k) * step;
+                let px = cx - (HALF_W as i16 - k) * step;
                 crate::objects::move_to(&mut s, parts.0, px as u16, (y - 1) as u16, z);
                 crate::objects::move_to(&mut s, parts.1, px as u16, y as u16, z);
                 crate::map::view::update_view(&mut s);
@@ -325,7 +355,9 @@ pub async fn wing_strike(state: &RefCell<State>, io: &Io) {
             if hit {
                 seams::wound_line(state, io, a).await;
             }
-            io.vblank().await;
+            if shows_frame(k, steps) {
+                io.vblank().await;
+            }
         }
         any = true;
         let mut s = state.borrow_mut();

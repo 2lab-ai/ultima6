@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use super::seams;
 use super::tables::Msg;
 use crate::engine::Io;
+use crate::geom::{HALF_H, HALF_W};
 use crate::main_loop::game_string;
 use crate::objects::Slot;
 use crate::state::State;
@@ -746,7 +747,10 @@ pub fn nearest_seen(s: &mut State, from: u16) -> i16 {
             continue;
         }
         let (x, y) = (s.objects.x(a as Slot) as i16, s.objects.y(a as Slot) as i16);
-        if x <= cx - 5 || x >= cx + 5 || y <= cy - 5 || y >= cy + 5 {
+        // Seen: strictly inside the view (within 4 of the centre in Original; spec 13
+        // Decision 5).
+        let (hw, hh) = (HALF_W as i16, HALF_H as i16);
+        if x <= cx - hw || x >= cx + hw || y <= cy - hh || y >= cy + hh {
             continue;
         }
         let d = (x - fx)

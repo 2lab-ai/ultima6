@@ -3,28 +3,35 @@
 use super::seams;
 use crate::combat::present::capture_window;
 use crate::engine::Io;
+use crate::geom::{MAP_X, MAP_Y, SHOWN};
 use crate::state::State;
 
 /// Engine milliseconds of one shake (its copy, 0x1344a8, and the next shake's draws). Not
 /// measured (no quake happens in the oracle's start fight), so one PAL frame.
 pub const SHAKE_MS: u16 = crate::combat::present::FRAME_MS;
 
+/// The shaken window's inset from the view's top left: one cell (Original (16, 16)).
+const SHAKE_INSET: i16 = 0x10;
+
 /// Original: 0x133a1a (ui: shake the map window `times` times by up to `amp` pixels: each time
 /// a random offset in 16 ± amp on both axes, and the 0x90-pixel window copied from there back
 /// to (16, 16); then refresh the view)
 ///
-/// Two RNG draws per shake, x first, as the original. The callers are synchronous (the end of
+/// The window is the shown map less a cell ([`SHOWN`]: 0x90 × 0x90 in Original, 560 × 304 in
+/// Wide), its offsets from the view's top left ([`MAP_X`], [`MAP_Y`]). Two RNG draws per shake,
+/// x first, as the original. The callers are synchronous (the end of
 /// turn 0x10348c, the view refresh 0x102ef0, Tremor), and the engine publishes only the last
 /// present of a poll, so each shake and then the refreshed window are recorded and shown by
 /// the next playback ([`crate::combat::play_effects`]), each shake after [`SHAKE_MS`].
 pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     seams::present_map(s, io, 0);
     for _ in 0..times.max(0) {
-        let (lo, hi) = ((0x10 - amp) as u16, (amp + 0x10) as u16);
-        let dx = s.rng.range(lo, hi) as i16;
-        let dy = s.rng.range(lo, hi) as i16;
+        let (lo, hi) = ((SHAKE_INSET - amp) as u16, (amp + SHAKE_INSET) as u16);
+        let ox = s.rng.range(lo, hi) as i16;
+        let oy = s.rng.range(lo, hi) as i16;
+        let [x0, y0, x1, y1, to_x, to_y] = shake_copy(ox, oy);
         io.with_buffers(|back, front| {
-            seams::copy_rect(back, front, dx, dy, dx + 0x90, dy + 0x90, 0x10, 0x10);
+            seams::copy_rect(back, front, x0, y0, x1, y1, to_x, to_y);
         });
         io.present();
         capture_window(s, SHAKE_MS);
@@ -33,14 +40,26 @@ pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     capture_window(s, crate::combat::present::REFRESH_MS);
 }
 
+/// The copy of one shake (0x151fe6's arguments: x0, y0, x1, y1 inclusive, then the destination)
+/// for the random offsets (`ox`, `oy`) from the view's top left ([`MAP_X`], [`MAP_Y`]): the
+/// shown map less a cell ([`SHOWN`]) from there, to one cell in from the view's top left.
+fn shake_copy(ox: i16, oy: i16) -> [i16; 6] {
+    let (x0, y0, x1, y1) = SHOWN;
+    let (w, h) = (
+        (x1 - x0) as i16 + 1 - SHAKE_INSET,
+        (y1 - y0) as i16 + 1 - SHAKE_INSET,
+    );
+    let (mx, my) = (MAP_X as i16, MAP_Y as i16);
+    let (x, y) = (mx + ox, my + oy);
+    [x, y, x + w, y + h, mx + SHAKE_INSET, my + SHAKE_INSET]
+}
+
 /// Original: 0x133a96 (ui: forget the map window's caches: every cell's tile 0xff (unknown),
 /// every cell's object list empty, the node list free again (node n links to n + 1))
 pub fn reset_window(s: &mut State) {
     let d = &mut s.objects.draw;
     d.base.iter_mut().for_each(|t| *t = 0xff);
-    for (n, next) in d.node_next.iter_mut().enumerate() {
-        *next = (n as u8).wrapping_add(1);
-    }
+    d.reset_nodes();
     d.cell.iter_mut().for_each(|c| *c = 0);
 }
 
@@ -72,10 +91,17 @@ mod tests {
         let d = &s.objects.draw;
         assert!(d.base.iter().all(|&t| t == 0xff));
         assert!(d.cell.iter().all(|&c| c == 0));
+        // Node 255 links to 256, past the byte pool of Original: 0; the last node ends it.
+        let n = crate::objects::DRAW_NODES;
         assert_eq!(
-            (d.node_next[0], d.node_next[3], d.node_next[255]),
-            (1, 4, 0)
+            (
+                d.node_next[0],
+                d.node_next[3],
+                usize::from(d.node_next[255])
+            ),
+            (1, 4, 256 % n)
         );
+        assert_eq!(d.node_next[n - 1], 0);
     }
 
     #[test]
@@ -106,14 +132,17 @@ mod tests {
     fn quake_records_each_shake_then_the_window() {
         // The original presents every shake (0x1344a8 copies to the screen); the engine only
         // publishes the last present of a poll, so each is recorded for playback, each after its
-        // time, and the refreshed window after them.
+        // time, and the refreshed window after them. The whole map window, as combat records
+        // it, is recorded once more after the quake for reference.
         let mut e =
             crate::Engine::with_game(shaking(), crate::Files::default(), |st, io| async move {
                 quake(&mut st.borrow_mut(), &io, 3, 4);
+                capture_window(&mut st.borrow_mut(), 0);
             });
         e.tick(&[], 0);
         let s = e.state();
-        let costs: Vec<u16> = s.combat.effects.iter().map(|f| f.cost).collect();
+        let (whole, quake) = s.combat.effects.split_last().expect("recorded");
+        let costs: Vec<u16> = quake.iter().map(|f| f.cost).collect();
         assert_eq!(
             costs,
             [
@@ -125,9 +154,37 @@ mod tests {
             "three shakes, then the window"
         );
         assert!(
-            s.combat.effects.iter().all(|f| (f.w, f.h) == (176, 176)),
+            quake
+                .iter()
+                .all(|f| (f.x, f.y, f.w, f.h) == (whole.x, whole.y, whole.w, whole.h)),
             "the whole map window each time"
         );
+        #[cfg(not(feature = "wide"))]
+        assert_eq!((whole.w, whole.h), (176, 176), "the 11 × 11 window");
+        // Each shake's copy, by the contract of 0x133a1a: in Original the 0x90-pixel window from
+        // (16 ± amp, 16 ± amp) to (0x10, 0x10); in Wide the shown map's 36 × 20 cells less the
+        // same cell of margin (16 pixels), from the same offsets past (MAP_X, MAP_Y) to one cell
+        // in from there.
+        let (w, h, to): (i16, i16, (i16, i16)) = if cfg!(feature = "wide") {
+            let (mx, my) = (crate::geom::MAP_X as i16, crate::geom::MAP_Y as i16);
+            let cells = (
+                crate::geom::VIEW_W as i16 - 1,
+                crate::geom::VIEW_H as i16 - 1,
+            );
+            (cells.0 * 16 - 16, cells.1 * 16 - 16, (mx + 16, my + 16))
+        } else {
+            (0x90, 0x90, (0x10, 0x10))
+        };
+        #[cfg(feature = "wide")]
+        assert_eq!((w, h, to), (560, 304, (336, 16)), "spec 13 Geometry");
+        for (ox, oy) in [(12, 20), (16, 16), (20, 12)] {
+            let (x, y) = (to.0 - 16 + ox, to.1 - 16 + oy);
+            assert_eq!(
+                shake_copy(ox, oy),
+                [x, y, x + w, y + h, to.0, to.1],
+                "offsets ({ox}, {oy})"
+            );
+        }
     }
 
     #[test]

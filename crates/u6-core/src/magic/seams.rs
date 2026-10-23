@@ -249,8 +249,9 @@ const STONE_TILE: u16 = 0x18e;
 const STONE_CENTRE: i16 = 0x7f;
 /// The hit mark's tile (0x1339a2).
 const HIT_TILE: u16 = 0x101;
-/// The changed rectangle A4+0x1900.. when nothing changed (0x1335ca..0x1335dc).
-const NO_RECT: [i16; 4] = [0xa8, 0xa8, 7, 7];
+/// The changed rectangle A4+0x1900.. when nothing changed (0x1335ca..0x1335dc): the flight's
+/// ([`crate::combat::present::NO_DIRTY`], [0xa8, 0xa8, 7, 7] in Original).
+const NO_RECT: [i16; 4] = crate::combat::present::NO_DIRTY;
 
 /// [gfx] the start of 0x133562 (0x1335ac..0x1335dc): sprite 7 built from tile 0x18e, unturned
 /// (0x15265a, [`crate::gfx::sprite::prepare`]), and no changed rectangle (combat's

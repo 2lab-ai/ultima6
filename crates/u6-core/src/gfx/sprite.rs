@@ -2,6 +2,8 @@
 //! turned by an angle, 0x152800 saves the back-buffer block under it, 0x152876 draws it there
 //! (or puts the saved block back). Chunky pixels in the original's byte addressing ([`super::blit`]):
 //! a block is 3 plane bytes (24 pixels) wide from byte column `(x - 8) / 8`, rows y - 8 .. y + 7.
+//! The callers draw them on the map; a block that started in the UI's columns would stay in the
+//! UI's screen (spec 13 Design 4, as the blitter's writes).
 
 use u6_formats::gfx::{Span, TILE_W, TileKind};
 use u6_render::{Framebuffer, HEIGHT, Src, WIDTH};
@@ -66,13 +68,15 @@ impl Default for Sprites {
 }
 
 /// Linear pixel index of pixel `c` of the row at byte address (row `y`, byte column `col`), as
-/// the original's byte pointer plus bit; `None` for a row off the 200 (the row table ends).
+/// the original's byte pointer plus bit; `None` for a row off the 200 (the row table ends), and
+/// in Wide for a pixel outside the UI's screen of a block that starts in its columns.
 fn at(y: i32, col: i32, c: usize) -> Option<usize> {
     if !(0..HEIGHT as i32).contains(&y) {
         return None;
     }
     let i = (y as usize * (WIDTH / 8)).checked_add_signed(col as isize)? * 8 + c;
-    (i < WIDTH * HEIGHT).then_some(i)
+    let x0 = usize::try_from(col).unwrap_or(0) * 8;
+    (i < WIDTH * HEIGHT && super::blit::stays(x0, i)).then_some(i)
 }
 
 fn get(fb: &Framebuffer, i: usize) -> u8 {

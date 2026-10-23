@@ -17,6 +17,8 @@ const fn a4(off: usize) -> i32 {
 }
 /// Moongate destinations: 25 entries (0x11d1d4 indexes them by quality - 1).
 pub const GATES: usize = 25;
+/// The row stride the image's walk steps are written with: the original's window side.
+pub(super) const IMAGE_STRIDE: i32 = 40;
 
 /// The tables, as read from `game`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +31,8 @@ pub struct MapTables {
     pub walk_dx: [i8; 8],
     /// Original: A4-0x7900 (y steps of the same walk)
     pub walk_dy: [i8; 8],
-    /// Original: A4-0x78f8 (cell-index steps of the same walk, `dy * 40 + dx`)
+    /// Original: A4-0x78f8 (cell-index steps of the same walk, `dy * 40 + dx`); the port's are
+    /// `dy * WINDOW + dx`, re-encoded from the image's (spec 13 Design 2)
     pub walk_step: [i8; 8],
     /// Original: A4-0x78f0 (16 bytes: tile offset of a wall piece per neighbour mask; 0x109e74)
     pub wall: [u8; 16],
@@ -43,7 +46,8 @@ pub struct MapTables {
 impl MapTables {
     /// Reads the tables from the decrunched `game`. The file is first checked the way the
     /// palette reader checks it (length, hunk header, hunk 33's HUNK_DATA); the walk tables
-    /// must agree with each other (`step = dy * 40 + dx`).
+    /// must agree with each other (`step = dy * 40 + dx`, the image's stride). The steps are
+    /// then re-encoded with [`WINDOW`] (unchanged where it is 40).
     pub fn from_game(game: &[u8]) -> Result<MapTables, FormatError> {
         palette(game)?;
         let img = GameImage::parse(game)?;
@@ -61,7 +65,7 @@ impl MapTables {
         let dist = at(a4(0x794a), 64)?;
         let wall = at(a4(0x78f0), 16)?;
         let gate_z = at(a4(0x6ac0), GATES)?;
-        let t = MapTables {
+        let mut t = MapTables {
             dist: std::array::from_fn(|dx| std::array::from_fn(|dy| dist[dx * 8 + dy] as i8)),
             walk_dx: signed(a4(0x7908))?,
             walk_dy: signed(a4(0x7900))?,
@@ -71,24 +75,37 @@ impl MapTables {
             gate_y: words(a4(0x6af2))?,
             gate_z: std::array::from_fn(|i| gate_z[i]),
         };
-        for i in 0..8 {
-            let step = i32::from(t.walk_dy[i]) * WINDOW as i32 + i32::from(t.walk_dx[i]);
-            if step != i32::from(t.walk_step[i]) {
-                return Err(FormatError::Invalid {
-                    what: "game view walk tables",
-                    offset: img
-                        .file_offset(crate::image::A4.wrapping_add_signed(a4(0x78f8)))
-                        .unwrap_or(0)
-                        + i,
-                    detail: format!(
-                        "step {} != dy * 40 + dx; unknown game version",
-                        t.walk_step[i]
-                    ),
-                });
-            }
-        }
+        t.walk_step =
+            walk_steps(&t.walk_dx, &t.walk_dy, &t.walk_step).map_err(|i| FormatError::Invalid {
+                what: "game view walk tables",
+                offset: img
+                    .file_offset(crate::image::A4.wrapping_add_signed(a4(0x78f8)))
+                    .unwrap_or(0)
+                    + i,
+                detail: format!(
+                    "step {} != dy * 40 + dx; unknown game version",
+                    t.walk_step[i]
+                ),
+            })?;
         Ok(t)
     }
+}
+
+/// The walk's cell-index steps for the port's grids, `dy * WINDOW + dx`, from the image's
+/// `image` steps, which must be `dy * 40 + dx` (spec 13 Design 2: decoded with stride 40,
+/// re-encoded with [`WINDOW`]). `Err(i)`: step `i` disagrees with its dx, dy, or does not fit
+/// a byte at this window side.
+pub(super) fn walk_steps(dx: &[i8; 8], dy: &[i8; 8], image: &[i8; 8]) -> Result<[i8; 8], usize> {
+    let mut out = [0; 8];
+    for i in 0..8 {
+        let (dx, dy) = (i32::from(dx[i]), i32::from(dy[i]));
+        let agree = dy * IMAGE_STRIDE + dx == i32::from(image[i]);
+        out[i] = i8::try_from(dy * WINDOW as i32 + dx)
+            .ok()
+            .filter(|_| agree)
+            .ok_or(i)?;
+    }
+    Ok(out)
 }
 
 impl MapState {

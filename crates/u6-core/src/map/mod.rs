@@ -51,13 +51,17 @@ use u6_formats::chunks::Chunks;
 use u6_formats::map::WorldMap;
 use u6_formats::position::Position;
 
+use crate::geom::{VIEW_H, VIEW_W};
+
 pub use tables::MapTables;
 
-/// Side of the window tile cache and of its flag / light grids (0x108d10 fills 5 × 5 chunks).
-pub const WINDOW: usize = 40;
+/// Side of the window tile cache and of its flag / light grids: [`crate::geom::WINDOW`] (0x108d10
+/// fills 5 × 5 chunks of its 40; Wide's 60 clips the last column and row of chunks).
+pub const WINDOW: usize = crate::geom::WINDOW;
 /// Cells in the window grids.
 pub const WINDOW_CELLS: usize = WINDOW * WINDOW;
-/// Side of the drawn view window (0x109e74 writes 11 × 11 view tiles).
+/// Side of the original's drawn view window (0x109e74 writes 11 × 11 view tiles). `map/` reads
+/// [`crate::geom::VIEW_W`] × [`crate::geom::VIEW_H`] instead; kept for the other units' sites.
 pub const VIEW: usize = 11;
 /// Coordinate mask on the surface (1024 tiles); 0x108d10.
 pub const SURFACE_MASK: u16 = 0x3ff;
@@ -91,18 +95,22 @@ pub struct MapState {
     /// Original: A4-0x796c (word: [`SURFACE_MASK`] or [`DUNGEON_MASK`]; 0x108d10)
     pub world_mask: u16,
     /// Original: A4-0x7950 / -0x794e (words: window cell of the view's top-left tile; 0x108d10
-    /// sets `centre - origin - 5`, the image holds 12, 12)
+    /// sets `centre - origin - 5`, the half view per axis in the port
+    /// ([`crate::geom::view_offset`]); the image holds 12, 12)
     pub view_offset: [i16; 2],
-    /// Original: A4+0x4b0a (40 × 40 map tiles, row-major; 0x108d10). Empty until the first
-    /// rebuild; [`MapState::tile_at`] then reads the chunks.
+    /// Original: A4+0x4b0a (40 × 40 map tiles, row-major; 0x108d10; [`WINDOW`] × [`WINDOW`] in
+    /// the port). Empty until the first rebuild; [`MapState::tile_at`] then reads the chunks.
     pub window_tiles: Vec<u8>,
     /// Original: A4+0x514a (40 × 40 cell flags; 0x109e74 / 0x109c12); bits in [`flags`]
-    /// (`CELL_*`). Persistent: 0x109e74 clears only the cells 8..32 of each axis.
+    /// (`CELL_*`). Persistent: 0x109e74 clears only the inner block, cells 8..32 of each axis
+    /// ([`crate::geom::BLOCK_X`] × [`crate::geom::BLOCK_Y`]).
     pub view_flags: Vec<u8>,
     /// Original: A4+0x578a (40 × 40 light levels summed by 0x109c12; same partial clear)
     pub light: Vec<u8>,
     /// Original: A4-0x1476 (11 × 11 words: the tile 0x102c90 draws per view cell, from 0x109e74;
-    /// [`view::NOT_VISIBLE`] or [`view::DARK`] where nothing shows)
+    /// [`view::NOT_VISIBLE`] or [`view::DARK`] where nothing shows). The port's has
+    /// [`crate::geom::VIEW_W`] × [`crate::geom::VIEW_H`] entries, row-major: view cell
+    /// (col, row) at `row * VIEW_W + col` (spec 13 C1).
     pub view_tiles: Vec<u16>,
     /// Original: A4-0x794c (word; nonzero makes 0x109e74 show every view tile lit; the image
     /// holds 0)
@@ -147,7 +155,7 @@ impl Default for MapState {
             window_tiles: Vec::new(),
             view_flags: vec![0; WINDOW_CELLS],
             light: vec![0; WINDOW_CELLS],
-            view_tiles: vec![0; VIEW * VIEW],
+            view_tiles: vec![0; VIEW_W * VIEW_H],
             reveal_all: 0,
             view_dirty: 0,
             arriving: 0,

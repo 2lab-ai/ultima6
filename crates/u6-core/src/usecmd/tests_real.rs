@@ -127,7 +127,8 @@ pub(crate) fn save_frame(e: &Engine, var: &str, name: &str) {
     let mut rgba = Vec::new();
     e.frame().write_rgba(&mut rgba);
     let file = format!("{name}.png");
-    std::fs::write(Path::new(&dir).join(&file), png(320, 200, &rgba)).quiet();
+    let (w, h) = (u6_render::WIDTH as u32, u6_render::HEIGHT as u32);
+    std::fs::write(Path::new(&dir).join(&file), png(w, h, &rgba)).quiet();
     eprintln!("frame: {file}");
 }
 
@@ -403,7 +404,7 @@ fn use_on_eight_kinds_of_objects() {
         }
         let gates0 = gates(&s);
         s.ui.input.targeting = 1;
-        s.ui.input.cursor = (5, 5);
+        s.ui.input.cursor = crate::ui::target::LEADER_CELL;
         s.ui.input.range = 7;
         let c = s.map.centre;
         let n = lines_of(&s).len();

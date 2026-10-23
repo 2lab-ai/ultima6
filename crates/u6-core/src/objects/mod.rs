@@ -2,7 +2,7 @@
 //!
 //! Domain state = [`Objects`]: the slot tables of the original (identity = slot index
 //! [`ObjectId`], location, type/frame, status, quality/quantity), the one list that links every
-//! slot in use, the 40 × 40 window grid that indexes it, the iteration cursors and the object
+//! slot in use, the window grid that indexes it, the iteration cursors and the object
 //! blocks. Actors are slots 0..256; `actors/` refers to them by [`ObjectId`] and never keeps its
 //! own copy of a position.
 //!
@@ -14,8 +14,8 @@
 //!   run of the list.
 //! - A contained object (status bits 3-4 set: 0x08 container, 0x10 inventory, 0x18 readied)
 //!   keeps its parent's slot in location bytes 0-1, `x | (y & 0x3f) << 10`.
-//! - `grid[dy * 40 + dx]` is the first list entry at window tile (dx, dy), or -1. The window
-//!   origin is [`Objects::window`], written by map 0x108d10 when the view moves.
+//! - `grid[dy * GRID_SIDE + dx]` is the first list entry at window tile (dx, dy), or -1. The
+//!   window origin is [`Objects::window`], written by map 0x108d10 when the view moves.
 //! - Free slots form two more chains through `next`: 0x101.. for objects and 0xe0..0x100 for
 //!   temporary actors (monsters).
 //! - Only the 2 × 2 surface superchunks around the party, or one dungeon level, live in slots.
@@ -127,7 +127,7 @@ pub use blocks::{
 #[allow(unused_imports)]
 pub(crate) use blocks::{load_region_objects, parse_lenient, unload_region_objects};
 pub use defs::{DefsError, ObjectDefs};
-pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, add_tile, build_draw_lists};
+pub use draw::{DRAW_CELLS, DRAW_NODES, DrawLists, DrawNode, add_tile, build_draw_lists};
 pub use effects::*;
 pub use iter::{
     AreaCursor, ChildCursor, LocationCursor, actor_at, begin_area, begin_at, find_child,
@@ -161,8 +161,9 @@ pub(crate) const PRINTED: [&[u32]; 2] = [effects::PRINTED, blocks::PRINTED];
 pub const OBJECT_SLOTS: usize = 3072;
 /// Slots 0..256 are actors.
 pub const ACTOR_SLOTS: usize = 256;
-/// Window grid side in tiles (A4+0x67c, 40 × 40 words).
-pub const GRID_SIDE: usize = 40;
+/// Window grid side in tiles: the window's, [`crate::geom::WINDOW`] (A4+0x67c, 40 × 40 words in
+/// Original).
+pub const GRID_SIDE: usize = crate::geom::WINDOW;
 
 /// A slot number as the original passes it: 0..0xc00, or -1 for "none".
 pub type Slot = i16;
@@ -224,7 +225,8 @@ pub struct Objects {
     /// Original: A4-0x1184 (word per slot: next slot in the object list or a free chain, -1 =
     /// end; slot 0x100 is the list head)
     pub next: Vec<Slot>,
-    /// Original: A4+0x67c (40 × 40 words: first list entry at each window tile, -1 = none)
+    /// Original: A4+0x67c (40 × 40 words: first list entry at each window tile, -1 = none);
+    /// [`GRID_SIDE`]² entries
     pub grid: Vec<Slot>,
     /// Original: A4-0x2ef8 / A4-0x2ef6 (words: x, y of the window's top-left tile)
     ///

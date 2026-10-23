@@ -111,13 +111,14 @@ fn world_turns_move_npcs_toward_their_schedules() {
         .collect();
     near.sort();
     let watched: Vec<u16> = near.iter().take(10).map(|&(_, a)| a).collect();
-    // The first hour boundary at which an NPC in view (within 5 tiles, where NPCs walk
-    // instead of jumping) is sent somewhere else: run the hourly pick on copies.
-    let in_view: Vec<u16> = near
-        .iter()
-        .filter(|&&(d, _)| d <= 5)
-        .map(|&(_, a)| a)
-        .collect();
+    // The first hour boundary at which an NPC in view (within HALF_W columns and HALF_H rows,
+    // where NPCs walk instead of jumping) is sent somewhere else: run the hourly pick on copies.
+    let seen = |a: u16| {
+        let p = state.objects.location[usize::from(a)];
+        let (dx, dy) = (p.x.abs_diff(lp.x), p.y.abs_diff(lp.y));
+        usize::from(dx) <= crate::geom::HALF_W && usize::from(dy) <= crate::geom::HALF_H
+    };
+    let in_view: Vec<u16> = near.iter().map(|&(_, a)| a).filter(|&a| seen(a)).collect();
     let here = |s: &State, a: u16| path::schedule_entry(s, a).map(|e| e.pos);
     let boundary = (1..24u8)
         .map(|k| (state.actors.calendar.hour + k) % 24)

@@ -4,7 +4,7 @@ use u6_formats::gfx::Span;
 use u6_render::Framebuffer;
 
 use super::{GfxState, install, map_tile, object_tile};
-use crate::gfx::blit::{fill_colour, fill_rect, set_plot_colour};
+use crate::gfx::blit::{UI, fill_colour, fill_rect, set_plot_colour};
 use crate::gfx::sprite::{draw, prepare, save};
 
 /// A state whose sine table is 64 · sin(n / 128 turns) rounded (the shape of the game's).
@@ -179,9 +179,10 @@ fn a_fill_over_wrapped_corners_stays_on_the_screen() {
         (fb.get(300, 0), fb.get(319, 0), fb.get(0, 1)),
         (Some(7), Some(7), Some(0))
     );
-    // Both corners wrapped on both axes: a bounded fill of the whole screen.
+    // Both corners wrapped on both axes: a bounded fill of the whole screen (the UI's, in the
+    // frame's corner in Wide: spec 13 Design 4).
     fill_colour(&mut fb, 0, 0, 0xffff, 0xffff, 5);
-    assert_eq!(fb.pixels().iter().filter(|&&p| p == 5).count(), 320 * 200);
+    assert_eq!(fb.pixels().iter().filter(|&&p| p == 5).count(), UI.0 * UI.1);
 }
 
 /// Spec 07 HD0: a flight's saved block writes its sources in place, but when a clone of the

@@ -9,6 +9,7 @@
 
 use super::moves::remove;
 use super::{HEAD, IN_CONTAINER, IN_INVENTORY, NONE, Objects, Slot, TEMPORARY, WHERE_MASK, seams};
+use crate::geom::{HALF_H, HALF_W, WINDOW};
 use crate::state::State;
 
 /// Number of object blocks (64 surface + 5 dungeon levels).
@@ -24,8 +25,14 @@ const STR_REGION_FULL: u32 = 0x0010_a494;
 /// Port-only (spec 08, slice K2): the string a block routine passes to `printf` as its format
 /// ([`flush`]), for the locale layer's catalogue ([`crate::locale::strings`]).
 pub(super) const PRINTED: &[u32] = &[STR_REGION_FULL];
-/// Distance (tiles) from the party beyond which 0x10c49c drops temporary objects.
-const KEEP: i16 = 0x14;
+/// Distance (tiles) from the party beyond which 0x10c49c drops temporary objects: half the
+/// window (Original 0x14; spec 13 Decision 6).
+const KEEP: i16 = (WINDOW / 2) as i16;
+/// Tiles the party keeps from each 128-tile edge of the loaded 2 × 2 superchunks, (x, y): the
+/// half view, so the view never shows unloaded objects (Original 5, 5; spec 13 Decision 5).
+const MARGIN: (i16, i16) = (HALF_W as i16, HALF_H as i16);
+/// Tiles across the loaded 2 × 2 superchunks on each axis.
+const SPAN: i16 = 0x100;
 
 /// Block index of dungeon level `z` (1..=5).
 pub fn block_index(z: u16) -> usize {
@@ -369,7 +376,7 @@ impl Objects {
     }
 }
 
-/// Original: 0x10c49c (objects: drop temporary objects more than 20 tiles from (x, y, z))
+/// Original: 0x10c49c (objects: drop temporary objects more than [`KEEP`] tiles from (x, y, z))
 ///
 /// Temporary actors 0xe0..0x100 and temporary map objects out of range are removed (the walk
 /// continues with the last content a removal moved out); a permanent egg (0x14f) out of range
@@ -410,10 +417,10 @@ pub fn prune_far(s: &mut State, x: u16, y: u16, z: u16) {
 /// Original: 0x10e1ce (objects: load the object blocks for the party at (x, y, z))
 ///
 /// On the surface the 2 × 2 superchunks nearest (x, y) are kept in slots: the base superchunk
-/// follows the party with 5 tiles of hysteresis at each 128-tile edge. Leaving a dungeon level
-/// prunes and writes it back; superchunks no longer wanted are written back (pruning first);
-/// newly wanted ones and a newly entered level are read, and inventory is re-attached after
-/// any read.
+/// follows the party with [`MARGIN`] tiles of hysteresis at each 128-tile edge (Original 5).
+/// Leaving a dungeon level prunes and writes it back; superchunks no longer wanted are written
+/// back (pruning first); newly wanted ones and a newly entered level are read, and inventory is
+/// re-attached after any read.
 pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
     let mut wrote = 0;
     let mut read = 0;
@@ -430,21 +437,22 @@ pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
         let b = if base == -1 {
             ((yi.wrapping_sub(0x40) >> 4) & 0x38) + ((xi.wrapping_sub(0x40) >> 7) & 7)
         } else {
+            let (mx, my) = MARGIN;
             let (mut dc, mut e) = (0i16, xi.wrapping_sub((base & 7) * 0x80));
-            while e < 5 {
+            while e < mx {
                 e += 0x80;
                 dc -= 1;
             }
-            while e >= 0xfb {
+            while e >= SPAN - mx {
                 e -= 0x80;
                 dc += 1;
             }
             let (mut dr, mut f) = (0i16, yi.wrapping_sub((base & 0x38) * 0x10));
-            while f < 5 {
+            while f < my {
                 f += 0x80;
                 dr -= 8;
             }
-            while f >= 0xfb {
+            while f >= SPAN - my {
                 f -= 0x80;
                 dr += 8;
             }

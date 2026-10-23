@@ -6,6 +6,14 @@
 //! the Amiga. Writes past the last pixel (the original would land in the next plane) are
 //! dropped, and so is any call with y ≥ 200 (the original indexes past its row table).
 //!
+//! Spec 13 Wide mode: the buffer is the [`WIDTH`] × [`HEIGHT`] frame (912 × 336), its rows that
+//! long; the UI keeps its 320 × 200 in the frame's top-left corner ([`UI`]) and the map lies
+//! beside it. A write that starts in the UI's columns stays in the UI (Design 4): its pixels past
+//! x = 319, which the Amiga wraps into the next row, would land in the map, and are dropped, as
+//! are those past y = 199, where the Amiga's row table ends ([`stays`]: the tile blitter, the
+//! fill, the rect copy, the bitmap blit, the plot, the flight sprites). In Original the frame is
+//! the UI's and nothing changes.
+//!
 //! Spec 07 HD0: the record blit and the bitmap blit name the image each pixel comes from on the
 //! source plane (when the buffer has one, [`Framebuffer::enable_src`]), and the copies between
 //! the buffers carry it ([`Framebuffer::copy_px`]); every other write here (plots, fills) is
@@ -15,9 +23,24 @@ use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, Span, TILE_W, TileKind};
 use u6_render::{FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT, Kind, Src, WIDTH};
 
 use super::GfxState;
+use crate::geom::SHOWN;
 
 /// Bytes per plane row.
 const ROW_BYTES: usize = WIDTH / 8;
+/// The UI's 320 × 200 screen, columns × rows: the frame's top-left corner in both builds (all of
+/// the frame in Original; spec 13 Geometry).
+pub const UI: (usize, usize) = (320, 200);
+/// Side of the dissolve's tile: the original's shown map, 160 × 160 pixels (0x1520e2 with
+/// (8, 8)..(0xa7, 0xa7)).
+pub const DISSOLVE_SIDE: u16 = 160;
+
+/// Spec 13 Design 4: whether a write that starts at frame column `x0` may write linear pixel `i`.
+/// Always in Original (the frame is the UI's screen: the Amiga's wrap into the next row); in Wide
+/// not when `x0` is in the UI's columns and `i` is outside the UI's screen ([`UI`]): past its
+/// columns, in the map, or past its rows.
+pub(super) fn stays(x0: usize, i: usize) -> bool {
+    (WIDTH, HEIGHT) == UI || x0 >= UI.0 || (i % WIDTH < UI.0 && i / WIDTH < UI.1)
+}
 
 /// Original: 0x157e9e (word per row: y·40), as the byte offset of row `y`.
 fn row_base(y: u16) -> Option<usize> {
@@ -102,18 +125,19 @@ pub fn blit_front(gfx: &GfxState, front: &mut Framebuffer, word: u16, x: u16, y:
 fn blit(gfx: &GfxState, fb: &mut Framebuffer, word: u16, x: u16, y: u16) {
     let Some(row) = row_base(y) else { return };
     let base = row + usize::from(x >> 3);
+    let x0 = usize::from(x >> 3) * 8;
     let (rec, overlay, masktype) = gfx.record(word);
     let id = gfx.record_of[usize::from(word & 0x7ff)];
     let ver = gfx.cache.version(usize::from(id));
     if masktype & 3 != 0 && word & 0x1800 != 0 {
         // The original then reads its overlay reference out of the scratch buffer (stale bytes
         // after the coverage rows); the port draws no overlay in outline mode.
-        outline(fb, rec, (id, ver), base, outline_colour(word));
+        outline(fb, rec, (id, ver), (x0, base), outline_colour(word));
         return;
     }
     for (i, (&p, &clear)) in rec.pixels.iter().zip(&rec.transparent).enumerate() {
-        if !clear {
-            let (r, c) = (i / TILE_W, i % TILE_W);
+        let (r, c) = (i / TILE_W, i % TILE_W);
+        if !clear && stays(x0, pixel_at(base, r, c)) {
             let src = tile_src(id, ver, (c, r), 0);
             update_src(fb, pixel_at(base, r, c), src, |_| p);
         }
@@ -126,7 +150,7 @@ fn blit(gfx: &GfxState, fb: &mut Framebuffer, word: u16, x: u16, y: u16) {
         for (k, bits) in rows.iter().enumerate() {
             let r = usize::from(ov.first_row) + k;
             for c in 0..TILE_W {
-                if bits & (0x8000 >> c) != 0 {
+                if bits & (0x8000 >> c) != 0 && stays(x0, pixel_at(base, r, c)) {
                     let src = tile_src(id, ver, (c, r), FLAG_OVERLAY);
                     update_src(fb, pixel_at(base, r, c), src, |p| p | 1 << ANIM_PLANE);
                 }
@@ -140,12 +164,13 @@ fn blit(gfx: &GfxState, fb: &mut Framebuffer, word: u16, x: u16, y: u16) {
 /// leaving every other pixel. The routine from the table at 0x152bc2 sets the colour's planes and
 /// clears the others, plane 4 included. Unlike the normal path this one does not add the byte
 /// for right-span records, so their outline lands 8 pixels left of the sprite. `(id, ver)`: the
-/// record and its version, for the source plane.
+/// record and its version, for the source plane; `(x0, base)`: the frame column and the byte
+/// address the tile starts at.
 fn outline(
     fb: &mut Framebuffer,
     rec: &u6_formats::gfx::Tile,
     (id, ver): (u16, u32),
-    base: usize,
+    (x0, base): (usize, usize),
     colour: u8,
 ) {
     let shift = match rec.kind {
@@ -154,7 +179,7 @@ fn outline(
     };
     for (i, (&p, &clear)) in rec.pixels.iter().zip(&rec.transparent).enumerate() {
         let (r, c) = (i / TILE_W, i % TILE_W);
-        if !clear && p == 0 && c >= shift {
+        if !clear && p == 0 && c >= shift && stays(x0, pixel_at(base, r, c - shift)) {
             let src = tile_src(id, ver, (c, r), FLAG_OUTLINE);
             update_src(fb, pixel_at(base, r, c - shift), src, |_| colour);
         }
@@ -177,7 +202,8 @@ pub fn plot(gfx: &GfxState, fb: &mut Framebuffer, x: u16, y: u16) {
     plot_in(fb, x, y, gfx.plot_colour, gfx.plot_xor);
 }
 
-/// [`plot`] with the colour and the mode given.
+/// [`plot`] with the colour and the mode given; in Wide not below the UI's screen in its columns
+/// ([`stays`]).
 fn plot_in(fb: &mut Framebuffer, x: u16, y: u16, colour: u16, xor: bool) {
     let Some(row) = row_base(y) else { return };
     let Ok(colour) = u8::try_from(colour) else {
@@ -187,6 +213,9 @@ fn plot_in(fb: &mut Framebuffer, x: u16, y: u16, colour: u16, xor: bool) {
         return;
     }
     let i = (row + usize::from(x >> 3)) * 8 + usize::from(x & 7);
+    if !stays(usize::from(x), i) {
+        return;
+    }
     if xor {
         update(fb, i, |p| p ^ colour);
     } else {
@@ -211,12 +240,18 @@ pub fn fill_colour(fb: &mut Framebuffer, x0: u16, y0: u16, x1: u16, y1: u16, col
 
 /// The corners are put in order as 0x152244..0x15224e does (unsigned), then held to the screen:
 /// the original has no bound and runs its byte pointer on past the row (and the buffer) for
-/// corners that wrapped below zero.
+/// corners that wrapped below zero. A fill from the UI's columns is held to the UI's screen
+/// (spec 13 Design 4, [`stays`]; the same bound in Original).
 fn fill(fb: &mut Framebuffer, (x0, y0, x1, y1): (u16, u16, u16, u16), colour: u16, xor: bool) {
     let (xa, xb) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
     let (ya, yb) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
-    let xb = xb.min(WIDTH as u16 - 1);
-    let yb = yb.min(HEIGHT as u16 - 1);
+    let (right, bottom) = if usize::from(xa) < UI.0 {
+        UI
+    } else {
+        (WIDTH, HEIGHT)
+    };
+    let xb = xb.min(right as u16 - 1);
+    let yb = yb.min(bottom as u16 - 1);
     for y in ya..=yb {
         for x in xa..=xb {
             plot_in(fb, x, y, colour, xor);
@@ -285,7 +320,8 @@ pub fn dissolve_order(w: u16, h: u16, taps: &[u16]) -> Vec<(u16, u16)> {
 /// LFSR order)
 ///
 /// The original has no waits inside: the reveal is the CPU time of 25,600 pixel copies on the
-/// live screen. The port copies in the same order in one call.
+/// live screen. The port copies in the same order in one call. The map window's dissolve is
+/// [`dissolve_map`].
 pub fn dissolve(
     taps: &[u16],
     back: &Framebuffer,
@@ -302,11 +338,73 @@ pub fn dissolve(
     }
 }
 
+/// The map's dissolve (spec 13 Decision 7): the original's order over its 160 × 160 shown map
+/// ([`dissolve_order`], [`DISSOLVE_SIDE`]) tiles [`SHOWN`] from its top left, each step revealing
+/// its pixel in every tile (rows of tiles, then columns), the tiles past the rect clipped. In
+/// Original the shown map is the one tile: 0x1520e2 over (8, 8)..(0xa7, 0xa7). Wide reveals its
+/// bigger map in as many steps, so in the same time.
+#[derive(Clone, Debug)]
+pub struct MapDissolve {
+    /// Pixel offsets in a tile, in the order they are revealed.
+    order: Vec<(u16, u16)>,
+    /// Frame pixel of each tile's top left.
+    tiles: Vec<(u16, u16)>,
+}
+
+impl MapDissolve {
+    /// The dissolve with the game's feedback words `taps` (0x151f3c).
+    pub fn new(taps: &[u16]) -> MapDissolve {
+        let (x0, y0, x1, y1) = SHOWN;
+        let side = usize::from(DISSOLVE_SIDE);
+        let tiles = (y0..=y1)
+            .step_by(side)
+            .flat_map(|y| (x0..=x1).step_by(side).map(move |x| (x, y)))
+            .collect();
+        MapDissolve {
+            order: dissolve_order(DISSOLVE_SIDE, DISSOLVE_SIDE, taps),
+            tiles,
+        }
+    }
+
+    /// The steps of the dissolve.
+    pub fn steps(&self) -> usize {
+        self.order.len()
+    }
+
+    /// The frame pixels step `k` reveals: its offset in every tile, those inside [`SHOWN`].
+    pub fn step(&self, k: usize) -> impl Iterator<Item = (u16, u16)> + '_ {
+        let (_, _, x1, y1) = SHOWN;
+        let tiles = &self.tiles;
+        let at = self.order.get(k).copied();
+        at.into_iter()
+            .flat_map(move |(dx, dy)| tiles.iter().map(move |&(x, y)| (x + dx, y + dy)))
+            .filter(move |&(x, y)| x <= x1 && y <= y1)
+    }
+}
+
+/// Original: 0x1520e2 over the map window's shown rect, (8, 8)..(0xa7, 0xa7) (0x102c90 with
+/// A4-0x6578 set): [`MapDissolve`]'s steps copied back → front in one call, as [`dissolve`] does.
+pub fn dissolve_map(taps: &[u16], back: &Framebuffer, front: &mut Framebuffer) {
+    let d = MapDissolve::new(taps);
+    for k in 0..d.steps() {
+        for (x, y) in d.step(k) {
+            copy_pixel(back, front, x, y);
+        }
+    }
+}
+
+/// The shown map's columns and rows, [`SHOWN`] as ranges (8..168 both in Original).
+pub fn shown_ranges() -> (std::ops::Range<u16>, std::ops::Range<u16>) {
+    let (x0, y0, x1, y1) = SHOWN;
+    (x0..x1 + 1, y0..y1 + 1)
+}
+
 /// Original: 0x151f5a (copy the map window, rows 8..168 × bytes 1..21 = pixels 8..168, back →
-/// front, all 5 planes)
+/// front, all 5 planes; the shown map [`SHOWN`], spec 13)
 pub fn copy_window(back: &Framebuffer, front: &mut Framebuffer) {
-    for y in 8..168 {
-        for x in 8..168 {
+    let (xs, ys) = shown_ranges();
+    for y in ys {
+        for x in xs.clone() {
             copy_pixel(back, front, x, y);
         }
     }
@@ -319,15 +417,18 @@ pub fn copy_window(back: &Framebuffer, front: &mut Framebuffer) {
 /// back classic ([`Framebuffer::sync_rect_from`]; the screen is the one buffer synced from the
 /// back buffer, always over this rect).
 pub fn copy_window_rows(back: &mut Framebuffer, front: &mut Framebuffer) {
-    front.sync_rect_from(back, 8..168, 8..168);
+    let (xs, ys) = shown_ranges();
+    let wide = |r: std::ops::Range<u16>| usize::from(r.start)..usize::from(r.end);
+    front.sync_rect_from(back, wide(xs), wide(ys));
 }
 
 /// Original: 0x151fe6 (copy the pixel rectangle (x0, y0)..=(x1, y1) of the back buffer to
 /// (dx, dy) on the screen: whole bytes of 8 pixels, all five planes)
 ///
 /// Columns are bytes: x0 / 8 ..= x1 / 8 go to dx / 8 onwards (`lsr.w #3`), rows y0..=y1 to
-/// dy onwards. A row past the screen is dropped (the original would land in the next plane).
-/// The pixels' sources come along ([`Framebuffer::copy_px`]).
+/// dy onwards. A row past the screen is dropped (the original would land in the next plane), and
+/// in Wide what a copy to the UI's columns would put outside the UI's screen ([`stays`]). The
+/// pixels' sources come along ([`Framebuffer::copy_px`]).
 #[allow(clippy::too_many_arguments)]
 pub fn copy_rect(
     back: &Framebuffer,
@@ -341,9 +442,16 @@ pub fn copy_rect(
 ) {
     let bytes = (x1 >> 3).wrapping_sub(x0 >> 3);
     let rows = y1.wrapping_sub(y0);
-    if bytes >= ROW_BYTES as u16 || rows >= HEIGHT as u16 {
+    // A copy to the UI's columns has the UI's screen's bounds (the frame's in Original).
+    let (w, h) = if usize::from(dx) < UI.0 {
+        UI
+    } else {
+        (WIDTH, HEIGHT)
+    };
+    if bytes >= (w / 8) as u16 || rows >= h as u16 {
         return;
     }
+    let to = usize::from(dx >> 3) * 8;
     for r in 0..=rows {
         let (Some(src), Some(dst)) = (back_byte(x0, y0 + r), row_base(dy + r)) else {
             continue;
@@ -351,6 +459,9 @@ pub fn copy_rect(
         for b in 0..=bytes {
             let s = (src + usize::from(b)) * 8;
             let d = (dst + usize::from((dx >> 3) + b)) * 8;
+            if !stays(to, d) {
+                continue;
+            }
             for bit in 0..8 {
                 front.copy_px(back, s + bit, d + bit);
             }
@@ -398,7 +509,8 @@ pub fn blit_bmp(
 /// `pixels` is `width × height` bytes, row-major; each byte becomes screen colour
 /// `colours[byte] & 0x1f` (the five bits the shifts take into the planes). The bitmap starts
 /// at byte column x / 8 of row y; each row is `width` pixels, the next row starts a screen row
-/// below. Pixels past the screen are dropped.
+/// below. Pixels past the screen are dropped, and in Wide those outside the UI's screen of a
+/// bitmap that starts in its columns ([`stays`]).
 ///
 /// `src` names the image for the source plane (spec 07): each pixel gets (column, row) in the
 /// bitmap, version 0; [`BitmapSource::Classic`] draws classic pixels.
@@ -421,10 +533,14 @@ pub fn blit_bitmap(
             continue;
         };
         let start = (row + usize::from(x >> 3)) * 8;
+        let x0 = usize::from(x >> 3) * 8;
         for c in 0..usize::from(width) {
             let Some(&b) = pixels.get(r * usize::from(width) + c) else {
                 return;
             };
+            if !stays(x0, start + c) {
+                continue;
+            }
             let src = match kind {
                 Kind::Classic => Src::CLASSIC,
                 _ => Src {

@@ -13,9 +13,11 @@ use std::rc::Rc;
 use u6_intake::{InputFile, intake};
 use u6_testkit::Quiet;
 
+#[cfg(not(feature = "wide"))]
+use super::present::FRAME_MS;
 use super::present::{
-    ACTOR_FLASH_MS, DISSOLVE_MS, FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, FRAME_MS, NAME_MS,
-    PRINT_MS, REFRESH_MS, WINDOW_MS,
+    ACTOR_FLASH_MS, DISSOLVE_MS, FLASH_MS, FLIGHT_START_MS, FLIGHT_STEP_MS, NAME_MS, PRINT_MS,
+    REFRESH_MS, WINDOW_MS,
 };
 use crate::actors::turn::{AFTER_TURN_MS, COMBAT_NPC_MS, MINUTE_MS, PICK_MS, SETUP_MS};
 use crate::actors::walk::{FOLLOW_MS, PASS_MOVED_MS, PASS_STILL_MS, STEP_MS};
@@ -41,6 +43,7 @@ const KEYS: [Key; 7] = [
 /// of [`KEYS`]): per step, the PAL frames from the key taken (A4-0x7a2c cleared) to the next
 /// prompt, and how many of them the game waited on the floppy (other tasks running: the first
 /// step loads a map region and the object names).
+#[cfg(not(feature = "wide"))]
 const ORACLE: [[(u32, u32); 7]; 3] = [
     [
         (535, 137),
@@ -72,6 +75,7 @@ const ORACLE: [[(u32, u32); 7]; 3] = [
 ];
 
 /// Seeds whose runs differ (the seed word picks the RNG state; 2 and 3 give the same run).
+#[cfg(not(feature = "wide"))]
 const SEEDS: [u16; 9] = [0, 2, 5, 7, 11, 100, 1000, 4242, 31337];
 
 fn files() -> Option<Files> {
@@ -91,8 +95,11 @@ fn files() -> Option<Files> {
 /// the command loop reads again with nothing queued.
 struct Turn {
     ms: u64,
+    // Read by the comparisons with the original's run only (Original builds).
+    #[cfg_attr(feature = "wide", allow(dead_code))]
     moved: bool,
     /// The waits of the turn by length (ms → how many, [`crate::combat::CombatState::paced`]).
+    #[cfg_attr(feature = "wide", allow(dead_code))]
     paced: BTreeMap<u16, u32>,
 }
 
@@ -192,6 +199,7 @@ fn play(files: &Files, seed: u16, tick_ms: u32, zero_polls: bool) -> Vec<Turn> {
     play_keys(files, seed, &KEYS, false, tick_ms, zero_polls)
 }
 
+#[cfg(not(feature = "wide"))]
 fn median(v: &mut [u32]) -> u32 {
     v.sort_unstable();
     let n = v.len();
@@ -284,6 +292,8 @@ fn a_wait_is_named_by_the_one_constant_or_sum_it_is_or_called_ambiguous() {
     assert_eq!(what(1), "other");
 }
 
+// A comparison with the original's run: Original only (spec 13 Tests).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn the_start_fight_turns_take_the_originals_time() {
     let Some(files) = files() else {
@@ -387,9 +397,11 @@ fn the_start_fight_takes_the_same_time_at_any_host_tick() {
 /// The original in the castle without the fight (tools/oracle/fight.mjs with U6_FIGHT_SETUP=town:
 /// the start's assault actors passed over, combat broken off, the steps of [`TOWN_KEYS`]): PAL
 /// frames from the key taken to the next prompt.
+#[cfg(not(feature = "wide"))]
 const ORACLE_TOWN: [u32; 7] = [28, 43, 33, 48, 32, 41, 32];
 
 /// The steps of the oracle's town runs: south along the carpet and back.
+#[cfg(not(feature = "wide"))]
 const TOWN_KEYS: [Key; 7] = [
     Key::Down,
     Key::Down,
@@ -400,6 +412,8 @@ const TOWN_KEYS: [Key; 7] = [
     Key::Up,
 ];
 
+// A comparison with the original's run: Original only (spec 13 Tests).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn the_castle_without_the_fight_takes_the_originals_time() {
     let Some(files) = files() else {

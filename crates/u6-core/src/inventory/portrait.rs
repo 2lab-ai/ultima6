@@ -164,8 +164,8 @@ pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {
 /// Within 24 pixels on both axes: the 3 × 3 cells of 16 pixels around the origin. Farther: a
 /// straight direction when one axis is at least twice the other (or the other is 0), else the
 /// diagonal of the quadrant.
-pub fn direction_to(origin: (u8, u8), x: i16, y: i16) -> i16 {
-    let (ox, oy) = (i16::from(origin.0), i16::from(origin.1));
+pub fn direction_to(origin: (u16, u16), x: i16, y: i16) -> i16 {
+    let (ox, oy) = (origin.0 as i16, origin.1 as i16);
     let (dx, dy) = ((x - ox).abs(), (y - oy).abs());
     if x >= ox - 0x18 && x < ox + 0x18 && y >= oy - 0x18 && y < oy + 0x18 {
         let row = |a: i16, b: i16, c: i16| {

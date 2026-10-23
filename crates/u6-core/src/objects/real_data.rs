@@ -107,8 +107,11 @@ fn the_party_start_region_and_its_objects() {
     let Some(files) = files() else { return };
     let mut s = loaded(&files);
     let at = s.leader_position().quiet();
-    s.objects
-        .set_window((at.x - 0x10) & 0x3f8, (at.y - 0x10) & 0x3f8, at.z);
+    s.objects.set_window(
+        crate::geom::window_origin(at.x),
+        crate::geom::window_origin(at.y),
+        at.z,
+    );
     load_region(&mut s, at.x, at.y, u16::from(at.z));
     let mut loaded: Vec<i16> = s.objects.loaded_surface.to_vec();
     loaded.sort();

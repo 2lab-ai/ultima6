@@ -10,6 +10,7 @@ dist/
 .worktrees/
 /target/
 /site/pkg/
+/site/pkg-wide/
 __pycache__/
 .wrangler/
 /site/packs/

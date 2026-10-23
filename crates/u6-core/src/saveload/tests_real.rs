@@ -12,17 +12,19 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use u6_formats::objlist::ObjList;
+use u6_formats::position::Position;
 use u6_testkit::assert_same;
 
 use super::objlist::{OBJLIST_LEN, TABLES, decode, encode};
 use super::*;
 use crate::engine::{Engine, InputEvent, Io, Key};
 use crate::files::Files;
-use crate::objects::{ACTOR_SLOTS, BLOCK_COUNT, FIRST_TEMP_ACTOR};
+use crate::objects::{ACTOR_SLOTS, BLOCK_COUNT, FIRST_TEMP_ACTOR, Slot};
 use crate::state::State;
 use u6_testkit::Quiet;
 
 const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+#[cfg(not(feature = "wide"))]
 const ORACLE: &str = "/Users/zhugehyuk/Games/ultima6/oracle/saveload";
 
 fn zip_files() -> Option<Files> {
@@ -39,6 +41,7 @@ fn zip_files() -> Option<Files> {
 }
 
 /// `ORACLE/<dir>/*` as `savegame/<name>` (a `savegame/` directory taken off the PLAYER disk).
+#[cfg(not(feature = "wide"))]
 fn oracle_save(dir: &str) -> Option<MemStore> {
     let path = Path::new(ORACLE).join(dir);
     let Ok(entries) = std::fs::read_dir(&path) else {
@@ -313,6 +316,10 @@ fn boot_change(table: &str, i: usize, x: u8, y: u8, party: &[usize]) -> Option<&
     })
 }
 
+/// The port's Save of the start state against the shipped files, in both builds: the objlist
+/// bytes the boot changes are the ones [`boot_change`] explains, the Save commits the region's
+/// 2 × 2 surface blocks, and the blocks hold the shipped records beside the opening fight's (in
+/// Wide beside every hatch's, [`written_back_beside_hatches`]).
 #[test]
 fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     let Some(files) = zip_files() else { return };
@@ -358,6 +365,17 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
     for (name, _, _) in block_diffs(&old_blocks, &new_blocks) {
         let i = (0..BLOCK_COUNT).find(|&i| block_file(i) == name).quiet();
         let (mut ra, mut rb) = (records(&old_blocks[i]), records(&new_blocks[i]));
+        if cfg!(feature = "wide") {
+            // Wide: the window offers the eggs past the wide view too (spec 13 Decision 6), so
+            // any block of the region may hold hatchlings' records, of more kinds than the start
+            // egg's gear.
+            if i == fight {
+                assert!(gear_records(&rb) > 0, "the hatched creatures' gear");
+            }
+            written_back_beside_hatches(&name, ra, rb);
+            assert!(committed.contains(&i), "{name}: a block of the region");
+            continue;
+        }
         if i == fight {
             // The egg hatched (its status) and armed its creatures (their gear).
             assert!(gear_records(&rb) > 0, "the hatched creatures' gear");
@@ -380,6 +398,7 @@ fn a_save_of_the_start_state_writes_the_shipped_bytes_back() {
 /// the number of differing block files.
 ///
 /// Content-free: table names, byte and record indices only (no counts of the user's records).
+#[cfg(not(feature = "wide"))]
 fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8>>)) -> usize {
     for (table, _, first) in table_diffs(&want.0, &got.0) {
         eprintln!("{what}: objlist {table} differs, first at {first:x?}");
@@ -417,6 +436,7 @@ fn report(what: &str, want: &(Vec<u8>, Vec<Vec<u8>>), got: &(Vec<u8>, Vec<Vec<u8
 }
 
 /// The `savegame/` files of a store, objlist and the 69 blocks.
+#[cfg(not(feature = "wide"))]
 fn store_files(store: &MemStore) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut f = Files::default();
     f.overlay("s", store.files.clone());
@@ -430,6 +450,7 @@ fn store_files(store: &MemStore) -> (Vec<u8>, Vec<Vec<u8>>) {
 /// A record with its container-content byte 3 cleared: 0x10d376 packs a container content's
 /// record index through a 3-byte stack buffer whose third byte it never writes (A5-1), so the
 /// original leaves stack contents there; nothing reads it back.
+#[cfg(not(feature = "wide"))]
 fn defined(r: &[u8; 8]) -> [u8; 8] {
     let mut r = *r;
     if r[0] & 0x18 == 0x08 {
@@ -438,6 +459,7 @@ fn defined(r: &[u8; 8]) -> [u8; 8] {
     r
 }
 
+#[cfg(not(feature = "wide"))]
 fn defined_block(bytes: &[u8]) -> Vec<[u8; 8]> {
     records(bytes).iter().map(defined).collect()
 }
@@ -478,7 +500,61 @@ fn temporary(actor: usize) -> bool {
 /// A block record of the opening fight: a readied object (the gear 0x13121a gives) of a
 /// temporary actor, or an egg (type 0x14f), whose status the hatch changes.
 fn fight_record(r: &[u8; 8]) -> bool {
-    (r[0] & 0x38 == 0x38 && temporary(usize::from(r[1]))) || r[4..6] == [1, 0x4f]
+    (r[0] & 0x38 == 0x38 && temporary(usize::from(r[1]))) || egg_record(r)
+}
+
+/// An egg's record (type 0x14f, frame 0: bytes 4-5 big-endian).
+fn egg_record(r: &[u8; 8]) -> bool {
+    r[4..6] == [1, 0x4f]
+}
+
+/// A block record a hatch (0x1319b2) made: an object a temporary actor carries or readies (its
+/// gear and treasure, 0x13121a), one inside a container with the temporary bit 0x20 (a
+/// hatchling's bag; 0x10be02 sets the bit), or one it put on the map: an object created there
+/// (0x10bcee sets the bit) or a body part of a monster of more than one tile (0x131646 clears the
+/// bit; its type is an actor type, 0x156 and up, the bound 0x1319b2 compares a template with).
+fn hatch_record(r: &[u8; 8]) -> bool {
+    /// The first actor type (0x1319b2 creates the templates below it as objects).
+    const ACTOR_TYPES: u16 = 0x156;
+    let temp = r[0] & crate::objects::TEMPORARY != 0;
+    match r[0] & 0x18 {
+        0x10 | 0x18 => temp && temporary(usize::from(r[1])),
+        0x08 => temp,
+        _ => temp || u16::from_be_bytes([r[4], r[5]]) & 0x3ff >= ACTOR_TYPES,
+    }
+}
+
+/// Wide: block `name`'s records saved against the shipped ones, container indices cleared (they
+/// shift after new records) and the eggs left out (a hatch changes their status): every shipped
+/// record is written back, and every other saved one is a hatch's ([`hatch_record`]).
+fn written_back_beside_hatches(name: &str, shipped: Vec<[u8; 8]>, saved: Vec<[u8; 8]>) {
+    let plain = |v: Vec<[u8; 8]>| -> Vec<[u8; 8]> {
+        v.into_iter()
+            .filter(|r| !egg_record(r))
+            .map(|mut r| {
+                if r[0] & 0x18 == 0x08 {
+                    r[1] = 0;
+                    r[2] = 0;
+                }
+                r
+            })
+            .collect()
+    };
+    let mut left = plain(shipped);
+    let mut new = Vec::new();
+    for r in plain(saved) {
+        match left.iter().position(|x| *x == r) {
+            Some(k) => {
+                left.swap_remove(k);
+            }
+            None => new.push(r),
+        }
+    }
+    assert!(left.is_empty(), "{name}: every shipped record written back");
+    assert!(
+        new.iter().all(hatch_record),
+        "{name}: every other record a hatch's"
+    );
 }
 
 /// The records of a block without the opening fight's, container indices (which shift after
@@ -506,6 +582,8 @@ fn gear_records(v: &[[u8; 8]]) -> usize {
         .count()
 }
 
+// Original only: the original's run; Wide's window hatches more eggs (spec 13 Decision 6).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn the_ports_start_save_against_the_originals() {
     let Some(mut files) = zip_files() else { return };
@@ -582,6 +660,8 @@ fn a_saved_party_size_past_the_roster_boots_clamped() {
 
 /// The original's own save boots in the port, and the port's save of it is the original's
 /// save of the same state (the original booted from that save and saved again at once).
+// Original only: the original's run; Wide's window hatches more eggs (spec 13 Decision 6).
+#[cfg(not(feature = "wide"))]
 #[test]
 fn the_originals_save_loads_and_saves_like_the_original() {
     let Some(mut files) = zip_files() else { return };
@@ -682,35 +762,31 @@ impl Run {
         pressed
     }
 
-    /// `T`, the cross-hair onto the nearest actor not in the party within 5 tiles (else the
-    /// nearest member), Return; then answers the conversation: "bye" at a line input, else
-    /// space / N / Y until the prompt is back. Returns the actor talked to.
+    /// `T`, the cross-hair onto the party's first member after the leader, Return; then answers
+    /// the conversation: "bye" at a line input, else space / N / Y until the prompt is back.
+    /// Returns the actor talked to. The target is a party member, not the nearest actor (which
+    /// hung on where every actor round the party walked: any change to a path picked another,
+    /// one that may not ask for a line). The boot starts in combat (the shipped combat byte,
+    /// 0x121c64), so the member stands where the combat AI put it, not in a follow formation;
+    /// the reach assert reports when it is past the cross-hair's box ([`crate::geom::RULE_HALF`]).
     fn talk(&mut self) -> u16 {
         let (target, dx, dy) = {
             let s = self.e.state();
             let c = s.leader_position().quiet();
             let leader = s.actors.party.leader().quiet().0;
-            let party: Vec<u16> = s.actors.party.active().map(|a| a.0).collect();
-            let mut best: Option<(bool, i32, u16, i32, i32)> = None;
-            for a in 1..0xe0u16 {
-                let p = s.objects.location[usize::from(a)];
-                if a == leader || s.objects.type_frame[usize::from(a)] == 0 || p.z != c.z {
-                    continue;
-                }
-                let (dx, dy) = (
-                    i32::from(p.x) - i32::from(c.x),
-                    i32::from(p.y) - i32::from(c.y),
-                );
-                if dx.abs() > 5 || dy.abs() > 5 {
-                    continue;
-                }
-                let key = (party.contains(&a), dx.abs().max(dy.abs()), a, dx, dy);
-                if best.is_none_or(|b| (key.0, key.1) < (b.0, b.1)) {
-                    best = Some(key);
-                }
-            }
-            let b = best.expect("an actor near the party");
-            (b.2, b.3, b.4)
+            let target = s.actors.party.active().map(|a| a.0).find(|&a| a != leader);
+            let target = target.expect("a member besides the leader");
+            let p = s.objects.location[usize::from(target)];
+            let (dx, dy) = (
+                i32::from(p.x) - i32::from(c.x),
+                i32::from(p.y) - i32::from(c.y),
+            );
+            let reach = i32::from(crate::geom::RULE_HALF);
+            assert!(
+                p.z == c.z && dx.abs() <= reach && dy.abs() <= reach,
+                "the member is in the cross-hair's reach"
+            );
+            (target, dx, dy)
         };
         self.press(Key::Char('t'));
         let (h, v) = (
@@ -963,4 +1039,86 @@ fn walk_talk_save_restore() {
         "restore: block files"
     );
     assert!(run.at_prompt());
+}
+
+/// The start egg after the game's own boot (seed 0, A4-0x7afb clear: 0x1321dc offers it and
+/// 0x1319b2 hatches it): its tile and the types of its templates. It is the hatched egg (status
+/// 0x40) nearest the leader on the leader's level.
+fn start_egg(s: &State) -> (Position, Vec<u16>) {
+    let mut s = s.clone();
+    let c = s.leader_position().quiet();
+    let o = &s.objects;
+    let egg = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&e| o.kind(e) == EGG && o.place(e) == 0 && o.z(e) == c.z && hatched(o, e))
+        .min_by_key(|&e| {
+            (i32::from(o.x(e)) - i32::from(c.x)).abs() + (i32::from(o.y(e)) - i32::from(c.y)).abs()
+        })
+        .expect("a hatched egg");
+    let at = o.location[egg as usize];
+    let mut kinds = Vec::new();
+    let mut t = crate::objects::first_child(&mut s.objects, egg);
+    while t >= 0 {
+        kinds.push(s.objects.kind(t));
+        t = crate::objects::next_child(&mut s.objects);
+    }
+    (at, kinds)
+}
+
+/// The egg type 0x1321dc and 0x1319b2 compare with.
+const EGG: u16 = 0x14f;
+
+/// Whether object `e` has the hatched bit 0x40 (0x1319b2 sets it, with 0x02, on every offer).
+fn hatched(o: &crate::objects::Objects, e: Slot) -> bool {
+    o.status(e) & 0x40 != 0
+}
+
+/// The game's own boot hatches the start egg once: walking on (in combat, as the boot starts)
+/// until the window origin moves, which rebuilds the window and offers the start egg again
+/// (0x1321dc: its status has bit 0x20), adds none of its monsters (no second wave) and the egg
+/// keeps its hatched bit, in both builds (the origin moves at other cells in Wide,
+/// `geom::LEAD`). Prints counts the test made only.
+#[test]
+fn the_start_egg_hatches_once_when_the_window_moves() {
+    let Some(files) = zip_files() else { return };
+    let mut run = Run::boot(files);
+    let s = run.state();
+    let (at, kinds) = start_egg(&s);
+    let egg = |s: &State| {
+        (0x100..crate::objects::OBJECT_SLOTS as Slot).find(|&e| {
+            s.objects.kind(e) == EGG
+                && s.objects.place(e) == 0
+                && s.objects.location[e as usize] == at
+        })
+    };
+    // Temporary actors of the start egg's types (other eggs' hatchlings of other types aside).
+    let theirs = |s: &State| {
+        (FIRST_TEMP_ACTOR..ACTOR_SLOTS as Slot)
+            .filter(|&m| {
+                s.objects.type_frame[m as usize] != 0 && kinds.contains(&s.objects.kind(m))
+            })
+            .count()
+    };
+    let first = theirs(&s);
+    assert!(first > 0, "the boot hatched the start egg");
+    let origin = s.map.window_origin;
+    let mut steps = 0;
+    loop {
+        run.walk(1);
+        steps += 1;
+        let s = run.state();
+        let e = egg(&s).expect("the start egg on its tile");
+        assert!(
+            hatched(&s.objects, e),
+            "step {steps}: the start egg keeps its hatched bit"
+        );
+        assert!(
+            theirs(&s) <= first,
+            "step {steps}: no second wave of the start egg"
+        );
+        if s.map.window_origin != origin {
+            break;
+        }
+        assert!(steps < 40, "the window origin moved within 40 steps");
+    }
+    eprintln!("the window origin moved after {steps} steps: no second wave, the egg still hatched");
 }

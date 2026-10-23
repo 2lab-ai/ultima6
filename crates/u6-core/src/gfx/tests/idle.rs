@@ -3,6 +3,7 @@
 
 use u6_formats::position::Position;
 
+use crate::geom::{HALF_H, HALF_W};
 use crate::gfx::GfxState;
 use crate::rng::Rng;
 use crate::state::State;
@@ -57,26 +58,37 @@ fn word(s: &State, slot: u16) -> (u16, u16) {
     (w & 0x3ff, w >> 10)
 }
 
+/// Skipped: outside the view on either axis (6 tiles from the centre in Original; one tile past
+/// the view's half, spec 13 Decision 5), on another level, dead, or with the due flag clear.
 #[test]
 fn pre_checks_skip_without_drawing() {
     let (mut s, mut g) = world();
-    put(&mut s, 1, 0x19a, 0, Position { x: 106, ..CENTRE });
+    let (past_x, past_y) = (HALF_W as u16 + 1, HALF_H as u16 + 1);
+    let east = Position {
+        x: CENTRE.x + past_x,
+        ..CENTRE
+    };
+    let north = Position {
+        y: CENTRE.y - past_y,
+        ..CENTRE
+    };
+    put(&mut s, 1, 0x19a, 0, east);
     put(&mut s, 2, 0x19a, 0, Position { z: 1, ..CENTRE });
-    put(&mut s, 3, 0x19a, 0, Position { y: 94, ..CENTRE });
+    put(&mut s, 3, 0x19a, 0, north);
     put(&mut s, 4, 0x19a, 0, CENTRE);
     s.actors.attrs.status[4] = 0x10;
     let before = s.rng;
     assert!(!actor_idle_frames(&mut s, &g));
     assert_eq!(s.rng, before);
-    // Within 5 tiles, but the due flag is clear.
+    // On the view's edge (in the view), but the due flag is clear.
     put(
         &mut s,
         5,
         0x19a,
         0,
         Position {
-            x: 95,
-            y: 105,
+            x: CENTRE.x - HALF_W as u16,
+            y: CENTRE.y + HALF_H as u16,
             z: 0,
         },
     );

@@ -67,7 +67,8 @@ pub(crate) fn move_object(state: &mut State, id: ObjectId, x: u16, y: u16, z: u1
     crate::objects::move_to(state, id.slot(), x, y, z);
 }
 
-/// Remove temporary objects (status 0x20) farther than 20 tiles from (x, y) or on another level
+/// Remove temporary objects (status 0x20) farther than the objects' `KEEP` from (x, y) (the
+/// original's 20, half its window; `WINDOW / 2` in Wide, spec 13 Decision 6) or on another level
 /// than `z`, and clear the active bit of such eggs (objects 0x10c49c).
 pub(crate) fn drop_far_temporaries(state: &mut State, x: u16, y: u16, z: u16) {
     crate::objects::prune_far(state, x, y, z);

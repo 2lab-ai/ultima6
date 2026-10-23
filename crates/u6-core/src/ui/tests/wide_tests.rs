@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use u6_formats::font::{HANGUL_GLYPHS, HangulFont};
 use u6_render::hd::{Compositor, HdGlyph, Image, Images, NoImages, Scale, word};
-use u6_render::{FLAG_INK, Kind, Src};
+use u6_render::{FLAG_INK, Kind, Src, WIDTH};
 
 use super::text::{TextWindow, draw_char};
 use super::*;
@@ -1072,7 +1072,7 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
                     let want = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
                     for sy in 0..n {
                         for sx in 0..n {
-                            let got = c.rgba()[(y * n + sy) * 320 * n + x * n + sx];
+                            let got = c.rgba()[(y * n + sy) * WIDTH * n + x * n + sx];
                             assert_eq!(got, want, "{what} ({x}, {y}) at {n}x");
                         }
                     }
@@ -1080,7 +1080,7 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
             }
         }
         // The tile beside them is still the tile's.
-        let tile = c.rgba()[(24 * n) * 320 * n + 16 * n];
+        let tile = c.rgba()[(24 * n) * WIDTH * n + 16 * n];
         assert_eq!(tile, word(fb.palette[5]));
         // Spec 11, the HD font mode: both cells listed with their ink and paper, each block the
         // paper; the tile is as before.
@@ -1100,10 +1100,10 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
             [listed(24, 0xac00), listed(32, u16::from(b'A'))]
         );
         for y in 16 * n..24 * n {
-            let row = &c.rgba()[y * 320 * n..][24 * n..40 * n];
+            let row = &c.rgba()[y * WIDTH * n..][24 * n..40 * n];
             assert!(row.iter().all(|&g| g == word(paper)), "the paper at {n}x");
         }
-        assert_eq!(c.rgba()[(24 * n) * 320 * n + 16 * n], tile);
+        assert_eq!(c.rgba()[(24 * n) * WIDTH * n + 16 * n], tile);
     }
 }
 
@@ -1151,7 +1151,7 @@ fn the_scroll_names_its_glyphs_and_the_hd_font_lists_its_letters() {
             continue;
         }
         glyphs += 1;
-        let (x, y) = (i % 320, i / 320);
+        let (x, y) = (i % WIDTH, i / WIDTH);
         let rows = match u8::try_from(src.id) {
             Ok(b) => font.glyphs[usize::from(b)],
             Err(_) => *table.glyph(u32::from(src.id)).unwrap(),
@@ -1163,7 +1163,10 @@ fn the_scroll_names_its_glyphs_and_the_hd_font_lists_its_letters() {
     }
     assert!(glyphs >= 9 * 4 * 64, "every cell of the nine lines left");
     // The scroll's columns 22.. and rows 14..=22 hold the last nine lines; row 23 the cursor.
-    let at = |col: usize, row: usize| (row * 8 * 320 + col * 8 + 1, row * 8 * 320 + col * 8);
+    let at = |col: usize, row: usize| {
+        let i = row * 8 * WIDTH + col * 8;
+        (i + 1, i)
+    };
     let (ink, paper) = at(23, 14);
     let (ink, paper) = (fb.pixels()[ink], fb.pixels()[paper]);
     assert_ne!(ink, paper, "the letter's ink and paper differ");

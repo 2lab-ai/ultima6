@@ -6,8 +6,9 @@ use std::path::Path;
 
 use super::flags::*;
 use super::view::DARK;
-use super::{VIEW, WINDOW, cell, region, view};
+use super::{WINDOW, cell, region, view};
 use crate::files::Files;
+use crate::geom::{self, HALF_H, HALF_W, RULE_HALF, VIEW_H, VIEW_W};
 use crate::state::State;
 use u6_testkit::Quiet;
 
@@ -34,6 +35,21 @@ fn boot() -> Option<State> {
     s.map.load_tables(&files).quiet();
     region::refresh_region(&mut s);
     Some(s)
+}
+
+/// View cells (col, row), row by row.
+fn view_cells() -> impl Iterator<Item = (usize, usize)> {
+    (0..VIEW_H).flat_map(|row| (0..VIEW_W).map(move |col| (col, row)))
+}
+
+/// The distance-table entry the sight flood reads for view cell (col, row): each axis laid over
+/// the original's half view of 5 (spec 13 Decision 8; the cell's own where the half is 5).
+fn sight_entry(col: usize, row: usize) -> (usize, usize) {
+    let r = RULE_HALF as usize;
+    (
+        col.abs_diff(HALF_W) * r / HALF_W,
+        row.abs_diff(HALF_H) * r / HALF_H,
+    )
 }
 
 /// One letter per window cell: `#` wall that blocks, `+` other blocking tile, `~` water,
@@ -72,11 +88,10 @@ fn start_tile_is_walkable_and_walls_around_it_block() {
             assert!(Some(s.map.window_tiles[cell(wx, wy)]) == want);
         }
     }
-    // A blocking wall in the view window (11 x 11 around the leader). Nothing of the window is
+    // A blocking wall in the view window (around the leader). Nothing of the window is
     // printed: its tiles are the user's map.
     let [vx, vy] = s.map.view_offset.map(|v| v as usize);
-    let walls = (0..VIEW)
-        .flat_map(|row| (0..VIEW).map(move |col| (col, row)))
+    let walls = view_cells()
         .filter(|&(col, row)| tile_letter(&s, vx + col, vy + row) == '#')
         .count();
     assert!(walls > 0, "no blocking wall in the start view");
@@ -91,23 +106,27 @@ fn start_view_sees_the_room_and_not_past_its_walls() {
     let raw = files.get("savegame/objlist").quiet()[0x1BFC] as i8;
     assert!(ambient == raw, "the ambient light at objlist 0x1BFC");
     view::update_view(&mut s);
-    // The start room and its walls fill the view, so every view cell is seen; the start is by
-    // day: the ambient light reaches the farthest view cell, so each cell gains
-    // 4 - dist + ambient, clamped to 4.
+    // The start room and its walls fill the original's 11 × 11 view round the leader (all of
+    // it in Original), so every cell of it is seen; the start is by day: the ambient light
+    // reaches the farthest view cell, so each seen cell gains 4 - dist + ambient, clamped to 4.
     let t = s.map.tables.as_ref().quiet();
-    let farthest = (0..VIEW)
-        .flat_map(|r| (0..VIEW).map(move |c| (c, r)))
-        .map(|(c, r)| t.dist[c.abs_diff(5)][r.abs_diff(5)])
+    let farthest = view_cells()
+        .map(|(c, r)| sight_entry(c, r))
+        .map(|(a, b)| t.dist[a][b])
         .max()
         .quiet();
     assert!(
         i16::from(ambient) >= i16::from(farthest),
         "the start is lit by day"
     );
-    for row in 0..VIEW {
-        for col in 0..VIEW {
+    let r = RULE_HALF as usize;
+    for (col, row) in view_cells() {
+        let room = col.abs_diff(HALF_W) <= r && row.abs_diff(HALF_H) <= r;
+        if room {
             assert!(s.map.is_visible(col, row), "({col}, {row}) hidden");
-            assert!(s.map.light_at(col, row) == 4);
+        }
+        if s.map.is_visible(col, row) {
+            assert!(s.map.light_at(col, row) == 4, "({col}, {row}) lit");
         }
     }
     assert_sight_is_closed(&s);
@@ -117,30 +136,35 @@ fn start_view_sees_the_room_and_not_past_its_walls() {
 fn view_west_of_the_start_sees_round_through_the_corridor_and_darkens_at_night() {
     let Some(mut s) = boot() else { return };
     // Three steps west of the start, inside the window the start loaded (its origin
-    // `(x - 16) & 0x3f8` stays), so the window is rebuilt, not reloaded.
-    let origin = |x: u16| x.wrapping_sub(16) & 0x3f8;
+    // `(x - 16) & 0x3f8` stays), so the window is rebuilt, not reloaded. Wide's window leads
+    // by another 10 cells and may start a chunk farther west there: then the region is
+    // refreshed, as a step into a new window refreshes it.
     let x0 = s.map.centre.x;
     s.map.centre.x -= 3;
-    assert!(origin(s.map.centre.x) == origin(x0), "the same window");
-    region::rebuild_window(&mut s);
+    let same = geom::window_origin(s.map.centre.x) == geom::window_origin(x0);
+    assert!(same || cfg!(feature = "wide"), "the same window");
+    if same {
+        region::rebuild_window(&mut s);
+    } else {
+        region::refresh_region(&mut s);
+    }
     view::update_view(&mut s);
     assert_sight_is_closed(&s);
     // Night: ambient 0. Light falls off with distance from the leader (dist < 4 lit).
     s.actors.objlist_tail[0x0b] = 0;
     view::update_view(&mut s);
-    assert!(s.map.view_tile(5, 5) != DARK);
+    assert!(s.map.view_tile(HALF_W, HALF_H) != DARK);
     // A seen cell at distance 4 or more gets no light (4 - dist + 0 <= 0) and is drawn dark.
     let mut dark = 0;
-    for row in 0..VIEW {
-        for col in 0..VIEW {
-            let d = s.map.tables.as_ref().quiet().dist[col.abs_diff(5)][row.abs_diff(5)];
-            let lit = s.map.light_at(col, row) > 0;
-            if s.map.is_visible(col, row) {
-                assert!(lit == (d < 4), "({col}, {row}): lit by its distance");
-                if d >= 4 {
-                    assert!(s.map.view_tile(col, row) == DARK, "({col}, {row}) dark");
-                    dark += 1;
-                }
+    for (col, row) in view_cells() {
+        let (a, b) = sight_entry(col, row);
+        let d = s.map.tables.as_ref().quiet().dist[a][b];
+        let lit = s.map.light_at(col, row) > 0;
+        if s.map.is_visible(col, row) {
+            assert!(lit == (d < 4), "({col}, {row}): lit by its distance");
+            if d >= 4 {
+                assert!(s.map.view_tile(col, row) == DARK, "({col}, {row}) dark");
+                dark += 1;
             }
         }
     }
@@ -153,7 +177,8 @@ fn view_west_of_the_start_sees_round_through_the_corridor_and_darkens_at_night()
 /// Holds for the region as loaded so far (actors are the only objects in slots).
 fn assert_sight_is_closed(s: &State) {
     let [vx, vy] = s.map.view_offset.map(|v| v as i32);
-    let (lx, ly) = (vx + 5, vy + 5);
+    let (w, h) = (VIEW_W as i32, VIEW_H as i32);
+    let (lx, ly) = (vx + HALF_W as i32, vy + HALF_H as i32);
     let tf = &s.tables.tileflags;
     let seen = |x: i32, y: i32| s.map.view_flags[cell(x as usize, y as usize)] & CELL_VISIBLE != 0;
     let passes = |x: i32, y: i32| {
@@ -164,10 +189,10 @@ fn assert_sight_is_closed(s: &State) {
             && (f2 & TF2_WINDOW == 0 || near)
             && f2 & TF2_BOUNDARY == 0
     };
-    let area = |x: i32, y: i32| (vx - 1..=vx + 11).contains(&x) && (vy - 1..=vy + 11).contains(&y);
+    let area = |x: i32, y: i32| (vx - 1..=vx + w).contains(&x) && (vy - 1..=vy + h).contains(&y);
     assert!(seen(lx, ly));
-    for y in vy - 1..=vy + 11 {
-        for x in vx - 1..=vx + 11 {
+    for y in vy - 1..=vy + h {
+        for x in vx - 1..=vx + w {
             if !(seen(x, y) && passes(x, y)) {
                 continue;
             }
@@ -217,4 +242,12 @@ fn map_tables_load_from_the_users_game() {
     seen.sort();
     seen.dedup();
     assert!(seen.len() == 8);
+    // Loaded in either build: the image's steps (stride 40) re-encoded for the port's grids.
+    for k in 0..8 {
+        let (dx, dy) = (i32::from(t.walk_dx[k]), i32::from(t.walk_dy[k]));
+        assert!(
+            i32::from(t.walk_step[k]) == dy * WINDOW as i32 + dx,
+            "step {k}"
+        );
+    }
 }

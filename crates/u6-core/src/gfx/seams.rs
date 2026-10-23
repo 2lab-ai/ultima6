@@ -4,21 +4,23 @@
 use super::GfxState;
 #[cfg(doc)]
 use super::blit;
-use super::view::{ViewWindow, WINDOW_TILES};
+use super::view::ViewWindow;
 use crate::engine::Io;
+use crate::geom::{MAP_X, MAP_Y, VIEW_W};
 use crate::objects::ObjectId;
 use crate::state::State;
 
 /// The window contents as last built by map 0x109e74 and objects 0x10e81e: the tile cache
 /// A4-0x1476 (`objects.draw.base`: map tile per cell, 0xff unseen, 0x1bc unlit, flat object
-/// tiles over it) and the per-cell object lists (`objects.draw`, first drawn first).
+/// tiles over it) and the per-cell object lists (`objects.draw`, first drawn first); both by view
+/// cell, `row * VIEW_W + col` (spec 13 C2).
 pub(crate) fn view_window(state: &State) -> ViewWindow {
     let d = &state.objects.draw;
     let mut window = ViewWindow::empty();
     for (row, line) in window.tiles.iter_mut().enumerate() {
         for (col, t) in line.iter_mut().enumerate() {
-            *t = d.base.get(row * WINDOW_TILES + col).copied().unwrap_or(0);
-            window.objects[row * WINDOW_TILES + col] = d.tiles(col, row);
+            *t = d.base.get(row * VIEW_W + col).copied().unwrap_or(0);
+            window.objects[row * VIEW_W + col] = d.tiles(col, row);
         }
     }
     window
@@ -32,8 +34,9 @@ pub(crate) fn anim_mode(map: &crate::map::MapState, slot: usize) -> u8 {
 
 /// 0x102c90's target cursor: when the ui is idle (A4-0x7a32 == 0, A4-0x7a5b == 0) it calls
 /// 0x106932(0) and clears A4-0x7a60; when A4-0x7a60 == 1 it draws tile 0x16c (A4-0x7a5d < 0) or
-/// 0x16d at (16·A4-0x7a5f, 16·A4-0x7a5e). Returns that (tile, x, y) for the caller to blit
-/// into the back buffer. The ui globals live in `ui.input` ([`crate::ui::InputState`]).
+/// 0x16d at (16·A4-0x7a5f, 16·A4-0x7a5e) from the map's corner ([`MAP_X`], [`MAP_Y`]). Returns
+/// that (tile, x, y) for the caller to blit into the back buffer. The ui globals live in
+/// `ui.input` ([`crate::ui::InputState`]).
 pub(crate) fn map_cursor(state: &mut State, io: &Io) -> Option<(u16, u16, u16)> {
     let input = &state.ui.input;
     if input.target_pending == 0 && !input.cursor_by_tab {
@@ -46,8 +49,8 @@ pub(crate) fn map_cursor(state: &mut State, io: &Io) -> Option<(u16, u16, u16)> 
         let (col, row) = input.cursor;
         (
             tile,
-            (i16::from(col) * 16) as u16,
-            (i16::from(row) * 16) as u16,
+            MAP_X.wrapping_add((i16::from(col) * 16) as u16),
+            MAP_Y.wrapping_add((i16::from(row) * 16) as u16),
         )
     })
 }
@@ -64,12 +67,13 @@ pub(crate) fn quake(state: &mut State, io: &Io, shakes: u8) {
     crate::ui::effects::quake(state, io, i16::from(shakes), 1);
 }
 
-/// Present the map window: [`blit::dissolve`] over (8, 8)..(0xa7, 0xa7) when `dissolve`, else
-/// [`blit::copy_window`] (0x151f5a), from the back buffer into the front (the screen).
+/// Present the map window: [`blit::dissolve_map`] over the shown map ((8, 8)..(0xa7, 0xa7) in
+/// Original, [`crate::geom::SHOWN`]) when `dissolve`, else [`blit::copy_window`] (0x151f5a), from
+/// the back buffer into the front (the screen).
 pub(crate) fn present_window(io: &Io, gfx: &GfxState, dissolve: bool) {
     io.with_buffers(|back, front| {
         if dissolve {
-            super::blit::dissolve(&gfx.tables.dissolve_taps, back, front, (8, 8), (0xa7, 0xa7));
+            super::blit::dissolve_map(&gfx.tables.dissolve_taps, back, front);
         } else {
             super::blit::copy_window(back, front);
         }

@@ -60,11 +60,23 @@ pub use weight::{
 
 use crate::files::Files;
 use crate::state::LoadError;
+use crate::ui::pointer::LEADER_PIXEL;
 
 /// Cells of the panel (A4+0x1348..0x136f): the 12 list cells, then the 8 equipment slots.
 pub const CELLS: usize = 20;
 /// Index of equipment slot 0 in [`InventoryState::cells`] (A4+0x1360).
 pub const EQUIP: usize = 12;
+
+/// The pointer origin at boot from the image's initial bytes (A4-0x7a26). They are a pixel of
+/// the original's 11 × 11 view at the screen's top left; Wide's view puts the leader elsewhere,
+/// so there the origin starts on its pixel, [`LEADER_PIXEL`], where the Move command returns it.
+fn initial_origin(image: (u8, u8)) -> (u16, u16) {
+    if cfg!(feature = "wide") {
+        LEADER_PIXEL
+    } else {
+        (u16::from(image.0), u16::from(image.1))
+    }
+}
 
 /// Hunk-8 inventory globals and the tables they use.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,8 +91,10 @@ pub struct InventoryState {
     pub cells: [i16; CELLS],
     /// Original: A4-0x7a26 / -0x7a25 (bytes: pixel 0x105016 measures directions from; the
     /// Move command (objcmds, 0x12ae04) moves it to the object being pushed and back to
-    /// (0x58, 0x58), the centre of the map window; initial value from the data hunk)
-    pub pointer_origin: (u8, u8),
+    /// (0x58, 0x58), the centre of the map window; initial value from the data hunk). Words
+    /// here: Wide map pixels reach past 255 (spec 13 Design 3); at rest the leader's pixel
+    /// [`LEADER_PIXEL`].
+    pub pointer_origin: (u16, u16),
     /// Tables read from the user's `game`.
     pub tables: InventoryTables,
 }
@@ -91,7 +105,7 @@ impl Default for InventoryState {
             equip_weight: 0,
             carried_weight: 0,
             cells: [0; CELLS],
-            pointer_origin: (0x58, 0x58),
+            pointer_origin: LEADER_PIXEL,
             tables: InventoryTables::default(),
         }
     }
@@ -108,7 +122,7 @@ impl InventoryState {
             detail,
         })?;
         Ok(Self {
-            pointer_origin: tables.pointer_origin,
+            pointer_origin: initial_origin(tables.pointer_origin),
             tables,
             ..Self::default()
         })

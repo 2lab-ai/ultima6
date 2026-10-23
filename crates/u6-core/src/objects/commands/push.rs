@@ -15,6 +15,7 @@ use crate::objects::moves::{move_into, move_to};
 use crate::objects::{IN_CONTAINER, Slot, shown_name};
 use crate::state::State;
 use crate::todo_stub;
+use crate::ui::pointer::LEADER_PIXEL;
 use crate::ui::printf::Arg;
 
 const S_BANG_LINE: u32 = 0x0012_85ac; // "\n%s!\n"
@@ -36,8 +37,16 @@ const DIR_NAMES: i32 = -0x61be;
 const WALK: u16 = 0x80;
 /// A chair: pushed against something, or not facing the push, it only turns.
 const CHAIR: u16 = 0xdd;
-/// Pixel of the view centre cell (A4-0x7a26 / -0x7a25 at rest).
-const CENTRE_PIXEL: u8 = 0x58;
+
+/// The frame pixel of map location (x, y) with the view centred on (cx, cy): the leader's
+/// pixel (A4-0x7a26 / -0x7a25 at rest, [`LEADER_PIXEL`]) plus 16 per cell. Words: Wide's map
+/// pixels pass 255, where the original's bytes would wrap (spec 13 Design 3).
+fn view_pixel(x: u16, y: u16, cx: u16, cy: u16) -> (u16, u16) {
+    (
+        (x.wrapping_sub(cx) << 4).wrapping_add(LEADER_PIXEL.0),
+        (y.wrapping_sub(cy) << 4).wrapping_add(LEADER_PIXEL.1),
+    )
+}
 
 fn leader(s: &State) -> Slot {
     let p = &s.actors.party;
@@ -74,7 +83,7 @@ pub fn push_blocked(s: &mut State, obj: Slot, x: u16, y: u16, dir: usize) -> boo
 /// the centre cell, the pointer shape for it (0x1051a6, [`crate::ui::pointer::update_shape`]).
 fn reset_pointer(s: &mut State) {
     s.ui.input.target_pending = 0;
-    s.inventory.pointer_origin = (CENTRE_PIXEL, CENTRE_PIXEL);
+    s.inventory.pointer_origin = LEADER_PIXEL;
     crate::ui::pointer::update_shape(s);
 }
 
@@ -132,9 +141,7 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         }
         let (ox, oy) = (s.objects.x(sel), s.objects.y(sel));
         s.ui.input.target_pending = 0;
-        let px = (ox.wrapping_sub(cx) << 4).wrapping_add(u16::from(CENTRE_PIXEL)) as u8;
-        let py = (oy.wrapping_sub(cy) << 4).wrapping_add(u16::from(CENTRE_PIXEL)) as u8;
-        s.inventory.pointer_origin = (px, py);
+        s.inventory.pointer_origin = view_pixel(ox, oy, cx, cy);
         (ox, oy)
     };
     print_at(state, io, S_TO, &[]).await;
@@ -238,4 +245,39 @@ fn finish(state: &RefCell<State>) {
     let mut s = state.borrow_mut();
     s.ui.panel.dirty = false;
     s.ui.input.target_pending = 0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, VIEW_H, VIEW_W};
+
+    /// Spec 13 Design 3: the pointer origin Move puts on the pushed object is the centre of its
+    /// view cell. For the view's east-most and south-most cells that is past 255 in Wide, and no
+    /// byte wraps it: from the east-most cell the leader is due west, from the south-most due
+    /// north.
+    #[test]
+    fn the_push_pixel_of_the_east_most_view_cell_does_not_wrap() {
+        let (cx, cy) = (500u16, 400u16);
+        let (hw, hh) = (HALF_W as u16, HALF_H as u16);
+        let east = view_pixel(cx + hw, cy, cx, cy);
+        assert_eq!(east, (MAP_X + (VIEW_W as u16 - 1) * 16 + 8, LEADER_PIXEL.1));
+        let south = view_pixel(cx, cy + hh, cx, cy);
+        assert_eq!(
+            south,
+            (LEADER_PIXEL.0, MAP_Y + (VIEW_H as u16 - 1) * 16 + 8)
+        );
+        let north_west = view_pixel(cx - hw, cy - hh, cx, cy);
+        assert_eq!(north_west, (MAP_X + 8, MAP_Y + 8), "the view's first cell");
+        assert_eq!(view_pixel(cx, cy, cx, cy), LEADER_PIXEL, "the leader's own");
+        let (lx, ly) = (LEADER_PIXEL.0 as i16, LEADER_PIXEL.1 as i16);
+        assert_eq!(crate::inventory::direction_to(east, lx, ly), 6, "west");
+        assert_eq!(crate::inventory::direction_to(south, lx, ly), 0, "north");
+        if cfg!(feature = "wide") {
+            assert!(
+                east.0 > 0xff && east.0 < u6_render::WIDTH as u16,
+                "past a byte"
+            );
+        }
+    }
 }

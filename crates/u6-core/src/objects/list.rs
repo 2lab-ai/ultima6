@@ -87,7 +87,7 @@ impl Objects {
     ///
     /// With `before` = false: the first list entry at or after (y, x) in list order. With
     /// `before` = true: the entry after which an object at (x, y) is linked (slot 0x100 at the
-    /// head). Inside the 40 × 40 window the grid gives the start; outside it the whole list is
+    /// head). Inside the window the grid gives the start; outside it the whole list is
     /// walked from the head (or from the window's last entry when (x, y) sorts after it).
     pub(crate) fn list_pos(&self, x: u16, y: u16, before: bool) -> Slot {
         let dx = x.wrapping_sub(self.window[0]) & 0x3ff;
@@ -128,8 +128,9 @@ impl Objects {
         }
         // Outside the window: compare packed bytes 2 (low nibble), 1, 0 = (y, x).
         let want = super::pack_xyz(x, y, 0).to_packed();
-        let wy = (self.window[1] + 39) & 0x3ff;
-        let wx = (self.window[0] + 39) & 0x3ff;
+        let last = GRID_SIDE as u16 - 1;
+        let wy = (self.window[1] + last) & 0x3ff;
+        let wx = (self.window[0] + last) & 0x3ff;
         let mut prev = HEAD;
         if y > wy || (y == wy && x > wx) {
             let mut p = LAST_CELL;

@@ -8,6 +8,7 @@
 
 use crate::actors::npc::{approach, wander};
 use crate::actors::walk;
+use crate::geom::{RULE_HALF, WINDOW};
 use crate::objects;
 use crate::state::State;
 
@@ -136,7 +137,7 @@ pub fn find_target(s: &mut State, actor: i16) -> i16 {
         if distance(s, actor, tx, ty) > 8 {
             continue;
         }
-        if wt(s, t) == 7 && !near_leader(s, tx, ty, 5) {
+        if wt(s, t) == 7 && !near_leader(s, tx, ty, RULE_HALF) {
             continue;
         }
         let dx = tx.wrapping_sub(ax);
@@ -253,8 +254,9 @@ pub fn hold_line(s: &mut State, actor: i16) -> i16 {
     s.actors.work.swap_ok = 0;
     let (ox, oy, _) = crate::actors::seams::window_origin(s);
     let (ox, oy) = (ox as i16, oy as i16);
+    let last = WINDOW as i16 - 1;
     loop {
-        let inside = (ox..=ox + 0x27).contains(&tx) && (oy..=oy + 0x27).contains(&ty);
+        let inside = (ox..=ox + last).contains(&tx) && (oy..=oy + last).contains(&ty);
         if !inside || (tx == ax && ty == ay) {
             s.actors.work.swap_ok = 1;
             return 1;
@@ -446,7 +448,7 @@ pub fn flank(s: &mut State, actor: i16) {
             continue;
         }
         let (tx, ty) = pos(s, t);
-        if [7, 9, 0x9a].contains(&wt(s, t)) && !near_leader(s, tx, ty, 5) {
+        if [7, 9, 0x9a].contains(&wt(s, t)) && !near_leader(s, tx, ty, RULE_HALF) {
             continue;
         }
         let far = (tx - cx).wrapping_abs() > 7 || (ty - cy).wrapping_abs() > 7;

@@ -1,7 +1,8 @@
 //! The actor idle-frame pass of 0x10202e (`0x001020E4..0x00102BE8`).
 //!
 //! For each actor slot 0..256 with a non-zero type/frame word, on the view centre's level and
-//! less than 6 tiles from the centre on both axes (signed 16-bit differences), while
+//! in the view (less than 6 tiles from the centre on both axes in Original, signed 16-bit
+//! differences; spec 13 Decision 5: at most [`HALF_W`] and [`HALF_H`] tiles), while
 //! [`GfxState::actor_anim_due`] (A4-0x7afa) is set and the actor's status byte (A4+0x3d0c) has
 //! none of bits 0x16: pick a new frame by object type, drawing RNG values in the original's
 //! order. `e` is the frame word being built (local -0xa), `base` the frame bits kept (local
@@ -10,6 +11,7 @@
 
 use super::GfxState;
 use super::seams;
+use crate::geom::{HALF_H, HALF_W};
 use crate::objects::ObjectId;
 use crate::state::State;
 
@@ -51,8 +53,10 @@ pub(crate) fn actor_idle_frames(state: &mut State) -> bool {
         if word == 0 || p.z != c.z {
             continue;
         }
-        let near = |a: u16, b: u16| (a as i16).wrapping_sub(b as i16).unsigned_abs() < 6;
-        if !near(p.x, c.x) || !near(p.y, c.y) {
+        let near = |a: u16, b: u16, half: usize| {
+            usize::from((a as i16).wrapping_sub(b as i16).unsigned_abs()) < half + 1
+        };
+        if !near(p.x, c.x, HALF_W) || !near(p.y, c.y, HALF_H) {
             continue;
         }
         let ty = word & 0x3ff;

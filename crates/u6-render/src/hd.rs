@@ -88,9 +88,13 @@ impl Scale {
     }
 }
 
-/// An image as the game holds it now: palette indices, row-major, at most [`WIDTH`] ×
-/// [`HEIGHT`] (the largest image the game draws, the paper bitmap; a larger one is shown
-/// classic).
+/// The largest image the compositor magnifies, width × height: the paper bitmap, the largest
+/// image the game draws, the game's 320 × 200 screen. In both builds: the frame of Wide mode
+/// (spec 13, [`WIDTH`] × [`HEIGHT`] 912 × 336) holds no larger image.
+pub const IMAGE_MAX: (usize, usize) = (320, 200);
+
+/// An image as the game holds it now: palette indices, row-major, at most [`IMAGE_MAX`] (a
+/// larger one is shown classic).
 pub struct Image<'a> {
     /// The image's version now ([`Src::ver`]): a pixel drawn at another version is stale.
     pub ver: u32,
@@ -1061,8 +1065,8 @@ impl Resolver<'_> {
         let resolved = match self.images.image(kind, id) {
             Some(img) => {
                 let (w, h, ver) = (img.width, img.height, img.ver);
-                let shaped = (1..=WIDTH).contains(&w)
-                    && (1..=HEIGHT).contains(&h)
+                let shaped = (1..=IMAGE_MAX.0).contains(&w)
+                    && (1..=IMAGE_MAX.1).contains(&h)
                     && img.pixels.len() == w * h
                     && img.transparent.is_none_or(|t| t.len() == w * h);
                 if !shaped {

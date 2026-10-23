@@ -18,12 +18,14 @@ use std::cell::RefCell;
 use super::{flush_prints, game_string, leader_name, pointed_string, say};
 use crate::converse::Cx;
 use crate::engine::Io;
+use crate::geom::RULE_HALF;
 use crate::image::A4;
 use crate::objects::ObjectId;
 use crate::state::State;
 use crate::todo_stub;
 use crate::ui::globals::NO_COMMAND;
 use crate::ui::printf::{Arg, printf};
+use crate::ui::target::LEADER_CELL;
 
 /// Image strings the loop pushes (PC-relative in hunk 1).
 const FMT_PROMPT: u32 = 0x0010_1f3c;
@@ -179,16 +181,30 @@ pub async fn command_loop(state: &RefCell<State>, io: &Io) {
     }
 }
 
-/// The cross-hair a targeted command starts with: cell (5, 5), `range` (-1 = a direction picks
-/// at once), cursor mode `mode`, not started by Tab; the panel cursor is restored first
-/// (0x106932(0)).
+/// The cross-hair a targeted command starts with: the leader's view cell (Original (5, 5)),
+/// `range` (-1 = a direction picks at once), cursor mode `mode`, not started by Tab; the panel
+/// cursor is restored first (0x106932(0)).
 fn start_cursor(s: &mut State, io: &Io, mode: u8, range: i8) {
     crate::ui::cursor::panel_cursor_in(s, io, 0);
     let input = &mut s.ui.input;
     input.cursor_by_tab = false;
     input.targeting = mode;
-    input.cursor = (5, 5);
+    input.cursor = LEADER_CELL;
     input.range = range;
+}
+
+/// Attack's cross-hair on the last target at map (x, y): its view cell when it lies in the
+/// original's 11 × 11 window round the leader ([`RULE_HALF`] each way, spec 13 Decision 4;
+/// Original `0..=10` from `x - cx + 5`, in bytes as the original), else the leader's cell.
+fn attack_cursor(x: u16, y: u16, cx: u16, cy: u16) -> (i8, i8) {
+    let dx = (x as i8).wrapping_sub(cx as i8);
+    let dy = (y as i8).wrapping_sub(cy as i8);
+    let rule = -(RULE_HALF as i8)..=RULE_HALF as i8;
+    if rule.contains(&dx) && rule.contains(&dy) {
+        (LEADER_CELL.0 + dx, LEADER_CELL.1 + dy)
+    } else {
+        LEADER_CELL
+    }
 }
 
 /// 0x104216..0x104496: command letters to codes, with the cursor each starts. Drop's inventory
@@ -218,10 +234,7 @@ fn letter_code(s: &mut State, io: &Io, key: u16) -> (u16, bool) {
                     .location(ObjectId(target as u16))
                     .unwrap_or_default();
                 let c = s.map.centre;
-                let col = (p.x as i8).wrapping_sub(c.x as i8).wrapping_add(5);
-                let row = (p.y as i8).wrapping_sub(c.y as i8).wrapping_add(5);
-                let inside = (0..=10).contains(&col) && (0..=10).contains(&row);
-                s.ui.input.cursor = if inside { (col, row) } else { (5, 5) };
+                s.ui.input.cursor = attack_cursor(p.x, p.y, c.x, c.y);
             }
             ATTACK
         }

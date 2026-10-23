@@ -15,9 +15,10 @@ use u6_render::{FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, HEIGHT, Kind, WIDTH};
 
 use super::plane::{kind, plane, tile};
 use super::view::world;
-use super::{install, map_tile, object_tile};
+use super::{at_map, at_map16, install, map_tile, object_tile, shown, view_rect};
 use crate::Files;
 use crate::engine::{Engine, InputEvent, Io, Key};
+use crate::geom::{VIEW_H, VIEW_W};
 use crate::gfx::GfxState;
 use crate::gfx::anim::{merge_shores, set_frame};
 use crate::gfx::blit::{blit_back, blit_front, copy_window};
@@ -175,7 +176,8 @@ fn a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
         {
             let mut s = st.borrow_mut();
             merge_shores(&mut s.gfx);
-            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, 16, 16));
+            let (x, y) = at_map16(16, 16);
+            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, x, y));
             io.with_buffers(|b, f| copy_window(b, f));
         }
         io.present();
@@ -185,7 +187,9 @@ fn a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
     e.tick(&[], 16);
     let s = e.state();
     assert!(s.gfx.cache.version(SHORE) > 0 && s.gfx.records[SHORE] != original.records[SHORE]);
-    let cell = || (16..32).flat_map(|y| (16..32).map(move |x| (x, y)));
+    // The window's cell at (16, 16) from the map's corner.
+    let (x0, y0) = at_map(16, 16);
+    let cell = || (y0..y0 + 16).flat_map(move |y| (x0..x0 + 16).map(move |x| (x, y)));
     for scale in SCALES {
         let mut c = Compositor::new();
         let mut fb = e.frame().clone();
@@ -205,12 +209,12 @@ fn a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
                 Some(tile(
                     SHORE as u16,
                     ver,
-                    ((x - 16) as u16, (y - 16) as u16),
+                    ((x - x0) as u16, (y - y0) as u16),
                     0
                 ))
             );
             let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
-            let now = record_block(&s.gfx, &fb, SHORE as u16, (x - 16, y - 16), scale, classic);
+            let now = record_block(&s.gfx, &fb, SHORE as u16, (x - x0, y - y0), scale, classic);
             assert_eq!(
                 block(c.rgba(), scale, (x, y)),
                 now,
@@ -228,7 +232,7 @@ fn a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
                     &original,
                     &fb,
                     SHORE as u16,
-                    (x - 16, y - 16),
+                    (x - x0, y - y0),
                     scale,
                     classic,
                 )
@@ -281,8 +285,9 @@ fn with_a_pack_a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
         {
             let s = st.borrow();
             io.draw_back(|b| {
-                blit_back(&s.gfx, b, SHORE as u16, 16, 16);
-                blit_back(&s.gfx, b, WATER as u16, 48, 16);
+                let ((sx, sy), (wx, wy)) = (at_map16(16, 16), at_map16(48, 16));
+                blit_back(&s.gfx, b, SHORE as u16, sx, sy);
+                blit_back(&s.gfx, b, WATER as u16, wx, wy);
             });
             io.with_buffers(|b, f| copy_window(b, f));
         }
@@ -291,7 +296,8 @@ fn with_a_pack_a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
         {
             let mut s = st.borrow_mut();
             merge_shores(&mut s.gfx);
-            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, 16, 16));
+            let (x, y) = at_map16(16, 16);
+            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, x, y));
             io.with_buffers(|b, f| copy_window(b, f));
         }
         io.present();
@@ -299,7 +305,10 @@ fn with_a_pack_a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
     });
     e.enable_src_plane();
     e.tick(&[], 16);
-    let cell = |x0: usize| (16..32).flat_map(move |y| (x0..x0 + 16).map(move |x| (x, y)));
+    // The window's cells at (16, 16) and (48, 16) from the map's corner, by their left column.
+    let (shore_x, top) = at_map(16, 16);
+    let water_x = at_map(48, 16).0;
+    let cell = |x0: usize| (top..top + 16).flat_map(move |y| (x0..x0 + 16).map(move |x| (x, y)));
     // Pack image `i`'s block (u, v) at `scale` over `classic`.
     let pack_block = |i: usize, (u, v): (usize, usize), scale: Scale, classic: u32| {
         let mut words = Vec::new();
@@ -316,10 +325,10 @@ fn with_a_pack_a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
         c.set_pack(Some(pack.clone()));
         let s = e.state();
         c.compose(&fb, &mut ImageCache::new().images(&s, e.io()), scale);
-        for (i, x0) in [(0, 16), (1, 48)] {
+        for (i, x0) in [(0, shore_x), (1, water_x)] {
             for (x, y) in cell(x0) {
                 let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
-                let want = pack_block(i, (x - x0, y - 16), scale, classic);
+                let want = pack_block(i, (x - x0, y - top), scale, classic);
                 assert_eq!(
                     block(c.rgba(), scale, (x, y)),
                     want,
@@ -345,20 +354,21 @@ fn with_a_pack_a_merged_shore_record_shows_mmpx_of_its_current_bytes() {
         fresh.set_pack(Some(pack.clone()));
         for c in [&mut *c, &mut fresh] {
             c.compose(&fb, &mut ImageCache::new().images(&s, e.io()), scale);
-            for (x, y) in cell(16) {
+            for (x, y) in cell(shore_x) {
                 let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
-                let now = record_block(&s.gfx, &fb, SHORE as u16, (x - 16, y - 16), scale, classic);
+                let at = (x - shore_x, y - top);
+                let now = record_block(&s.gfx, &fb, SHORE as u16, at, scale, classic);
                 assert_eq!(
                     block(c.rgba(), scale, (x, y)),
                     now,
                     "the shore: MMPX of its bytes now"
                 );
-                let packed = pack_block(0, (x - 16, y - 16), scale, classic);
+                let packed = pack_block(0, at, scale, classic);
                 assert_ne!(block(c.rgba(), scale, (x, y)), packed, "not its pack image");
             }
-            for (x, y) in cell(48) {
+            for (x, y) in cell(water_x) {
                 let classic = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
-                let want = pack_block(1, (x - 48, y - 16), scale, classic);
+                let want = pack_block(1, (x - water_x, y - top), scale, classic);
                 assert_eq!(
                     block(c.rgba(), scale, (x, y)),
                     want,
@@ -381,7 +391,8 @@ fn a_pixel_left_while_its_record_is_rewritten_is_its_classic_colour() {
     let mut e = Engine::with_game(shore_state(), Files::default(), |st, io| async move {
         {
             let mut s = st.borrow_mut();
-            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, 16, 16));
+            let (x, y) = at_map16(16, 16);
+            io.draw_back(|b| blit_back(&s.gfx, b, SHORE as u16, x, y));
             merge_shores(&mut s.gfx);
             io.with_buffers(|b, f| copy_window(b, f));
         }
@@ -404,8 +415,9 @@ fn a_pixel_left_while_its_record_is_rewritten_is_its_classic_colour() {
             "stale",
         );
         let mut differ = 0;
-        for y in 16..32 {
-            for x in 16..32 {
+        let (x0, y0) = at_map(16, 16);
+        for y in y0..y0 + 16 {
+            for x in x0..x0 + 16 {
                 let src = fb.src_at(x, y).unwrap();
                 assert!(
                     src.kind == Kind::Tile && src.ver != s.gfx.cache.version(SHORE),
@@ -419,7 +431,7 @@ fn a_pixel_left_while_its_record_is_rewritten_is_its_classic_colour() {
                         &s.gfx,
                         &fb,
                         SHORE as u16,
-                        (x - 16, y - 16),
+                        (x - x0, y - y0),
                         scale,
                         classic,
                     ),
@@ -647,9 +659,10 @@ fn a_combat_replay_composes_the_hd_art_it_put_back() {
         }
     }
     let fill = |gfx: &GfxState, f: &mut Framebuffer, n: u16| {
-        for row in 0..11 {
-            for col in 0..11 {
-                blit_front(gfx, f, n, col * 16, row * 16);
+        for row in 0..VIEW_H {
+            for col in 0..VIEW_W {
+                let (x, y) = at_map16(col * 16, row * 16);
+                blit_front(gfx, f, n, x, y);
             }
         }
     };
@@ -691,12 +704,14 @@ fn a_combat_replay_composes_the_hd_art_it_put_back() {
             Scale::X4,
             "the replay",
         );
-        let window = (8..168).flat_map(|y| (8..168).map(move |x| (x, y)));
+        let (xs, ys) = shown();
+        let window = ys.flat_map(|y| xs.clone().map(move |x| (x, y)));
         assert!(
             reshaped(c.rgba(), &fb, Scale::X4, window) > 1000,
             "HD art in the window"
         );
-        records.push(fb.src_at(88, 88).unwrap().id);
+        let (cx, cy) = at_map(88, 88);
+        records.push(fb.src_at(cx, cy).unwrap().id);
         frames += 1;
     }
     records.dedup();
@@ -753,7 +768,10 @@ fn the_hd_switch_over_a_persistent_panel_and_a_skipped_render_is_exact() {
     e.enable_src_plane();
     let blank = Framebuffer::new();
     let panel = || (8..40).flat_map(|y| (176..240).map(move |x| (x, y)));
-    let window = || (8..168).flat_map(|y| (8..168).map(move |x| (x, y)));
+    let window = || {
+        let (xs, ys) = shown();
+        ys.flat_map(move |y| xs.clone().map(move |x| (x, y)))
+    };
     let exact = |view: &HdView, e: &Engine, scale, what: &str| {
         let fb = e.frame();
         assert!(
@@ -842,16 +860,18 @@ fn a_replay_ending_on_equal_colours_is_composed_on_its_sources_alone() {
     s.ui = crate::main_loop::test_support::test_ui();
     install(&mut s.gfx, 1, map_tile(0, 16, pattern(1)));
     let tiles = |gfx: &GfxState, f: &mut Framebuffer| {
-        for row in 0..11 {
-            for col in 0..11 {
-                blit_front(gfx, f, 1, col * 16, row * 16);
+        for row in 0..VIEW_H {
+            for col in 0..VIEW_W {
+                let (x, y) = at_map16(col * 16, row * 16);
+                blit_front(gfx, f, 1, x, y);
             }
         }
     };
     let classic = |gfx: &GfxState, f: &mut Framebuffer| {
         let rec = &gfx.records[1];
-        for y in 0..176 {
-            for x in 0..176 {
+        let (xs, ys) = view_rect();
+        for y in ys {
+            for x in xs.clone() {
                 f.set(x, y, rec.pixels[y % 16 * 16 + x % 16]);
             }
         }
@@ -905,7 +925,8 @@ fn a_replay_ending_on_equal_colours_is_composed_on_its_sources_alone() {
         "the record, the classic frame, the record again"
     );
     let fb = e.frame();
-    let window = (0..176).flat_map(|y| (0..176).map(move |x| (x, y)));
+    let (xs, ys) = view_rect();
+    let window = ys.flat_map(|y| xs.clone().map(move |x| (x, y)));
     assert!(
         reshaped(view.rgba(), fb, Scale::X4, window) > 1000,
         "HD art at the end"
