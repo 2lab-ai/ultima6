@@ -25,25 +25,33 @@ const SHAKE_INSET: i16 = 0x10;
 /// the next playback ([`crate::combat::play_effects`]), each shake after [`SHAKE_MS`].
 pub fn quake(s: &mut State, io: &Io, times: i16, amp: i16) {
     seams::present_map(s, io, 0);
-    let (x0, y0, x1, y1) = SHOWN;
-    let (w, h) = (
-        (x1 - x0) as i16 + 1 - SHAKE_INSET,
-        (y1 - y0) as i16 + 1 - SHAKE_INSET,
-    );
-    let (mx, my) = (MAP_X as i16, MAP_Y as i16);
     for _ in 0..times.max(0) {
         let (lo, hi) = ((SHAKE_INSET - amp) as u16, (amp + SHAKE_INSET) as u16);
-        let dx = mx + s.rng.range(lo, hi) as i16;
-        let dy = my + s.rng.range(lo, hi) as i16;
-        let (to_x, to_y) = (mx + SHAKE_INSET, my + SHAKE_INSET);
+        let ox = s.rng.range(lo, hi) as i16;
+        let oy = s.rng.range(lo, hi) as i16;
+        let [x0, y0, x1, y1, to_x, to_y] = shake_copy(ox, oy);
         io.with_buffers(|back, front| {
-            seams::copy_rect(back, front, dx, dy, dx + w, dy + h, to_x, to_y);
+            seams::copy_rect(back, front, x0, y0, x1, y1, to_x, to_y);
         });
         io.present();
         capture_window(s, SHAKE_MS);
     }
     seams::refresh_view(s, io);
     capture_window(s, crate::combat::present::REFRESH_MS);
+}
+
+/// The copy of one shake (0x151fe6's arguments: x0, y0, x1, y1 inclusive, then the destination)
+/// for the random offsets (`ox`, `oy`) from the view's top left ([`MAP_X`], [`MAP_Y`]): the
+/// shown map less a cell ([`SHOWN`]) from there, to one cell in from the view's top left.
+fn shake_copy(ox: i16, oy: i16) -> [i16; 6] {
+    let (x0, y0, x1, y1) = SHOWN;
+    let (w, h) = (
+        (x1 - x0) as i16 + 1 - SHAKE_INSET,
+        (y1 - y0) as i16 + 1 - SHAKE_INSET,
+    );
+    let (mx, my) = (MAP_X as i16, MAP_Y as i16);
+    let (x, y) = (mx + ox, my + oy);
+    [x, y, x + w, y + h, mx + SHAKE_INSET, my + SHAKE_INSET]
 }
 
 /// Original: 0x133a96 (ui: forget the map window's caches: every cell's tile 0xff (unknown),
@@ -148,6 +156,30 @@ mod tests {
         );
         #[cfg(not(feature = "wide"))]
         assert_eq!((whole.w, whole.h), (176, 176), "the 11 × 11 window");
+        // Each shake's copy, by the contract of 0x133a1a: in Original the 0x90-pixel window from
+        // (16 ± amp, 16 ± amp) to (0x10, 0x10); in Wide the shown map's 36 × 20 cells less the
+        // same cell of margin (16 pixels), from the same offsets past (MAP_X, MAP_Y) to one cell
+        // in from there.
+        let (w, h, to): (i16, i16, (i16, i16)) = if cfg!(feature = "wide") {
+            let (mx, my) = (crate::geom::MAP_X as i16, crate::geom::MAP_Y as i16);
+            let cells = (
+                crate::geom::VIEW_W as i16 - 1,
+                crate::geom::VIEW_H as i16 - 1,
+            );
+            (cells.0 * 16 - 16, cells.1 * 16 - 16, (mx + 16, my + 16))
+        } else {
+            (0x90, 0x90, (0x10, 0x10))
+        };
+        #[cfg(feature = "wide")]
+        assert_eq!((w, h, to), (560, 304, (336, 16)), "spec 13 Geometry");
+        for (ox, oy) in [(12, 20), (16, 16), (20, 12)] {
+            let (x, y) = (to.0 - 16 + ox, to.1 - 16 + oy);
+            assert_eq!(
+                shake_copy(ox, oy),
+                [x, y, x + w, y + h, to.0, to.1],
+                "offsets ({ox}, {oy})"
+            );
+        }
     }
 
     #[test]

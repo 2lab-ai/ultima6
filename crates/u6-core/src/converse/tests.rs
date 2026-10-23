@@ -67,8 +67,8 @@ pub(super) fn state(script: &[u8]) -> State {
         y: 100,
         z: 0,
     };
-    // The view's draw lists as `objects` sizes them (spec 13 C2: `VIEW_W` × `VIEW_H` cells, row
-    // by row of `VIEW_W`), which 0x112bf2 reads.
+    // The view's caches A4-0x15f0 / A4-0x1476 that 0x112bf2 reads, one entry per view cell
+    // (`VIEW_W` × `VIEW_H`, spec 13 Decision 1), row by row of `VIEW_W`.
     let cells = crate::geom::VIEW_W * crate::geom::VIEW_H;
     s.objects.draw.base.resize(cells, 0);
     s.objects.draw.cell.resize(cells, 0);
@@ -418,6 +418,30 @@ fn script_names_cut_at_the_first_high_byte() {
 }
 
 // ---- 0x112bf2 ---------------------------------------------------------------------------------
+
+/// 0x112bf2 reads the actor's own view cell: the leader's ([`HALF_W`], [`HALF_H`]) plus its
+/// offset. An actor 4 east and 3 north of the centre whose cell shows tile 0xff (and no list)
+/// is not on screen; with that cell cleared it is. A view cell taken as `x - cx + 5` (the
+/// original's 11 × 11 window) reads another cell in Wide and fails this.
+///
+/// [`HALF_W`]: crate::geom::HALF_W
+/// [`HALF_H`]: crate::geom::HALF_H
+#[test]
+fn on_screen_reads_the_actors_own_view_cell() {
+    use crate::geom::{HALF_H, HALF_W, VIEW_W};
+    let mut s = state(&[]);
+    s.objects.location[9] = Position {
+        x: 104,
+        y: 97,
+        z: 0,
+    };
+    let cell = (HALF_H - 3) * VIEW_W + HALF_W + 4;
+    s.objects.draw.base.iter_mut().for_each(|t| *t = 0);
+    s.objects.draw.base[cell] = 0xff;
+    assert!(!on_screen(&s, 9), "its cell shows nothing");
+    s.objects.draw.base[cell] = 0;
+    assert!(on_screen(&s, 9), "its cell cleared");
+}
 
 #[test]
 fn on_screen_needs_the_inner_window_or_a_vehicle() {
