@@ -60,9 +60,10 @@
 // and site/pkg-wide (Wide: a 912 × 336 frame, the UI's 320 × 200 at its top left and a 37 × 21
 // map beside it), and the page imports one at its engine's operation: Wide when the kept screen
 // (`u6.layout`) is `wide` or none (a new visitor), else Original. The chooser's and Settings'
-// "Screen layout" is Wide / HD 16:9 / Original 16:10; a choice across the builds keeps it and
-// loads the page again (the game starts from the kept files and its own stored save, as at any
-// load). In Wide, HD on or off, the canvas is 1920 × 1080 in the HD layout's 16:9 box: the
+// "Screen layout" is Wide / HD 16:9 / Original 16:10; a choice across the builds is noted, and
+// the chooser's OK, once it kept the chooser's other choices, keeps it and loads the page again,
+// once, after the operations admitted before (the game starts from the kept files and its own
+// stored save, as at any load). In Wide, HD on or off, the canvas is 1920 × 1080 in the HD layout's 16:9 box: the
 // engine's shown map scaled to cover it, and over it four framed windows with a title each (the
 // date line top right, the side panel under it, the message scroll bottom right, the command bar
 // bottom left), each the size of its spec 10 region; the HD frame scaled smoothly (the
@@ -271,6 +272,7 @@ let shown_map = null;
 let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
 let crashed = false; // the engine trapped: nothing calls into it again until a reload
+let leaving = false; // the page is loading again into the other build: the game steps no more
 
 // Public state for scripts and tests: data-ops = queued operations, data-state = what the page
 // does, data-saved = the last save generation stored, data-audio / data-audio-chunks = the
@@ -1397,10 +1399,15 @@ function hdScale() {
   return box.width * dpr >= 3 * 320 && box.height * dpr >= 3 * 200 ? 4 : 2;
 }
 
-// Settings' "HD on", "Screen layout" and "Font" as the choices are.
+// Settings' "HD on", "Screen layout" (the build switch chosen, while one is pending; none while
+// the page loads again into it) and "Font" as the choices are.
 function showHd() {
   hdButton.checked = hdOn;
-  for (const input of layoutChoices) input.checked = input.value === layoutChoice;
+  const screen = switchTo ?? layoutChoice;
+  for (const input of layoutChoices) {
+    input.checked = input.value === screen;
+    input.disabled = switching;
+  }
   for (const input of fontChoices) input.checked = input.value === fontChoice;
 }
 
@@ -1514,7 +1521,9 @@ const LAYOUT_WHOLE = [64, 0, 1152, 720];
 // Where a press, a release or a held move in a gap reaches the game: a pixel of the screen in
 // none of the map window, the command bar and the side panel (nor the message scroll), so the
 // click map takes it for the rest of the screen, a cancel (ui/click.rs: region 3, 0x8f, the
-// target cleared), never a walk or a command; the arrow the game draws from there is off screen.
+// target cleared), never a walk or a command; the arrow the game draws from there is off screen
+// (the 320 × 200 frame clips it). Not in Wide: there the frame goes on past x 319 and y 199, and
+// the arrow from (319, 199) reaches the map's columns at the canvas's left edge (WIDE_REST).
 const LAYOUT_REST = [319, 199];
 // The letterbox's sides (every screen but the game's).
 const LAYOUT_FILL = '#0b0b0f';
@@ -1793,7 +1802,9 @@ globalThis.__u6Layout = {
   get whole() {
     return [...(WIDE ? WIDE_WHOLE : LAYOUT_WHOLE)];
   },
-  rest: [...LAYOUT_REST],
+  get rest() {
+    return [...(WIDE ? WIDE_REST : LAYOUT_REST)];
+  },
   get size() {
     return WIDE ? [WIDE_W, WIDE_H] : [LAYOUT_W, LAYOUT_H];
   },
@@ -1802,33 +1813,64 @@ globalThis.__u6Layout = {
   },
 };
 
-// The chooser's and Settings' "Screen layout" changed: kept. Within the build this page loaded,
-// on the game on screen at once. Across the builds (spec 13 Decision 2) the page loads again,
-// once the operations queued before are done, with nothing new saved: the game starts again
-// from the kept files and the game's own stored save, which carry over (no state of the window
-// or the view is saved). With storage that does not keep it, the reload would bring back the
-// build it left, so the choice is put back and a line says why.
+// The switch to the other build (spec 13 Decision 2): the screen chosen across the builds while
+// the chooser (or Settings: the same panel) is open, the latest choice, until its OK
+// (`switchBuild`); null for none. `switching`: OK started it and the page is to load again.
+let switchTo = null;
+let switching = false;
+
+// The chooser's and Settings' "Screen layout" changed. Within the build this page loaded: kept,
+// on the game on screen at once, and a switch to the other build chosen before is called off.
+// Across the builds: only noted (`switchTo`, the latest choice), for the chooser's OK, which
+// switches after it kept the chooser's other choices (`applySetup`). While the page is loading
+// again into the other build, nothing (the choices are disabled).
 function chooseLayout(value) {
+  if (switching) return;
   const next = value === 'wide' || value === 'original' ? value : 'hd';
-  let kept = true;
+  if ((next === 'wide') !== WIDE) {
+    switchTo = next;
+    showHd();
+    return;
+  }
+  switchTo = null;
+  layoutChoice = next;
+  try {
+    localStorage.setItem(LAYOUT_KEY, layoutChoice);
+  } catch {
+    // No storage: the choice lasts until the page is left.
+  }
+  showHd();
+  applyHd();
+}
+
+// The chooser's OK with a switch to the other build noted (`switchTo`): once (`switching`), the
+// page loads again into it after every operation admitted before is done: the queue's tail is
+// awaited again until no operation came after it (a Save of the game on screen meanwhile is
+// stored first), then the choice is kept and the page loads again at once, the game stepped no
+// more (`frame`), with nothing new saved: the game starts from the kept files and its own stored
+// save, which carry over (no state of the window or the view is saved). Storage that does not
+// keep the choice would bring back the build the page left: the switch is called off, the
+// radios show the build that runs, and a line says why.
+async function switchBuild() {
+  if (switching || switchTo === null) return;
+  switching = true;
+  showHd();
+  for (let seen = null; seen !== tail;) {
+    seen = tail;
+    await seen;
+  }
+  const next = switchTo;
   try {
     localStorage.setItem(LAYOUT_KEY, next);
   } catch {
-    // No storage: the choice lasts until the page is left.
-    kept = false;
-  }
-  if ((next === 'wide') !== WIDE) {
-    if (kept) {
-      tail.then(() => location.reload());
-    } else {
-      say('layoutNotKept');
-      showHd();
-    }
+    switchTo = null;
+    switching = false;
+    showHd();
+    say('layoutNotKept');
     return;
   }
-  layoutChoice = next;
-  showHd();
-  applyHd();
+  leaving = true;
+  location.reload();
 }
 
 // --- the Wide layout (spec 13) -----------------------------------------------------------------
@@ -1875,6 +1917,12 @@ const wideWindows = WIDE ? WIDE_WINDOWS.map(({ name, title, corner, under }) => 
 // The map (Design 5): the engine's shown rect (`shown_map`) scaled to cover the canvas, centred
 // (`placeWide`, once the engine loaded).
 let wideMap = null;
+// Where a press, a release or a held move in a gap (a window's frame or title strip, a drag)
+// reaches the game in Wide (as LAYOUT_REST): the UI's top-left pixel, the rest of the screen for
+// the click map (in none of its map, command bar and side panel: a cancel, at the prompt a
+// pass), whose arrow lies in the UI's paper top left, which no window shows (the first window
+// columns and rows the arrow could reach start at x 168 and y 6, the side panel's), nor the map.
+const WIDE_REST = [0, 0];
 // Every other screen (a program other than `game`): the UI's 320 × 200 scaled to the canvas's
 // height, centred, the sides dark (as LAYOUT_WHOLE).
 const WIDE_WHOLE = [Math.round((WIDE_W - (SCREEN_W * WIDE_H) / SCREEN_H) / 2), 0,
@@ -2134,7 +2182,7 @@ function repaintWide() {
 // other screen: the UI's screen letterboxed, a point on a dark side at the nearest edge. The
 // game's: a window first (each in front of the map, the one painted last in front): in its
 // content that pixel of its classic rect; on its frame or its title strip (a gap), a move with no
-// button the nearest pixel of its content, anything else the rest of the screen (LAYOUT_REST);
+// button the nearest pixel of its content, anything else the rest of the screen (WIDE_REST);
 // elsewhere the map, at its pixel.
 function wideToGame(px, py, held) {
   const through = ([fx, fy, fw, fh], [x, y, w, h]) => [
@@ -2142,17 +2190,20 @@ function wideToGame(px, py, held) {
     clamp(fy + Math.floor(((py - y) * fh) / h), fy, fy + fh - 1)];
   if (shownView === WHOLE_VIEW) return through([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
   const win = wideWindows.findLast(({ outer }) => inRect(px, py, outer));
-  if (win && !inRect(px, py, win.to) && held) return [...LAYOUT_REST];
+  if (win && !inRect(px, py, win.to) && held) return [...WIDE_REST];
   if (win) return through(win.from, win.to);
   return through(wideMap.from, wideMap.to);
 }
 
 // The canvas pixel (the centre of what shows game pixel (gx, gy)) in the Wide layout (as
-// `layoutToCanvas`); null for a pixel that does not show: outside the windows and the map, under
-// a window in front of it, or of the map past the canvas's edges.
+// `layoutToCanvas`); null for a pixel that does not show: on every other screen outside the UI's
+// 320 × 200; in `game` outside the windows and the map, under a window in front of it, or of the
+// map past the canvas's edges.
 function wideToCanvas(gx, gy) {
   const at = ([fx, fy, fw, fh], [x, y, w, h]) => [x + ((gx - fx + 0.5) * w) / fw, y + ((gy - fy + 0.5) * h) / fh];
-  if (shownView === WHOLE_VIEW) return at([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
+  if (shownView === WHOLE_VIEW) {
+    return inRect(gx, gy, [0, 0, SCREEN_W, SCREEN_H]) ? at([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE) : null;
+  }
   const i = wideWindows.findIndex(({ from }) => inRect(gx, gy, from));
   const [region, before] = i >= 0 ? [wideWindows[i], wideWindows.slice(i + 1)] : [wideMap, wideWindows];
   if (!inRect(gx, gy, region.from)) return null;
@@ -2507,6 +2558,10 @@ function toggleHd() {
 // reported (`ran`). If any ran, the frame is converted and drawn once, when they changed it;
 // the sound, a Save to store and the reflected state once per frame.
 function frame(now) {
+  if (leaving) {
+    looping = false;
+    return;
+  }
   if (!game || crashed) {
     looping = false;
     followLine();
@@ -3094,6 +3149,8 @@ async function downloadPack(name) {
 // before): the active pack's own entry (or none checked) changes nothing; MMPX removes the active
 // pack, whatever its source; another listed pack is downloaded and loaded, the chooser open and
 // saying what the status line says until it is (it stays open with the reason when it is not).
+// Then, the chooser closed and its choices kept, a switch to the other build noted by "Screen
+// layout" (`switchBuild`).
 function applySetup() {
   const chosen = setupHd.querySelector('input:checked')?.value;
   applyVoices();
@@ -3109,6 +3166,13 @@ function applySetup() {
         keepSetup();
       } else if (await downloadPack(chosen)) {
         keepSetup();
+      }
+      // Spec 13 Decision 2: a switch to the other build chosen in the chooser, once it kept
+      // the choices above (the language, the voices, the pack): the page loads again into it
+      // (which starts the game in the language kept, so none of the restarts below).
+      if (setup.hidden && switchTo !== null) {
+        switchBuild();
+        return;
       }
       // Spec 08 K6: in 한글 the site's Korean pack, when it should be loaded, restarts the game on
       // screen for it as a drop does.
@@ -3440,7 +3504,7 @@ function sendPointer(e) {
   } else {
     const px = ((e.clientX - box.left) * canvas.width) / box.width;
     const py = ((e.clientY - box.top) * canvas.height) / box.height;
-    if (WIDE && dragWindow(e, px, py)) [x, y] = LAYOUT_REST;
+    if (WIDE && dragWindow(e, px, py)) [x, y] = WIDE_REST;
     else [x, y] = layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
   }
   sentButtons = buttons;
