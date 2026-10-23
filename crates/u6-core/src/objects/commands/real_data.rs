@@ -283,8 +283,8 @@ fn run_engine(s: State, files: &Files, keys: &[InputEvent], cmd: Command) -> (En
     (e, new)
 }
 
-/// The frame pixel at the middle of the view cell holding map tile (x, y) (C4: the map from
-/// ([`MAP_X`], [`MAP_Y`]), 16 pixels a cell).
+/// The frame pixel at the middle of the view cell holding map tile (x, y): the map drawn from
+/// the wide map's pixel origin ([`MAP_X`], [`MAP_Y`]; spec 13 Geometry), 16 pixels a cell.
 fn cell_pixel(s: &State, x: u16, y: u16) -> (i16, i16) {
     let c = s.map.centre;
     let col = x as i16 - c.x as i16 + HALF_W as i16;

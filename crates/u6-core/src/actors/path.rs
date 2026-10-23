@@ -806,6 +806,32 @@ mod tests {
         assert_eq!(s.objects.location[10].x, 300);
     }
 
+    /// An actor outside the window walks in from the edge it lies beyond as seen from the grid's
+    /// centre ([`GRID`] / 2): one 45 columns west and 40 rows south of the centre comes from the
+    /// west edge (it is further off east-west).
+    #[test]
+    fn an_actor_outside_the_window_comes_in_from_the_edge_facing_it() {
+        // The view at (104 + CENTRE, 104 + CENTRE): window origin 104 on both axes.
+        let o = 104u16;
+        let mid = (GRID / 2) as u16;
+        let lead = o + CENTRE;
+        let from = (o + mid - 45, o + mid + 40);
+        let mut s = walker(from, (lead + 1, lead + 1), 0x90);
+        s.map.centre = Position {
+            x: lead,
+            y: lead,
+            z: 0,
+        };
+        assert_eq!(window(&s), (o, o));
+        s.map.window_origin = [o, o];
+        s.objects.set_window(o, o, 0);
+        s.actors.work.slot = 0;
+        seek(&mut s, 10, Goal::At(lead + 1, lead + 1));
+        assert_eq!(s.actors.path.seek_edge, 3, "the west edge");
+        assert_eq!(s.objects.location[10].x, o, "jumped onto the west edge");
+        assert_eq!(s.actors.worktype[10], 0x83, "walking in");
+    }
+
     #[test]
     fn reverse_flips_order_and_directions() {
         let mut s = State::empty();

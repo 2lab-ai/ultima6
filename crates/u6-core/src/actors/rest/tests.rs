@@ -304,3 +304,28 @@ fn the_ambush_spot_is_outside_the_view_and_inside_the_window() {
         (-6..=4).collect::<Vec<_>>()
     );
 }
+
+/// Original only: [`ambush_spot`] is the original's formula, draw for draw: a side 0..=3, then
+/// 0..=10 along it; west (cx − 6, cy + off − 6), north (cx + off − 6, cy − 7), east (cx + 7,
+/// cy + off − 6), south (cx + off − 6, cy + 6).
+#[cfg(not(feature = "wide"))]
+#[test]
+fn the_ambush_spot_is_the_original_formula() {
+    let mut s = camp_world();
+    for seed in (1..=0xffffu16).step_by(97) {
+        s.rng = crate::rng::Rng::seeded(seed);
+        for (cx, cy) in [(20i16, 20i16), (500, 300)] {
+            let mut r = s.rng;
+            let side = r.range(0, 3);
+            let off = r.range(0, 10) as i16;
+            let old = match side {
+                0 => (cx - 6, cy + off - 6),
+                1 => (cx + off - 6, cy - 7),
+                2 => (cx + 7, cy + off - 6),
+                _ => (cx + off - 6, cy + 6),
+            };
+            assert_eq!(ambush_spot(&mut s, cx, cy), old, "seed {seed:#x}");
+            assert_eq!(s.rng, r, "seed {seed:#x}: the same draws");
+        }
+    }
+}

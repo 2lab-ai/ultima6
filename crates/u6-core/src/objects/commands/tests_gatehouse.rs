@@ -108,7 +108,8 @@ fn look_at(mut s: State, (x, y): (u16, u16)) -> (State, String) {
     let c = s.map.centre;
     let (hw, hh) = (crate::geom::HALF_W as i16, crate::geom::HALF_H as i16);
     let (col, row) = (x as i16 - c.x as i16 + hw, y as i16 - c.y as i16 + hh);
-    // The middle of its view cell on the frame (C4: the map from (MAP_X, MAP_Y)).
+    // The middle of its view cell on the frame, the map drawn from the wide map's pixel origin
+    // (MAP_X, MAP_Y; spec 13 Geometry).
     let (mx, my) = (crate::geom::MAP_X as i16, crate::geom::MAP_Y as i16);
     s.ui.input.selection = -1;
     s.ui.input.pointer = (mx + col * 16 + 8, my + row * 16 + 8);

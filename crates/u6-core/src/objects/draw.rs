@@ -239,11 +239,12 @@ pub fn add_object_tiles(s: &mut State, tile: u16, effect: u16, cx: i16, cy: i16)
 /// (status 0x02) are drawn only for party members (actor status 0x80) and then as an outline
 /// (+0x800, types below 0x1aa); actors with movement flag 0x10 are skipped; a type-0x7b actor
 /// with frame < 2 shows frame 1 when an actor stands below it. Actor effects: actor status
-/// 0x01 → +0x1000, status 0x40 → +0x1800. Two fixed doorways (0x18a at (926, 856), 0x18c at
-/// (930, 856)) add their side tiles. Then, unless A4-0x794c is set, cells whose base tile has
-/// flags1 0x04 and whose view flags (east or south neighbour) are dark lose their objects, and
-/// light levels 1..3 overlay tile 0x1bc + level. An object 0x188 coming into view resets its
-/// animation with one RNG draw.
+/// 0x01 → +0x1000, status 0x40 → +0x1800. Two fixed doorways, 0x18a at world (0x399, 0x353)
+/// and 0x18c at (0x39d, 0x353), add their side tiles (the original's constants 0x39e / 0x3a2,
+/// 0x358 are those cells plus its half view of 5). Then, unless A4-0x794c is set, cells whose
+/// base tile has flags1 0x04 and whose view flags (east or south neighbour) are dark lose their
+/// objects, and light levels 1..3 overlay tile 0x1bc + level. An object 0x188 coming into view
+/// resets its animation with one RNG draw.
 pub fn build_draw_lists(s: &mut State) {
     let d = &mut s.objects.draw;
     d.reset_nodes();
@@ -318,8 +319,9 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
             effect = 0x1800;
         }
     }
-    let cx = (o.x(c) as i16).wrapping_sub(lx) + HALF_W as i16;
-    let cy = (o.y(c) as i16).wrapping_sub(ly) + HALF_H as i16;
+    let (wx, wy) = (o.x(c) as i16, o.y(c) as i16);
+    let cx = wx.wrapping_sub(lx) + HALF_W as i16;
+    let cy = wy.wrapping_sub(ly) + HALF_H as i16;
     let z = o.z(c);
     if effect != 0 {
         add_object_tiles(s, tile, effect, cx, cy);
@@ -327,14 +329,17 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
     if !invisible {
         add_object_tiles(s, tile, 0, cx, cy);
     }
+    // The doorways' world cells. The original tests view cell + leader, its view's half of 5
+    // added to the world cell, against 0x39e / 0x3a2 and 0x358; the port tests the world cell,
+    // which stays the same in both builds.
     let doorway = match kind {
-        0x18a => Some((0x39e, [0x1ba, 0x1bb])),
-        0x18c => Some((0x3a2, [0x1b8, 0x1b9])),
+        0x18a => Some((0x399, [0x1ba, 0x1bb])),
+        0x18c => Some((0x39d, [0x1b8, 0x1b9])),
         _ => None,
     };
     if let Some((x, [right, left])) = doorway
-        && cx + lx == x
-        && cy + ly == 0x358
+        && wx == x
+        && wy == 0x353
         && z == 0
         && cy < VIEW_H as i16
     {

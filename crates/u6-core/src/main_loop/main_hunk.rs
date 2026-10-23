@@ -276,3 +276,90 @@ pub fn debug_hook() {}
 pub fn boot_hook() {
     crate::gfx::blit::empty_hook();
 }
+
+#[cfg(test)]
+mod tests {
+    use u6_formats::position::Position;
+
+    use super::*;
+
+    /// The leader at (100 + LEAD, 100 + LEAD): window origin 96 on both axes.
+    fn edge_world() -> (State, u16) {
+        let mut s = State::empty();
+        let c = 100 + geom::LEAD;
+        s.map.centre = Position { x: c, y: c, z: 0 };
+        s.actors.objlist_tail = vec![0; 0x82];
+        s.tables.tileflags.flags1 = vec![0; 2048];
+        s.tables.tileflags.flags2 = vec![0; 2048];
+        s.tables.tileflags.flags3 = vec![0; 2048];
+        s.tables.basetile.base = vec![0; 1024];
+        let o = geom::window_origin(c);
+        assert_eq!(o, 96);
+        (s, o)
+    }
+
+    /// Spec 13 Decision 6: the hazard under an actor is looked at in the whole window, the last
+    /// column ([`geom::WINDOW`] − 1 from the origin) included, and not one past it. An invisible
+    /// object whose tile has flags1 bit 3 under the actor shows itself and marks the actor hit.
+    #[test]
+    fn a_hazard_under_an_actor_counts_to_the_windows_last_column() {
+        let side = geom::WINDOW as u16;
+        for (dx, seen) in [(side - 1, true), (side, false)] {
+            let (mut s, o) = edge_world();
+            let at = (o + dx, o + 3);
+            s.objects.type_frame[10] = 0x17a;
+            s.objects.location[10] = Position {
+                x: at.0,
+                y: at.1,
+                z: 0,
+            };
+            // Status 0x10: the hit is marked, its effect not run.
+            s.actors.attrs.status[10] = 0x10;
+            crate::main_loop::test_support::link_placed_objects(&mut s);
+            s.tables.basetile.base[0x90] = 0x300;
+            s.tables.tileflags.flags1[0x300] = 0x08;
+            let hazard =
+                crate::objects::create_on_map(&mut s.objects, 0x90, 0x02, 0, at.0, at.1, 0);
+            actor_status_tick(&mut s, 10);
+            let hit = s.actors.attrs.movement_flags[10] & 0x08 != 0;
+            let shown = s.objects.obj_status[hazard as usize] & 0x02 == 0;
+            assert_eq!((hit, shown), (seen, seen), "column {dx} of the window");
+        }
+    }
+
+    /// Spec 13 Decision 6: moongates show at moonstones in the whole window, the last column
+    /// and row included, and not one past them.
+    #[test]
+    fn moongates_show_up_to_the_windows_last_column_and_row() {
+        let side = geom::WINDOW as u16;
+        let (mut s, o) = edge_world();
+        s.map.window_origin = [o, o];
+        crate::main_loop::test_support::link_placed_objects(&mut s);
+        let stones = [
+            ((o + side - 1, o + 2), true),
+            ((o + 2, o + side - 1), true),
+            ((o + side, o + 2), false),
+            ((o + 2, o + side), false),
+        ];
+        for (n, &((x, y), _)) in stones.iter().enumerate() {
+            let at = 0x2a + n * 6;
+            s.actors.objlist_tail[at..at + 6].copy_from_slice(&[
+                (x >> 8) as u8,
+                x as u8,
+                (y >> 8) as u8,
+                y as u8,
+                0,
+                0,
+            ]);
+        }
+        // The other four stones on another level.
+        for n in 4..8 {
+            s.actors.objlist_tail[0x2a + n * 6 + 5] = 1;
+        }
+        moongates(&mut s);
+        for ((x, y), up) in stones {
+            let gate = crate::objects::object_of_type_at(&s, 0x55, x, y);
+            assert_eq!(gate >= 0, up, "a moonstone at ({x}, {y})");
+        }
+    }
+}

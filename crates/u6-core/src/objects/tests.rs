@@ -543,6 +543,227 @@ fn the_view_reaches_half_w_columns_and_half_h_rows_from_the_leader() {
     }
 }
 
+/// Every non-empty view cell's tiles, in row then column order.
+fn shown(s: &State) -> Vec<((usize, usize), Vec<u16>)> {
+    (0..VIEW_H)
+        .flat_map(|row| (0..VIEW_W).map(move |col| (col, row)))
+        .map(|(col, row)| ((col, row), s.objects.draw.tiles(col, row)))
+        .filter(|(_, t)| !t.is_empty())
+        .collect()
+}
+
+/// The fixed doorway 0x18a is a world cell, (0x399, 0x353): there it gets its side tiles (east
+/// of it the first, west the second) in both builds. An object of the type anywhere else gets
+/// none, also at the cell the original's constants (0x39e, 0x358) would name if they were taken
+/// less the wide view's half.
+#[test]
+fn a_doorway_gets_its_side_tiles_at_its_world_cell_only() {
+    let at = (0x399, 0x353);
+    let wide_shift = (0x39e - HALF_W as u16, 0x358 - HALF_H as u16);
+    let door = |x: u16, y: u16| {
+        let mut s = world();
+        (s.map.centre.x, s.map.centre.y) = (at.0 + 2, at.1 + 1);
+        put(&mut s, 0x18a, x, y);
+        build_draw_lists(&mut s);
+        shown(&s)
+    };
+    let col = |x: u16| usize::from(x + HALF_W as u16 - (at.0 + 2));
+    let row = |y: u16| usize::from(y + HALF_H as u16 - (at.1 + 1));
+    let (c, r) = (col(at.0), row(at.1));
+    assert_eq!(
+        door(at.0, at.1),
+        [
+            ((c - 1, r), vec![0x1bb]),
+            ((c, r), vec![tile(0x18a, 0)]),
+            ((c + 1, r), vec![0x1ba]),
+        ],
+        "at its world cell"
+    );
+    let mut elsewhere = vec![(at.0 + 1, at.1), (at.0, at.1 - 1)];
+    if wide_shift != at {
+        elsewhere.push(wide_shift);
+    }
+    for (x, y) in elsewhere {
+        assert_eq!(
+            door(x, y),
+            [((col(x), row(y)), vec![tile(0x18a, 0)])],
+            "at ({x}, {y})"
+        );
+    }
+}
+
+/// The pool holds [`DRAW_NODES`] − 1 tiles (Original 255, Wide 2047). One object more than that,
+/// stacked over every view cell: the last one visited is not drawn, every node is in one list
+/// once, each cell keeps its objects in the order they were made, and a tile added to the full
+/// pool is refused. A rebuild after it starts from a free pool.
+#[test]
+fn a_full_draw_pool_refuses_the_next_tile_and_a_rebuild_starts_clean() {
+    let mut s = world();
+    let (lx, ly) = (s.map.centre.x, s.map.centre.y);
+    let at = |i: usize| {
+        let (col, row) = (i % DRAW_CELLS % VIEW_W, i % DRAW_CELLS / VIEW_W);
+        (
+            lx + col as u16 - HALF_W as u16,
+            ly + row as u16 - HALF_H as u16,
+        )
+    };
+    // Object i: on cell i % cells, type 0x80 + its stack level (tiles 0x200, 0x204, 0x208).
+    let level_tile = |level: usize| tile(0x80 + level as u16, 0);
+    let mut made = Vec::new();
+    for i in 0..DRAW_NODES {
+        let (x, y) = at(i);
+        made.push(put(&mut s, 0x80 + (i / DRAW_CELLS) as u16, x, y));
+    }
+    build_draw_lists(&mut s);
+    assert_eq!(drawn(&s), DRAW_NODES - 1, "the pool's nodes");
+    let d = &s.objects.draw;
+    assert_eq!(d.node_next[0], 0, "no free node left");
+    let mut seen = vec![false; DRAW_NODES];
+    for c in 0..DRAW_CELLS {
+        let mut n = d.cell[c];
+        while n != 0 {
+            let i = usize::from(n);
+            assert!(i < DRAW_NODES && !seen[i], "node {i} in one list once");
+            seen[i] = true;
+            n = d.node_next[i];
+        }
+    }
+    assert_eq!(seen.iter().filter(|&&b| b).count(), DRAW_NODES - 1);
+    for c in 0..DRAW_CELLS {
+        let (col, row) = (c % VIEW_W, c / VIEW_W);
+        let want: Vec<u16> = (0..DRAW_NODES)
+            .filter(|&i| i % DRAW_CELLS == c)
+            .map(|i| level_tile(i / DRAW_CELLS))
+            .collect();
+        let got = d.tiles(col, row);
+        let mut it = want.iter();
+        assert!(
+            got.iter().all(|t| it.any(|w| w == t)),
+            "cell ({col}, {row}): in the order made"
+        );
+    }
+    let (hx, hy) = (HALF_W as i16, HALF_H as i16);
+    let before = s.objects.draw.tiles(HALF_W, HALF_H);
+    add_tile(&mut s, tile(0x90, 0), hx, hy, 0);
+    assert_eq!(s.objects.draw.tiles(HALF_W, HALF_H), before, "refused");
+    assert_eq!(drawn(&s), DRAW_NODES - 1);
+    // One object a cell left: every cell drawn, the next free node right after them.
+    for &m in &made[DRAW_CELLS..] {
+        remove(&mut s, m);
+    }
+    build_draw_lists(&mut s);
+    assert_eq!(drawn(&s), DRAW_CELLS);
+    assert!(shown(&s).iter().all(|(_, t)| t == &[level_tile(0)]));
+    assert_eq!(usize::from(s.objects.draw.node_next[0]), DRAW_CELLS + 1);
+}
+
+/// Multi-tile objects anchored one cell past the view's east or south edge show their west and
+/// north parts in the edge cells (the draw area's extra column and row); anchored two past,
+/// nothing.
+#[test]
+fn multi_tile_objects_just_past_the_view_show_their_west_and_north_parts() {
+    // Type 20 double width, 21 double height, 22 both (tile 4 t: parts t − 1, − 2, − 3).
+    let kinds = [(20u16, 0x80u8), (21, 0x40), (22, 0xc0)];
+    let (w, h) = (VIEW_W - 1, VIEW_H - 1);
+    let (hw, hh) = (HALF_W, HALF_H);
+    // (type, cells past the east and south edges, the view cells and parts drawn there).
+    type Parts = Vec<((usize, usize), u16)>;
+    let cases: [(u16, (i16, i16), Parts); 7] = [
+        (20, (1, 0), vec![((w, hh), 1)]),
+        (21, (0, 1), vec![((hw, h), 1)]),
+        (22, (1, 0), vec![((w, hh - 1), 3), ((w, hh), 1)]),
+        (22, (0, 1), vec![((hw - 1, h), 3), ((hw, h), 2)]),
+        (22, (1, 1), vec![((w, h), 3)]),
+        (20, (2, 0), vec![]),
+        (22, (2, 2), vec![]),
+    ];
+    for (t, (px, py), want) in cases {
+        let mut s = world();
+        for (k, f) in kinds {
+            s.tables.tileflags.flags2[usize::from(tile(k, 0))] = f;
+        }
+        let (lx, ly) = (s.map.centre.x, s.map.centre.y);
+        let dx = if px > 0 { HALF_W as i16 + px } else { 0 };
+        let dy = if py > 0 { HALF_H as i16 + py } else { 0 };
+        put(&mut s, t, (lx as i16 + dx) as u16, (ly as i16 + dy) as u16);
+        build_draw_lists(&mut s);
+        let want: Vec<((usize, usize), Vec<u16>)> = want
+            .into_iter()
+            .map(|(cell, part)| (cell, vec![tile(t, 0) - part]))
+            .collect();
+        assert_eq!(shown(&s), want, "type {t} at +{px}, +{py} past the edges");
+    }
+}
+
+/// Spec 13 Decision 6: temporaries are dropped beyond half the window from the party
+/// ([`crate::geom::WINDOW`] / 2 on each side, 20 in Original): kept from − half to half − 1.
+#[test]
+fn prune_far_keeps_temporaries_within_half_the_window() {
+    let mut s = world();
+    let (x, y) = (500u16, 500u16);
+    let half = (crate::geom::WINDOW / 2) as u16;
+    let spots = [
+        ((x - half, y), true),
+        ((x + half - 1, y), true),
+        ((x, y - half), true),
+        ((x, y + half - 1), true),
+        ((x - half - 1, y), false),
+        ((x + half, y), false),
+        ((x, y - half - 1), false),
+        ((x, y + half), false),
+    ];
+    let made: Vec<Slot> = spots
+        .iter()
+        .map(|&((px, py), _)| create_on_map(&mut s.objects, 70, TEMPORARY, 0, px, py, 0))
+        .collect();
+    prune_far(&mut s, x, y, 0);
+    let left = list(&s.objects);
+    for (&m, &(at, kept)) in made.iter().zip(&spots) {
+        assert_eq!(left.contains(&m), kept, "the temporary at {at:?}");
+    }
+}
+
+/// Spec 13 Decision 5: a move marks the view dirty when it leaves or lands in the view, within
+/// [`HALF_W`] columns and [`HALF_H`] rows of the leader (Original 5, 5).
+#[test]
+fn a_move_marks_the_view_dirty_within_the_half_view() {
+    let (hw, hh) = (HALF_W as u16, HALF_H as u16);
+    let (lx, ly) = (500u16, 500u16);
+    let far = (lx + 100, ly + 100);
+    for (from, to, dirty) in [
+        (far, (lx + hw, ly + hh), true),
+        (far, (lx - hw, ly - hh), true),
+        ((lx + hw, ly), far, true),
+        (far, (lx + hw + 1, ly), false),
+        (far, (lx, ly + hh + 1), false),
+        (far, (lx - hw - 1, ly), false),
+    ] {
+        let mut s = world();
+        let o = put(&mut s, 70, from.0, from.1);
+        s.map.view_dirty = 0;
+        assert_eq!(move_to(&mut s, o, to.0, to.1, 0), o);
+        assert_eq!(s.map.view_dirty == 1, dirty, "{from:?} to {to:?}");
+    }
+}
+
+/// An object outside the window grid whose row lies inside the window's rows ([`GRID_SIDE`]
+/// of them) is linked by walking the list from its head: the list stays sorted though the
+/// grid's last object sorts after it.
+#[test]
+fn an_object_beside_the_window_sorts_before_the_grids_last_rows() {
+    let mut s = world();
+    s.objects.set_window(0, 0, 0);
+    let side = GRID_SIDE as u16;
+    put(&mut s, 70, 5, side - 5);
+    put(&mut s, 71, side + 5, side - 10);
+    assert_sorted(&s.objects);
+    let kinds: Vec<u16> = list(&s.objects)
+        .iter()
+        .map(|&c| s.objects.kind(c))
+        .collect();
+    assert_eq!(kinds, [71, 70]);
+}
+
 /// The superchunks of the loaded 2 × 2 block, which hold view cell (x, y) (every surface
 /// coordinate wraps at 1024).
 fn loaded_holds(s: &State, x: i32, y: i32) -> bool {
