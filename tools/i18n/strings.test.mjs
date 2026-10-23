@@ -145,14 +145,20 @@ async function fixture({ strings = EXPORT, bundles = BUNDLES } = {}) {
   return { dir, strings: s, bundles: b, out: join(dir, 'ko') };
 }
 
-// Nothing the tool printed names an NPC, a line, a string, a script's item or a hash.
+// The path of a preview the tool printed: its name holds the run's pid and a random part, either
+// of which may hold a fixture's item number by chance.
+const PREVIEW_PATH = /\S*first-request-[0-9]+-[0-9a-f]{12}\.json/g;
+
+// Nothing the tool printed names an NPC, a line, a string, a script's item or a hash (the item
+// numbers read past the preview's path).
 function nothingTold(printed) {
   assert.ok(!printed.includes(SENTINEL) && !printed.includes(NAME), 'no name, line or string printed');
   for (const s of STRINGS) {
     assert.ok(!printed.includes(s.hash), 'no hash printed');
     if (s.text.trim().length >= 6) assert.ok(!printed.includes(s.text.trim()), 'no string printed');
   }
-  for (const n of ITEMS) assert.ok(!new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(printed), 'no item printed');
+  const told = printed.replace(PREVIEW_PATH, '');
+  for (const n of ITEMS) assert.ok(!new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(told), 'no item printed');
   for (const h of HASHES) assert.ok(!printed.includes(h), 'no hash printed');
   assert.ok(!/[가-힣]{2}/.test(printed.replace(/한글/g, '')), 'no Korean line printed');
 }

@@ -58,6 +58,25 @@
 // (registerOf). A script the file does not list takes Pass A, `adult` and an empty profile. `--ages a,b` (with `--speakers` only) chooses the
 // scripts of those ages, a script not listed counting as adult: all of them, or with `--first N`
 // the first N of them. Without `--speakers` every request is byte for byte as before.
+// One Korean form per name over the scripts: `--names <file>` (u6.names/1, the owner's names
+// table, local: {format, names: [{en, ko}]}, read strictly (readNames): one that does not read is
+// refused with no request). A listed name occurs in an English line or table string at a word
+// boundary, case-sensitive, the longest names first and without overlap (a two-word name takes
+// its words before a one-word name could); hidden `&…&` text, runic `<…>` text, a keyword its `@`
+// marks and the escapes are not read (namesIn). A script's request (its first, a request again
+// and a --regate run's alike) then also lists `names`: the listed names the lines it sends hold,
+// each {en, ko}, in the table's order (a request whose lines hold none has no `names`); and a run
+// or table string of the script whose English holds a listed name fails the gate `names`, after
+// the other gates, when its Korean does not hold the name's Korean form (spaces as in the form, a
+// particle after it allowed), asked again once as any line that fails. A key of the script is
+// named when every word its lines highlight for it is one listed name (case-folded as the keys
+// are) whose Korean form is one word (namedOf): that form is its fixed word, as the guide's yes and
+// no words are (fixedOf; a yes or no word wins over a name): sent as known in every request of the
+// script, settled to it whatever the answer gives, never refused, and another key's word colliding
+// with it refused. With --regate it is the one keyword word the run changes: a named key whose
+// pack words are not its form alone is set to it, and the script's lines are checked with it (one
+// showing the old word fails `keywords` and is sent); the summary counts the keys so set. Without
+// `--names` every request and output is byte for byte as before.
 // The game strings go in requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS
 // characters, the object names in requests of at most LOOK_PER_REQUEST names and LOOK_CHARS
 // characters, the books in requests of at most BOOKS_PER_REQUEST books and BOOK_CHARS characters
@@ -106,7 +125,8 @@
 // its answer fails is asked again once, as in any run; a script with none to send is sent
 // nothing. A script the pack has no line of is not repaired (no keyword word would be asked for
 // it): nothing of it is sent, its lines are left English (`not-in-pack`), and the consent text and
-// the summary count it, to run without --regate. No keyword word changes: the shared keywords are
+// the summary count it, to run without --regate. No keyword word changes (with --names, but the
+// words of the keys the names file names, above): the shared keywords are
 // not asked, an answer's `keywords` are not read, the pack's aliases are written as they were and
 // the keys are not counted; so it does not go with --fresh-keywords (nor with --name, --ages or
 // --strings). A line still failing keeps the pack's line, as any merge does. The consent text says
@@ -151,7 +171,8 @@
 // kind only.
 //
 //   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N
-//        | --ages AGES [--first N]) [--speakers <speakers.json>] [--fresh-keywords] [--regate]]
+//        | --ages AGES [--first N]) [--speakers <speakers.json>] [--names <names.json>]
+//        [--fresh-keywords] [--regate]]
 //        [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS]
 //        [--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs N]
 //        [--timeout SECONDS]
@@ -238,6 +259,9 @@ export const AGES = ['child', 'youth', 'adult', 'elder'];
 export const SPEAKERS_FORMAT = 'u6.speakers/1';
 export const SPEAKER_NOTE_MAX = 400; // the characters of a speaker's note the reader takes
 const SPEAKERS_MAX = 1 << 16; // the entries of a speaker file
+export const NAMES_FORMAT = 'u6.names/1';
+export const NAME_SYLLABLES = 8; // the Hangul syllables of a name's Korean form, at most
+const NAMES_MAX = 1 << 12; // the entries of a names table
 
 // The stations whose young speak 해요체 (an apprentice, a young servant); the young of the others
 // speak a soft 하오체 (a young noble, a squire). Spec 12 Design 3.
@@ -1048,6 +1072,86 @@ export function hasLetters(en) {
   return /[A-Za-z]/.test(open.replace(/[$#^][\s\S]?/g, ''));
 }
 
+// --- the names table (one Korean form per name over the scripts) ------------------------------
+
+// `text` with what the names' occurrence rule does not read blanked, a NUL for each character
+// (so the places stay): hidden `&…&` text with its `&`s, runic `<…>` text with its brackets, each
+// `@` with the keyword it marks (the letters and digits after it, [`keywordsOf`]), and every other
+// escape with the character it takes ([`placeholders`]).
+function namesText(text) {
+  const out = text.split('');
+  const blank = (i) => { out[i] = '\0'; };
+  let hidden = false;
+  let runes = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === '&') {
+      hidden = !hidden;
+      blank(i);
+    } else if (hidden) {
+      blank(i);
+    } else if (runes) {
+      runes = c !== '>';
+      blank(i);
+    } else if (c === '<') {
+      runes = true;
+      blank(i);
+    } else if (c === '@') {
+      blank(i);
+      while (i + 1 < text.length && /[A-Za-z0-9]/.test(text[i + 1])) {
+        i += 1;
+        blank(i);
+      }
+    } else if (isEscape(c)) {
+      blank(i);
+      if (PREFIXED.includes(c) && i + 1 < text.length && !isEscape(text[i + 1])) {
+        i += 1;
+        blank(i);
+      }
+    }
+  }
+  return out.join('');
+}
+
+const wordChar = (c) => c !== undefined && /[A-Za-z0-9]/.test(c);
+
+/// The names of `names` (a names table, [`readNames`]'s) that occur in English `text`, in the
+/// table's order: a name occurs where its `en` stands at a word boundary (no ASCII letter or digit
+/// right before or after it), case-sensitive, in the text the rule reads ([`namesText`]: not in
+/// hidden or runic text, not a keyword its `@` marks, not an escape); the longest names are taken
+/// first and a place one takes is taken by no other, so a two-word name takes its words before a
+/// one-word name could.
+export function namesIn(text, names) {
+  const shown = namesText(text);
+  const taken = new Array(shown.length).fill(false);
+  const order = names.map((_, i) => i).sort((a, b) => names[b].en.length - names[a].en.length || a - b);
+  const found = new Set();
+  for (const i of order) {
+    const { en } = names[i];
+    for (let at = shown.indexOf(en); at >= 0; at = shown.indexOf(en, at + 1)) {
+      const end = at + en.length;
+      if (wordChar(shown[at - 1]) || wordChar(shown[end]) || taken.slice(at, end).some(Boolean)) continue;
+      taken.fill(true, at, end);
+      found.add(i);
+    }
+  }
+  return names.filter((_, i) => found.has(i));
+}
+
+/// The names of `names` that the English of `lines` (a request's units) hold, each once, in the
+/// table's order: the request's `names`.
+export function namesOf(lines, names) {
+  const held = new Set(lines.flatMap((u) => namesIn(u.text, names)));
+  return names.filter((x) => held.has(x));
+}
+
+/// Why `ko` does not keep the names of English `en`, or null: `names` when a name of `names` (a
+/// names table, or null for none) occurs in `en` ([`namesIn`]) and `ko` does not hold its Korean
+/// form (spaces as in the form; a particle may follow it).
+export function namesWhy(en, ko, names) {
+  return names !== null && namesIn(en, names).some((x) => !ko.includes(x.ko)) ? 'names' : null;
+}
+
 // --- the bundles -----------------------------------------------------------------------------
 
 /// The runs of `bundle` (u6.npc-bundle/1) in script order, each once: {offset, text, joins}
@@ -1182,8 +1286,11 @@ function lineOf(u) {
 /// `systemOf(style, true)`'s. With none it is K1's to K4's body, byte for byte, for the same style.
 /// With `speaker` (spec 12: a script's {age, profile} from the speaker file, [`planOf`]) the `npc`
 /// also names its `age` and its `profile` (the personality note), and its `register` is the one
-/// for that class at that age ([`registerOf`]); without it (null) the body is as before.
-export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker = null) {
+/// for that class at that age ([`registerOf`]); without it (null) the body is as before. With
+/// `names` (the owner's names table, [`readNames`]'s) the body also lists `names`, the names of
+/// the table `lines` hold ([`namesOf`]), each {en, ko}, when they hold any; without it (null), or
+/// when they hold none, the body is as before.
+export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker = null, names = null) {
   const npc = {
     name: typeof bundle.name === 'string' ? bundle.name : '',
     description: textOf(bundle.narration?.look),
@@ -1191,7 +1298,10 @@ export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker =
     ...(speaker ? { age: speaker.age, profile: speaker.profile } : {}),
     register: speaker ? registerOf(cls, speaker.age) : CLASSES[cls],
   };
-  const user = JSON.stringify(topics.length > 0 ? { npc, lines: lines.map(lineOf), topics } : { npc, lines: lines.map(lineOf) });
+  const held = names === null ? [] : namesOf(lines, names).map(({ en, ko }) => ({ en, ko }));
+  const user = JSON.stringify({
+    npc, lines: lines.map(lineOf), ...(topics.length > 0 ? { topics } : {}), ...(held.length > 0 ? { names: held } : {}),
+  });
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
@@ -1204,22 +1314,52 @@ export const YES_NO_WORDS = { y: '예', n: '아니' };
 /// takes, another than the reply's (style-ko.md).
 export const YES_NO_KEYS = { yes: '그렇소', no: '아니오' };
 
+/// The keys of a script that the names table names (--names): `shown` (a Map of key to the words
+/// its lines highlight that hit it, [`shownOf`]) and `names` (a names table, [`readNames`]'s, or
+/// null for none); a Map of key to the Korean form of its name. A key is named when every word its
+/// lines show for it is one listed name (the name's `en` case-folded as the keys are) whose Korean
+/// form is one word (no space): a key no line shows, one whose words are two names, or a listed
+/// and an unlisted word, is not named.
+export function namedOf(shown, names) {
+  const named = new Map();
+  if (names === null) return named;
+  const fold = (w) => w.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  for (const [k, words] of shown) {
+    const hit = new Set();
+    for (const w of words) {
+      const listed = names.filter((x) => fold(x.en) === w);
+      if (listed.length !== 1) {
+        hit.clear();
+        break;
+      }
+      hit.add(listed[0]);
+    }
+    const [name] = hit;
+    if (hit.size === 1 && !name.ko.includes(' ')) named.set(k, name.ko);
+  }
+  return named;
+}
+
 /// The word the guide fixes for key `k` (style-ko.md), whatever an answer gives it, with `block`
 /// the keys of its first keyword block (none for the shared keywords): for a key of [`YES_NO`]
 /// the block lists alone, the reply's yes or no, {word: its [`YES_NO_WORDS`] word, answer: yes or
-/// no}; else for the key yes or no, {word: its [`YES_NO_KEYS`] word, answer: null}; else null.
-/// The request ([`topicsOf`]) and the settle ([`aliasesOf`]'s `fixed`) both go by it.
-export function fixedOf(k, block = []) {
+/// no}; else for the key yes or no, {word: its [`YES_NO_KEYS`] word, answer: null}; else, for a
+/// key `named` (its script's named keys, [`namedOf`]: a Map of key to its name's Korean form)
+/// names, {word: that form, answer: null} (a yes or no word wins over a name); else null. The
+/// request ([`topicsOf`]) and the settle ([`aliasesOf`]'s `fixed`) both go by it.
+export function fixedOf(k, block = [], named = null) {
   if (Object.hasOwn(YES_NO, k) && block.length === 1 && block[0] === k) return { word: YES_NO_WORDS[k], answer: YES_NO[k] };
   if (Object.hasOwn(YES_NO_KEYS, k)) return { word: YES_NO_KEYS[k], answer: null };
+  if (named?.has(k)) return { word: named.get(k), answer: null };
   return null;
 }
 
 // The fixed words ([`fixedOf`]) of `keys`, each with its first block of `topics` (a script's
-// keyword blocks; none for the shared keywords): a Map of key to word.
-function fixedWordsOf(keys, topics = []) {
+// keyword blocks; none for the shared keywords) and the script's named keys (`named`): a Map of
+// key to word.
+function fixedWordsOf(keys, topics = [], named = null) {
   const first = firstBlocksOf(topics);
-  return new Map(keys.map((k) => [k, fixedOf(k, first.has(k) ? topics[first.get(k)] : [])?.word ?? null]).filter(([, w]) => w !== null));
+  return new Map(keys.map((k) => [k, fixedOf(k, first.has(k) ? topics[first.get(k)] : [], named)?.word ?? null]).filter(([, w]) => w !== null));
 }
 
 /// The `topics` of a request of `script` (slice K5b): one entry per keyword block with keys, in
@@ -1233,16 +1373,18 @@ function fixedWordsOf(keys, topics = []) {
 /// (the settle gives it the same, so the word the run gate takes is that word too): a marked key's
 /// word and its mark never disagree. Another key is named no `known` word that collides with the
 /// fixed word of a key of another first block (the settle would refuse it, or drop it from the
-/// pack): it is asked afresh, so one run cleans such a pack.
+/// pack): it is asked afresh, so one run cleans such a pack. With --names a key the names table
+/// names (`script.named`, [`namedOf`]) has its name's Korean form as its fixed word.
 export function topicsOf(script, known, only = null) {
   const first = firstBlocksOf(script.topics);
-  const fixedWords = fixedWordsOf([...first.keys()], script.topics);
+  const names = script.named ?? null;
+  const fixedWords = fixedWordsOf([...first.keys()], script.topics, names);
   const refused = (k, w) => [...fixedWords].some(([f, v]) => f !== k && first.get(f) !== first.get(k) && collide(w, v));
   return script.topics
     .map((list, i) => ({
       keys: list.filter((k) => first.get(k) === i && (only === null || only.has(k)))
         .map((k) => {
-          const fixed = fixedOf(k, list);
+          const fixed = fixedOf(k, list, names);
           const word = fixed?.word ?? known.get(k);
           const named = word !== undefined && (fixed !== null || !refused(k, word));
           return {
@@ -1396,6 +1538,30 @@ export function readSpeakers(value) {
   }
   if (twice > 0) throw refused(`${twice} entries list a script listed before`);
   return speakers;
+}
+
+/// The names table (`value`, the parsed u6.names/1 the owner keeps locally) as its list of {en,
+/// ko}, in its order. Strict: an object of exactly {format, names}, at most NAMES_MAX entries, each
+/// exactly {en, ko}: `en` words of ASCII letters and `'` (a letter among them), one space between
+/// two, `ko` words of Hangul syllables, one space between two, 1 to NAME_SYLLABLES syllables in
+/// all; no `en` twice. Anything else throws an InputError with a fixed message (a count at most).
+export function readNames(value) {
+  const refused = (why) => new InputError(`the names file is not ${NAMES_FORMAT}${why ? `: ${why}` : ''}`);
+  if (!exact(value, ['format', 'names']) || value.format !== NAMES_FORMAT || !Array.isArray(value.names)) throw refused('');
+  if (value.names.length > NAMES_MAX) throw refused(`it lists more than ${NAMES_MAX} names`);
+  const entry = (x) => exact(x, ['en', 'ko'])
+    && typeof x.en === 'string' && /^[A-Za-z']+( [A-Za-z']+)*$/.test(x.en) && /[A-Za-z]/.test(x.en)
+    && typeof x.ko === 'string' && /^[가-힣]+( [가-힣]+)*$/.test(x.ko) && x.ko.replace(/ /g, '').length <= NAME_SYLLABLES;
+  const bad = value.names.filter((x) => !entry(x)).length;
+  if (bad > 0) throw refused(`${bad} entries are not {en, ko} of its forms`);
+  const seen = new Set();
+  let twice = 0;
+  for (const x of value.names) {
+    if (seen.has(x.en)) twice += 1;
+    else seen.add(x.en);
+  }
+  if (twice > 0) throw refused(`${twice} entries list an English name listed before`);
+  return value.names.map(({ en, ko }) => ({ en, ko }));
 }
 
 /// The bundles of `value` (the parsed file) as the scripts to translate: `item` ({archive, item}),
@@ -1634,15 +1800,17 @@ function unitGate(u, ko, keyed = null) {
 
 /// The units of `script` an answer gave that pass the gates: a Map of n to text; and the n of the
 /// others, by reason. A conversation script's runs and table strings are gated with its keys and
-/// their words (`script.keyed`, slice K5b); the other texts have none.
+/// their words (`script.keyed`, slice K5b), then, with --names, with the names table
+/// (`script.names`, [`namesWhy`]); the other texts have neither.
 function checked(script, answer) {
   const good = new Map();
   const failed = new Map();
   const keyed = script.keyed ?? null;
+  const names = script.names ?? null;
   for (const u of script.units) {
     if (u.done) continue;
     const ko = answer?.lines?.get(u.n);
-    const why = ko === undefined ? 'missing' : unitGate(u, ko, keyed);
+    const why = ko === undefined ? 'missing' : unitGate(u, ko, keyed) ?? namesWhy(u.text, ko, names);
     if (why === null) good.set(u.n, ko);
     else failed.set(u.n, why);
   }
@@ -1712,7 +1880,8 @@ export const firstWord = (words) => words.find((w) => wordGate(w) === null) ?? w
 /// with the answer's `keywords`, or a failure with its `reason`): `kept`, the words that pass the
 /// alias gate ([`aliasesOf`], checked against each other and against the words the pack there,
 /// `existing`, keeps for the script's keys this answer does not replace), each key with a fixed
-/// word ([`fixedOf`], by its first block) with that word whatever the answer gave it; `refused`,
+/// word ([`fixedOf`], by its first block and, with --names, the script's named keys,
+/// `script.named`) with that word whatever the answer gave it; `refused`,
 /// the other keys' reasons; `lost`, the keys whose words the pack keeps collide with a fixed word
 /// (the merge drops them); `keyed`, its keys with the words its lines are gated with: the pack
 /// there's for the script (all of a key's words) but a lost key's, each key this answer kept a
@@ -1721,7 +1890,7 @@ export const firstWord = (words) => words.find((w) => wordGate(w) === null) ?? w
 export function settleKeys(script, r, existing = null) {
   const theirs = scriptWordsOf(existing?.aliases, script.bundle.archive, script.bundle.item);
   const kept = new Map([...theirs].filter(([k]) => script.keys.includes(k)));
-  const { words, failed, lost } = r?.ok ? aliasesOf(script.keys, r.keywords, script.compatible, kept, fixedWordsOf(script.keys, script.topics))
+  const { words, failed, lost } = r?.ok ? aliasesOf(script.keys, r.keywords, script.compatible, kept, fixedWordsOf(script.keys, script.topics, script.named ?? null))
     : { words: new Map(), failed: new Map(script.keys.map((k) => [k, r?.reason ?? 'not-sent'])), lost: new Set() };
   script.kept = words;
   script.refused = failed;
@@ -1730,21 +1899,31 @@ export function settleKeys(script, r, existing = null) {
 }
 
 /// The repair mode (`--regate`): each line and table string of `scripts` (planOf's) that the pack
-/// read from <out> (`existing`, readPack's) already has, checked by the gate a new answer meets,
-/// its script's keys with the words the pack keeps for them (`keyed`, all of a key's words, as
+/// read from <out> (`existing`, readPack's) already has, checked by the gate a new answer meets
+/// (the names gate after the others with --names, the script's `names`, [`namesWhy`]), its
+/// script's keys with the words the pack keeps for them (`keyed`, all of a key's words, as
 /// [`settleKeys`] leaves them where no key is settled; a request again names each key's word as
 /// known). One that passes is kept as the pack has it (`had`, done: the pack's line stays, and
 /// it is not this run's) and is not sent; the others and the ones the pack lacks are left to send;
 /// one an op reads from inside (`inner`) stays English, unasked. A script the pack has no line of
 /// is not repaired (its request would ask no keyword word, so its keyword lines could not land):
 /// none of it is sent, its lines left English (`not-in-pack`), and it is counted (`unpacked`).
-/// Returns the counts: `kept`, `failing` (by reason), `lacking`, `sent` (the units left to send)
-/// and `unpacked`.
+/// With --names (the scripts' `named`, [`namedOf`]) it is the one place a --regate run changes a
+/// keyword word: a key the names table names (and no yes or no word fixes) whose words in the pack
+/// are not its name's Korean form alone is set to that form (`set`, a Map of key to form, which the
+/// merge writes), and the script's lines are gated with the words so changed, so a line that
+/// shows the old word fails (`keywords`) and is sent; a named key whose form collides with a word
+/// the pack keeps for a key of another first block (or one set before it) stays as the pack has
+/// it and is no named key of the script (`clashing`): every other alias stays as the pack has it.
+/// Returns the counts: `kept`, `failing` (by reason), `lacking`, `sent` (the units left to send),
+/// `unpacked` and, with --names, `named` ({set, clashing}: keys).
 export function regateOf(scripts, existing) {
-  const counts = { kept: 0, failing: {}, lacking: 0, sent: [], unpacked: 0 };
+  const withNames = scripts.some((s) => s.named !== undefined);
+  const counts = { kept: 0, failing: {}, lacking: 0, sent: [], unpacked: 0, ...(withNames ? { named: { set: 0, clashing: 0 } } : {}) };
   for (const s of scripts) {
     const { archive, item } = s.bundle;
     s.keyed = { keys: s.keys, words: scriptWordsOf(existing?.aliases, archive, item) };
+    s.set = new Map();
     const textsOf = (list) => new Map((list ?? []).filter((r) => r.archive === archive && r.item === item).map((r) => [r.offset, r.text]));
     const had = { run: textsOf(existing?.converse), table: textsOf(existing?.tables) };
     if (had.run.size + had.table.size === 0) {
@@ -1752,10 +1931,23 @@ export function regateOf(scripts, existing) {
       for (const u of s.units) if (!u.done) Object.assign(u, { done: true, why: 'not-in-pack' });
       continue;
     }
+    const first = firstBlocksOf(s.topics);
+    for (const [k, form] of [...(s.named ?? [])]) {
+      if (fixedOf(k, s.topics[first.get(k)] ?? []) !== null) continue;
+      const words = s.keyed.words;
+      if ([...words].some(([j, ws]) => j !== k && s.keys.includes(j) && first.get(j) !== first.get(k) && ws.some((w) => collide(w, form)))) {
+        s.named.delete(k);
+        counts.named.clashing += 1;
+      } else if (words.get(k)?.length !== 1 || words.get(k)[0] !== form) {
+        words.set(k, [form]);
+        s.set.set(k, form);
+        counts.named.set += 1;
+      }
+    }
     for (const u of s.units) {
       if (u.done) continue;
       const ko = had[u.kind].get(u.offset);
-      const why = ko === undefined ? null : unitGate(u, ko, s.keyed);
+      const why = ko === undefined ? null : unitGate(u, ko, s.keyed) ?? namesWhy(u.text, ko, s.names ?? null);
       if (ko !== undefined && why === null) {
         Object.assign(u, { done: true, had: true });
         counts.kept += 1;
@@ -1787,8 +1979,15 @@ export function regateSummary(counts) {
   const sum = (byReason) => Object.values(byReason).reduce((n, x) => n + x, 0);
   return `Regate: ${counts.kept} lines and table strings kept as the pack had them, ${counts.sent.length} sent `
     + `(${sum(counts.failing)} that failed the checks${reasonsOf(counts.failing)}, ${counts.lacking} the pack lacked), `
-    + `${sum(still)} still failing${reasonsOf(still)}${unpackedOf(counts)}.`;
+    + `${sum(still)} still failing${reasonsOf(still)}${namedKeysOf(counts)}${unpackedOf(counts)}.`;
 }
+
+// `N set to their name's Korean form (M left …)` of [`regateOf`]'s counts with --names.
+const namedSetOf = (counts) => `${counts.named.set} set to their name's Korean form`
+  + `${counts.named.clashing > 0 ? ` (${counts.named.clashing} left as the pack has them: the form collides with another key's word)` : ''}`;
+
+// `; keys the names file names: …` of [`regateOf`]'s counts, with --names only; '' without.
+const namedKeysOf = (counts) => (counts.named ? `; keys the names file names: ${namedSetOf(counts)}` : '');
 
 // `; N scripts the pack has no line of: …` of [`regateOf`]'s counts, or '' for none.
 const unpackedOf = (counts) => (counts.unpacked > 0
@@ -1882,7 +2081,11 @@ export function outputsOf(plan, model, existing = null) {
   const keyUnits = [];
   const fresh = [];
   const lostKeys = new Set();
-  // A --regate run asks no key: its words stay the pack's, and no key of it is counted.
+  // A --regate run asks no key: its words stay the pack's but those of the keys the names file
+  // names that it set to their name's form (regateOf's `set`), and no key of it is counted.
+  if (plan.regate) {
+    for (const s of plan.scripts) for (const [k, w] of s.set ?? []) fresh.push({ archive: s.bundle.archive, item: s.bundle.item, keyword: k, words: [w] });
+  }
   for (const s of plan.regate ? [] : plan.scripts) {
     for (const k of s.keys ?? []) {
       const unit = { archive: s.bundle.archive, item: s.bundle.item, script: s.bundle.hash, k };
@@ -2003,14 +2206,14 @@ export function outputsOf(plan, model, existing = null) {
 }
 
 const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N | --ages AGES [--first N]) '
-  + '[--speakers <speakers.json>] [--fresh-keywords] [--regate]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
+  + '[--speakers <speakers.json>] [--names <names.json>] [--fresh-keywords] [--regate]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
   + `[--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
 
 /// The options of `argv`, or {error}.
 export function parseArgs(argv) {
   const o = { send: false, dryRun: false, model: DEFAULTS.model, llmux: DEFAULTS.llmux, out: DEFAULTS.out,
     jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, strings: null, item: null, first: null,
-    name: null, cls: null, only: null, speakers: null, ages: null, freshKeywords: false, regate: false, help: false };
+    name: null, cls: null, only: null, speakers: null, ages: null, names: null, freshKeywords: false, regate: false, help: false };
   const value = (i) => (i + 1 < argv.length ? argv[i + 1] : null);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -2020,7 +2223,7 @@ export function parseArgs(argv) {
     else if (a === '--regate') o.regate = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--item', '--first', '--class', '--name', '--strings', '--only',
-      '--speakers', '--ages'].includes(a)) {
+      '--speakers', '--ages', '--names'].includes(a)) {
       const v = value(i);
       if (v === null) return { error: `${a} needs a value` };
       i += 1;
@@ -2036,6 +2239,7 @@ export function parseArgs(argv) {
       else if (a === '--only') o.only = v.split(',');
       else if (a === '--speakers') o.speakers = resolve(v);
       else if (a === '--ages') o.ages = v.split(',');
+      else if (a === '--names') o.names = resolve(v);
       else {
         const m = /^([ab]):([0-9]{1,5})$/.exec(v);
         if (!m) return { error: '--item is <archive>:<item>, the archive a or b' };
@@ -2050,6 +2254,7 @@ export function parseArgs(argv) {
   // Spec 12: --ages chooses by the speaker file's ages, alone or with --first N.
   if (o.ages !== null && o.speakers === null) return { error: '--ages chooses by the ages of a --speakers file: name one' };
   if (o.speakers !== null && o.bundles === null) return { error: '--speakers and --ages go with a bundles file' };
+  if (o.names !== null && o.bundles === null) return { error: '--names goes with a bundles file' };
   if (o.freshKeywords && o.bundles === null) return { error: '--fresh-keywords goes with a bundles file' };
   // The repair mode checks again the lines a pack has of the scripts chosen, and keeps its words.
   if (o.regate && o.freshKeywords) return { error: '--regate keeps the keyword words of the pack there: it does not go with --fresh-keywords' };
@@ -2148,6 +2353,8 @@ export async function main(argv, {
       // Spec 12: the speaker file, read strictly before the bundles (one that does not read is
       // refused here, before any request).
       const speakers = o.speakers === null ? null : readSpeakers((await readJson(o.speakers, 'speakers')).value);
+      // The names table, read strictly before the bundles too.
+      const names = o.names === null ? null : readNames((await readJson(o.names, 'names')).value);
       const { value, size } = await readJson(o.bundles, 'bundles');
       Object.assign(plan, planOf(value, { item: o.item, first: o.first, name: o.name, cls: o.cls, speakers, ages: o.ages }));
       const units = plan.scripts.reduce((n, s) => n + s.units.filter((u) => u.kind === 'run').length, 0);
@@ -2161,6 +2368,15 @@ export async function main(argv, {
         say(`Speakers: ${speakers.size} scripts listed in ${o.speakers}${o.ages ? `; chosen by age (${o.ages.join(', ')})` : ''}; `
           + `of the ${plan.scripts.length} chosen, ${listed} listed (the others by Pass A, as adults); `
           + `${AGES.map((a) => `${a} ${ages[a].chosen}`).join(', ')}.`);
+      }
+      if (names !== null) {
+        // Each script's requests list the names their lines hold, and its lines are gated with them;
+        // a key the table names takes its name's Korean form as a fixed word.
+        for (const s of plan.scripts) Object.assign(s, { names, named: namedOf(s.shown, names) });
+        const naming = plan.scripts.reduce((n, s) => n + s.units.filter((u) => !u.done && namesIn(u.text, names).length > 0).length, 0);
+        const keys = plan.scripts.reduce((n, s) => n + s.named.size, 0);
+        say(`Names: ${names.length} names listed in ${o.names}; ${naming} lines and table strings of the chosen scripts name one; `
+          + `${keys} of their keys are named, each taking its name's Korean form.`);
       }
     }
     if (o.strings !== null) {
@@ -2206,7 +2422,7 @@ export async function main(argv, {
     }
     const topics = again ? topicsOf(g, new Map([...g.keyed.words].map(([k, ws]) => [k, firstWord(ws)])), new Set(g.keyed.words.keys()))
       : topicsOf(g, new Map([...known, ...(g.own ?? [])]));
-    return { script: g, body: bodyOf(o.model, topics.length > 0 ? keyedSystem : system, g.bundle, g.cls, units, topics, g.speaker) };
+    return { script: g, body: bodyOf(o.model, topics.length > 0 ? keyedSystem : system, g.bundle, g.cls, units, topics, g.speaker, g.names ?? null) };
   };
   const groups = [...plan.scripts, ...(plan.strings?.batches ?? []), ...(plan.texts?.batches ?? []), ...(plan.program?.batches ?? [])];
   const jobsOf = () => [
@@ -2284,7 +2500,8 @@ export async function main(argv, {
       plan.glossary = glossaryOf(plan.scripts, settledOf(plan.scripts));
     }
     const jobs = jobsOf();
-    if (plan.regate && jobs.length === 0) {
+    // A --regate --names run that sets a key's word writes it even with no line to send.
+    if (plan.regate && jobs.length === 0 && !(plan.regate.named?.set > 0)) {
       say(regateSummary(plan.regate));
       say('Nothing to send: every line the pack has of the chosen scripts passes the checks, and it lacks none of a script it has '
         + 'lines of; nothing was sent.');
@@ -2292,8 +2509,9 @@ export async function main(argv, {
     }
     const parts = new Set(jobs.map((j) => j.script.kind));
     const npcSaid = plan.speakers ? 'its NPC\'s name, description, age and personality note' : 'its NPC\'s name and description';
-    const scriptSaid = plan.regate ? `the lines of one script that fail the checks or that the pack lacks, with ${npcSaid} and the words `
-      + 'the pack keeps for its keys' : `one script's lines (and its keywords) with ${npcSaid}`;
+    const namesSaid = o.names !== null ? ', the names of the names file its lines hold (each with its Korean form)' : '';
+    const scriptSaid = plan.regate ? `the lines of one script that fail the checks or that the pack lacks, with ${npcSaid}${namesSaid} and the words `
+      + 'the pack keeps for its keys' : `one script's lines (and its keywords) with ${npcSaid}${namesSaid}`;
     const what = [plan.scripts.length > 0 ? scriptSaid : null,
       parts.has('glossary') ? `the keywords at least ${GLOSSARY_SCRIPTS} of the scripts share (up to ${GLOSSARY_KEYS}, each with up to `
         + `${GLOSSARY_SHOWN} of the words their lines highlight)` : null,
@@ -2308,7 +2526,11 @@ export async function main(argv, {
       say(`Regate (--regate): of the chosen scripts' lines and table strings the pack has, ${r.kept} pass the checks and are kept `
         + `as they are, not sent, and ${failing} fail them${reasonsOf(r.failing)}; those and the ${r.lacking} the pack lacks are sent, a `
         + `script's in one request of those lines, naming the words the pack keeps for its keys as known; no keyword word changes`
-        + `${unpackedOf(r)}.`);
+        + `${r.named ? ` but for the keys the names file names: ${namedSetOf(r)}, their lines checked with it` : ''}${unpackedOf(r)}.`);
+    }
+    if (o.names !== null) {
+      say('Names (--names): a line or table string whose English holds a name of the names file is checked to hold that name\'s '
+        + 'Korean form too (a particle after it allowed); one that does not fails the checks (names).');
     }
     if (o.freshKeywords) {
       say('Keywords afresh (--fresh-keywords): no word of the pack there is sent as known in a script\'s first request (a line '
@@ -2325,24 +2547,33 @@ export async function main(argv, {
 // From the preview to the last file, with `o.out`'s lock held (tools/speech/profile.mjs's order):
 // the preview of this run (a name of its own), the owner's go, the requests, the gates, the
 // files. `known`: the words the shared keywords' answer settles for the keys (it adds to it), each
-// script's own words (`own`) going before them in its request.
+// script's own words (`own`) going before them in its request. With no request (a --regate --names
+// run that sets keys but has no line to send) there is no preview: nothing of the game's text
+// leaves, and the files are written as after requests, with --send only (not by a dry run, nor
+// without --send, which then says so).
 async function consentAndSend(o, plan, jobs, jobOf, existing, known, route, { transport, stdin, stdout, isTTY, signals, now, say }) {
-  const previewDir = join(o.out, 'preview');
-  const preview = join(previewDir, `first-request-${process.pid}-${randomBytes(6).toString('hex')}.json`);
-  try {
-    await privateDir(previewDir, 'preview directory');
-    const bytes = await writePrivate(preview, jobs[0].body);
-    say(`The exact first request: ${preview} (${bytes} bytes).`);
-  } catch (err) {
-    if (err instanceof NotOwnDir) say(`translate: ${err.message}: nothing was sent.`);
-    else say(`translate: the preview cannot be written (${err?.code ?? err?.name ?? 'Error'}): nothing was sent.`);
-    return 2;
+  if (jobs.length > 0) {
+    const previewDir = join(o.out, 'preview');
+    const preview = join(previewDir, `first-request-${process.pid}-${randomBytes(6).toString('hex')}.json`);
+    try {
+      await privateDir(previewDir, 'preview directory');
+      const bytes = await writePrivate(preview, jobs[0].body);
+      say(`The exact first request: ${preview} (${bytes} bytes).`);
+    } catch (err) {
+      if (err instanceof NotOwnDir) say(`translate: ${err.message}: nothing was sent.`);
+      else say(`translate: the preview cannot be written (${err?.code ?? err?.name ?? 'Error'}): nothing was sent.`);
+      return 2;
+    }
   }
   if (o.dryRun) {
     say('Dry run: nothing was sent.');
     return 0;
   }
   if (!o.send) {
+    if (jobs.length === 0) {
+      say('Nothing was written: no request is needed, but the keys set change the pack; add --send to write them.');
+      return 1;
+    }
     if (!isTTY) {
       say('Nothing was sent: there is no terminal to ask on; add --send to send.');
       return 1;
