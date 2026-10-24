@@ -37,6 +37,12 @@ const LOOK: u16 = 0x84;
 const MSG_LOCKED: u32 = 0x104fe6;
 const FMT_PROMPT: u32 = 0x104ff4;
 
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings 0x10619c passes to `printf` as its
+/// format, for the locale layer's catalogue ([`crate::locale::strings`]): the locked chest's
+/// line and the prompt after it. The prompt holds no word of its own: the catalogue leaves it
+/// out (it stays as it is).
+pub(crate) const PRINTED: &[u32] = &[MSG_LOCKED, FMT_PROMPT];
+
 /// Original: 0x10658e (ui: the code of a click, by the first region A4-0x79c2 that holds the
 /// pointer: 0 the map window, 1 the command bar, 2 the side panel, 3 the rest of the screen;
 /// 0 = nothing). In Wide region 0 is the shown map beside the UI ([`super::pointer::region`]),

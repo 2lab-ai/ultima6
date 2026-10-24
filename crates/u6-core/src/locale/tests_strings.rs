@@ -1185,3 +1185,308 @@ fn a_line_said_after_a_held_newline_shows_and_holds_as_the_old_drain_did() {
         assert_eq!(now, (screen.to_string(), held.to_vec()), "{case}");
     }
 }
+
+/// The inventory's sites, the test's own copies of the addresses (pinned to their lists in the
+/// test): Ready's (0x112052) line, a torch's line, the name line, the three refusals, the
+/// prompt, the line format, the newline and Unready's (0x1123d6) line; the burned-out torch's
+/// line; the locked chest's line and the prompt of the click (0x10619c, `ui::click`).
+const NAME_LINE: u32 = 0x0011_0baa;
+const READY: u32 = 0x0011_0c14;
+const TORCH_LINE: u32 = 0x0011_0c1c;
+const CANT: u32 = 0x0011_0c24;
+const HEAVY: u32 = 0x0011_0c38;
+const NO_PLACE: u32 = 0x0011_0c46;
+const PROMPT: u32 = 0x0011_0c5a;
+const LINE: u32 = 0x0011_0c62;
+const NEWLINE: u32 = 0x0011_0c68;
+const UNREADY: u32 = 0x0011_0c6a;
+const BURNED_OUT: u32 = crate::image::A4 - 0x756f;
+const LOCKED: u32 = 0x0010_4fe6;
+const CLICK_PROMPT: u32 = 0x0010_4ff4;
+/// The pointer of the amulet's line Unready shows through `%s` (A4-0x6c3c, entry 12 of the
+/// shared messages' table), and where the synthetic `game` keeps the line (no catalogued site).
+const AMULET_POINTER: u32 = crate::image::A4 - 0x6c3c;
+const AMULET_TEXT: u32 = crate::image::IMAGE_BASE + 0x200;
+
+/// The synthetic text at each inventory site and the amulet's line (the test's own; each fits
+/// before the next site with its NUL: the newline's site lies 2 bytes before Unready's): a line
+/// at each site that prints one, but four formats of no word of their own (the name line, the
+/// two prompts, the line format) and the newline.
+fn inventory_texts() -> SiteLines {
+    vec![
+        (NAME_LINE, b"%s\n".to_vec()),
+        (READY, b"Zr1 ".to_vec()),
+        (TORCH_LINE, b"Zt1\n".to_vec()),
+        (CANT, b"Zc1\n".to_vec()),
+        (HEAVY, b"Zh1\n".to_vec()),
+        (NO_PLACE, b"Zp1\n".to_vec()),
+        (PROMPT, b"\n=%s\n".to_vec()),
+        (LINE, b"%s\n".to_vec()),
+        (NEWLINE, b"\n".to_vec()),
+        (UNREADY, b"Zu1 %s\n".to_vec()),
+        (BURNED_OUT, b"Zb1\n".to_vec()),
+        (LOCKED, b"Zl1\n".to_vec()),
+        (CLICK_PROMPT, b"\n=%s\n".to_vec()),
+        (AMULET_TEXT, b"Za1".to_vec()),
+    ]
+}
+
+/// A synthetic `game` (one CODE hunk from the image base) holding [`inventory_texts`], each
+/// NUL-ended at its site, and the amulet's pointer (absolute: no RELOC32) to its line.
+fn inventory_game() -> Vec<u8> {
+    let mut lines = inventory_texts();
+    lines.push((AMULET_POINTER, AMULET_TEXT.to_be_bytes().to_vec()));
+    game_of(&lines)
+}
+
+#[test]
+fn the_inventorys_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
+    // The lists in full, as the test's own literals (a constant dropped, added twice or moved
+    // fails here).
+    let sorted = |list: &[u32]| {
+        let mut v = list.to_vec();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        sorted(crate::inventory::PRINTED),
+        sorted(&[
+            READY, TORCH_LINE, NAME_LINE, CANT, HEAVY, NO_PLACE, PROMPT, LINE, NEWLINE, UNREADY,
+            BURNED_OUT,
+        ]),
+        "Ready's and Unready's list"
+    );
+    assert_eq!(
+        crate::ui::click::PRINTED,
+        [LOCKED, CLICK_PROMPT],
+        "the click's list"
+    );
+    assert_eq!(
+        crate::inventory::LABELS,
+        [AMULET_POINTER],
+        "Unready's label"
+    );
+    let cat = Catalogue::from_game(&inventory_game());
+    for (at, text) in inventory_texts() {
+        let want = match at {
+            NAME_LINE | PROMPT | LINE | NEWLINE | CLICK_PROMPT => None,
+            UNREADY => Some(Kind::Format),
+            AMULET_TEXT => Some(Kind::Label),
+            _ => Some(Kind::Message),
+        };
+        assert_eq!(cat.of(&text).map(|e| e.kind), want, "the string at {at:#x}");
+    }
+    assert_eq!(
+        cat.len(),
+        9,
+        "seven lines, Unready's format and the amulet's label"
+    );
+}
+
+/// Object types of [`holding`]'s world (tile = 4 × type): one that readies nowhere, two helms
+/// (slot 0; the first too heavy for the actor), the torch and the amulet of Unready's checks.
+const NO_SLOT: u16 = 0x30;
+const HEAVY_HELM: u16 = 0x80;
+const HELM: u16 = 0x81;
+const TORCH: u16 = 0x5a;
+const AMULET: u16 = 0x4c;
+
+/// Party member `Zm` (actor 1, strength 20) holding an object of type and frame `tf` placed by
+/// `status` (in its inventory or readied), selected in the inventory panel of member 0: tiles
+/// 4 × type + frame, [`HEAVY_HELM`] weighing 0xff, no look table (every object is named `zo`,
+/// the nothing word).
+fn holding(tf: u16, status: u8) -> State {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    s.tables.basetile.base = (0..1024).map(|t| t * 4).collect();
+    s.tables.tileflags.weight = vec![0; 1024];
+    s.tables.tileflags.weight[usize::from(HEAVY_HELM)] = 0xff;
+    s.objects.defs.nothing_lower = "zo".into();
+    crate::objects::init_slots(&mut s.objects);
+    crate::objects::link_actors(&mut s.objects);
+    let p = &mut s.actors.party;
+    p.size = 1;
+    p.members[0] = 1;
+    p.names = vec!["Zm".into()];
+    s.actors.attrs.strength[1] = 20;
+    s.actors.attrs.status[1] = 0x80;
+    s.objects.type_frame[1] = 0x178;
+    let obj = crate::objects::create_in(&mut s, tf, status, 1, 1);
+    assert!(obj > 0, "a slot for the object");
+    s.ui.input.selection = obj;
+    s
+}
+
+/// A pack of a form for each line Ready and Unready print and the amulet's (the test's own).
+fn inventory_ko() -> Pack {
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings([
+            string("Zr1 ", "가 "),
+            string("Zt1\n", "나\n"),
+            string("Zc1\n", "다\n"),
+            string("Zh1\n", "라\n"),
+            string("Zp1\n", "마\n"),
+            string("Zu1 %s\n", "바 %s\n"),
+            string("Zb1\n", "사\n"),
+            string("Za1", "아"),
+        ])
+        .unwrap()
+}
+
+/// Ready (or, `unready`, Unready) of the selected object of `s` in an engine over
+/// [`inventory_game`], with `pack` installed over its catalogue (or no pack): the scroll's text
+/// and the counts.
+fn inventory_command(mut s: State, pack: Option<Pack>, unready: bool) -> (String, [u32; 2]) {
+    let game = inventory_game();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    if let Some(p) = pack {
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            None,
+            Catalogue::from_game(&game),
+        )
+        .expect("the pack checks");
+    }
+    let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
+        if unready {
+            crate::inventory::unready(&st, &io).await;
+        } else {
+            crate::inventory::ready(&st, &io).await;
+        }
+    });
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    (scroll(&s).trim_end().to_string(), s.locale.texts.get())
+}
+
+/// One case of Ready or Unready: its name, the object's type and frame and its place, whether
+/// Unready runs, what else the actor's equipment holds, then the scroll with the pack and the
+/// strings it found there, and the scroll without a pack.
+type InventoryCase<'a> = (
+    &'a str,
+    u16,
+    u8,
+    bool,
+    fn(&mut State),
+    &'a str,
+    u32,
+    &'a str,
+);
+
+#[test]
+fn ready_and_unready_print_the_packs_forms_in_order_and_without_a_pack_the_english() {
+    use crate::objects::{IN_INVENTORY, READIED};
+    let nothing: fn(&mut State) = |_| {};
+    let worn: fn(&mut State) = |s| {
+        let obj = s.ui.input.selection;
+        s.inventory.set_equip(0, obj);
+    };
+    let helm_worn: fn(&mut State) = |s| {
+        let other = crate::objects::create_in(s, HELM, READIED, 1, 1);
+        s.inventory.set_equip(0, other);
+    };
+    let cases: [InventoryCase; 7] = [
+        // Ready refused: the Ready line, the name line (no word: as it is), the refusal, then
+        // the prompt (no word); the pack's forms in that order, each looked up and found.
+        (
+            "no slot",
+            NO_SLOT,
+            IN_INVENTORY,
+            false,
+            nothing,
+            "가 zo\n다\n\n=Zm",
+            2,
+            "Zr1 zo\nZc1\n\n=Zm",
+        ),
+        (
+            "too heavy",
+            HEAVY_HELM,
+            IN_INVENTORY,
+            false,
+            nothing,
+            "가 zo\n라\n\n=Zm",
+            2,
+            "Zr1 zo\nZh1\n\n=Zm",
+        ),
+        (
+            "the slot taken",
+            HELM,
+            IN_INVENTORY,
+            false,
+            helm_worn,
+            "가 zo\n마\n\n=Zm",
+            2,
+            "Zr1 zo\nZp1\n\n=Zm",
+        ),
+        // A torch prints its own line in place of the name.
+        (
+            "a torch",
+            TORCH,
+            IN_INVENTORY,
+            false,
+            nothing,
+            "가 나\n다\n\n=Zm",
+            3,
+            "Zr1 Zt1\nZc1\n\n=Zm",
+        ),
+        // Unready: its line with the name, then the prompt.
+        (
+            "unready",
+            HELM,
+            READIED,
+            true,
+            worn,
+            "바 zo\n\n=Zm",
+            1,
+            "Zu1 zo\n\n=Zm",
+        ),
+        // The amulet stays: its line, a label read for display, through the line format.
+        (
+            "the amulet",
+            AMULET,
+            READIED,
+            true,
+            worn,
+            "바 zo\n아\n\n=Zm",
+            2,
+            "Zu1 zo\nZa1\n\n=Zm",
+        ),
+        // A lit torch burns out: a newline, then its line.
+        (
+            "a lit torch",
+            TORCH | (1 << 10),
+            READIED,
+            true,
+            worn,
+            "바 zo\n\n사\n\n=Zm",
+            2,
+            "Zu1 zo\n\nZb1\n\n=Zm",
+        ),
+    ];
+    for (case, tf, status, unready, setup, ko, found, en) in cases {
+        let world = || {
+            let mut s = holding(tf, status);
+            setup(&mut s);
+            s
+        };
+        assert_eq!(
+            inventory_command(world(), Some(inventory_ko()), unready),
+            (ko.to_string(), [found, 0]),
+            "{case}: the pack's forms"
+        );
+        assert_eq!(
+            inventory_command(world(), None, unready),
+            (en.to_string(), [0, 0]),
+            "{case}: the English"
+        );
+    }
+}

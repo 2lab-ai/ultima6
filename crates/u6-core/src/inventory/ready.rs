@@ -31,6 +31,31 @@ const PTR_AMULET: u32 = 0x6c3c;
 /// Original: A4-0x756f (the line that a torch burned out)
 const STR_BURNED_OUT: u32 = 0x756f;
 
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings Ready and Unready pass to `printf` as
+/// its format ([`say`], and the burned-out torch's line), for the locale layer's catalogue
+/// ([`crate::locale::strings`]): the Ready line, a torch's, the three refusals, the Unready line
+/// and the burned-out line (the clock's too, [`crate::actors::clock::PRINTED`]; the catalogue
+/// keeps it once). The name line, the prompt, the line format and the newline hold no word of
+/// their own: the catalogue leaves them out (they stay as they are).
+pub(crate) const PRINTED: &[u32] = &[
+    STR_READY,
+    STR_TORCH,
+    STR_NAME_LINE,
+    STR_CANT,
+    STR_HEAVY,
+    STR_NO_PLACE,
+    STR_PROMPT,
+    STR_LINE,
+    STR_NEWLINE,
+    STR_UNREADY,
+    A4.wrapping_sub(STR_BURNED_OUT),
+];
+
+/// Port-only (spec 08, slice K2; 2026-10-24): the pointer of the amulet's line Unready shows
+/// through `%s` of the line format (A4-0x6c3c, entry 12 of the shared messages' table at
+/// A4-0x6c6c), a label of the catalogue: [`unready_check`] reads it for display.
+pub(crate) const LABELS: &[u32] = &[A4.wrapping_sub(PTR_AMULET)];
+
 /// Object types with special handling.
 const TORCH: u16 = 0x5a;
 const AMULET: u16 = 0x4c;
@@ -186,7 +211,10 @@ pub async fn unready_check(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
         return 0;
     }
     if ty == AMULET {
-        let text = pointed_string(io, A4.wrapping_sub(PTR_AMULET));
+        // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
+        // it when it has one ([`LABELS`], [`crate::locale::shown`]).
+        let line = pointed_string(io, A4.wrapping_sub(PTR_AMULET));
+        let text = crate::locale::shown(&state.borrow(), line);
         say(state, io, STR_LINE, &[Arg::Str(&text)]).await;
         return 1;
     }
