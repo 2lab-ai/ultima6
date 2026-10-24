@@ -490,12 +490,18 @@ async fn spellbook(state: &RefCell<State>, io: &Io, book: Slot) {
 }
 
 /// The spell's name, its words and its ingredients.
+///
+/// Port (spec 08, 2026-10-25): the spell's name and each reagent's name it prints are read for
+/// display ([`crate::locale::shown`]: the pack's form when it has one; the name is a label of
+/// [`crate::magic::NAME_LABELS`], the reagents' of [`super::LABELS`]), a reagent's where it is
+/// printed, so one the spell does not need is not looked up; the words (the incantation's
+/// syllables) stay English.
 async fn describe_spell(state: &RefCell<State>, io: &Io, spell: u8) {
     let (name, words, reagents, names) = {
         let s = state.borrow();
         let d = &s.objcmds.data;
         let at = |off: i32, i: u32| super::GameData::a4(off).wrapping_add(4 * i);
-        let name = d.pointed(at(SPELL_NAMES, u32::from(spell)));
+        let name = crate::locale::shown(&s, d.pointed(at(SPELL_NAMES, u32::from(spell))));
         let list = d.long(at(SPELL_WORDS, u32::from(spell)));
         let mut words = Vec::new();
         let mut k = 0;
@@ -523,7 +529,8 @@ async fn describe_spell(state: &RefCell<State>, io: &Io, spell: u8) {
     }
     for (b, n) in names.iter().enumerate() {
         if (reagents >> b) & 1 != 0 {
-            print_at(state, io, S_REAGENT, &[Arg::Str(n)]).await;
+            let n = crate::locale::shown(&state.borrow(), n.clone());
+            print_at(state, io, S_REAGENT, &[Arg::Str(&n)]).await;
         }
     }
 }

@@ -900,9 +900,11 @@ fn the_string_export_of_the_owners_game_holds_the_inventorys_ready_and_unready_l
 /// spellbook page's strings, each with its cells: every spell's name that is not empty
 /// (A4-0x6f4c + 4 n, `magic::NAME_LABELS`) and the 8 circles' names (A4-0x6c9c + 4 n,
 /// `magic::CIRCLE_LABELS`) as labels within the page's fields, each English within it too, and
-/// the level word (0x1158b4, `magic::PAGE_PRINTED`) within its English's cells; and none of the
-/// incantations' syllables (A4-0x70b8), which stay English, or the result formats of no word of
-/// their own. Prints pass/fail only: a failure names the site, never its text.
+/// the level word (0x1158b4, `magic::PAGE_PRINTED`) within its English's cells; the 8 reagents'
+/// names Look's description of a spell prints (A4-0x6d4c + 4 n, `objects::commands::LABELS`),
+/// each not empty, as labels with no cells; and none of the incantations' syllables
+/// (A4-0x70b8), which stay English, or the result formats of no word of their own. Prints
+/// pass/fail only: a failure names the site, never its text.
 #[test]
 fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_syllable() {
     use crate::converse::disasm::catalog::hash64;
@@ -1026,8 +1028,22 @@ fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_sy
         entry(&level).is_some_and(|(kind, cells)| kind != Kind::Label && cells == cells_of(&level)),
         "the book page's level word in the export within its English's cells"
     );
+    // The reagents' names Look's description prints (2026-10-25), each on a wrapping line.
+    for i in 0..8u32 {
+        let ptr = A4 - 0x6d4c + 4 * i;
+        assert!(
+            crate::objects::commands::LABELS.contains(&ptr),
+            "reagent {i} is in the object commands' labels"
+        );
+        let name = img.pointer(ptr).and_then(|p| img.cstr(p)).quiet();
+        assert!(!name.is_empty(), "reagent {i} has a name");
+        assert!(
+            entry(&name) == Some((Kind::Label, None)),
+            "reagent name {i} in the export as a label with no cells"
+        );
+    }
     eprintln!(
-        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, the spells' and circles' names as labels within the book page's fields and its level word within its cells, and no result format or syllable: pass"
+        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, the spells' and circles' names as labels within the book page's fields and its level word within its cells, the 8 reagents' names as labels, and no result format or syllable: pass"
     );
 }
 

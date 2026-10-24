@@ -96,7 +96,8 @@ pub(crate) use tables::LABELS;
 /// catalogue, each within its field there: the level word, a `printf` format within its
 /// English's cells ([`book::PAGE_PRINTED`]); the spells' names, labels within
 /// [`tables::NAME_CELLS`], and the circles' names, labels within [`tables::CIRCLE_CELLS`]. Cast's
-/// announcement and Detect Magic's charge line read the same names.
+/// announcement, Detect Magic's charge line and Look's description of a spell
+/// (`objects::commands::look`) read the same names.
 pub(crate) use book::PAGE_PRINTED;
 pub(crate) use tables::{CIRCLE_CELLS, CIRCLE_LABELS, NAME_CELLS, NAME_LABELS};
 

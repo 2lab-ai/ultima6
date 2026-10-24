@@ -29,9 +29,11 @@
 //! Unready prints through `%s` (2026-10-24, [`crate::inventory::LABELS`]), the spells' result
 //! messages (that table's 13), potion descriptions and direction names they print through `%s`
 //! (2026-10-24, [`crate::magic::LABELS`]), the spells' and the circles' names the spellbook
-//! page, Cast's announcement and Detect Magic's charge line print through `%s` (2026-10-25,
-//! [`crate::magic::NAME_LABELS`] and [`crate::magic::CIRCLE_LABELS`], each within its field on
-//! the page), the wind's names the date line prints through `%s`
+//! page, Cast's announcement, Detect Magic's charge line and Look's description of a spell print
+//! through `%s` (2026-10-25, [`crate::magic::NAME_LABELS`] and [`crate::magic::CIRCLE_LABELS`],
+//! each within its field on the page), the reagents' names that description prints through `%s`
+//! (2026-10-25, [`crate::objects::commands::LABELS`], each on a wrapping line: no budget), the
+//! wind's names the date line prints through `%s`
 //! ([`crate::actors::clock::LABELS`]), the combat-mode names the panels' line prints through
 //! `%s` (2026-10-24, [`crate::ui::tables::LABELS`], each within the line's field), and the
 //! conversation's `$G`, `$T` and `$Y` words. And (2026-10-24) the inventory view's two weight
@@ -424,6 +426,7 @@ impl Catalogue {
         let labels = crate::main_loop::commands::LABELS
             .iter()
             .chain(&SHARED_MESSAGES)
+            .chain(crate::objects::commands::LABELS)
             .chain(crate::inventory::LABELS)
             .chain(crate::magic::LABELS)
             .chain(crate::actors::clock::LABELS)

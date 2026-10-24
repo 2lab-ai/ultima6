@@ -88,10 +88,13 @@ pub(crate) const LABELS: &[u32] = &[
 /// spell number n < [`SPELLS`] (circle × 16 + index; a slot that names no spell holds an empty
 /// string, which the catalogue leaves out), labels of the locale layer's catalogue
 /// ([`crate::locale::strings`]), each within [`NAME_CELLS`]. The spellbook page, Cast's
-/// announcement and Detect Magic's charge line read the name for display through
+/// announcement, Detect Magic's charge line and Look's description of a spell in an open book
+/// (`objects::commands::look`, which reads the same slots) read the name for display through
 /// [`crate::locale::shown`]. The incantations' syllables are not listed (the game's magic words
-/// stay English), and logic (a typed spell is matched on its letters) reads [`MagicTables`] as
-/// it is.
+/// stay English): the announcement's, Look's description's and Use's line of a wand's or a
+/// staff's charge (`usecmd::misc`, which reads A4-0x71b4 and A4-0x70b8, `WORDS` and `SYLLABLES`
+/// here, through `usecmd::defs`) print syllables, not names, and stay as they are. Logic (a
+/// typed spell is matched on its letters) reads [`MagicTables`] as it is.
 pub(crate) const NAME_LABELS: [u32; SPELLS] = slots(NAMES);
 
 /// Port-only (spec 08, 2026-10-25): the cells a spell's name takes at most, the spellbook page's

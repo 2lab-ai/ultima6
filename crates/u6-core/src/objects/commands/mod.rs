@@ -63,6 +63,27 @@ pub(crate) const PRINTED: [&[u32]; 6] = [
     world::PRINTED,
 ];
 
+/// Port-only (spec 08, 2026-10-25): the pointers of the reagents' names, A4-0x6d4c + 4 n for the
+/// 8 reagent bits, labels of the locale layer's catalogue ([`crate::locale::strings`]): Look's
+/// description of a spell in an open spellbook reads each it lists for display through
+/// [`crate::locale::shown`] and prints it on a line of its own in the message window, which
+/// wraps, so none has a cell budget. Nothing else reads the table.
+pub(crate) const LABELS: &[u32] = &[
+    reagent_pointer(0),
+    reagent_pointer(1),
+    reagent_pointer(2),
+    reagent_pointer(3),
+    reagent_pointer(4),
+    reagent_pointer(5),
+    reagent_pointer(6),
+    reagent_pointer(7),
+];
+
+/// The pointer slot of reagent `n`'s name (bit n of a spell's reagent mask).
+const fn reagent_pointer(n: u32) -> u32 {
+    crate::image::A4.wrapping_sub(0x6d4c) + 4 * n
+}
+
 /// State of the object commands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ObjCommands {

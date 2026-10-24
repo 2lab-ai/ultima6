@@ -1826,12 +1826,14 @@ fn caster_world() -> State {
 /// What [`spellwork`] runs: the Cast command, Detect Magic (spell 1) with its target chosen,
 /// the key `A` under the spell cursor, the search of the typed syllables, or Wind Change (spell
 /// 0x39), Telekinesis (spell 0x15, its target chosen) or Move (the object commands' push)
-/// answered with the up key (north, direction 0); or (2026-10-25) the Cast command answered with
-/// Return in the open book, which chooses the line of the current spell.
+/// answered with the up key (north, direction 0); or (2026-10-25) the Cast command, or Look on
+/// the selected object, answered with Return in the open book, which chooses the line of the
+/// current spell.
 #[derive(Clone, Copy, Debug)]
 enum Spellwork {
     Cast,
     CastChosen,
+    LookChosen,
     Detect,
     Syllable,
     Search,
@@ -1866,6 +1868,7 @@ fn spellwork(work: Spellwork, setup: fn(&mut State), pack: Option<Pack>) -> (Str
     let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
         match work {
             Spellwork::Cast | Spellwork::CastChosen => crate::magic::cast(&st, &io).await,
+            Spellwork::LookChosen => crate::objects::commands::look(&st, &io).await,
             Spellwork::Detect => crate::magic::dispatch(&st, &io, 1, true).await,
             Spellwork::Syllable => {
                 crate::magic::spell_key(&st, &io, 0x41).await;
@@ -1885,7 +1888,7 @@ fn spellwork(work: Spellwork, setup: fn(&mut State), pack: Option<Pack>) -> (Str
             16,
         );
     }
-    if let Spellwork::CastChosen = work {
+    if let Spellwork::CastChosen | Spellwork::LookChosen = work {
         e.tick(
             &[crate::engine::InputEvent::Key(crate::engine::Key::Enter)],
             16,
@@ -2645,16 +2648,46 @@ fn circle_name(c: u32) -> Vec<u8> {
     format!("Zo{c}").into_bytes()
 }
 
+/// Look's sites its description of a spell prints (2026-10-25), the test's own copies of
+/// `objects::commands::look`'s addresses (pinned to its list in the test): the name's format,
+/// the first word's and the next words', and a reagent's line; and the slots of the reagents'
+/// names (A4-0x6d4c + 4 n), of spell 1's incantation letters (A4-0x71b4 + 4) and spell 1's
+/// reagent bits (A4-0x6d1c + 1, a byte).
+const LOOK_NAME_DASH: u32 = 0x0012_8508;
+const LOOK_WORD: u32 = 0x0012_850c;
+const LOOK_SPACE_WORD: u32 = 0x0012_8510;
+const LOOK_REAGENT: u32 = 0x0012_852a;
+const REAGENT_SLOTS: u32 = crate::image::A4 - 0x6d4c;
+const SPELL_1_WORD: u32 = crate::image::A4 - 0x71b4 + 4;
+const SPELL_1_REAGENTS: u32 = crate::image::A4 - 0x6d1c + 1;
+
+/// The synthetic name of reagent `n` (bit n, the test's own).
+fn reagent_name(n: u32) -> Vec<u8> {
+    format!("Zj{n}").into_bytes()
+}
+
 /// The spellbook page's lines (the test's own text): the level word (`Zlv`: the next site lies 6
 /// bytes on), and the name slots of [`NAMED`] and of the 8 circles (absolute pointers: no
-/// RELOC32) with their texts.
+/// RELOC32) with their texts; and Look's description of a spell: its four formats (of no word
+/// of their own, each fitting before the next site), the 8 reagents' name slots with their
+/// names, spell 1's incantation (`A`, whose syllable [`spell_lines`] holds) and its reagents
+/// (bits 0 and 2).
 fn book_lines() -> SiteLines {
-    let mut lines = vec![(LEVEL_WORD, b"Zlv".to_vec())];
+    let mut lines = vec![
+        (LEVEL_WORD, b"Zlv".to_vec()),
+        (LOOK_NAME_DASH, b"%s-".to_vec()),
+        (LOOK_WORD, b"%s".to_vec()),
+        (LOOK_SPACE_WORD, b" %s".to_vec()),
+        (LOOK_REAGENT, b"\n%s".to_vec()),
+        (SPELL_1_REAGENTS, vec![0b101]),
+    ];
     let names = NAMED
         .iter()
         .map(|&(n, text)| (NAME_SLOTS + 4 * u32::from(n), text.to_vec()));
     let circles = (0..8).map(|c| (CIRCLE_SLOTS + 4 * c, circle_name(c)));
-    for (i, (slot, text)) in (0u32..).zip(names.chain(circles)) {
+    let reagents = (0..8).map(|n| (REAGENT_SLOTS + 4 * n, reagent_name(n)));
+    let word = [(SPELL_1_WORD, b"A".to_vec())];
+    for (i, (slot, text)) in (0u32..).zip(names.chain(circles).chain(reagents).chain(word)) {
         let at = BOOK_LABELS + 0x10 * i;
         lines.push((slot, at.to_be_bytes().to_vec()));
         lines.push((at, text));
@@ -2666,11 +2699,21 @@ fn book_lines() -> SiteLines {
 fn the_spells_and_circles_names_and_the_level_word_are_catalogued_with_their_cells() {
     // The lists in full, as the test's own literals (a slot dropped, added twice or moved fails
     // here), and the budgets: the page's name field (columns 1..=13, the count at 14) and its
-    // circle field (columns 11..=16 of 17).
+    // circle field (columns 11..=16 of 17); the reagents' names (2026-10-25, Look's) have none.
     let names: Vec<u32> = (0..0x80).map(|n| NAME_SLOTS + 4 * n).collect();
     assert_eq!(crate::magic::NAME_LABELS.to_vec(), names);
     let circles: Vec<u32> = (0..8).map(|c| CIRCLE_SLOTS + 4 * c).collect();
     assert_eq!(crate::magic::CIRCLE_LABELS.to_vec(), circles);
+    let reagents: Vec<u32> = (0..8).map(|n| REAGENT_SLOTS + 4 * n).collect();
+    assert_eq!(crate::objects::commands::LABELS, reagents);
+    for at in [LOOK_NAME_DASH, LOOK_WORD, LOOK_SPACE_WORD, LOOK_REAGENT] {
+        assert!(
+            crate::objects::commands::PRINTED
+                .iter()
+                .any(|l| l.contains(&at)),
+            "{at:#x} is in Look's list"
+        );
+    }
     assert_eq!(crate::magic::PAGE_PRINTED, [LEVEL_WORD]);
     assert_eq!(
         (crate::magic::NAME_CELLS, crate::magic::CIRCLE_CELLS),
@@ -2692,12 +2735,24 @@ fn the_spells_and_circles_names_and_the_level_word_are_catalogued_with_their_cel
     // The level word, a format of no conversion, within its English's cells: a print finds it.
     assert_eq!(entry(b"Zlv"), Some((Kind::Message, Some(3))));
     assert!(cat.of(b"Zlv").is_some());
-    // Still no syllable.
+    // Each reagent's name a label with no budget; Look's formats hold no word of their own.
+    for n in 0..8 {
+        assert_eq!(
+            entry(&reagent_name(n)),
+            Some((Kind::Label, None)),
+            "reagent {n}"
+        );
+    }
+    for text in [&b"%s-"[..], b" %s", b"\n%s"] {
+        assert!(cat.label_of(text).is_none());
+    }
+    // Still no syllable, nor an incantation's letters.
     assert!(cat.of(SYLLABLE).is_none() && cat.label_of(SYLLABLE).is_none());
+    assert!(cat.label_of(b"A").is_none());
     assert_eq!(
         cat.len(),
-        60 + 1 + 4 + 8 + 1,
-        "magic's 60, Move's prompt, 4 names, 8 circles and the level word"
+        60 + 1 + 4 + 8 + 1 + 8,
+        "magic's 60, Move's prompt, 4 names, 8 circles, the level word and 8 reagents"
     );
     // The export: `cells` on exactly these, in site order (the printed strings first).
     let export = cat.export();
@@ -2715,6 +2770,7 @@ fn the_spells_and_circles_names_and_the_level_word_are_catalogued_with_their_cel
     assert!(json.contains("\"len\":4,\"kind\":\"label\",\"text\":\"Zw00\",\"cells\":13}"));
     assert!(json.contains("\"len\":3,\"kind\":\"label\",\"text\":\"Zo7\",\"cells\":6}"));
     assert!(json.contains("\"len\":3,\"kind\":\"message\",\"text\":\"Zlv\",\"cells\":3}"));
+    assert!(json.contains("\"len\":3,\"kind\":\"label\",\"text\":\"Zj7\"}"));
     assert_eq!(
         strings::Export::from_json(&json),
         Ok(export),
@@ -2833,8 +2889,8 @@ const KO13: &str = "가나다라마바사아자차카타파";
 
 /// The forms of [`book_ko`] (the test's own syllables): one for each named spell (the first
 /// one's [`KO13`]), the first circle's (6 syllables, the whole field), the level word's, Cast's
-/// level refusal's, the charge line's, the on-what message's and `A`'s syllable's, which is never
-/// looked up.
+/// level refusal's, the charge line's, the on-what message's, the two reagents' spell 1 needs
+/// (bits 0 and 2) and `A`'s syllable's, which is never looked up.
 fn book_forms() -> Vec<(String, String)> {
     [
         ("Zw00".to_string(), KO13),
@@ -2847,6 +2903,8 @@ fn book_forms() -> Vec<(String, String)> {
         (spell_text(CHARGE_LINE), "카 %s\n"),
         ("Zr08".into(), "바"),
         ("Zsyl".into(), "차"),
+        ("Zj0".into(), "사"),
+        ("Zj2".into(), "아자"),
     ]
     .into_iter()
     .map(|(en, ko)| (en, ko.to_string()))
@@ -2907,6 +2965,19 @@ fn a_spell_or_circle_names_form_over_its_field_prints_the_english_counted_missed
     assert_eq!(counts, [4, 1]);
 }
 
+#[test]
+fn a_level_words_form_over_its_english_cells_prints_the_english_counted_missed() {
+    // 4 syllables for the level word, its English 3 cells: the English, one miss; the names and
+    // the circle the pack's forms, each at its column.
+    let (rows, counts) = book_rows(Some(book_ko_but("Zlv", "가나다라")));
+    assert_eq!(rows, page_of([KO13, "가나", "다라"], "바사아자차카", "Zlv"));
+    assert_eq!(counts, [4, 1]);
+    // Within its 3 cells, another line break than the English's: the English too.
+    let (rows, counts) = book_rows(Some(book_ko_but("Zlv", "가\n")));
+    assert_eq!(rows[11], row_of(&[(10, "Zlv")]));
+    assert_eq!(counts, [4, 1]);
+}
+
 /// Spell 1 in a book readied by the caster, chosen with Return under the spell cursor (as the
 /// command loop leaves Cast); the caster's level (0) is under its circle, so Cast's level refusal
 /// follows the announcement.
@@ -2961,6 +3032,35 @@ fn casts_announcement_shows_the_packs_spell_name_and_the_english_syllables() {
         (format!("(Zw01){refusal}"), [0, 0]),
         "typed: the English"
     );
+}
+
+/// [`chosen_from_the_book`], the book selected for Look and its target the caster's tile (the
+/// book is in the caster's hands, so Look opens it).
+fn book_looked_at(s: &mut State) {
+    chosen_from_the_book(s);
+    let book = (0x100..crate::objects::OBJECT_SLOTS as i16)
+        .find(|&o| s.objects.kind(o) == crate::magic::SPELLBOOK)
+        .expect("the book");
+    s.ui.input.selection = book;
+    s.ui.input.target = (100, 100);
+}
+
+#[test]
+fn looks_description_of_a_spell_shows_the_packs_spell_and_reagent_names_and_the_english_syllables()
+{
+    // Look on the open book, Return choosing spell 1: the description's name through its format
+    // (`%s-`), its incantation's syllable in English though the pack has a form for it, then the
+    // two reagents it needs, each on its line. Found: the page's name, circle and level word
+    // twice (the book opens on the page, Return draws it again), the description's name and the
+    // two reagents' names.
+    let (ko, counts) = spellwork(Spellwork::LookChosen, book_looked_at, Some(book_ko()));
+    let (en, none) = spellwork(Spellwork::LookChosen, book_looked_at, None);
+    assert!(en.ends_with("Zw01-Zsyl\nZj0\nZj2"), "the English");
+    assert_eq!(none, [0, 0]);
+    let want = en
+        .replace("Zw01-", "가나-")
+        .replace("\nZj0\nZj2", "\n사\n아자");
+    assert_eq!((ko, counts), (want, [9, 0]), "the pack's names");
 }
 
 /// An object (type 0x30, not a magic tile) two tiles east of the caster holding a charge (type
