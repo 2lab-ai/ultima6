@@ -891,6 +891,105 @@ fn the_string_export_of_the_owners_game_holds_the_inventorys_ready_and_unready_l
     );
 }
 
+/// Spec 08 (slice K2, 2026-10-24): the string export of the owner's files holds magic's lines, by
+/// the hashes of the strings at the spells' sites (`magic::PRINTED`): Cast's no-book line, the
+/// books' no-magic, no-spells and nothing lines, the three refusals of the checks, the typed
+/// spell's not-in-book line (A4-0x7387), the detections' lines and the not-possible line; the 13
+/// result messages, the 8 potion descriptions and the 8 direction names as labels
+/// (`magic::LABELS`, A4-0x6c6c + 4 n, A4-0x6b4c + 4 n and A4-0x61be + 4 n); and none of the
+/// incantations' syllables (A4-0x70b8), the spells' names (A4-0x6f4c) or the circles' names
+/// (A4-0x6c9c), which stay English, nor the spellbook page's line (0x1158b4, a panel's) or the
+/// result formats of no word of their own. Prints pass/fail only: a failure names the site,
+/// never its text.
+#[test]
+fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_syllable() {
+    use crate::converse::disasm::catalog::hash64;
+    use crate::image::{A4, GameImage};
+    use crate::locale::strings::Kind;
+    let Some(files) = files() else { return };
+    let export = crate::locale::strings::export(&files).quiet();
+    let game = files.get("game").quiet();
+    let img = GameImage::parse(game).quiet();
+    let has = |text: &[u8]| export.strings.iter().any(|e| e.hash == hash64(text));
+    let printed: Vec<u32> = crate::magic::PRINTED
+        .iter()
+        .flat_map(|l| l.iter().copied())
+        .collect();
+    for (site, at) in [
+        ("NO_BOOK", 0x0011_5b36),
+        ("NO_MAGIC", 0x0011_5a9a),
+        ("NO_SPELLS", 0x0011_5ab2),
+        ("NOTHING", 0x0011_5ad0),
+        ("LEVEL_LOW", 0x0011_5ae8),
+        ("NO_POINTS", 0x0011_5b0a),
+        ("NO_REAGENTS", 0x0011_5b26),
+        ("NOT_IN_BOOK", A4 - 0x7387),
+        ("NOT_MAGICAL", 0x0011_5994),
+        ("POTION", 0x0011_59a8),
+        ("TRAPPED", 0x0011_595e),
+        ("NO_TRAP", 0x0011_596e),
+        ("NOT_POSSIBLE", 0x0011_59f8),
+    ] {
+        assert!(printed.contains(&at), "{site} is in magic's list");
+        assert!(has(&img.cstr(at).quiet()), "{site} in the export");
+    }
+    // The result formats, the dispatcher's newline and the announcement's format hold no word
+    // of their own: none is in the export.
+    for (site, at) in [
+        ("FMT_S", 0x0011_58b0),
+        ("FMT_S_NL", 0x0011_58ca),
+        ("FMT_NL_S_NL", 0x0011_58ce),
+        ("FMT_NL_S_BANG", 0x0011_58e4),
+        ("NEWLINE", 0x0011_58ba),
+        ("FMT_NAME_QUOTE", 0x0011_5ae0),
+    ] {
+        assert!(printed.contains(&at), "{site} is in magic's list");
+        assert!(!has(&img.cstr(at).quiet()), "{site} not in the export");
+    }
+    let label = |ptr: u32| {
+        let h = hash64(&img.pointer(ptr).and_then(|p| img.cstr(p)).quiet());
+        export
+            .strings
+            .iter()
+            .any(|e| e.hash == h && e.kind == Kind::Label)
+    };
+    for (what, table, n) in [
+        ("message", A4 - 0x6c6c, 13),
+        ("potion", A4 - 0x6b4c, 8),
+        ("direction", A4 - 0x61be, 8),
+    ] {
+        for i in 0..n {
+            let ptr = table + 4 * i;
+            assert!(
+                crate::magic::LABELS.contains(&ptr),
+                "{what} {i} is in magic's labels"
+            );
+            assert!(label(ptr), "{what} {i} in the export as a label");
+        }
+    }
+    let tables = crate::magic::MagicTables::from_game(game).quiet();
+    for (i, syllable) in tables.syllables.iter().enumerate() {
+        assert!(!has(syllable), "syllable {i} not in the export");
+    }
+    for (i, name) in tables.names.iter().enumerate() {
+        assert!(!has(name), "spell name {i} not in the export");
+    }
+    for (i, circle) in tables.circles.iter().enumerate() {
+        assert!(!has(circle), "circle name {i} not in the export");
+    }
+    assert!(
+        !printed.contains(&0x0011_58b4),
+        "the book page's line is not in magic's list"
+    );
+    assert!(
+        !has(&img.cstr(0x0011_58b4).quiet()),
+        "the book page's line not in the export"
+    );
+    eprintln!(
+        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, and no result format, syllable, spell or circle name or book page line: pass"
+    );
+}
+
 /// The keys (type 0x40) of quality `q` the port holds, anywhere (the slot list).
 fn keys_of(s: &State, q: u8) -> Vec<Slot> {
     let o = &s.objects;

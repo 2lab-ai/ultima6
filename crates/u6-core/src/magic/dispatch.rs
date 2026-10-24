@@ -13,6 +13,9 @@ use crate::ui::printf::printf;
 
 /// The newline 0x11a586 prints first.
 const MSG_NEWLINE: u32 = 0x0011_58ba;
+/// Port-only (spec 08, slice K2; 2026-10-24): that string, for the locale layer's catalogue
+/// ([`super::PRINTED`]).
+pub(super) const PRINTED: &[u32] = &[MSG_NEWLINE];
 /// Timers A4-0x7b72 + n the dispatcher sets.
 const LIGHT: usize = 0;
 const INFRAVISION: usize = 1;

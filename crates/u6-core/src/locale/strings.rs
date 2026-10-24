@@ -11,27 +11,34 @@
 //! ([`crate::combat::seams::PRINTED`])), the inventory's Ready and Unready lines (2026-10-24: the
 //! Ready line, a torch's, the three refusals, the Unready line and a burned-out torch's
 //! ([`crate::inventory::PRINTED`]), and the locked chest's line of a click in the inventory
-//! panel ([`crate::ui::click::PRINTED`])), the lines the actors' and objects' own code prints
-//! (the clock's with the status area's date line ([`crate::actors::clock::PRINTED`]), the world
-//! turn's ([`crate::actors::turn::PRINTED`]), the party's ([`crate::actors::party::PRINTED`]),
-//! the NPC turn's ([`crate::actors::npc::PRINTED`]), the step test's
-//! ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
+//! panel ([`crate::ui::click::PRINTED`])), magic's lines (2026-10-24: Cast's and the books'
+//! refusals, the result formats, every spell's own lines and prompts and the typed spell's
+//! not-in-book line ([`crate::magic::PRINTED`])), the lines the actors' and objects' own code
+//! prints (the clock's with the status area's date line ([`crate::actors::clock::PRINTED`]), the
+//! world turn's ([`crate::actors::turn::PRINTED`]), the party's
+//! ([`crate::actors::party::PRINTED`]), the NPC turn's ([`crate::actors::npc::PRINTED`]), the
+//! step test's ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
 //! ([`crate::objects::PRINTED`])) and the conversation's own messages
 //! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format. And
 //! the strings a loader table holds that game code shows through an escape (labels): the command
 //! names before their dash ([`crate::main_loop::commands::LABELS`]), the shared messages Use and
 //! the object commands print through `%s` ([`SHARED_MESSAGES`]), the amulet's line of that table
-//! Unready prints through `%s` (2026-10-24, [`crate::inventory::LABELS`]), the wind's names the
-//! date line prints through `%s` ([`crate::actors::clock::LABELS`]), and the conversation's `$G`,
-//! `$T` and `$Y` words. Every other string of the executable is not catalogued: the panels (but
-//! the date line), magic, object names and articles. It is substituted only where its bytes
-//! are a catalogued string's, as the lookup is by content: magic's not-possible line is the
-//! string of the staff's refusal (the one address 0x1159f8, [`crate::combat::seams::PRINTED`]),
-//! so it shows the pack's form too (2026-10-24). A string
-//! shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`, a name and a space), is not
-//! catalogued either; but (2026-10-21) a label of a pointer table, read through
-//! [`super::shown`], is catalogued from 1 byte (a wind's name is 2). The conversation's words
-//! keep the minimum: its display reads them as the print hooks do.
+//! Unready prints through `%s` (2026-10-24, [`crate::inventory::LABELS`]), the spells' result
+//! messages (that table's 13), potion descriptions and direction names they print through `%s`
+//! (2026-10-24, [`crate::magic::LABELS`]), the wind's names the date line prints through `%s`
+//! ([`crate::actors::clock::LABELS`]), and the conversation's `$G`, `$T` and `$Y` words. Every
+//! other string of the executable is not catalogued: the panels (but the date line; the
+//! spellbook page is one), the spells' incantation syllables (the game's magic words), the names
+//! the spells print through `%s` (the spells', the circles'), object names and articles. It is
+//! substituted only where its bytes are a catalogued string's, as the lookup is by content: a
+//! string two sites print is catalogued once (magic's not-possible line is the string of the
+//! staff's refusal, the one address 0x1159f8 in both [`crate::combat::seams::PRINTED`] and
+//! [`crate::magic::PRINTED`]); a direction name, read through [`super::shown`] wherever it is
+//! shown (the spells', Move's, Dig's and the telescope's lines, a scout's warning), follows the
+//! pack everywhere. A string shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`, a
+//! name and a space), is not catalogued either; but (2026-10-21) a label of a pointer table,
+//! read through [`super::shown`], is catalogued from 1 byte (a wind's name is 2). The
+//! conversation's words keep the minimum: its display reads them as the print hooks do.
 //!
 //! **Lookup.** By content: [`hash64`] of the English bytes, only where game code prints them
 //! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`], [`Catalogue::of`]) or reads
@@ -281,6 +288,52 @@ pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     Ok(export)
 }
 
+/// Tests (2026-10-24): installs over `s` a Korean pack of `forms` (an English string and the
+/// pack's text for it, each the test's own), checked against the catalogue of a synthetic `game`
+/// holding `parts` (one CODE hunk from the image base: each part's bytes at its image address),
+/// as the page installs one. For a module's own test of a label read for display
+/// ([`super::shown`]).
+#[cfg(test)]
+pub(crate) fn install_test_forms(
+    s: &mut crate::state::State,
+    parts: &[(u32, &[u8])],
+    forms: &[(&[u8], &str)],
+) {
+    let at = |addr: u32| (addr - crate::image::IMAGE_BASE) as usize;
+    let end = parts.iter().map(|&(a, b)| at(a) + b.len() + 1).max();
+    let mut hunk = vec![0u8; end.unwrap_or(0).next_multiple_of(4)];
+    for &(addr, bytes) in parts {
+        hunk[at(addr)..at(addr) + bytes.len()].copy_from_slice(bytes);
+    }
+    let game = crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build();
+    let strings = forms.iter().map(|&(en, ko)| {
+        let text = super::StringText {
+            len: en.len() as u32,
+            text: ko.as_bytes().to_vec(),
+        };
+        (hash64(en), text)
+    });
+    let pack = super::Pack::new(
+        crate::ui::Language::Korean,
+        "test/1",
+        super::fingerprint([]),
+        [],
+    )
+    .and_then(|p| p.with_strings(strings))
+    .expect("the test's pack reads");
+    let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    super::install_catalogued(
+        s,
+        &files,
+        std::rc::Rc::new(pack),
+        None,
+        Catalogue::from_game(&game),
+    )
+    .expect("the pack checks");
+}
+
 impl Catalogue {
     /// The catalogue of `game` (the decrunched executable): every site's string that reads
     /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer, a label of a pointer table
@@ -305,6 +358,7 @@ impl Catalogue {
             .chain(crate::combat::seams::PRINTED)
             .chain(crate::inventory::PRINTED)
             .chain(crate::ui::click::PRINTED)
+            .chain(crate::magic::PRINTED.iter().flat_map(|s| s.iter()))
             .chain(crate::actors::clock::PRINTED)
             .chain(crate::actors::turn::PRINTED)
             .chain(crate::actors::party::PRINTED)
@@ -325,6 +379,7 @@ impl Catalogue {
             .iter()
             .chain(&SHARED_MESSAGES)
             .chain(crate::inventory::LABELS)
+            .chain(crate::magic::LABELS)
             .chain(crate::actors::clock::LABELS);
         for &ptr in labels {
             if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {

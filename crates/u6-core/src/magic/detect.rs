@@ -19,6 +19,17 @@ pub(super) const MSG_POTION: u32 = 0x0011_59a8;
 pub(super) const MSG_MAGICAL: u32 = 0x0011_59ba;
 const MSG_TRAPPED: u32 = 0x0011_595e;
 const MSG_NO_TRAP: u32 = 0x0011_596e;
+/// Port-only (spec 08, slice K2; 2026-10-24): the detections' lines, for the locale layer's
+/// catalogue ([`super::PRINTED`]). The charge line puts the spell's name through `%s`: it stays
+/// English.
+pub(super) const PRINTED: &[u32] = &[
+    MSG_CHARGE,
+    MSG_NOT_MAGICAL,
+    MSG_POTION,
+    MSG_MAGICAL,
+    MSG_TRAPPED,
+    MSG_NO_TRAP,
+];
 /// Object types.
 const CHARGE: u16 = 0x150;
 const TRAP: u16 = 0x151;
@@ -198,7 +209,11 @@ async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
                 let tf = s.objects.tf(sel);
                 (tf & 0x3ff == POTION).then(|| {
                     let n = usize::from(tf >> 10);
-                    s.magic.tables.potions.get(n).cloned().unwrap_or_default()
+                    // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale
+                    // pack's label of it when it has one ([`super::tables::LABELS`],
+                    // [`crate::locale::shown`]).
+                    let p = s.magic.tables.potions.get(n).cloned().unwrap_or_default();
+                    crate::locale::shown(&s, p)
                 })
             };
             match potion {

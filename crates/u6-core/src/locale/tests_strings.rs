@@ -1490,3 +1490,600 @@ fn ready_and_unready_print_the_packs_forms_in_order_and_without_a_pack_the_engli
         );
     }
 }
+
+/// Magic's sites the tests below print or sort out, the test's own copies of the addresses
+/// (pinned to their lists in the test): the result formats (`%s`, `%s\n`, `\n%s\n`, `\n%s!\n`)
+/// and the dispatcher's newline, the book's number and the announcement's formats, the
+/// direction's and Locate's formats, the newline after a typed spell's search (hunk 2); the
+/// closing quote and Locate's hemisphere letters; the charge, potion and food lines; Cast's
+/// no-book line, the books' no-magic and no-spells lines and the typed spell's not-in-book line
+/// (A4-relative).
+const SPELL_FMT_S: u32 = 0x0011_58b0;
+const SPELL_NEWLINE: u32 = 0x0011_58ba;
+const SPELL_FMT_S_NL: u32 = 0x0011_58ca;
+const SPELL_FMT_NL_S_NL: u32 = 0x0011_58ce;
+const SPELL_FMT_NL_S_BANG: u32 = 0x0011_58e4;
+const BOOK_COUNT: u32 = 0x0011_58ac;
+const SPELL_FMT_SPACE_S: u32 = 0x0011_5a62;
+const ANNOUNCE_TYPED: u32 = 0x0011_5ada;
+const ANNOUNCE_NAME: u32 = 0x0011_5ae0;
+const DIRECTION_NAME: u32 = 0x0011_5a94;
+const LATITUDE: u32 = 0x0011_5a72;
+const LONGITUDE: u32 = 0x0011_5a7c;
+const SEARCH_NEWLINE: u32 = 0x0010_4ffc;
+const CLOSING_QUOTE: u32 = 0x0011_5ae6;
+const SOUTH: u32 = 0x0011_5a78;
+const NORTH: u32 = 0x0011_5a7a;
+const EAST: u32 = 0x0011_5a82;
+const WEST: u32 = 0x0011_5a86;
+const CHARGE_LINE: u32 = 0x0011_5978;
+const POTION_LINE: u32 = 0x0011_59a8;
+const FOOD_LINE: u32 = 0x0011_59ca;
+const NO_BOOK: u32 = 0x0011_5b36;
+const NO_MAGIC: u32 = 0x0011_5a9a;
+const NO_SPELLS: u32 = 0x0011_5ab2;
+const NOT_IN_BOOK: u32 = crate::image::A4 - 0x7387;
+/// Wind Change's direction prompt (Telekinesis' too).
+const DIRECTION_PROMPT: u32 = 0x0011_5a08;
+
+/// The pointer slots of the result messages (A4-0x6c6c + 4 n, `Msg` order), of the potion
+/// descriptions (A4-0x6b4c + 4 n) and of the direction names (A4-0x61be + 4 n), and the slot of
+/// `A`'s syllable (A4-0x70b8 + 4 × 0x41: in the image, never catalogued); where the synthetic
+/// `game` keeps the texts they point to, 0x10 bytes apart (no catalogued site there).
+const MESSAGE_SLOTS: u32 = crate::image::A4 - 0x6c6c;
+const POTION_SLOTS: u32 = crate::image::A4 - 0x6b4c;
+const DIRECTION_SLOTS: u32 = crate::image::A4 - 0x61be;
+const SYLLABLE_A: u32 = crate::image::A4 - 0x70b8 + 4 * 0x41;
+const SPELL_LABELS: u32 = crate::image::IMAGE_BASE + 0x400;
+
+/// The synthetic syllable of `A` (the test's own): 3 bytes or more, so a print hook would find
+/// it were it catalogued.
+const SYLLABLE: &[u8] = b"Zsyl";
+
+/// The synthetic result messages (`Zr` and two digits, `Msg` order).
+fn message_texts() -> Vec<Vec<u8>> {
+    (0..13).map(|n| format!("Zr{n:02}").into_bytes()).collect()
+}
+
+/// The synthetic potion descriptions (`Zd` and a digit, by the potion's frame).
+fn potion_texts() -> Vec<Vec<u8>> {
+    (0..8).map(|n| format!("Zd{n}").into_bytes()).collect()
+}
+
+/// The synthetic direction names (`Zn` and a digit, by direction: 0 north, clockwise).
+fn direction_texts() -> Vec<Vec<u8>> {
+    (0..8).map(|n| format!("Zn{n}").into_bytes()).collect()
+}
+
+/// Magic's sites, each once, in address order.
+fn spell_sites() -> Vec<u32> {
+    let mut v: Vec<u32> = crate::magic::PRINTED
+        .iter()
+        .flat_map(|l| l.iter().copied())
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The formats of no word of their own at magic's sites in [`spell_texts`] (the test's own): the
+/// result formats, the dispatcher's newline, the book's number, the announcement's formats, the
+/// direction's and Locate's formats and the search's newline.
+const SPELL_NO_WORD: [(u32, &[u8]); 13] = [
+    (SPELL_FMT_S, b"%s"),
+    (SPELL_NEWLINE, b"\n"),
+    (SPELL_FMT_S_NL, b"%s\n"),
+    (SPELL_FMT_NL_S_NL, b"\n%s\n"),
+    (SPELL_FMT_NL_S_BANG, b"\n%s!\n"),
+    (BOOK_COUNT, b"%d"),
+    (SPELL_FMT_SPACE_S, b" %s"),
+    (ANNOUNCE_TYPED, b"(%s)"),
+    (ANNOUNCE_NAME, b"%s\n"),
+    (DIRECTION_NAME, b"%s.\n"),
+    (LATITUDE, b"%d"),
+    (LONGITUDE, b"%d"),
+    (SEARCH_NEWLINE, b"\n"),
+];
+/// The sites 2 or 4 bytes before the next (a letter each in [`spell_texts`]), and the three
+/// lines that print a value (a line with a conversion).
+const SPELL_SHORT: [u32; 5] = [CLOSING_QUOTE, SOUTH, NORTH, EAST, WEST];
+const SPELL_VALUE: [u32; 3] = [CHARGE_LINE, POTION_LINE, FOOD_LINE];
+
+/// The synthetic text at each of [`spell_sites`] (the test's own; each fits before the next
+/// site with its NUL, as the test checks: some lie 2 or 4 bytes apart): [`SPELL_NO_WORD`]'s, a
+/// letter at [`SPELL_SHORT`], `Zg`, two digits and a conversion at [`SPELL_VALUE`], `Zg` and two
+/// digits at every other.
+fn spell_texts() -> SiteLines {
+    let lines: SiteLines = spell_sites()
+        .into_iter()
+        .enumerate()
+        .map(|(i, at)| {
+            let text = if let Some(&(_, t)) = SPELL_NO_WORD.iter().find(|&&(a, _)| a == at) {
+                t.to_vec()
+            } else if SPELL_SHORT.contains(&at) {
+                b"Z".to_vec()
+            } else if at == FOOD_LINE {
+                format!("Zg{i:02} %d\n").into_bytes()
+            } else if SPELL_VALUE.contains(&at) {
+                format!("Zg{i:02} %s\n").into_bytes()
+            } else {
+                format!("Zg{i:02}").into_bytes()
+            };
+            (at, text)
+        })
+        .collect();
+    for pair in lines.windows(2) {
+        let ((at, text), (next, _)) = (&pair[0], &pair[1]);
+        assert!(at + (text.len() as u32) < *next, "the text at {at:#x} fits");
+    }
+    lines
+}
+
+/// The text [`spell_texts`] puts at `at`.
+fn spell_text(at: u32) -> String {
+    let (_, text) = spell_texts()
+        .into_iter()
+        .find(|&(a, _)| a == at)
+        .expect("a magic site");
+    String::from_utf8(text).unwrap()
+}
+
+/// [`spell_texts`], and the result messages', the potions', the directions' and `A`'s syllable
+/// slots (absolute pointers: no RELOC32) with their texts.
+fn spell_lines() -> SiteLines {
+    let mut lines = spell_texts();
+    let slots = (0..13)
+        .map(|n| MESSAGE_SLOTS + 4 * n)
+        .chain((0..8).map(|n| POTION_SLOTS + 4 * n))
+        .chain((0..8).map(|n| DIRECTION_SLOTS + 4 * n))
+        .chain([SYLLABLE_A]);
+    let texts = message_texts()
+        .into_iter()
+        .chain(potion_texts())
+        .chain(direction_texts())
+        .chain([SYLLABLE.to_vec()]);
+    for (i, (slot, text)) in (0u32..).zip(slots.zip(texts)) {
+        let at = SPELL_LABELS + 0x10 * i;
+        lines.push((slot, at.to_be_bytes().to_vec()));
+        lines.push((at, text));
+    }
+    lines
+}
+
+/// A synthetic `game` (one CODE hunk from the image base) holding [`spell_lines`], each string
+/// NUL-ended at its site.
+fn spell_game() -> Vec<u8> {
+    game_of(&spell_lines())
+}
+
+/// Move's sites the push case prints, the test's own copies of `objects::commands::push`'s
+/// addresses (pinned to its list in the test): the direction prompt, the direction's line and
+/// the `\n%s\n` format of the not-possible message.
+const PUSH_TO: u32 = 0x0012_85fe;
+const PUSH_DIR_LINE: u32 = 0x0012_860c;
+const PUSH_NL_LINE_NL: u32 = 0x0012_859a;
+
+/// [`spell_lines`] and Move's lines (the test's own text): the prompt (`Zp1`: the next site lies
+/// 4 bytes on), the direction's line and the message format (no word of their own).
+fn spellwork_lines() -> SiteLines {
+    let mut lines = spell_lines();
+    lines.extend([
+        (PUSH_TO, b"Zp1".to_vec()),
+        (PUSH_DIR_LINE, b"%s.\n".to_vec()),
+        (PUSH_NL_LINE_NL, b"\n%s\n".to_vec()),
+    ]);
+    lines
+}
+
+#[test]
+fn magics_lines_and_results_are_catalogued_but_its_formats_of_no_word_and_its_syllables_not() {
+    let a4 = crate::image::A4;
+    // Each file's list in full, as the test's own literals (a constant dropped, added twice or
+    // moved fails here): the book page's two formats (its line, a panel's, is not listed); Cast's
+    // and the books'; the creature spells'; the
+    // detections'; the dispatcher's; the effects' (with a torch's burned-out line); the typed
+    // spell's; the object spells'; the spells of their own; the travel spells'.
+    assert_eq!(
+        crate::magic::PRINTED.map(<[u32]>::to_vec),
+        [
+            vec![0x0011_58b0, 0x0011_58ac],
+            vec![
+                0x0011_5b36,
+                0x0011_5a9a,
+                0x0011_5ab2,
+                0x0011_5ad0,
+                0x0011_5ada,
+                0x0011_5ae0,
+                0x0011_58b0,
+                0x0011_5a62,
+                0x0011_5ae6,
+                0x0011_5ae8,
+                0x0011_5b0a,
+                0x0011_5b26,
+            ],
+            vec![0x0011_59dc, 0x0011_5a66],
+            vec![
+                0x0011_5978,
+                0x0011_5994,
+                0x0011_59a8,
+                0x0011_59ba,
+                0x0011_595e,
+                0x0011_596e,
+            ],
+            vec![0x0011_58ba],
+            vec![
+                0x0011_58b0,
+                0x0011_58ba,
+                0x0011_58ca,
+                0x0011_58ce,
+                0x0011_58e4,
+                0x0011_58d4,
+                0x0011_58bc,
+                a4 - 0x756f,
+            ],
+            vec![a4 - 0x7387, 0x0010_4ffc],
+            vec![
+                0x0011_59f8,
+                0x0011_5a08,
+                0x0011_5a14,
+                0x0011_5a28,
+                0x0011_5a38,
+                0x0011_5a48,
+                0x0011_5a54,
+                0x0011_5a5c,
+                0x0011_5a62,
+            ],
+            vec![
+                0x0011_59ca,
+                0x0011_58ea,
+                0x0011_5a08,
+                0x0011_5a8a,
+                0x0011_5a94,
+            ],
+            vec![
+                0x0011_5a1e,
+                0x0011_5a72,
+                0x0011_5a78,
+                0x0011_5a7a,
+                0x0011_5a7c,
+                0x0011_5a82,
+                0x0011_5a86,
+            ],
+        ],
+        "magic's lists"
+    );
+    let labels: Vec<u32> = (0..13)
+        .map(|n| MESSAGE_SLOTS + 4 * n)
+        .chain((0..8).map(|n| POTION_SLOTS + 4 * n))
+        .chain((0..8).map(|n| DIRECTION_SLOTS + 4 * n))
+        .collect();
+    assert_eq!(crate::magic::LABELS, labels.as_slice(), "magic's labels");
+    let cat = Catalogue::from_game(&spell_game());
+    let lines = spell_texts();
+    assert_eq!(lines.len(), 49, "magic's sites, each once");
+    for (at, text) in &lines {
+        let want = if SPELL_NO_WORD.iter().any(|&(a, _)| a == *at) || SPELL_SHORT.contains(at) {
+            None
+        } else if SPELL_VALUE.contains(at) {
+            Some(Kind::Format)
+        } else {
+            Some(Kind::Message)
+        };
+        assert_eq!(cat.of(text).map(|e| e.kind), want, "the string at {at:#x}");
+    }
+    for text in message_texts()
+        .iter()
+        .chain(&potion_texts())
+        .chain(&direction_texts())
+    {
+        assert_eq!(cat.of(text).map(|e| e.kind), Some(Kind::Label), "a label");
+    }
+    assert!(
+        cat.of(SYLLABLE).is_none() && cat.label_of(SYLLABLE).is_none(),
+        "the syllable is not catalogued"
+    );
+    assert_eq!(
+        cat.len(),
+        28 + 3 + 29,
+        "28 lines, the three with a value, 13 messages, 8 potions and 8 directions"
+    );
+}
+
+/// A potion of description 3 (type 0x113, frame 3) and its tile (4 × type + frame).
+const POTION_TF: u16 = 0x113 | 3 << 10;
+const POTION_TILE: u16 = 4 * 0x113 + 3;
+
+/// Party member `Zm` (actor 1, a party member: status 0x80) at (100, 100) leading a party of one,
+/// slots linked, the test text layer; magic's tables hold [`message_texts`], [`potion_texts`] and
+/// `A`'s syllable, the potion's tile is a magic tile; tiles 4 × type + frame, no look table
+/// (every object is named `zo`, the nothing word).
+fn caster_world() -> State {
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    s.objects.type_frame[1] = 0x17a;
+    s.objects.location[1] = crate::objects::pack_xyz(100, 100, 0);
+    s.actors.attrs.status[1] = 0x80;
+    let p = &mut s.actors.party;
+    p.size = 1;
+    p.members[0] = 1;
+    p.names = vec!["Zm".into()];
+    s.map.centre = s.objects.location[1];
+    crate::objects::init_slots(&mut s.objects);
+    crate::objects::link_actors(&mut s.objects);
+    s.tables.basetile.base = (0..1024).map(|t| t * 4).collect();
+    s.objects.defs.nothing_lower = "zo".into();
+    let t = &mut s.magic.tables;
+    t.messages = message_texts();
+    t.potions = potion_texts();
+    t.syllables = vec![SYLLABLE.to_vec()];
+    t.magic_tiles = vec![POTION_TILE];
+    s
+}
+
+/// What [`spellwork`] runs: the Cast command, Detect Magic (spell 1) with its target chosen,
+/// the key `A` under the spell cursor, the search of the typed syllables, or Wind Change (spell
+/// 0x39), Telekinesis (spell 0x15, its target chosen) or Move (the object commands' push)
+/// answered with the up key (north, direction 0).
+#[derive(Clone, Copy, Debug)]
+enum Spellwork {
+    Cast,
+    Detect,
+    Syllable,
+    Search,
+    Wind,
+    Telekinesis,
+    Push,
+}
+
+/// `work` run on [`caster_world`] after `setup`, in an engine over [`spell_game`], with `pack`
+/// installed over its catalogue (or no pack): the scroll's text and the counts.
+fn spellwork(work: Spellwork, setup: fn(&mut State), pack: Option<Pack>) -> (String, [u32; 2]) {
+    let lines = spellwork_lines();
+    let game = game_of(&lines);
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let mut s = caster_world();
+    // The object commands read the same image (Move).
+    let parts: Vec<(u32, &[u8])> = lines.iter().map(|(at, t)| (*at, t.as_slice())).collect();
+    s.objcmds = crate::objects::commands::ObjCommands::from_data(
+        crate::objects::commands::GameData::with_bytes(&parts),
+    );
+    setup(&mut s);
+    if let Some(p) = pack {
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            None,
+            Catalogue::from_game(&game),
+        )
+        .expect("the pack checks");
+    }
+    let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
+        match work {
+            Spellwork::Cast => crate::magic::cast(&st, &io).await,
+            Spellwork::Detect => crate::magic::dispatch(&st, &io, 1, true).await,
+            Spellwork::Syllable => {
+                crate::magic::spell_key(&st, &io, 0x41).await;
+            }
+            Spellwork::Search => {
+                crate::magic::find_typed_spell(&st, &io).await;
+            }
+            Spellwork::Wind => crate::magic::dispatch(&st, &io, 0x39, false).await,
+            Spellwork::Telekinesis => crate::magic::dispatch(&st, &io, 0x15, true).await,
+            Spellwork::Push => crate::objects::commands::push(&st, &io).await,
+        }
+    });
+    e.tick(&[], 16);
+    if let Spellwork::Wind | Spellwork::Telekinesis | Spellwork::Push = work {
+        e.tick(
+            &[crate::engine::InputEvent::Key(crate::engine::Key::Up)],
+            16,
+        );
+    }
+    // Enough display frames for the flashes a spell holds on screen.
+    for _ in 0..6000 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished(), "{work:?} ends");
+    let s = e.state();
+    (scroll(&s).trim_end().to_string(), s.locale.texts.get())
+}
+
+/// A pack of a form for magic's lines the cases print, Move's prompt, four result messages, a
+/// potion's description and north's name (the test's own), and one for `A`'s syllable, which
+/// is never looked up.
+fn spell_ko() -> Pack {
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings([
+            string(&spell_text(NO_BOOK), "가"),
+            string(&spell_text(NO_MAGIC), "나"),
+            string(&spell_text(NO_SPELLS), "다"),
+            string(&spell_text(NOT_IN_BOOK), "라"),
+            string(&spell_text(POTION_LINE), "마 %s\n"),
+            string("Zr08", "바"),
+            string("Zr05", "사"),
+            string("Zr02", "아"),
+            string("Zd3", "자"),
+            string(&spell_text(DIRECTION_PROMPT), "카"),
+            string("Zn0", "타"),
+            string("Zp1", "파"),
+            string("Zr06", "하"),
+            string("Zsyl", "차"),
+        ])
+        .unwrap()
+}
+
+/// One case: its name, what runs, the world's setup, then the scroll with the pack and the
+/// strings it found there, and the scroll without a pack.
+type SpellCase<'a> = (&'a str, Spellwork, fn(&mut State), String, u32, String);
+
+#[test]
+fn magics_refusals_results_potions_and_directions_print_the_packs_forms_and_else_the_english() {
+    for at in [PUSH_TO, PUSH_DIR_LINE, PUSH_NL_LINE_NL] {
+        assert!(
+            crate::objects::commands::PRINTED
+                .iter()
+                .any(|l| l.contains(&at)),
+            "{at:#x} is in Move's list"
+        );
+    }
+    let nothing: fn(&mut State) = |_| {};
+    let empty_book: fn(&mut State) = |s| {
+        crate::objects::create_in(s, crate::magic::SPELLBOOK, crate::objects::READIED, 0, 1);
+    };
+    let negated: fn(&mut State) = |s| {
+        crate::objects::create_in(s, crate::magic::SPELLBOOK, crate::objects::READIED, 0, 1);
+        s.actors.timers[13] = 1;
+    };
+    let no_target: fn(&mut State) = |s| {
+        s.ui.input.selection = -1;
+    };
+    let potion: fn(&mut State) = |s| {
+        let at = crate::objects::create_on_map(&mut s.objects, POTION_TF, 0, 0, 102, 100, 0);
+        assert!(at >= 0x100, "an object slot for the potion");
+        s.ui.input.selection = at;
+        s.ui.input.target = (102, 100);
+    };
+    let typed: fn(&mut State) = |s| {
+        s.magic.typed_mask = 1;
+    };
+    // The up arrow's raw key gives north's direction code (the test text layer has no arrows).
+    let up_arrow: fn(&mut State) = |s| {
+        s.ui.tables.keymap[0x4c] = [0x148; 4];
+    };
+    // An object of weight 5 two tiles east of the leader, selected and targeted for Telekinesis.
+    let weighty: fn(&mut State) = |s| {
+        s.ui.tables.keymap[0x4c] = [0x148; 4];
+        s.tables.tileflags.weight = vec![0; 0x400];
+        s.tables.tileflags.weight[0x77] = 5;
+        let at = crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 102, 100, 0);
+        assert!(at >= 0x100, "an object slot");
+        s.ui.input.selection = at;
+        s.ui.input.target = (102, 100);
+    };
+    // A weightless object one tile east of the leader, selected and targeted for Move.
+    let beside: fn(&mut State) = |s| {
+        s.ui.tables.keymap[0x4c] = [0x148; 4];
+        let at = crate::objects::create_on_map(&mut s.objects, 0x30, 0, 0, 101, 100, 0);
+        assert!(at >= 0x100, "an object slot");
+        s.ui.input.selection = at;
+        s.ui.input.target = (101, 100);
+    };
+    let cases: [SpellCase; 9] = [
+        // Cast refused: no book readied, the books' magic negated, no spell in the book.
+        (
+            "no book",
+            Spellwork::Cast,
+            nothing,
+            "가".into(),
+            1,
+            spell_text(NO_BOOK),
+        ),
+        (
+            "no magic",
+            Spellwork::Cast,
+            negated,
+            "나".into(),
+            1,
+            spell_text(NO_MAGIC),
+        ),
+        (
+            "no spells",
+            Spellwork::Cast,
+            empty_book,
+            "다".into(),
+            1,
+            spell_text(NO_SPELLS),
+        ),
+        // Detect Magic with no target: the dispatcher's newline, then three result messages
+        // through three formats (`%s`, `%s\n`, `\n%s\n`; no word: as they are), each a label
+        // read for display.
+        (
+            "no target",
+            Spellwork::Detect,
+            no_target,
+            "\n바사\n\n아".into(),
+            3,
+            "\nZr08Zr05\n\nZr02".into(),
+        ),
+        // On a potion: the prompt, the object's name, then the potion line with the
+        // description through `%s` (a label read for display).
+        (
+            "a potion",
+            Spellwork::Detect,
+            potion,
+            "\n바zo\n마 자".into(),
+            3,
+            format!("\nZr08zo\n{}", spell_text(POTION_LINE).replace("%s", "Zd3"))
+                .trim_end()
+                .into(),
+        ),
+        // A typed spell not in the book: its line, then the search's newline (no word).
+        (
+            "not in the book",
+            Spellwork::Search,
+            typed,
+            "라".into(),
+            1,
+            spell_text(NOT_IN_BOOK),
+        ),
+        // Wind Change: the dispatcher's newline, the direction prompt, then north's name (a label
+        // read for display) through the name format (`%s.\n`, no word: as it is).
+        (
+            "a direction",
+            Spellwork::Wind,
+            up_arrow,
+            "\n카타.".into(),
+            2,
+            format!("\n{}Zn0.", spell_text(DIRECTION_PROMPT)),
+        ),
+        // Telekinesis: the dispatcher's newline, the prompt for a target and the object's name,
+        // the direction prompt, then north's name (a label read for display) through `%s\n`.
+        (
+            "a telekinesis",
+            Spellwork::Telekinesis,
+            weighty,
+            "\n바zo\n카타".into(),
+            3,
+            format!("\nZr08zo\n{}Zn0", spell_text(DIRECTION_PROMPT)),
+        ),
+        // Move: the object's name, the prompt, then north's name (a label read for display)
+        // through the direction's line (`%s.\n`, no word: as it is), then the not-possible
+        // message (a weightless object) through `\n%s\n`.
+        (
+            "a push",
+            Spellwork::Push,
+            beside,
+            "zo\n파타.\n\n하".into(),
+            3,
+            "zo\nZp1Zn0.\n\nZr06".into(),
+        ),
+    ];
+    for (case, work, setup, ko, found, en) in cases {
+        assert_eq!(
+            spellwork(work, setup, Some(spell_ko())),
+            (ko, [found, 0]),
+            "{case}: the pack's forms"
+        );
+        assert_eq!(
+            spellwork(work, setup, None),
+            (en, [0, 0]),
+            "{case}: the English"
+        );
+    }
+}
+
+#[test]
+fn a_typed_syllable_stays_english_with_a_packs_form_for_it() {
+    // `A` under the spell cursor prints its syllable as a format: in the image, but no site
+    // lists it, so the print hook does not look it up (nothing counted) even with a form.
+    let (with, counts) = spellwork(Spellwork::Syllable, |_| {}, Some(spell_ko()));
+    let (without, none) = spellwork(Spellwork::Syllable, |_| {}, None);
+    assert!(with.starts_with("Zsyl"), "the syllable as it is");
+    assert_eq!((with, counts), (without, none), "as without a pack");
+    assert_eq!(counts, [0, 0]);
+}

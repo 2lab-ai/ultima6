@@ -510,7 +510,9 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
         return;
     }
     let dir = ux.s().ui.input.direction;
-    let name = defs::direction_name(ux.io, dir);
+    // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of it
+    // when it has one ([`crate::magic::LABELS`], [`crate::locale::shown`]).
+    let name = crate::locale::shown(&ux.s(), defs::direction_name(ux.io, dir));
     ux.print(FMT_DIR, &[crate::ui::printf::Arg::Str(&name)])
         .await;
     let (dx, dy) = defs::direction(ux.io, dir);

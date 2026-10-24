@@ -22,6 +22,20 @@ const MSG_FULL: u32 = 0x0011_5a48;
 const MSG_WITH: u32 = 0x0011_5a54;
 const MSG_NONE: u32 = 0x0011_5a5c;
 const FMT_SPACE_S: u32 = 0x0011_5a62;
+/// Port-only (spec 08, slice K2; 2026-10-24): those strings, for the locale layer's catalogue
+/// ([`super::PRINTED`]). The syllables go through `%s`: they stay English; the direction's name
+/// too, a label read for display ([`super::tables::LABELS`]).
+pub(super) const PRINTED: &[u32] = &[
+    MSG_NOT_POSSIBLE,
+    MSG_DIRECTION,
+    MSG_NOWHERE,
+    MSG_WHICH,
+    MSG_CANT_CARRY,
+    MSG_FULL,
+    MSG_WITH,
+    MSG_NONE,
+    FMT_SPACE_S,
+];
 /// A4-0x61be: a name pointer per direction.
 const DIRECTION_NAMES: u32 = 0x61be;
 /// The objects Telekinesis treats apart: the drawbridge crank, the lever, the cannon.
@@ -132,7 +146,9 @@ pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
     }
     let dir = state.borrow().ui.input.direction;
     let at = crate::image::A4.wrapping_sub(DIRECTION_NAMES) + 4 * (dir as u32);
-    let name = crate::main_loop::pointed_string(io, at);
+    // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of it
+    // when it has one ([`super::tables::LABELS`], [`crate::locale::shown`]).
+    let name = crate::locale::shown(&state.borrow(), crate::main_loop::pointed_string(io, at));
     print_at(state, io, FMT_S_NL, &[Arg::Str(&name)]).await;
     let blocked = {
         let mut s = state.borrow_mut();

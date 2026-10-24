@@ -154,7 +154,9 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
     let dir_name = {
         let s = state.borrow();
         let at = super::GameData::a4(DIR_NAMES).wrapping_add_signed(i32::from(dir) * 4);
-        s.objcmds.data.pointed(at)
+        // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
+        // it when it has one ([`crate::magic::LABELS`], [`crate::locale::shown`]).
+        crate::locale::shown(&s, s.objcmds.data.pointed(at))
     };
     print_at(state, io, S_DIR_LINE, &[Arg::Str(&dir_name)]).await;
     let pusher = leader(&state.borrow());

@@ -66,6 +66,31 @@ pub use spells::{WINDOW_FLASH_MS, flash_window, resurrect, resurrect_and_rejoin,
 pub use tables::{MagicTables, Msg};
 pub use travel::{locate, wizard_eye};
 
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings the spell code passes to `printf` as
+/// its format (`print_at`, the direct `printf`s, the refusals), each file's list next to its
+/// addresses, for the locale layer's catalogue ([`crate::locale::strings`]). A format of no word
+/// of its own (the result formats, the newlines, the announcement's, the book's number, the
+/// direction's and Locate's) and a string under three bytes the catalogue leaves out: they stay
+/// as they are. The incantation's syllables (printed as a format, the game's magic words), the
+/// names the spells put through `%s` (the spells', the circles') and the spellbook page's line
+/// (a panel's: it stays English) are not listed.
+pub(crate) const PRINTED: [&[u32]; 10] = [
+    book::PRINTED,
+    cast::PRINTED,
+    creatures::PRINTED,
+    detect::PRINTED,
+    dispatch::PRINTED,
+    effects::PRINTED,
+    input::PRINTED,
+    items::PRINTED,
+    spells::PRINTED,
+    travel::PRINTED,
+];
+
+/// Port-only (spec 08, slice K2): the result messages', the potions' and the direction names'
+/// labels for the locale layer's catalogue.
+pub(crate) use tables::LABELS;
+
 /// Spellbook object type.
 pub const SPELLBOOK: u16 = 0x39;
 /// Spell object type (the spells inside a book; quality = spell number).

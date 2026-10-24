@@ -28,6 +28,26 @@ const MSG_QUOTE: u32 = 0x0011_5ae6;
 const MSG_LEVEL_LOW: u32 = 0x0011_5ae8;
 const MSG_NO_POINTS: u32 = 0x0011_5b0a;
 const MSG_NO_REAGENTS: u32 = 0x0011_5b26;
+
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings Cast and the books pass to `printf` as
+/// its format, for the locale layer's catalogue ([`super::PRINTED`]): the no-book, no-magic,
+/// no-spells and nothing lines, the announcement's formats and closing quote, and the three
+/// refusals of the checks. The announcement puts the spell's name and syllables through `%s`:
+/// they stay English.
+pub(super) const PRINTED: &[u32] = &[
+    MSG_NO_BOOK,
+    MSG_NO_MAGIC,
+    MSG_NO_SPELLS,
+    MSG_NOTHING,
+    FMT_PAREN,
+    FMT_NAME_QUOTE,
+    FMT_S,
+    FMT_SPACE_S,
+    MSG_QUOTE,
+    MSG_LEVEL_LOW,
+    MSG_NO_POINTS,
+    MSG_NO_REAGENTS,
+];
 /// A4-0x7b65 (timer 13): while it runs no spell can be cast (Negate Magic sets it).
 const NEGATE_TIMER: usize = 13;
 /// The spell Help, which uses no reagent from the page count.

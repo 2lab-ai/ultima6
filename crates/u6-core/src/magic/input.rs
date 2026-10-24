@@ -27,6 +27,11 @@ const NO_COMMAND: u16 = 0x8f;
 const MSG_NOT_IN_BOOK: u32 = 0x7387;
 /// The newline 0x10674e prints after a search (hunk 2).
 const MSG_NEWLINE: u32 = 0x0010_4ffc;
+/// Port-only (spec 08, slice K2; 2026-10-24): those strings, for the locale layer's catalogue
+/// ([`super::PRINTED`]): the not-in-book line by its image address (as [`a4_string`] reads it)
+/// and the newline. A typed syllable is printed as a format too, but it is a magic word: it is
+/// not catalogued and stays as it is.
+pub(super) const PRINTED: &[u32] = &[crate::image::A4.wrapping_sub(MSG_NOT_IN_BOOK), MSG_NEWLINE];
 
 /// Bit of letter `c` in a syllable set (`1 << (c - 'A')`, a 68000 long shift: 0 from 32 on).
 pub(super) fn letter_bit(c: u8) -> u32 {

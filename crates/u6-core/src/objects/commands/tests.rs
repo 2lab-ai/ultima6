@@ -276,12 +276,9 @@ fn the_view_direction_of_a_pixel() {
 
 /// A world with a 2-entry monster list (types 0x16b, 0x1ac), their stat bytes, one spell for
 /// both, and the hero (actor 1) leading at (500, 500) at noon.
-fn monster_world() -> State {
-    let mut s = world();
-    s.objects.defs.monster_types = vec![0x16b, 0x1ac, 0];
-    s.objects.defs.dir_dx = vec![0, 1, 1, 1, 0, -1, -1, -1];
-    s.objects.defs.dir_dy = vec![-1, -1, 0, 1, 1, 1, 0, -1];
-    let parts = vec![
+/// The made-up A4 tables of [`monster_world`]'s monster types.
+fn monster_parts() -> Vec<(u32, Vec<u8>)> {
+    vec![
         (a4(-0x7f7e), vec![20, 4]),
         (a4(-0x7f3e), vec![10, 2]),
         (a4(-0x7efe), vec![8, 1]),
@@ -289,8 +286,15 @@ fn monster_world() -> State {
         (a4(-0x7dfe), vec![0x20, 0x00]),
         (a4(-0x7d3e), vec![0, 0, 0, 0]),
         (a4(-0x7cbe), vec![7, 0, 0, 0, 0]),
-    ];
-    with_data(&mut s, parts);
+    ]
+}
+
+fn monster_world() -> State {
+    let mut s = world();
+    s.objects.defs.monster_types = vec![0x16b, 0x1ac, 0];
+    s.objects.defs.dir_dx = vec![0, 1, 1, 1, 0, -1, -1, -1];
+    s.objects.defs.dir_dy = vec![-1, -1, 0, 1, 1, 1, 0, -1];
+    with_data(&mut s, monster_parts());
     s.actors.party.size = 1;
     s.actors.party.members[0] = 1;
     s.objects.type_frame[1] = 0x19a;
@@ -414,6 +418,70 @@ fn friends_of_gargoyles_get_peaceful_gargoyles() {
     hatch_egg(&mut s, egg);
     let m = monsters(&s)[0];
     assert_eq!(s.actors.worktype[m as usize], 0xc);
+}
+
+/// A scout's warning (A4-0x763a) and the direction names' slots (A4-0x61be + 4 n), the test's own
+/// copies of the addresses; where the made-up image keeps east's name (no site there).
+const WARNING: i32 = -0x763a;
+const DIR_SLOTS: i32 = -0x61be;
+const EAST_TEXT: u32 = crate::image::IMAGE_BASE + 0x400;
+
+/// The name the scout's warning queues for its `%s` when an egg 20 tiles east of the leader
+/// hatches a hostile (RNG seeded with `seed`), with a Korean pack of a form for east's name
+/// installed (`pack`) or no pack: [`monster_world`]'s tables and, after them, the warning
+/// `Zw1 %s` and east's name `Zn2` at the third slot of the direction table (an absolute pointer),
+/// actor 3 a member (status 0x80) beside the leader; the made-up image's bytes are the test's
+/// own. `None` when no warning is queued.
+fn scouts_warning(pack: bool, seed: u16) -> Option<Vec<u8>> {
+    let mut s = monster_world();
+    let mut parts = monster_parts();
+    parts.extend([
+        (a4(WARNING), b"Zw1 %s".to_vec()),
+        (a4(DIR_SLOTS) + 8, EAST_TEXT.to_be_bytes().to_vec()),
+        (EAST_TEXT, b"Zn2".to_vec()),
+    ]);
+    with_data(&mut s, parts.clone());
+    if pack {
+        let refs: Vec<(u32, &[u8])> = parts.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        crate::locale::strings::install_test_forms(&mut s, &refs, &[(b"Zn2", "동")]);
+    }
+    s.map.centre = crate::objects::pack_xyz(500, 500, 0);
+    s.objects.type_frame[3] = 0x17a;
+    s.objects.set_xyz(3, 501, 500, 0);
+    s.actors.attrs.status[3] = 0x80;
+    s.rng = crate::rng::Rng::seeded(seed);
+    let egg = put(&mut s, 0x14f, 520, 500);
+    s.objects.qq[egg as usize] = 0x0264; // quality 2 (alignment 2: hostile), 100%
+    s.objects.obj_status[egg as usize] = 0; // not marked (0x20): its hostiles are warned of
+    create_in(&mut s, 0x16b, 0x08, 0x0801, egg);
+    hatch_egg(&mut s, egg);
+    let warning = super::text::a4_string(&s, WARNING);
+    s.main.pending_print.iter().find_map(|p| match p {
+        Pending::Print(f, args) if *f == warning => match args.as_slice() {
+            [PrintArg::Str(name)] => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn a_scouts_warning_names_the_packs_direction_and_without_a_pack_the_english() {
+    // The warning's `%s` gets east's name read for display: the pack's form, else the English.
+    // A seed whose draw lets the scout speak (`range(0, 3)` is 0..=3: 1 in 4 says nothing).
+    let seed = (1..64)
+        .find(|&n| scouts_warning(false, n).is_some())
+        .expect("a seed where the scout warns");
+    assert_eq!(
+        scouts_warning(true, seed),
+        Some("동".as_bytes().to_vec()),
+        "the pack's name"
+    );
+    assert_eq!(
+        scouts_warning(false, seed),
+        Some(b"Zn2".to_vec()),
+        "the English"
+    );
 }
 
 #[test]
