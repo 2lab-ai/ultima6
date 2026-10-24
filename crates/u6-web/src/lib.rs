@@ -12,14 +12,14 @@
 //! `=` the game takes itself.
 //!
 //! HD (spec 07 HD0): with [`Game::set_hd`] on, each present also composes the HD frame
-//! ([`Game::hd_frame_ptr`], `WIDTH·S × HEIGHT·S`, S 2 or 4; the frame is 320 × 200, 912 × 336
-//! in Wide mode, spec 13: [`Game::width`], [`Game::height`]) from the published frame (the shown
-//! frame without the pointer sprite, spec 11 Design 7) and the images its source plane names
-//! (`u6_render::hd::Compositor`), when the frame, its sources or the HD setting changed since the
-//! last composition; the page draws the pointer over it ([`Game::hd_pointer`]). Off, nothing of
-//! it runs and the RGBA frame, the sprite in it, is as without it. An HD pack (spec 07 H2): the
-//! page tells a dropped pack from game files with a [`PackProbe`] (its zip directory and manifest
-//! only), loads it once as an [`HdPack`] (checked whole, every image decoded: at most
+//! ([`Game::hd_frame_ptr`], `WIDTH·S × HEIGHT·S`, S 2 or 4; the frame is 320 × 200, 912 × 408
+//! in Wide mode, specs 13 and 14: [`Game::width`], [`Game::height`]) from the published frame
+//! (the shown frame without the pointer sprite, spec 11 Design 7) and the images its source plane
+//! names (`u6_render::hd::Compositor`), when the frame, its sources or the HD setting changed
+//! since the last composition; the page draws the pointer over it ([`Game::hd_pointer`]). Off,
+//! nothing of it runs and the RGBA frame, the sprite in it, is as without it. An HD pack (spec 07
+//! H2): the page tells a dropped pack from game files with a [`PackProbe`] (its zip directory and
+//! manifest only), loads it once as an [`HdPack`] (checked whole, every image decoded: at most
 //! [`MAX_PACK_FILE_BYTES`] read, at most `u6_hdpack::MAX_DECODED_BYTES` decoded) and sets it on
 //! every game it starts ([`Game::set_hd_pack`]); a pack image whose classic image is the one the
 //! game holds now goes in front of MMPX.
@@ -3188,7 +3188,12 @@ mod tests {
     /// pixels and its version move), draws it at the last cell and presents (the cells drawn
     /// before keep pixels of its old version).
     fn tile_engine() -> Engine {
-        let mut state = u6_core::State::empty();
+        tile_engine_on(u6_core::State::empty())
+    }
+
+    /// [`tile_engine`] on `state` (its records 1..=3 set as there): the pointer events queued in
+    /// front of a key are taken first, so a state with the pointer tables can be pointed at too.
+    fn tile_engine_on(mut state: u6_core::State) -> Engine {
         for (r, seed) in [(1usize, 3u32), (2, 7), (3, 3)] {
             let rec = &mut state.gfx.records[r];
             rec.pixels = (0..256u32)
@@ -3206,6 +3211,7 @@ mod tests {
             io.present();
             let mut cell = 0u16;
             loop {
+                io.take_pointer();
                 while io.key_ready() {
                     let key = io.next_key().await;
                     let s = state.borrow();
@@ -3633,7 +3639,8 @@ mod tests {
 
     /// An engine on screen with the plane and the pointer tables of [`pointer_shape`] (shown), a
     /// palette of distinct colours and five letters of the synthetic font at cells 2..=6 of row 2
-    /// (ink 3, paper 4); on keys `h` the pointer hidden, `s` shown again.
+    /// (ink 3, paper 4); on keys `h` the pointer hidden, `s` shown again, `p` the sprite's
+    /// colours 17..=19 changed in the palette and presented.
     fn pointer_engine() -> Engine {
         let mut state = u6_core::State::empty();
         state.ui.pointer =
@@ -3663,6 +3670,14 @@ mod tests {
                     match io.next_key().await {
                         Key::Char('h') => st.borrow_mut().ui.pointer.shown = false,
                         Key::Char('s') => st.borrow_mut().ui.pointer.shown = true,
+                        Key::Char('p') => {
+                            io.draw(|fb| {
+                                for v in 17..20u8 {
+                                    fb.palette[usize::from(v)] = u6_core::Rgb::new(v, 2 * v, 3 * v);
+                                }
+                            });
+                            io.present();
+                        }
                         _ => {}
                     }
                 }
@@ -3732,8 +3747,19 @@ mod tests {
         }
         assert!(opaque > 0 && opaque < 15, "clear pixels inside the box too");
         drop(published);
-        // Moves of the pointer alone: nothing composed, the pointer's version moved.
+        // Moves of the pointer alone: nothing composed, the pointer's version moved. The baseline
+        // first: the five letters listed.
         let (v, held, list) = (game.frame_version(), game.hd_frame_rgba(), game.hd_glyphs());
+        let e = game.engine.as_ref().unwrap();
+        let rgb = |i: usize| {
+            let c = e.frame().palette[i];
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        };
+        let letters: Vec<u32> = (2..7u32)
+            .zip(0..)
+            .flat_map(|(col, k)| [col * 8, 16, u32::from(b'a') + k, rgb(3), rgb(4)])
+            .collect();
+        assert_eq!(list, letters, "the baseline: the five letters listed");
         game.hd_take_dirty();
         let mut version = p[4];
         for (x, y, what) in [(140, 80, "a move"), (27, 19, "over the letters")] {
@@ -3800,6 +3826,155 @@ mod tests {
         );
         game.set_hd(true, 2);
         assert_eq!(game.hd_pointer()[..4], [98, 59, 16, 3], "HD on again");
+    }
+
+    /// The pointer's pixels [`Game::hd_pointer_rgba`] is to give for the running engine's sprite
+    /// whole in the frame ([`pointer_shape`]'s 16 × 3): value v ≠ 0 in the shown frame's colour
+    /// 16 + v, opaque; 0 transparent.
+    fn expected_pointer(game: &Game) -> Vec<u8> {
+        let fb = game.engine.as_ref().unwrap().frame();
+        pointer_shape()
+            .rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|&v| match v {
+                0 => [0; 4],
+                v => {
+                    let c = fb.palette[usize::from(16 + v)];
+                    [c.r, c.g, c.b, 255]
+                }
+            })
+            .collect()
+    }
+
+    /// Spec 11 Design 7: the HD frame follows the published frame alone. On [`tile_engine`] with
+    /// the pointer shown: a move of the sprite alone composes the shown frame again
+    /// ([`Engine::frame_version`]) but leaves the published version, composes no HD block and
+    /// moves only the pointer's version; a publish of the sources alone (`c`: the cell drawn
+    /// classic in its colours, then `d`: the record again) moves the published version, and the
+    /// HD frame is composed for it (the page's version moved, the cell in the rect), the pointer's
+    /// version left as it was.
+    #[test]
+    fn a_publish_of_the_sources_alone_composes_and_a_sprite_move_does_not() {
+        let mut state = u6_core::State::empty();
+        state.ui.pointer =
+            u6_core::ui::pointer::PointerState::from_tables(u6_core::ui::pointer::PointerTables {
+                shapes: vec![pointer_shape()],
+                shown: true,
+                ..Default::default()
+            });
+        let mut game = Game::new();
+        game.put_on_screen(tile_engine_on(state));
+        game.set_hd(true, 4);
+        for k in ["a", "a"] {
+            press(&mut game, k);
+        }
+        point(&mut game, 200, 120);
+        let versions = |game: &Game| {
+            let e = game.engine.as_ref().unwrap();
+            (e.frame_version(), e.published_version())
+        };
+        game.hd_take_dirty();
+        let (shown, published) = versions(&game);
+        let (v, pointer) = (game.frame_version(), game.hd_pointer()[4]);
+        point(&mut game, 230, 140);
+        assert_eq!(
+            versions(&game),
+            (shown + 1, published),
+            "the sprite moved: the shown frame composed again, the published frame as it was"
+        );
+        assert_eq!(
+            game.frame_version(),
+            v,
+            "the sprite alone: nothing composed"
+        );
+        assert!(
+            game.hd_take_dirty().is_empty(),
+            "the sprite alone: no dirty rect"
+        );
+        assert_eq!(
+            game.hd_pointer()[4],
+            pointer + 1,
+            "the pointer's version moved"
+        );
+        for (key, what) in [("c", "classic"), ("d", "the record again")] {
+            let (shown, published) = versions(&game);
+            let (v, pointer) = (game.frame_version(), game.hd_pointer()[4]);
+            press(&mut game, key);
+            assert_eq!(
+                versions(&game),
+                (shown, published + 1),
+                "{what}: the sources alone published (the colours as they were)"
+            );
+            assert_eq!(
+                game.frame_version(),
+                v + 1.0,
+                "{what}: composed for the sources"
+            );
+            assert_eq!(
+                game.hd_take_dirty(),
+                vec![32 * 4, 32 * 4, 16 * 4, 16 * 4],
+                "{what}: the cell"
+            );
+            assert_eq!(
+                game.hd_pointer()[4],
+                pointer,
+                "{what}: the pointer as it was"
+            );
+        }
+    }
+
+    /// Spec 11 Design 7: the pointer standing still, its colours changed in the palette (`p`):
+    /// the same box, its pixels in the new colours, the version moved; a new engine put on
+    /// screen (a start) gives no pointer until its first step, then its own sprite's box and
+    /// pixels, each time with the version moved.
+    #[test]
+    fn the_pointer_follows_its_colours_and_a_new_engine() {
+        let mut game = Game::new();
+        game.put_on_screen(pointer_engine());
+        game.set_hd(true, 2);
+        point(&mut game, 100, 60);
+        let (before, rgba) = (game.hd_pointer(), game.hd_pointer_rgba());
+        assert_eq!(before[..4], [98, 59, 16, 3]);
+        assert_eq!(
+            rgba,
+            expected_pointer(&game),
+            "its pixels in the frame's colours"
+        );
+        press(&mut game, "p");
+        let after = game.hd_pointer();
+        assert_eq!(after[..4], before[..4], "the colours changed: the same box");
+        assert_eq!(
+            after[4],
+            before[4] + 1,
+            "the colours changed: the version moved"
+        );
+        assert!(
+            game.hd_pointer_rgba() != rgba,
+            "the pixels in the new colours"
+        );
+        assert_eq!(game.hd_pointer_rgba(), expected_pointer(&game));
+        // A start: a new engine, no sprite before its first step, then its own.
+        let version = after[4];
+        game.put_on_screen(pointer_engine());
+        assert_eq!(
+            game.hd_pointer(),
+            vec![0, 0, 0, 0, version + 1],
+            "the new engine before its first step: no pointer"
+        );
+        assert!(game.hd_pointer_rgba().is_empty());
+        point(&mut game, 140, 80);
+        let p = game.hd_pointer();
+        assert_eq!(
+            p,
+            vec![138, 79, 16, 3, version + 2],
+            "the new engine's sprite"
+        );
+        assert_eq!(
+            game.hd_pointer_rgba(),
+            expected_pointer(&game),
+            "its pixels"
+        );
     }
 
     /// A synthetic pack image of a tile: 64 × 64 RGBA of a pattern seeded by `seed`, opaque but

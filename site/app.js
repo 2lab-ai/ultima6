@@ -1365,20 +1365,21 @@ let drawnHd = false; // that frame was its HD frame
 // Wide in `game` the side panel's view is read first (`pollPanel`): when it changed, the canvas
 // is composed whole, with no new frame too. With HD on, a move of the pointer alone
 // (Game.hd_pointer: the HD frame is composed without it) draws too: the canvas under its old and
-// new boxes, then the pointer (spec 11 Design 7).
+// new boxes, then the pointer (spec 11 Design 7). The pointer is read once a draw, here.
 function draw() {
   const version = game.frame_version();
   const hd = game.hd_on();
   const view = viewFor(hd);
   if (WIDE && view === REGIONS_VIEW && pollPanel()) wideStale = true;
-  const pointerMoved = hd && drawnHd && game === drawnGame && game.hd_pointer()[4] !== pointerShown?.[4];
+  const pointer = hd ? game.hd_pointer() : null;
+  const pointerMoved = hd && drawnHd && game === drawnGame && pointer[4] !== pointerShown?.[4];
   if (game === drawnGame && version === drawnVersion && view === shownView && !wideStale && !pointerMoved) return;
   if (WIDE) {
-    composeWide(view, hd, version);
+    composeWide(view, hd, version, pointer);
     return;
   }
   if (view !== FRAME) {
-    compose(view, version);
+    compose(view, version, pointer);
     return;
   }
   if (x4) {
@@ -1411,19 +1412,19 @@ function draw() {
   }
   const rect = game.hd_take_dirty();
   const before = over ? pointerShown : null;
-  const pointer = takePointer();
-  const moved = before === null || before[4] !== pointer[4];
+  const shown = takePointer(pointer);
+  const moved = before === null || before[4] !== shown[4];
   if (over && rect.length === 0 && !moved) return;
   const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
   const image = new ImageData(pixels, w, h);
   if (over) {
     if (rect.length > 0) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
     // The pointer moved: the HD frame put back under its old and new boxes.
-    if (moved) for (const box of [before, pointer].map((p) => scaledBox(p, s)).filter(Boolean)) ctx.putImageData(image, 0, 0, ...box);
+    if (moved) for (const box of [before, shown].map((p) => scaledBox(p, s)).filter(Boolean)) ctx.putImageData(image, 0, 0, ...box);
   } else ctx.putImageData(image, 0, 0);
   // Then the pointer, whole: at a whole scale each canvas pixel takes one of its pixels, so
   // drawing it again over itself changes nothing.
-  pointerShown = pointer;
+  [pointerShown, pointerOf] = [shown, game];
   paintPointer(ctx, [0, 0, game.width(), game.height()], [0, 0, w, h], [0, 0, w, h]);
 }
 
@@ -1648,8 +1649,9 @@ function viewFor(hd) {
 // Draws the HD frame (version `version`) for `view`: on the offscreen ×4 frame (only the dirty
 // rect over the one it holds of this game), then on the canvas, whole when it showed another
 // game, another view or nothing yet, else only the regions the dirty rect touches (with the
-// pointer's old and new boxes when it moved: spec 11 Design 7).
-function compose(view, version) {
+// pointer's old and new boxes when it moved: spec 11 Design 7; `meta`, Game.hd_pointer as `draw`
+// read it).
+function compose(view, version, meta) {
   if (canvas.width !== LAYOUT_W || canvas.height !== LAYOUT_H) {
     canvas.width = LAYOUT_W;
     canvas.height = LAYOUT_H;
@@ -1667,7 +1669,7 @@ function compose(view, version) {
   const rect = game.hd_take_dirty();
   const fresh = shownView !== view;
   const before = whole ? null : pointerShown;
-  const pointer = takePointer();
+  const pointer = takePointer(meta);
   // The pointer moved (spec 11 Design 7): the canvas under its old and new boxes, as for a dirty
   // rect of the ×4 frame there.
   const moved = before !== null && before[4] !== pointer[4] ? union(scaledBox(before, LAYOUT_S), scaledBox(pointer, LAYOUT_S)) : null;
@@ -1675,7 +1677,7 @@ function compose(view, version) {
   drawnVersion = version;
   drawnHd = true;
   shownView = view;
-  pointerShown = pointer;
+  [pointerShown, pointerOf] = [pointer, game];
   if (fresh) fitRendering(true);
   if (over && rect.length === 0 && !whole && !moved) return;
   if (!over || rect.length > 0) {
@@ -1708,19 +1710,20 @@ function union(a, b) {
 // --- the pointer over the HD frame (spec 11 Design 7) -------------------------------------------
 
 let pointerShown = null; // the pointer the canvas shows (Game.hd_pointer as drawn last), or null
+let pointerOf = null; // the game `pointerShown` is of
 let pointerImage = null; // an offscreen canvas holding its pixels (Game.hd_pointer_rgba)
-let pointerHeld = null; // the game and the version whose pixels pointerImage holds
 
-// The pointer the game gives now (Game.hd_pointer: its box in frame pixels and its version), its
-// pixels taken into `pointerImage` when they are another game's or version's.
-function takePointer() {
-  const p = [...game.hd_pointer()];
-  if (p[2] > 0 && (pointerHeld?.game !== game || pointerHeld.version !== p[4])) {
+// The pointer `p` (Game.hd_pointer as `draw` read it, once a draw: its box in frame pixels and its
+// version) as the canvas is to show it: while it is the one the canvas shows (this game's, at the
+// same version), that one, nothing copied or taken again; else `p` itself, its pixels taken into
+// `pointerImage` when it has a box. The caller then shows it (`pointerShown`, `pointerOf`).
+function takePointer(p) {
+  if (pointerOf === game && pointerShown !== null && pointerShown[4] === p[4]) return pointerShown;
+  if (p[2] > 0) {
     pointerImage ??= document.createElement('canvas');
     [pointerImage.width, pointerImage.height] = [p[2], p[3]];
     const rgba = new Uint8ClampedArray(game.hd_pointer_rgba());
     pointerImage.getContext('2d').putImageData(new ImageData(rgba, p[2], p[3]), 0, 0);
-    pointerHeld = { game, version: p[4] };
   }
   return p;
 }
@@ -2269,8 +2272,9 @@ const inRect = (px, py, [x, y, w, h]) => px >= x && px < x + w && py >= y && py 
 // the one it holds of this game at this scale; the classic frame, which has none, whole), then
 // on the canvas, whole when it showed another game, another view, the other frame or nothing
 // yet, else the part the dirty rect touches (`paintWide`; with the pointer's old and new boxes
-// when it moved over the HD frame: spec 11 Design 7).
-function composeWide(view, hd, version) {
+// when it moved over the HD frame: spec 11 Design 7; `meta`, Game.hd_pointer as `draw` read it,
+// null with HD off).
+function composeWide(view, hd, version, meta) {
   if (canvas.width !== WIDE_W || canvas.height !== WIDE_H) {
     canvas.width = WIDE_W;
     canvas.height = WIDE_H;
@@ -2291,14 +2295,14 @@ function composeWide(view, hd, version) {
   // With HD the pointer is drawn over the frame (spec 11 Design 7); when it moved, the canvas
   // under its old and new boxes is painted again, as for a dirty rect of the HD frame there.
   const before = whole ? null : pointerShown;
-  const pointer = hd ? takePointer() : null;
+  const pointer = hd ? takePointer(meta) : null;
   const moved = before !== null && before[4] !== pointer[4] ? union(scaledBox(before, s), scaledBox(pointer, s)) : null;
   drawnGame = game;
   drawnVersion = version;
   drawnHd = hd;
   shownView = view;
   wideStale = false;
-  pointerShown = pointer;
+  [pointerShown, pointerOf] = [pointer, game];
   if (fresh) fitRendering(hd);
   if (!over || !hd || rect.length > 0) {
     // Re-create the view every frame: wasm memory growth detaches old buffers.

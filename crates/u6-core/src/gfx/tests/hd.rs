@@ -578,7 +578,12 @@ fn overlapping_records_an_outline_and_an_overlay_in_the_final_frame() {
     }
 }
 
-/// The pointer sprite over HD art: its pixels the classic colours, the art beside it HD.
+/// The compositor over the shown frame ([`Engine::frame`], the classic frame: the published frame
+/// with the pointer sprite drawn over it), composed here directly: the sprite's pixels are
+/// classic sources, so they show their classic colours, and the art beside them is HD. The
+/// platform's HD frame is not this one: [`HdView`] composes the published frame, without the
+/// sprite, and the page draws the pointer over it (spec 11 Design 7,
+/// `ui/tests/pointer_tests.rs`).
 #[test]
 fn the_pointer_sprite_stays_classic_over_hd_art() {
     let mut s = State::empty();

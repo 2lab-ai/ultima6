@@ -2257,7 +2257,7 @@ async function bootHd(env, foreign, init = watchMedia) {
   return page;
 }
 
-test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box (S 2 in a smaller box, S 4 at twice the pixel ratio, S 2 again back on the first display); no foreign request', async (env) => {
+test('HD: on by default and kept across a reload; the button switches it at once with no game step; off the canvas is the RGBA frame at 320 x 200, on the HD frame at 320·S x 200·S in the same box (S 2 in a smaller box, S 4 at twice the pixel ratio, S 2 again back on the first display); the pointer drawn over the HD frame (spec 11 Design 7): moved and at rest, and moved with the game frozen, the canvas the HD frame with the pointer over it exactly; no foreign request', async (env) => {
   const foreign = [];
   const page = await bootHd(env, foreign);
   await h.waitPrompt(page);
@@ -2286,6 +2286,36 @@ test('HD: on by default and kept across a reload; the button switches it at once
   assert.equal(await page.evaluate(() => globalThis.__ticks), ticks, 'no game step ran');
   await h.runFrames(page, 30);
   assert.ok(await canvasShowsGame(page), 'and after frames');
+  // The pointer moved (spec 11 Design 7: the HD frame is composed without it, and the page draws it
+  // over the frame): at rest at two places apart, the canvas each time the HD frame with the
+  // pointer over it, exactly.
+  const pointerNow = () => page.evaluate(() => [...globalThis.__shownGame.hd_pointer()]);
+  const rests = [];
+  for (const [gx, gy] of [[60, 60], [250, 150]]) {
+    await page.mouse.move(...(await h.screenPoint(page, gx, gy)));
+    await h.runFrames(page, 10);
+    rests.push(await pointerNow());
+    assert.ok(await canvasShowsGame(page), `the pointer at rest at (${gx}, ${gy}): the HD frame with the pointer over it`);
+  }
+  const apart = ([ax, ay, aw, ah], [bx, by, bw, bh]) => ax >= bx + bw || bx >= ax + aw || ay >= by + bh || by >= ay + ah;
+  assert.ok(rests.every((p) => p[2] > 0) && rests[0][4] !== rests[1][4] && apart(rests[0], rests[1]), 'precondition: the pointer moved, its boxes apart');
+  // The same move with the game frozen, so no rect the compositions wrote repaints anything: the
+  // page's read of the pointer moved by the test's own offset (the pointer's own pixels), and the
+  // canvas is the HD frame with the pointer at its new box, so under its old box the HD frame was
+  // put back; then the pointer back where it is.
+  await freezeGame(page, true);
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const [x, y, w, hh, v] = [...Object.getPrototypeOf(g).hd_pointer.call(g)];
+    const shift = x >= 160 ? -80 : 80;
+    g.hd_pointer = () => Uint32Array.from([x + shift, y, w, hh, (v + 1) >>> 0]);
+  });
+  await h.runFrames(page, 2);
+  assert.ok(await canvasShowsGame(page), 'the pointer moved, the game frozen: the HD frame put back under its old box, the pointer at its new one');
+  await page.evaluate(() => { delete globalThis.__shownGame.hd_pointer; });
+  await h.runFrames(page, 2);
+  assert.ok(await canvasShowsGame(page), 'the pointer back: the HD frame with the pointer over it');
+  await freezeGame(page, false);
   // Kept across reloads; anything but off stored is on.
   await press();
   await page.reload();
@@ -7461,7 +7491,7 @@ const writeFramePixels = (page, at, colour) => page.evaluate(([points, rgb]) => 
   });
 }, [at, colour]);
 
-test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the regions is the game\'s paper from the x4 frame: its outer band (in game only the paper there, the source plane says, the pointer apart) 9-sliced to the canvas\'s edges, the corners and the top and bottom edges unscaled, the side edges stretched, the right and bottom ones mirrored from the left and top; inside it the parchment in one colour, the median of three pixels of the frame; no pixel of the old dark fill or frames; the pieces tile the canvas; the rects that paint it whole outside every region; the pointer\'s sprite never in it (spec 11 Design 7: where the game starts it, moved into the map, the cross-hair at the map\'s left edge, the band as the frame shows it and the same throughout); two samples changed in the frame (by the test) paint it whole, the parchment their new median, and put back whole again; the sprite over one sample leaves the parchment\'s colour with no whole repaint; the regions still the x4 frame\'s; no page error', async (env) => {
+test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the regions is the game\'s paper from the x4 frame: its outer band (in game only the paper there, the source plane says, the pointer apart) 9-sliced to the canvas\'s edges, the corners and the top and bottom edges unscaled, the side edges stretched, the right and bottom ones mirrored from the left and top; inside it the parchment in one colour, the median of three pixels of the frame; no pixel of the old dark fill or frames; the pieces tile the canvas; the rects that paint it whole outside every region; the pointer\'s sprite never in it (spec 11 Design 7: where the game starts it, moved into the map, the cross-hair at the map\'s left edge, the band as the frame shows it and the same throughout); a source of the band changed in the frame (by the test) and a repaint under the pointer meeting the band\'s sources paints it whole with that change; two samples changed in the frame (by the test) paint it whole, the parchment their new median, and put back whole again; the sprite over one sample leaves the parchment\'s colour with no whole repaint; the regions still the x4 frame\'s; no page error', async (env) => {
   const errors = [];
   const { page } = await bootLayout(env, { init: wasmMemoryHook });
   page.on('pageerror', () => errors.push(1));
@@ -7574,6 +7604,28 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   assert.ok(s.touched > 0, 'Look: the cross-hair at the map\'s left edge over the band, in the shown frame');
   paperAsFrame(s, 'the cross-hair over the band');
   assert.equal(s.hash, clean.hash, 'the cross-hair over the band\'s source: the band as before (the x4 frame holds no sprite)');
+  // A source of the band changed: the test's own colour written into the x4 frame at the top
+  // piece's game pixel (100, 0) (unscaled on the canvas's top row, outside every region, and
+  // mirrored on its bottom row), and the next rect the page takes widened to it, as a composition
+  // that wrote there gives it (`recordDirty`'s `__widenTake`). Then the cross-hair moved down the
+  // map's left edge: the rect the page paints again meets the band's sources (PAPER_SOURCES), so
+  // the canvas is painted whole and the band shows the change. The pixel is put back the same way
+  // afterwards.
+  const corner = [[100, 0]];
+  const cornerRect = [400, 0, 4, 4];
+  await writeFramePixels(page, corner, OWN);
+  await startSeeing();
+  await page.evaluate((r) => { window.__widenTake = r; }, cornerRect);
+  await page.mouse.move(...(await h.screenPoint(page, 8, 100)));
+  await h.runFrames(page, 10);
+  m = await moveSeen();
+  assert.ok(m.rects > 0 && m.meets && !m.full && m.sameGame && m.view === 'game', 'precondition: the pointer moved down the map\'s edge, a partial repaint meeting a source of the band');
+  s = await paperShown(page);
+  paperAsFrame(s, 'a source of the band changed');
+  assert.notEqual(s.hash, clean.hash, 'a source of the band changed: the band painted again with it');
+  assert.ok(m.whole > 0, 'a source of the band changed: the canvas painted whole');
+  await writeFramePixels(page, corner, null);
+  await page.evaluate((r) => { window.__widenTake = r; }, cornerRect);
   await page.keyboard.press('Escape');
   for (let k = 0; k < 40 && await page.evaluate(() => document.getElementById('screen').dataset.keys !== '0'); k += 1) await h.runFrames(page, 5);
   await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
@@ -7585,7 +7637,7 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   // The regions over the paper: the one-to-one ones still the x4 frame's pixels.
   for (const [name, { differ }] of Object.entries(await oneToOne(page))) assert.equal(differ, 0, `${name}: the x4 frame's pixels`);
   assert.equal(errors.length, 0, 'no page error');
-  console.log(`  receipt: ${LAYOUT_PAPER.pieces.length} pieces of the band and the parchment tile the canvas; ${s.compared} canvas pixels round the regions the paper from the x4 frame (${s.directCompared} of them read straight from the frame), none the old fill or frame; the pointer's sprite never in it (at the boot, moved into the map, the cross-hair at the map's edge); two samples changed in the frame: painted whole with their median, and again once put back; the sprite over a sample: the parchment's colour kept, no whole repaint: pass`);
+  console.log(`  receipt: ${LAYOUT_PAPER.pieces.length} pieces of the band and the parchment tile the canvas; ${s.compared} canvas pixels round the regions the paper from the x4 frame (${s.directCompared} of them read straight from the frame), none the old fill or frame; the pointer's sprite never in it (at the boot, moved into the map, the cross-hair at the map's edge); a source of the band changed: painted whole with it; two samples changed in the frame: painted whole with their median, and again once put back; the sprite over a sample: the parchment's colour kept, no whole repaint: pass`);
 }, { needs: h.haveHfes });
 
 // --- the HD font (spec 11) ----------------------------------------------------------------------
@@ -8112,40 +8164,56 @@ const oneToOneOff = async (page, name, rect) => (await pointerAreaHook(page), pa
   return off;
 }, [name, rect]));
 
-// Page script: from now on, every non-empty rect of the game on screen's x4 frame the page paints
-// again is kept in `window.__dirty`, and that game in `window.__dirtyGame`: each rect it takes
-// (Game.hd_take_dirty, the rect `paint` copies from), and at each move of the pointer it draws
-// over the frame (Game.hd_pointer's version moved: spec 11 Design 7) the box round the pointer's
-// old and new boxes at x4, which it paints again as such a rect.
+// Page script: from now on, the rect of the game on screen's x4 frame each of the page's draws
+// paints again (the HD layout's `paint` gets it as its dirty rect) is kept in `window.__dirty`,
+// one per draw that paints, and that game in `window.__dirtyGame`. A draw reads the pointer first
+// (Game.hd_pointer, once) and then takes the rect the compositions wrote (Game.hd_take_dirty);
+// the rect it paints is the box round that rect and, when the pointer's version moved (spec 11
+// Design 7), the pointer's old and new boxes at x4. So each entry is that union, kept as the page
+// keeps it: the rect taken alone, the pointer's boxes alone, or both in one. A test that wrote
+// pixels of the x4 frame itself (`writeFramePixels`) sets `window.__widenTake` to the x4 rect it
+// wrote: the next take is widened to it (and that rect cleared), as a composition that wrote
+// there would give it, so the page copies those pixels to the canvas it paints from.
 const recordDirty = (page) => page.evaluate(() => {
   const g = globalThis.__shownGame;
   const real = Object.getPrototypeOf(g);
   window.__dirty = [];
   window.__dirtyGame = g;
-  g.hd_take_dirty = function hdTakeDirty() {
-    const rect = real.hd_take_dirty.call(this);
-    if (rect.length > 0) window.__dirty.push([...rect]);
-    return rect;
+  const union = (a, b) => {
+    if (!a || !b) return a ?? b;
+    const [x0, y0] = [Math.min(a[0], b[0]), Math.min(a[1], b[1])];
+    const [x1, y1] = [Math.max(a[0] + a[2], b[0] + b[2]), Math.max(a[1] + a[3], b[1] + b[3])];
+    return [x0, y0, x1 - x0, y1 - y0];
   };
+  const box = (p) => (p[2] > 0 ? [p[0], p[1], p[2], p[3]].map((v) => 4 * v) : null);
   let last = [...real.hd_pointer.call(g)];
+  let moved = null; // the pointer's old and new boxes, read by this draw
   g.hd_pointer = function hdPointer() {
     const p = real.hd_pointer.call(this);
     if (p[4] !== last[4]) {
-      const boxes = [last, p].filter((b) => b[2] > 0).map((b) => b.slice(0, 4).map((v) => 4 * v));
-      if (boxes.length > 0) {
-        const [x0, y0] = [Math.min(...boxes.map((b) => b[0])), Math.min(...boxes.map((b) => b[1]))];
-        const [x1, y1] = [Math.max(...boxes.map((b) => b[0] + b[2])), Math.max(...boxes.map((b) => b[1] + b[3]))];
-        window.__dirty.push([x0, y0, x1 - x0, y1 - y0]);
-      }
+      moved = union(box(last), box(p));
       last = [...p];
     }
     return p;
   };
+  window.__widenTake = null;
+  g.hd_take_dirty = function hdTakeDirty() {
+    let rect = real.hd_take_dirty.call(this);
+    if (window.__widenTake) {
+      rect = Uint32Array.from(union(rect.length > 0 ? [...rect] : null, window.__widenTake));
+      window.__widenTake = null;
+    }
+    const painted = union(rect.length > 0 ? [...rect] : null, moved);
+    moved = null;
+    if (painted) window.__dirty.push(painted);
+    return rect;
+  };
 });
 
-// Page script: the rects `recordDirty` kept: how many, whether any is the whole x4 frame, whether
-// any meets the x4 rect `rect`; whether the game on screen and the view are still the ones then
-// (so each of those rects reached `paint` as its dirty rect: a partial repaint).
+// Page script: the rects `recordDirty` kept (one per draw that painted: the union it painted
+// again): how many, whether any is the whole x4 frame, whether any meets the x4 rect `rect`;
+// whether the game on screen and the view are still the ones then (so each of those rects
+// reached `paint` as its dirty rect: a partial repaint).
 const dirtySeen = (page, rect) => page.evaluate(([x, y, w, hh]) => {
   const g = globalThis.__shownGame;
   const [w4, h4] = [g.width() * 4, g.height() * 4];
@@ -8220,12 +8288,22 @@ test('HD font (spec 11, a one-to-one region): a run listed in the map window (ma
   }, [RUN_X, RUN_Y]);
   const { from, to } = (await layoutTable(page)).regions.find((r) => r.name === 'map');
   const span = [to[0] + (RUN_X - from[0]) * 4, to[1] + (RUN_Y - from[1]) * 4, 32 * 4, 32];
-  // A whole paint (the font off and on again) draws it; Settings closed again (its OK, nothing
-  // else chosen), so the canvas is where it was for the pointer's moves below.
+  // A whole paint (the font off and on again) draws it; then Settings closed again (its OK,
+  // nothing else chosen). Settings (#setup) is a section in the page's flow above the screen's box
+  // (site/index.html: its rules, and the section before #screen-box), so while it is open the
+  // canvas sits lower, and `h.screenPoint` maps a game pixel through the canvas's box as it is
+  // then: the pointer's moves below could land past the viewport's bottom. Each target is checked
+  // inside the viewport.
   await chooseFont(page, 'pixel');
   await chooseFont(page, 'hd');
   await page.click('#setup-ok');
   await h.waitSettled(page);
+  const inView = async (gx, gy) => {
+    const [px, py] = await h.screenPoint(page, gx, gy);
+    const [w, hh] = await page.evaluate(() => [innerWidth, innerHeight]);
+    assert.ok(px >= 0 && px < w && py >= 0 && py < hh, `precondition: game pixel (${gx}, ${gy}) inside the viewport`);
+    return [px, py];
+  };
   assert.ok(await oneToOneOff(page, 'map', span) > 0, 'the made-up run drawn in the map window');
   await page.evaluate(([x, y, w, hh]) => {
     window.__spanShot = [...document.getElementById('screen').getContext('2d').getImageData(x, y, w, hh).data];
@@ -8239,7 +8317,7 @@ test('HD font (spec 11, a one-to-one region): a run listed in the map window (ma
   const version = () => page.evaluate(() => globalThis.__shownGame.hd_pointer()[4]);
   // A repaint the pointer causes far from the run, the run still listed: drawn once again.
   let v = await version();
-  await page.mouse.move(...(await h.screenPoint(page, 150, 100)));
+  await page.mouse.move(...(await inView(150, 100)));
   await h.runFrames(page, 10);
   assert.notEqual(await version(), v, 'the pointer moved: its version moved');
   assert.ok(await sameAsShot(), 'the run still listed: its pixels as before (drawn once)');
@@ -8255,7 +8333,7 @@ test('HD font (spec 11, a one-to-one region): a run listed in the map window (ma
   await countWholePaints(page);
   await page.evaluate(() => { window.__fake = null; });
   v = await version();
-  await page.mouse.move(...(await h.screenPoint(page, 150, 150)));
+  await page.mouse.move(...(await inView(150, 150)));
   await h.runFrames(page, 10);
   assert.notEqual(await version(), v, 'the pointer moved again: its version moved');
   const dirty = await dirtySeen(page, under);
