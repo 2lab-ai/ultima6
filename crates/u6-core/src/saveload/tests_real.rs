@@ -1,10 +1,11 @@
 //! Save and restore on the user's files: the archive.org zip (skipped when absent) and the
 //! original's own save taken in the oracle (`~/Games/ultima6/oracle/saveload/`, skipped when
-//! absent). Reads them and prints observations only. One test writes: with
+//! absent). Reads them and prints observations only. One test writes the user's data: with
 //! `U6_BOOK_SAVE=<dir>` (an existing folder outside the repository and its main checkout) it
 //! writes a save of the user's game with a spellbook given to the hero to a new `<dir>/savegame`
-//! (spec 08, 2026-10-25); without the variable it writes nothing. Its guard and writer are
-//! tested on a scratch folder of the system temp directory, with the test's own bytes.
+//! (spec 08, 2026-10-25); without the variable it writes nothing. The tests of its guard and
+//! writer write too, only under the system temp directory: each a scratch folder of its own
+//! (fixture folders, symlinks and the test's own bytes), removed when it ends.
 // The tests read the zip, the oracle's save and the environment, and write the `U6_BOOK_SAVE`
 // save and their scratch files (`OpenOptions` for a file made new).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -1906,32 +1907,45 @@ fn repository_roots(tree: &Path) -> Result<Vec<PathBuf>, &'static str> {
     })
 }
 
-/// Whether `dir` is a place the save may be written: an absolute path with no `..` step, that
-/// exists, outside every one of `roots` both as written and with symlinks resolved (a symlinked
-/// ancestor leads where it points). Writes nothing.
+/// Whether `dir` is a place the save may be written: an absolute path with no `..` step (the
+/// first layer, on the path as written), that exists, and that is not inside any of `roots` by
+/// identity: no ancestor of its resolved path (itself included) is the same directory, by device
+/// and inode, as a root. A path names a directory in more ways than resolving it undoes (on
+/// macOS `/System/Volumes/Data/Users/...` is `/Users/...` through the Data volume's firmlink, and
+/// resolving leaves that form as it is), so no path prefix decides. A root whose metadata does
+/// not read, or an ancestor's, refuses. Writes nothing.
 fn outside_repository(dir: &Path, roots: &[PathBuf]) -> bool {
+    use std::os::unix::fs::MetadataExt;
     let plain = dir.is_absolute()
         && dir
             .components()
             .all(|c| !matches!(c, std::path::Component::ParentDir));
+    if !plain {
+        return false;
+    }
     let Ok(resolved) = dir.canonicalize() else {
         return false;
     };
-    let roots: Vec<PathBuf> = roots
-        .iter()
-        .flat_map(|r| [r.clone(), r.canonicalize().unwrap_or_else(|_| r.clone())])
-        .collect();
-    plain
-        && roots
-            .iter()
-            .all(|r| !dir.starts_with(r) && !resolved.starts_with(r))
+    let id = |p: &Path| std::fs::metadata(p).map(|m| (m.dev(), m.ino())).ok();
+    let Some(roots) = roots.iter().map(|r| id(r)).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    resolved
+        .ancestors()
+        .all(|a| id(a).is_some_and(|i| !roots.contains(&i)))
 }
 
 /// Writes `files` (each named `savegame/<name>`, the original's names) into a new folder
 /// `<dir>/savegame`: `dir` must pass [`outside_repository`] for `roots`, the folder must not
 /// exist yet (`create_dir`, so neither a folder nor a symlink is there), and each file is made
 /// new ([`write_new_files`]). Returns how many were written, or a fixed sentence of what refused
-/// (no path, name or byte in it).
+/// (no path, name or byte in it). When the folder made fails the check again, it is removed
+/// (empty) before the refusal.
+///
+/// It assumes the directories stay put while it runs: it checks paths, then writes by path, so
+/// a directory another process replaces between the check and the write is out of its scope.
+/// Each file is made with `create_new` (the leaf is never followed), but its parents are not
+/// held open by handle. This is a single-user test run, not a service.
 fn write_save(
     dir: &Path,
     roots: &[PathBuf],
@@ -1945,6 +1959,7 @@ fn write_save(
     std::fs::create_dir(&folder)
         .map_err(|_| "its savegame folder exists already or could not be made")?;
     if !outside_repository(&folder, roots) {
+        let _ = std::fs::remove_dir(&folder);
         return Err("the savegame folder made is not outside the repository");
     }
     write_new_files(
@@ -1968,7 +1983,10 @@ fn save_names(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<&str>, &'static s
 
 /// Writes each (bare name, bytes) of `files` into `folder`, each file made new
 /// (`create_new`: an existing path, a symlink included, is refused, not followed). Every name is
-/// checked absent before the first is written, so a refusal writes nothing.
+/// checked absent before the first is written, so that refusal (a name there already) writes
+/// nothing. A later failure (a file that cannot be made new, or a write that fails) returns the
+/// error with the files before it, and part of that one, already written: the write is not
+/// transactional.
 fn write_new_files(folder: &Path, files: &[(&str, &Vec<u8>)]) -> Result<usize, &'static str> {
     use std::io::Write;
     if files
@@ -2075,10 +2093,21 @@ fn the_book_save_guard_refuses_the_worktree_the_main_checkout_a_parent_step_a_re
         ("inside the worktree", inside_wt),
         ("the main checkout", main.clone()),
         ("inside the main checkout", inside_main.clone()),
-        ("a parent step", out.join("../main/sub")),
-        ("a relative path", PathBuf::from("out")),
         ("a folder that does not exist", s.0.join("missing")),
     ] {
+        assert!(!outside_repository(&dir, &roots), "{case}");
+    }
+    // Each of these resolves outside the roots (its resolved form passes), so only its own rule
+    // refuses it: a `..` step (back into `out`), and a relative path (the current directory, the
+    // crate's own, not under the fixture's roots).
+    for (case, dir) in [
+        ("a parent step", out.join("../out")),
+        ("a relative path", PathBuf::from(".")),
+    ] {
+        assert!(
+            outside_repository(&dir.canonicalize().quiet(), &roots),
+            "{case}: resolved, it passes"
+        );
         assert!(!outside_repository(&dir, &roots), "{case}");
     }
     let link = s.0.join("link");
@@ -2095,6 +2124,79 @@ fn the_book_save_guard_refuses_the_worktree_the_main_checkout_a_parent_step_a_re
     let real = repository_roots(&compiled_tree()).quiet();
     assert!(real.iter().all(|r| !outside_repository(r, &real)));
     assert!(outside_repository(&out, &real));
+}
+
+/// The guard decides by identity (device and inode), not by path: a root named through another
+/// path to the same directory (here a symlink; on macOS also the Data volume's firmlink, which
+/// resolving a path leaves as it is) still guards it. The roots are given as `[L]`, a symlink to
+/// the real root `R`: a folder under `R`'s real path is refused, a folder beside `R` is not.
+#[test]
+fn the_book_save_guard_refuses_a_folder_under_a_root_named_through_another_path() {
+    let s = Scratch::new("alias");
+    let real = s.dir("R");
+    let under = s.dir("R/sub");
+    let beside = s.dir("beside");
+    let alias = s.0.join("L");
+    std::os::unix::fs::symlink(&real, &alias).quiet();
+    let roots = [alias];
+    assert!(!outside_repository(&real, &roots), "the root's real path");
+    assert!(
+        !outside_repository(&under, &roots),
+        "under the root's real path"
+    );
+    assert!(
+        outside_repository(&beside, &roots),
+        "a folder beside the root"
+    );
+    // A root whose metadata does not read refuses everything.
+    let gone = [s.0.join("gone")];
+    assert!(
+        !outside_repository(&beside, &gone),
+        "a root that does not read"
+    );
+}
+
+/// The live check (writes nothing; macOS, where the Data volume is mounted, else it does
+/// nothing): each root of this tree (the worktree and its main checkout) named through
+/// `/System/Volumes/Data`, which names the same directories as `/` and which resolving a path
+/// leaves as it is, is refused; the dispatch folder beside the repository, named the same way,
+/// is not. Prints each case's label and pass/fail only.
+#[test]
+fn the_book_save_guard_refuses_the_repository_through_the_macos_data_volume() {
+    let data = Path::new("/System/Volumes/Data");
+    let dispatch = data.join("Users/zhugehyuk/Games/ultima6/work/dispatch/r1023-wide");
+    if !cfg!(target_os = "macos") || !dispatch.is_dir() {
+        return;
+    }
+    let roots = repository_roots(&compiled_tree()).quiet();
+    let mut cases: Vec<(String, PathBuf, bool)> = roots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let label = if i == 0 {
+                "the compiled tree"
+            } else {
+                "the main checkout"
+            };
+            let aliased = data.join(r.strip_prefix("/").quiet());
+            (format!("{label} through the Data volume"), aliased, false)
+        })
+        .collect();
+    cases.push((
+        "the dispatch folder through the Data volume".into(),
+        dispatch,
+        true,
+    ));
+    let mut failed = Vec::new();
+    for (case, dir, accepted) in &cases {
+        let ok = dir.is_dir() && outside_repository(dir, &roots) == *accepted;
+        let verdict = if *accepted { "accepted" } else { "refused" };
+        eprintln!("{case}: {verdict}: {}", if ok { "pass" } else { "fail" });
+        if !ok {
+            failed.push(case.clone());
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
 }
 
 #[test]

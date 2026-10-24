@@ -3063,6 +3063,35 @@ fn looks_description_of_a_spell_shows_the_packs_spell_and_reagent_names_and_the_
     assert_eq!((ko, counts), (want, [9, 0]), "the pack's names");
 }
 
+#[test]
+fn looks_description_of_a_spell_falls_back_to_the_english_name_over_its_field_counted_missed() {
+    // An enabled pack whose form for spell 1's name is 14 syllables, over its 13 cells: the
+    // page's line and the description's name stay English, each counted a miss (the page is
+    // drawn twice). A reagent form with a line break its English lacks: a reagent's name has no
+    // cell budget, and the line-break rule belongs to the budget (`locale::within_place`, as the
+    // translation tool's gate), so the pack's form is shown as it is, a hit. A reagent the pack
+    // has no form for: English, a miss.
+    let forms = book_forms()
+        .into_iter()
+        .filter_map(|(en, ko)| match en.as_str() {
+            "Zw01" => Some(string(&en, "가나다라마바사아자차카타파하")),
+            "Zj0" => Some(string(&en, "사\n")),
+            "Zj2" => None,
+            _ => Some(string(&en, &ko)),
+        });
+    let pack = Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings(forms)
+        .unwrap();
+    let (ko, counts) = spellwork(Spellwork::LookChosen, book_looked_at, Some(pack));
+    let (en, _) = spellwork(Spellwork::LookChosen, book_looked_at, None);
+    assert!(ko.ends_with("Zw01-Zsyl\n사\n\nZj2"), "the English name");
+    assert_eq!(ko, en.replace("\nZj0\n", "\n사\n\n"));
+    // Found: the circle and the level word twice, and the first reagent's form. Missed: the
+    // name twice on the page and once in the description, and the second reagent.
+    assert_eq!(counts, [5, 4]);
+}
+
 /// An object (type 0x30, not a magic tile) two tiles east of the caster holding a charge (type
 /// 0x150, `detect`'s own) of spell 2, selected and targeted for Detect Magic.
 fn charged(s: &mut State) {
