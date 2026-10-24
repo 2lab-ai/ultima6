@@ -2041,9 +2041,6 @@ fn magics_refusals_results_potions_and_directions_print_the_packs_forms_and_else
             2,
             format!("\n{}Zn0.", spell_text(DIRECTION_PROMPT)),
         ),
-        // Move: the object's name, the prompt, then north's name (a label read for display)
-        // through the direction's line (`%s.\n`, no word: as it is), then the not-possible
-        // message (a weightless object) through `\n%s\n`.
         // Telekinesis: the dispatcher's newline, the prompt for a target and the object's name,
         // the direction prompt, then north's name (a label read for display) through `%s\n`.
         (
@@ -2054,6 +2051,9 @@ fn magics_refusals_results_potions_and_directions_print_the_packs_forms_and_else
             3,
             format!("\nZr08zo\n{}Zn0", spell_text(DIRECTION_PROMPT)),
         ),
+        // Move: the object's name, the prompt, then north's name (a label read for display)
+        // through the direction's line (`%s.\n`, no word: as it is), then the not-possible
+        // message (a weightless object) through `\n%s\n`.
         (
             "a push",
             Spellwork::Push,

@@ -276,12 +276,9 @@ fn the_view_direction_of_a_pixel() {
 
 /// A world with a 2-entry monster list (types 0x16b, 0x1ac), their stat bytes, one spell for
 /// both, and the hero (actor 1) leading at (500, 500) at noon.
-fn monster_world() -> State {
-    let mut s = world();
-    s.objects.defs.monster_types = vec![0x16b, 0x1ac, 0];
-    s.objects.defs.dir_dx = vec![0, 1, 1, 1, 0, -1, -1, -1];
-    s.objects.defs.dir_dy = vec![-1, -1, 0, 1, 1, 1, 0, -1];
-    let parts = vec![
+/// The made-up A4 tables of [`monster_world`]'s monster types.
+fn monster_parts() -> Vec<(u32, Vec<u8>)> {
+    vec![
         (a4(-0x7f7e), vec![20, 4]),
         (a4(-0x7f3e), vec![10, 2]),
         (a4(-0x7efe), vec![8, 1]),
@@ -289,8 +286,15 @@ fn monster_world() -> State {
         (a4(-0x7dfe), vec![0x20, 0x00]),
         (a4(-0x7d3e), vec![0, 0, 0, 0]),
         (a4(-0x7cbe), vec![7, 0, 0, 0, 0]),
-    ];
-    with_data(&mut s, parts);
+    ]
+}
+
+fn monster_world() -> State {
+    let mut s = world();
+    s.objects.defs.monster_types = vec![0x16b, 0x1ac, 0];
+    s.objects.defs.dir_dx = vec![0, 1, 1, 1, 0, -1, -1, -1];
+    s.objects.defs.dir_dy = vec![-1, -1, 0, 1, 1, 1, 0, -1];
+    with_data(&mut s, monster_parts());
     s.actors.party.size = 1;
     s.actors.party.members[0] = 1;
     s.objects.type_frame[1] = 0x19a;
@@ -424,16 +428,18 @@ const EAST_TEXT: u32 = crate::image::IMAGE_BASE + 0x400;
 
 /// The name the scout's warning queues for its `%s` when an egg 20 tiles east of the leader
 /// hatches a hostile (RNG seeded with `seed`), with a Korean pack of a form for east's name
-/// installed (`pack`) or no pack: the warning `Zw1 %s`, east's name `Zn2` at the third slot of
-/// the direction table (an absolute pointer), actor 3 a member (status 0x80) beside the leader;
-/// the made-up image's bytes are the test's own. `None` when no warning is queued.
+/// installed (`pack`) or no pack: [`monster_world`]'s tables and, after them, the warning
+/// `Zw1 %s` and east's name `Zn2` at the third slot of the direction table (an absolute pointer),
+/// actor 3 a member (status 0x80) beside the leader; the made-up image's bytes are the test's
+/// own. `None` when no warning is queued.
 fn scouts_warning(pack: bool, seed: u16) -> Option<Vec<u8>> {
     let mut s = monster_world();
-    let parts = vec![
+    let mut parts = monster_parts();
+    parts.extend([
         (a4(WARNING), b"Zw1 %s".to_vec()),
         (a4(DIR_SLOTS) + 8, EAST_TEXT.to_be_bytes().to_vec()),
         (EAST_TEXT, b"Zn2".to_vec()),
-    ];
+    ]);
     with_data(&mut s, parts.clone());
     if pack {
         let refs: Vec<(u32, &[u8])> = parts.iter().map(|(a, b)| (*a, b.as_slice())).collect();
@@ -462,7 +468,7 @@ fn scouts_warning(pack: bool, seed: u16) -> Option<Vec<u8>> {
 #[test]
 fn a_scouts_warning_names_the_packs_direction_and_without_a_pack_the_english() {
     // The warning's `%s` gets east's name read for display: the pack's form, else the English.
-    // A seed whose draw (1 in 3 says nothing) lets the scout speak.
+    // A seed whose draw lets the scout speak (`range(0, 3)` is 0..=3: 1 in 4 says nothing).
     let seed = (1..64)
         .find(|&n| scouts_warning(false, n).is_some())
         .expect("a seed where the scout warns");
