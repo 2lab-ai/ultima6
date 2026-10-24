@@ -274,8 +274,6 @@ fn the_view_direction_of_a_pixel() {
     assert_eq!(d(&s, 0x58 - 40, 0x58 + 30), 5);
 }
 
-/// A world with a 2-entry monster list (types 0x16b, 0x1ac), their stat bytes, one spell for
-/// both, and the hero (actor 1) leading at (500, 500) at noon.
 /// The made-up A4 tables of [`monster_world`]'s monster types.
 fn monster_parts() -> Vec<(u32, Vec<u8>)> {
     vec![
@@ -289,6 +287,8 @@ fn monster_parts() -> Vec<(u32, Vec<u8>)> {
     ]
 }
 
+/// A world with a 2-entry monster list (types 0x16b, 0x1ac), their stat bytes, one spell for
+/// both, and the hero (actor 1) leading at (500, 500) at noon.
 fn monster_world() -> State {
     let mut s = world();
     s.objects.defs.monster_types = vec![0x16b, 0x1ac, 0];

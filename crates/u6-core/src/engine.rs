@@ -599,6 +599,10 @@ pub struct Engine {
     task: Task,
     finished: bool,
     ticks: u64,
+    /// The screen's version ([`Io::present`]) the published frame was synced from last.
+    published_front: u64,
+    /// Bumped each time the published frame is synced again from the screen: its colours and
+    /// sources, or its sources alone ([`Engine::published_version`]).
     published_version: u64,
     /// The published frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
@@ -674,6 +678,7 @@ impl Engine {
             task,
             finished: false,
             ticks: 0,
+            published_front: 0,
             published_version: 0,
             shown: Framebuffer::new(),
             shown_version: 0,
@@ -733,7 +738,7 @@ impl Engine {
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
         let version = self.io.front_version.get();
-        let presented = version != self.published_version;
+        let presented = version != self.published_front;
         // The published frame is the one buffer synced from the screen, and the shown frame the
         // one synced from it: with a source plane only its changed chunks are copied. Sources
         // presented alone ([`Io::present_sources`]) are published with the plane alone, where
@@ -746,10 +751,12 @@ impl Engine {
                 .published
                 .borrow_mut()
                 .sync_from(&mut self.io.front.borrow_mut());
-            self.published_version = version;
+            self.published_front = version;
+            self.published_version += 1;
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
+            self.published_version += u64::from(src_only);
             #[cfg(test)]
             {
                 self.src_publishes += u64::from(src_only);
@@ -791,10 +798,19 @@ impl Engine {
         }
     }
 
-    /// The pointer sprite drawn over the shown frame, if any (tests).
-    #[cfg(test)]
-    pub(crate) fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
+    /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at
+    /// the handler's position), if any: its top left in frame pixels and its rows of values
+    /// 0..=3 (0 clear). Port-only use (spec 11 Design 7): a platform that shows the HD frame,
+    /// composed without it ([`Engine::published_frame`]), draws it over that frame itself.
+    pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
+    }
+
+    /// Port-only (spec 11 Design 7): the colour the shown frame draws sprite value `v` in, its
+    /// palette's entry 16 + v ([`crate::ui::pointer::SpriteFrame::colour_index`]); `None` for 0
+    /// (clear).
+    pub fn sprite_colour(&self, v: u8) -> Option<crate::Rgb> {
+        crate::ui::pointer::SpriteFrame::colour_index(v).map(|i| self.shown.palette[usize::from(i)])
     }
 
     /// The ticks so far whose publish took the source plane alone, the screen's sources into
@@ -814,6 +830,22 @@ impl Engine {
     /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
+    }
+
+    /// Port-only (spec 11 Design 7): the last published frame without the pointer sprite, the
+    /// screen as the game drew it (what [`Engine::frame`] is composed from; the original's
+    /// pointer is a hardware sprite above the screen, `ui/pointer.rs`). The HD frame is composed
+    /// from it. Borrowed between ticks only (a tick publishes into it).
+    pub fn published_frame(&self) -> Ref<'_, Framebuffer> {
+        self.io.published.borrow()
+    }
+
+    /// Port-only (spec 11 Design 7): changes whenever [`Engine::published_frame`] was synced
+    /// again: the game presented (its colours and sources), or its sources alone were published
+    /// ([`Io::present_sources`]); 0 before the first publish. A move of the pointer sprite alone
+    /// leaves it, so a consumer of the published frame composes nothing for one.
+    pub fn published_version(&self) -> u64 {
+        self.published_version
     }
 
     /// Port-only (spec 07 HD0): every buffer gets a source plane ([`Io::enable_src_plane`], and
@@ -1207,6 +1239,58 @@ mod tests {
             .map(|_| {
                 p.tick(&[], 20);
                 p.frame_version()
+            })
+            .collect();
+        assert_eq!(versions, [1, 1, 2, 2, 3], "a present every other tick");
+    }
+
+    #[test]
+    fn the_published_frame_is_the_screen_without_the_sprite() {
+        // Port (spec 11 Design 7): the shown frame is the published one with the sprite drawn
+        // over it; the published frame stays the screen as the game drew it, and its version
+        // moves at a publish only, never for the sprite alone. The sprite's colours are the
+        // shown frame's 16 + v.
+        let mut e = idle_engine();
+        e.tick(&[], 20);
+        assert_eq!(
+            (e.frame_version(), e.published_version()),
+            (1, 0),
+            "the first tick composes the shown frame; nothing was presented"
+        );
+        e.tick(
+            &[InputEvent::Pointer {
+                x: 100,
+                y: 50,
+                buttons: 0,
+            }],
+            20,
+        );
+        assert_eq!(e.frame_version(), 2, "the sprite moved: shown again");
+        assert_eq!(e.published_version(), 0, "the published frame as it was");
+        assert_eq!(e.sprite().map(|sp| (sp.x, sp.y)), Some((99, 48)));
+        assert_eq!(
+            e.frame().get(99, 48),
+            Some(17),
+            "the sprite in the shown frame"
+        );
+        assert_eq!(
+            e.published_frame().get(99, 48),
+            Some(0),
+            "not in the published one"
+        );
+        assert_eq!(e.sprite_colour(1), Some(e.frame().palette[17]));
+        assert_eq!(e.sprite_colour(0), None, "0 is clear");
+        let mut p = engine_with(|_state, io| async move {
+            loop {
+                io.present();
+                io.vblank().await;
+                io.vblank().await;
+            }
+        });
+        let versions: Vec<u64> = (0..5)
+            .map(|_| {
+                p.tick(&[], 20);
+                p.published_version()
             })
             .collect();
         assert_eq!(versions, [1, 1, 2, 2, 3], "a present every other tick");

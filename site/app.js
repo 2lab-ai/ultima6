@@ -88,6 +88,19 @@
 // each character in its own ink. Until the font is loaded, with the pixel font chosen, with
 // Original or with HD off, the game's own pixel font shows, as before.
 //
+// The pointer over the HD frame (spec 11 Design 7): the HD frame is composed without the game's
+// pointer sprite (the original's is a hardware sprite above the screen), so its blocks and its
+// listed cells are the screen as the game drew it, a cell under the pointer included, and a move
+// of the pointer alone composes nothing. With HD on the page draws the pointer itself, last
+// (Game.hd_pointer: its box in frame pixels and a version; Game.hd_pointer_rgba: its pixels):
+// through every region whose frame rect its box meets, as that region maps the frame's pixels,
+// pixelated, clipped to the region and to what the paint copied there, after the region's HD font
+// characters (in Wide the map's before the windows in front of it, each window's over its
+// content, at full opacity); in the whole view likewise, and on 07's canvas (HD on with Original)
+// at its scale. When its version moves, the page paints the canvas under its old and new boxes as
+// for a dirty rect of the HD frame there (the regions they touch and the runs listed there), then
+// the pointer. With HD off the classic frame holds the sprite, as before.
+//
 // Fullscreen (the toolbar's Fullscreen): #screen-box (the canvas, its badge, the hidden input
 // that takes Korean) goes fullscreen, the canvas as large as fits with the game's aspect ratio,
 // centred on black, drawn as on the page; the canvas takes the focus, and where the browser has
@@ -1350,19 +1363,23 @@ let drawnHd = false; // that frame was its HD frame
 // goes to the offscreen ×4 frame and the canvas is composed from it (`compose`), also when only
 // the screen changed (the opening's end: the game's regions in place of the whole frame). In
 // Wide in `game` the side panel's view is read first (`pollPanel`): when it changed, the canvas
-// is composed whole, with no new frame too.
+// is composed whole, with no new frame too. With HD on, a move of the pointer alone
+// (Game.hd_pointer: the HD frame is composed without it) draws too: the canvas under its old and
+// new boxes, then the pointer (spec 11 Design 7). The pointer is read once a draw, here.
 function draw() {
   const version = game.frame_version();
   const hd = game.hd_on();
   const view = viewFor(hd);
   if (WIDE && view === REGIONS_VIEW && pollPanel()) wideStale = true;
-  if (game === drawnGame && version === drawnVersion && view === shownView && !wideStale) return;
+  const pointer = hd ? game.hd_pointer() : null;
+  const pointerMoved = hd && drawnHd && game === drawnGame && pointer[4] !== pointerShown?.[4];
+  if (game === drawnGame && version === drawnVersion && view === shownView && !wideStale && !pointerMoved) return;
   if (WIDE) {
-    composeWide(view, hd, version);
+    composeWide(view, hd, version, pointer);
     return;
   }
   if (view !== FRAME) {
-    compose(view, version);
+    compose(view, version, pointer);
     return;
   }
   if (x4) {
@@ -1394,11 +1411,21 @@ function draw() {
     return;
   }
   const rect = game.hd_take_dirty();
-  if (over && rect.length === 0) return;
+  const before = over ? pointerShown : null;
+  const shown = takePointer(pointer);
+  const moved = before === null || before[4] !== shown[4];
+  if (over && rect.length === 0 && !moved) return;
   const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
   const image = new ImageData(pixels, w, h);
-  if (over) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
-  else ctx.putImageData(image, 0, 0);
+  if (over) {
+    if (rect.length > 0) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
+    // The pointer moved: the HD frame put back under its old and new boxes.
+    if (moved) for (const box of [before, shown].map((p) => scaledBox(p, s)).filter(Boolean)) ctx.putImageData(image, 0, 0, ...box);
+  } else ctx.putImageData(image, 0, 0);
+  // Then the pointer, whole: at a whole scale each canvas pixel takes one of its pixels, so
+  // drawing it again over itself changes nothing.
+  [pointerShown, pointerOf] = [shown, game];
+  paintPointer(ctx, [0, 0, game.width(), game.height()], [0, 0, w, h], [0, 0, w, h]);
 }
 
 // --- HD ------------------------------------------------------------------------------------
@@ -1558,18 +1585,17 @@ const LAYOUT_FILL = '#0b0b0f';
 // at the top and the bottom and 8 columns at either side, is only the paper in game: the source
 // plane (Game.hd_source_at, read at the prompt and in a conversation) shows the paper bitmap and
 // nothing else there, and everywhere outside the regions but the column right of the side panel
-// beside its rows; only the pointer's sprite is drawn over it, where it reaches. The band goes
-// to the canvas's edges 9-sliced: `from`, a rect of the band (game pixels); `to`, where it goes
-// (canvas pixels); `flip`, mirrored across x or y. The corners at ×4, unscaled; the top edge
-// along the canvas at ×4 (the canvas is as wide as the ×4 frame), the left edge stretched down
-// it. The right edge, the bottom edge and the bottom-right corner are the left edge, the top edge
-// and the bottom-left corner mirrored: the band's own right and bottom strips hold the frame the
-// paper draws round the message scroll (they are the paper too, so the source plane cannot tell
-// them apart), and they are where the pointer's arrow reaches from the side panel, the message
-// scroll and the command bar; the top and left strips and those three corners are out of the
-// arrow's reach from every region (the sprite is over them only where the game starts it, until
-// the first move, and as the cross-hair at a region's very edge), and every rect here is outside
-// the regions' bounding box, so a change in the regions alone leaves the band as drawn.
+// beside its rows (the pointer's sprite apart, where it reaches: the shown frame's plane names it
+// classic, but the ×4 frame is composed without it, spec 11 Design 7, so the band never shows
+// it; the page draws the pointer through the regions only). The band goes to the canvas's edges
+// 9-sliced: `from`, a rect of the band (game pixels); `to`, where it goes (canvas pixels);
+// `flip`, mirrored across x or y. The corners at ×4, unscaled; the top edge along the canvas at
+// ×4 (the canvas is as wide as the ×4 frame), the left edge stretched down it. The right edge,
+// the bottom edge and the bottom-right corner are the left edge, the top edge and the
+// bottom-left corner mirrored: the band's own right and bottom strips hold the frame the paper
+// draws round the message scroll (they are the paper too, so the source plane cannot tell them
+// apart). Every rect here is outside the regions' bounding box, so a change in the regions alone
+// leaves the band as drawn.
 const LAYOUT_PAPER = [
   { name: 'top-left', from: [0, 0, 8, 6], to: [0, 0, 32, 24] },
   { name: 'top', from: [8, 0, 304, 6], to: [32, 0, 1216, 24] },
@@ -1584,8 +1610,9 @@ const LAYOUT_PAPER = [
 // pixels of the ×4 frame, the top-left pixel of game pixels on the row between the side panel and
 // the message scroll, a quarter of the panel's width apart (the parchment there is one colour at
 // ×4, with and without the owner's HD pack). One colour, not a patch stretched: no patch of the
-// parchment is larger than a row of it, which stretched would streak the whole inside; three,
-// since the pointer's sprite (16 px wide) covers at most one of them.
+// parchment is larger than a row of it, which stretched would streak the whole inside; three, so
+// that one of them drawn over alone leaves the median as it was (the pointer's sprite never is:
+// the ×4 frame is composed without it, spec 11 Design 7).
 const LAYOUT_PARCHMENT = [32, 24, 1216, 672];
 const LAYOUT_SAMPLES = [[204, 104], [240, 104], [276, 104]];
 // What the band is taken from, in ×4 frame pixels: a dirty rect that meets one of these is
@@ -1594,8 +1621,8 @@ const LAYOUT_SAMPLES = [[204, 104], [240, 104], [276, 104]];
 // the message scroll in one take span the samples' row, and would paint everything. The
 // parchment is checked instead: at every partial paint `paint` takes the samples' median from the
 // ×4 frame again and paints whole when it is not the colour the canvas shows (`parchmentShown`).
-// The pointer's sprite over one sample leaves the median as it was; two changed samples, or the
-// paper's whole image, change it.
+// One changed sample leaves the median as it was; two changed samples, or the paper's whole
+// image, change it.
 const PAPER_SOURCES = LAYOUT_PAPER.map(({ from }) => from.map((v) => v * LAYOUT_S));
 
 let shownView = FRAME; // what the canvas shows now
@@ -1621,8 +1648,10 @@ function viewFor(hd) {
 
 // Draws the HD frame (version `version`) for `view`: on the offscreen ×4 frame (only the dirty
 // rect over the one it holds of this game), then on the canvas, whole when it showed another
-// game, another view or nothing yet, else only the regions the dirty rect touches.
-function compose(view, version) {
+// game, another view or nothing yet, else only the regions the dirty rect touches (with the
+// pointer's old and new boxes when it moved: spec 11 Design 7; `meta`, Game.hd_pointer as `draw`
+// read it).
+function compose(view, version, meta) {
   if (canvas.width !== LAYOUT_W || canvas.height !== LAYOUT_H) {
     canvas.width = LAYOUT_W;
     canvas.height = LAYOUT_H;
@@ -1639,12 +1668,18 @@ function compose(view, version) {
   const over = x4Game === game;
   const rect = game.hd_take_dirty();
   const fresh = shownView !== view;
+  const before = whole ? null : pointerShown;
+  const pointer = takePointer(meta);
+  // The pointer moved (spec 11 Design 7): the canvas under its old and new boxes, as for a dirty
+  // rect of the ×4 frame there.
+  const moved = before !== null && before[4] !== pointer[4] ? union(scaledBox(before, LAYOUT_S), scaledBox(pointer, LAYOUT_S)) : null;
   drawnGame = game;
   drawnVersion = version;
   drawnHd = true;
   shownView = view;
+  [pointerShown, pointerOf] = [pointer, game];
   if (fresh) fitRendering(true);
-  if (over && rect.length === 0 && !whole) return;
+  if (over && rect.length === 0 && !whole && !moved) return;
   if (!over || rect.length > 0) {
     // Re-create the view every frame: wasm memory growth detaches old buffers.
     const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
@@ -1654,7 +1689,7 @@ function compose(view, version) {
     else ctx.putImageData(image, 0, 0);
     x4Game = game;
   }
-  paint(view, whole || !over ? null : rect);
+  paint(view, whole || !over ? null : union(rect.length > 0 ? [...rect] : null, moved));
 }
 
 // The part of rect `a` inside rect `b` (x, y, width, height), or null when they do not meet.
@@ -1664,16 +1699,70 @@ function overlap([ax, ay, aw, ah], [bx, by, bw, bh]) {
   return x0 < x1 && y0 < y1 ? [x0, y0, x1 - x0, y1 - y0] : null;
 }
 
+// The box round rects `a` and `b` (x, y, width, height; null for none), or null for neither.
+function union(a, b) {
+  if (!a || !b) return a ?? b;
+  const [x0, y0] = [Math.min(a[0], b[0]), Math.min(a[1], b[1])];
+  const [x1, y1] = [Math.max(a[0] + a[2], b[0] + b[2]), Math.max(a[1] + a[3], b[1] + b[3])];
+  return [x0, y0, x1 - x0, y1 - y0];
+}
+
+// --- the pointer over the HD frame (spec 11 Design 7) -------------------------------------------
+
+let pointerShown = null; // the pointer the canvas shows (Game.hd_pointer as drawn last), or null
+let pointerOf = null; // the game `pointerShown` is of
+let pointerImage = null; // an offscreen canvas holding its pixels (Game.hd_pointer_rgba)
+
+// The pointer `p` (Game.hd_pointer as `draw` read it, once a draw: its box in frame pixels and its
+// version) as the canvas is to show it: while it is the one the canvas shows (this game's, at the
+// same version), that one, nothing copied or taken again; else `p` itself, its pixels taken into
+// `pointerImage` when it has a box. The caller then shows it (`pointerShown`, `pointerOf`).
+function takePointer(p) {
+  if (pointerOf === game && pointerShown !== null && pointerShown[4] === p[4]) return pointerShown;
+  if (p[2] > 0) {
+    pointerImage ??= document.createElement('canvas');
+    [pointerImage.width, pointerImage.height] = [p[2], p[3]];
+    const rgba = new Uint8ClampedArray(game.hd_pointer_rgba());
+    pointerImage.getContext('2d').putImageData(new ImageData(rgba, p[2], p[3]), 0, 0);
+  }
+  return p;
+}
+
+// Pointer `p`'s box at `s` frame's pixels per game pixel, or null for none (no pointer, an empty
+// box).
+const scaledBox = (p, s) => (p && p[2] > 0 ? [p[0] * s, p[1] * s, p[2] * s, p[3] * s] : null);
+
+// The pointer the canvas shows (`pointerShown`) through a region that shows the frame's rect
+// `from` (game pixels) on the canvas rect `to`, as the region maps the frame's pixels: pixelated,
+// clipped to `to` and to `clip` (the canvas rect the caller copied again just before; the pointer
+// is drawn only over pixels copied in the same paint), at full opacity. Nothing when its box does
+// not meet `from`.
+function paintPointer(ctx, from, to, clip) {
+  const p = pointerShown;
+  if (!p || p[2] === 0 || !clip || !overlap(p, from)) return;
+  const area = overlap(to, clip);
+  if (!area) return;
+  const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(...area);
+  ctx.clip();
+  ctx.globalAlpha = 1;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(pointerImage, 0, 0, p[2], p[3], to[0] + (p[0] - from[0]) * sx, to[1] + (p[1] - from[1]) * sy, p[2] * sx, p[3] * sy);
+  ctx.restore();
+}
+
 // The canvas from the ×4 frame for `view`: everything (`dirty` null: the letterbox's sides or the
 // paper round the regions, and every region), or the regions that rect of the ×4 frame touches (a
 // one-to-one region only that part of it, a scaled one whole: a part scaled on its own would not
-// meet its neighbours'); then the HD font's characters over what it copied (`paintGlyphs`). A
-// rect that meets what the band is taken from (PAPER_SOURCES) paints everything, and so does any
-// rect when the samples' median in the ×4 frame now is not the parchment the canvas shows (a
-// rect that meets a sample alone does not: one covered sample leaves the median as it was). A
-// one-to-one region with cells listed in it, now or at the paint before, is copied whole too: a
-// run's characters move when one of its cells changes, so a part copied alone could keep pixels
-// of the run before.
+// meet its neighbours'); then the HD font's characters over what it copied (`paintGlyphs`), and
+// last the pointer over what it copied (`paintPointer`). A rect that meets what the band is
+// taken from (PAPER_SOURCES) paints everything, and so does any rect when the samples' median in
+// the ×4 frame now is not the parchment the canvas shows (a rect that meets a sample alone does
+// not: one covered sample leaves the median as it was). A one-to-one region with cells listed in
+// it, now or at the paint before, is copied whole too: a run's characters move when one of its
+// cells changes, so a part copied alone could keep pixels of the run before.
 function paint(view, dirty) {
   const ctx = canvas.getContext('2d');
   const glyphs = game.hd_font() ? game.hd_glyphs() : [];
@@ -1690,12 +1779,14 @@ function paint(view, dirty) {
     // screen is one region here: runs of two windows side by side do not join, since the
     // windows' borders are not listed cells and so end a run.
     if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], LAYOUT_WHOLE, LAYOUT_WHOLE);
+    paintPointer(ctx, [0, 0, SCREEN_W, SCREEN_H], LAYOUT_WHOLE, LAYOUT_WHOLE);
     paintedGlyphs = glyphs;
     return;
   }
   if (dirty && PAPER_SOURCES.some((source) => overlap(source, dirty))) dirty = null;
   if (dirty && parchmentNow() !== parchmentShown) dirty = null;
   if (!dirty) paintPaper(ctx);
+  const copies = [];
   for (const { from, to } of LAYOUT_REGIONS) {
     const source = from.map((v) => v * LAYOUT_S);
     const one = to[2] === source[2] && to[3] === source[3];
@@ -1712,7 +1803,10 @@ function paint(view, dirty) {
       ctx.drawImage(x4, ...source, ...to);
     }
     if (glyphs.length > 0) paintGlyphs(ctx, glyphs, from, to, copied);
+    copies.push([from, to, copied]);
   }
+  // Last, the pointer through every region it reaches, over what was copied (spec 11 Design 7).
+  for (const [from, to, copied] of copies) paintPointer(ctx, from, to, copied);
   paintedGlyphs = glyphs;
 }
 
@@ -2177,8 +2271,10 @@ const inRect = (px, py, [x, y, w, h]) => px >= x && px < x + w && py >= y && py 
 // on the 1920 × 1080 canvas: first on the offscreen frame (the HD frame's dirty rect only over
 // the one it holds of this game at this scale; the classic frame, which has none, whole), then
 // on the canvas, whole when it showed another game, another view, the other frame or nothing
-// yet, else the part the dirty rect touches (`paintWide`).
-function composeWide(view, hd, version) {
+// yet, else the part the dirty rect touches (`paintWide`; with the pointer's old and new boxes
+// when it moved over the HD frame: spec 11 Design 7; `meta`, Game.hd_pointer as `draw` read it,
+// null with HD off).
+function composeWide(view, hd, version, meta) {
   if (canvas.width !== WIDE_W || canvas.height !== WIDE_H) {
     canvas.width = WIDE_W;
     canvas.height = WIDE_H;
@@ -2196,11 +2292,17 @@ function composeWide(view, hd, version) {
   const whole = !over || !hd || game !== drawnGame || view !== shownView || hd !== drawnHd || wideStale;
   const fresh = view !== shownView;
   const rect = hd ? game.hd_take_dirty() : [];
+  // With HD the pointer is drawn over the frame (spec 11 Design 7); when it moved, the canvas
+  // under its old and new boxes is painted again, as for a dirty rect of the HD frame there.
+  const before = whole ? null : pointerShown;
+  const pointer = hd ? takePointer(meta) : null;
+  const moved = before !== null && before[4] !== pointer[4] ? union(scaledBox(before, s), scaledBox(pointer, s)) : null;
   drawnGame = game;
   drawnVersion = version;
   drawnHd = hd;
   shownView = view;
   wideStale = false;
+  [pointerShown, pointerOf] = [pointer, game];
   if (fresh) fitRendering(hd);
   if (!over || !hd || rect.length > 0) {
     // Re-create the view every frame: wasm memory growth detaches old buffers.
@@ -2214,8 +2316,9 @@ function composeWide(view, hd, version) {
     wideSrcGame = game;
     wideSrcScale = s;
   }
+  const dirty = union(rect.length > 0 ? [...rect] : null, moved);
   if (whole) paintWide(view, null);
-  else if (rect.length > 0) paintWide(view, rect);
+  else if (dirty) paintWide(view, dirty);
 }
 
 // The canvas from the offscreen frame for `view`. Every other screen: the dark sides and the UI's
@@ -2224,8 +2327,10 @@ function composeWide(view, hd, version) {
 // the map that part, WIDE_PAD wider, all of it with cells listed in it now or at the paint
 // before; of a window shown its whole content) the map, then each window shown over it: its
 // frame, its title and its content; then the HD font's characters over each region copied
-// (`paintGlyphs`, within the clip: copied again just before). The HD frame is scaled smoothly (a
-// one-to-one window copied as it is), the classic frame pixelated.
+// (`paintGlyphs`, within the clip: copied again just before), and last the pointer through that
+// region (`paintPointer`, over the HD frame only: the classic frame holds the sprite), so a
+// window in front covers the map's pointer as it covers the map. The HD frame is scaled smoothly
+// (a one-to-one window copied as it is), the classic frame pixelated.
 function paintWide(view, dirty) {
   const ctx = canvas.getContext('2d');
   const s = wideSrcScale;
@@ -2238,6 +2343,7 @@ function paintWide(view, dirty) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(wideSrc, 0, 0, SCREEN_W * s, SCREEN_H * s, ...WIDE_WHOLE);
     if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE, WIDE_WHOLE);
+    paintPointer(ctx, [0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE, WIDE_WHOLE);
     paintedGlyphs = glyphs;
     return;
   }
@@ -2275,6 +2381,7 @@ function paintWide(view, dirty) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(wideSrc, ...wideMap.from.map((v) => v * s), ...wideMap.to);
   if (glyphs.length > 0) paintGlyphs(ctx, glyphs, wideMap.from, wideMap.to, overlap(wideMap.to, clip));
+  paintPointer(ctx, wideMap.from, wideMap.to, overlap(wideMap.to, clip));
   for (const win of shownWindows()) {
     if (overlap(win.outer, clip)) paintWindow(ctx, win, s, smooth, glyphs, clip);
   }
@@ -2286,7 +2393,8 @@ function paintWide(view, dirty) {
 // (`windowTitle`, fitted to its strip), lighter while it is the active one, its content from the
 // offscreen frame at scale `s` (`smooth`: the HD frame, scaled smoothly unless one to one), the
 // HD font's characters over the content (`glyphs`); the content and the characters at
-// WINDOW_DIM over the border's ink while it is dimmed.
+// WINDOW_DIM over the border's ink while it is dimmed; then the pointer over the content, at full
+// opacity (the original's is a sprite above the screen, never part of a window).
 function paintWindow(ctx, win, s, smooth, glyphs, clip) {
   const [x, y, w, h] = win.outer;
   const active = windowActive(win);
@@ -2318,6 +2426,7 @@ function paintWindow(ctx, win, s, smooth, glyphs, clip) {
   const copied = overlap(win.to, clip);
   if (glyphs.length > 0 && copied) paintGlyphs(ctx, glyphs, win.from, win.to, copied);
   if (dim) ctx.globalAlpha = 1;
+  paintPointer(ctx, win.from, win.to, copied);
 }
 
 // `text` as it fits `room` canvas pixels in the context's font: as it is, else cut short with an

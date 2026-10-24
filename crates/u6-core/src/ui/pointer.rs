@@ -255,6 +255,11 @@ pub struct SpriteFrame {
 }
 
 impl SpriteFrame {
+    /// The palette entry [`SpriteFrame::draw`] shows value `v` in: 16 + v; `None` for 0 (clear).
+    pub fn colour_index(v: u8) -> Option<u8> {
+        (v != 0).then_some(SPRITE_COLOURS + v)
+    }
+
     /// Draws the sprite over `fb`: value v ≠ 0 in colour 16 + v; only the frame shows it
     /// ([`WIDTH`] × [`HEIGHT`]: the 320 × 200 display, in Wide the map beside it too).
     pub fn draw(&self, fb: &mut Framebuffer) {

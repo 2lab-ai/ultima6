@@ -12,16 +12,17 @@
 //! `=` the game takes itself.
 //!
 //! HD (spec 07 HD0): with [`Game::set_hd`] on, each present also composes the HD frame
-//! ([`Game::hd_frame_ptr`], `WIDTH·S × HEIGHT·S`, S 2 or 4; the frame is 320 × 200, 912 × 336
-//! in Wide mode, spec 13: [`Game::width`], [`Game::height`]) from the shown frame and the images
-//! its source plane names (`u6_render::hd::Compositor`), when the frame, its sources or the HD
-//! setting changed since the last composition; off, nothing of it runs and the RGBA frame is as
-//! without it. An HD pack (spec 07 H2): the page tells a dropped pack from game files with a
-//! [`PackProbe`] (its zip directory and manifest only), loads it once as an [`HdPack`] (checked
-//! whole, every image decoded: at most [`MAX_PACK_FILE_BYTES`] read, at most
-//! `u6_hdpack::MAX_DECODED_BYTES` decoded) and sets it on every game it starts
-//! ([`Game::set_hd_pack`]); a pack image whose classic image is the one the game holds now goes
-//! in front of MMPX.
+//! ([`Game::hd_frame_ptr`], `WIDTH·S × HEIGHT·S`, S 2 or 4; the frame is 320 × 200, 912 × 408
+//! in Wide mode, specs 13 and 14: [`Game::width`], [`Game::height`]) from the published frame
+//! (the shown frame without the pointer sprite, spec 11 Design 7) and the images its source plane
+//! names (`u6_render::hd::Compositor`), when the frame, its sources or the HD setting changed
+//! since the last composition; the page draws the pointer over it ([`Game::hd_pointer`]). Off,
+//! nothing of it runs and the RGBA frame, the sprite in it, is as without it. An HD pack (spec 07
+//! H2): the page tells a dropped pack from game files with a [`PackProbe`] (its zip directory and
+//! manifest only), loads it once as an [`HdPack`] (checked whole, every image decoded: at most
+//! [`MAX_PACK_FILE_BYTES`] read, at most `u6_hdpack::MAX_DECODED_BYTES` decoded) and sets it on
+//! every game it starts ([`Game::set_hd_pack`]); a pack image whose classic image is the one the
+//! game holds now goes in front of MMPX.
 //!
 //! Sound: once the page has an AudioContext it calls [`Game::audio_start`] with its sample
 //! rate; every step then replays the game's MED calls on the emulated A500 audio machine
@@ -481,6 +482,12 @@ pub struct Game {
     hd: HdView,
     /// The HD pack set ([`Game::set_hd_pack`]).
     hd_pack: Option<Rc<u6_core::hd::HdPack>>,
+    /// Spec 11 Design 7: the pointer the page draws over the HD frame ([`Game::hd_pointer`]): its
+    /// box in frame pixels (x, y, width, height; width and height 0 for none), its pixels as
+    /// RGBA8, and their version, all as of the last [`Game::present`], [`Game::set_hd`] or start.
+    pointer_box: [u32; 4],
+    pointer_rgba: Vec<u8>,
+    pointer_version: u64,
     /// Voices on ([`Game::set_voices`]): the engine's speech tap keeps what NPCs say.
     voices: bool,
 }
@@ -520,6 +527,9 @@ impl Game {
             pacer: Pacer::new(),
             hd: HdView::new(),
             hd_pack: None,
+            pointer_box: [0; 4],
+            pointer_rgba: Vec::new(),
+            pointer_version: 0,
             voices: false,
         };
         game.redraw();
@@ -872,8 +882,10 @@ impl Game {
     /// frame, after its steps; steps that composed no new frame convert nothing. Before a start
     /// the RGBA frame stays black.
     ///
-    /// With HD on ([`Game::set_hd`]) it then composes the HD frame when the shown frame's colours
-    /// or sources changed since the last composition.
+    /// With HD on ([`Game::set_hd`]) it then composes the HD frame when the published frame's
+    /// colours or sources changed since the last composition (a move of the pointer sprite alone
+    /// composes nothing, spec 11 Design 7), and takes the pointer the page draws over it
+    /// ([`Game::hd_pointer`]).
     pub fn present(&mut self) {
         let version = self.engine.as_ref().map(Engine::frame_version);
         if version.is_some() && version != self.rgba_holds {
@@ -882,12 +894,15 @@ impl Game {
         if self.engine.is_some() {
             self.compose_hd();
         }
+        self.track_pointer();
     }
 
     /// Changes whenever the frame the page shows was made again: with HD off the RGBA frame
     /// converted ([`Game::present`], a start), with HD on the HD frame composed with a block
     /// changed, and HD switched or its scale changed ([`Game::set_hd`]). The page draws the
-    /// canvas only when it moved since its last draw. It never goes back, also across starts.
+    /// canvas only when it moved since its last draw, or with HD on when the pointer it draws
+    /// over the HD frame did ([`Game::hd_pointer`]: a move of the pointer alone moves only that).
+    /// It never goes back, also across starts.
     pub fn frame_version(&self) -> f64 {
         self.conversions as f64
     }
@@ -899,6 +914,7 @@ impl Game {
         if self.hd.set(on, Scale::from_factor(scale)) {
             self.conversions += 1;
             self.compose_hd();
+            self.track_pointer();
         }
     }
 
@@ -954,6 +970,28 @@ impl Game {
                 ]
             })
             .collect()
+    }
+
+    /// Spec 11 Design 7: the pointer the page draws over the HD frame, last, as the original's
+    /// hardware sprite is shown above the screen (the HD frame is composed without it):
+    /// `[x, y, width, height, version]`, its box in frame pixels (of the [`Game::width`] ×
+    /// [`Game::height`] frame), clipped to the frame, and a version that moves whenever the box or
+    /// the pixels ([`Game::hd_pointer_rgba`]) changed, also to or from no pointer. The box is
+    /// empty (width and height 0, at 0, 0) when there is no sprite, the pointer is hidden, its
+    /// box lies outside the frame, HD is off or no game runs; the version is given then too, so
+    /// the page sees the pointer go. As of the last [`Game::present`], [`Game::set_hd`] or start.
+    pub fn hd_pointer(&self) -> Vec<u32> {
+        let mut out = self.pointer_box.to_vec();
+        out.push(self.pointer_version as u32);
+        out
+    }
+
+    /// Spec 11 Design 7: the pointer's pixels in its box ([`Game::hd_pointer`]), width × height
+    /// RGBA8 in rows: value v ≠ 0 of the sprite's shape in the shown frame's colour 16 + v
+    /// (the colours the RGBA frame shows it in), opaque; value 0 transparent (alpha 0). Empty
+    /// with the box.
+    pub fn hd_pointer_rgba(&self) -> Vec<u8> {
+        self.pointer_rgba.clone()
     }
 
     /// Address of the HD frame in wasm memory: `WIDTH·S × HEIGHT·S` RGBA8 pixels while HD is on
@@ -1431,6 +1469,7 @@ impl Game {
         self.redraw();
         self.hd.restart();
         self.compose_hd();
+        self.track_pointer();
     }
 
     /// Sets the HD pack (`None`: none): with HD on, composed at once and the page's version
@@ -1444,8 +1483,23 @@ impl Game {
         }
     }
 
-    /// With HD on: composes the HD frame from the engine's frame (black before a start) when it
-    /// does not hold that frame's colours and sources at the HD setting now
+    /// Spec 11 Design 7: takes the pointer the page is to draw over the HD frame now
+    /// ([`Game::hd_pointer`]): with HD on and a game, [`pointer_pixels`] of its engine, else none;
+    /// the version moves when the box or the pixels changed.
+    fn track_pointer(&mut self) {
+        let (rect, rgba) = match &self.engine {
+            Some(e) if self.hd.on() => pointer_pixels(e),
+            _ => ([0; 4], Vec::new()),
+        };
+        if rect != self.pointer_box || rgba != self.pointer_rgba {
+            self.pointer_box = rect;
+            self.pointer_rgba = rgba;
+            self.pointer_version += 1;
+        }
+    }
+
+    /// With HD on: composes the HD frame from the engine's published frame (black before a start)
+    /// when it does not hold that frame's colours and sources at the HD setting now
     /// ([`HdView::present`]).
     fn compose_hd(&mut self) {
         let wrote = self.hd.present(self.engine.as_ref(), &self.blank);
@@ -1482,6 +1536,42 @@ fn whole_save(s: &u6_core::State, since: u32) -> BTreeMap<String, Vec<u8>> {
         out.insert(block_file(i), block.to_bytes());
     }
     out
+}
+
+/// Spec 11 Design 7: the pointer sprite `e` shows now, for the page to draw over the HD frame:
+/// its box (x, y, width, height in frame pixels) clipped to the frame, and its pixels in that box
+/// as RGBA8 (value v ≠ 0 in the shown frame's colour 16 + v, [`Engine::sprite_colour`], opaque;
+/// value 0 transparent). An empty box and no pixels when there is no sprite, the pointer is
+/// hidden (0x1622d6 parks it below the frame; a shape reaching up past its hot spot would still
+/// put rows of it into the frame's last lines there, which the RGBA frame shows) or the box lies
+/// outside the frame.
+fn pointer_pixels(e: &Engine) -> ([u32; 4], Vec<u8>) {
+    let none = ([0; 4], Vec::new());
+    let Some(sp) = e.sprite() else {
+        return none;
+    };
+    if !e.state().ui.pointer.shown {
+        return none;
+    }
+    // A sprite row is 16 pixels wide (`SpriteFrame::rows`).
+    let (x0, y0) = (i32::from(sp.x), i32::from(sp.y));
+    let (x1, y1) = (x0 + 16, y0 + sp.rows.len() as i32);
+    let (w, h) = (u6_render::WIDTH as i32, u6_render::HEIGHT as i32);
+    let (cx0, cy0, cx1, cy1) = (x0.max(0), y0.max(0), x1.min(w), y1.min(h));
+    if cx0 >= cx1 || cy0 >= cy1 {
+        return none;
+    }
+    let mut rgba = Vec::with_capacity(((cx1 - cx0) * (cy1 - cy0) * 4) as usize);
+    for y in cy0..cy1 {
+        let row = &sp.rows[(y - y0) as usize];
+        for x in cx0..cx1 {
+            let v = row[(x - x0) as usize];
+            let c = e.sprite_colour(v).map_or([0; 4], |c| [c.r, c.g, c.b, 255]);
+            rgba.extend_from_slice(&c);
+        }
+    }
+    let rect = [cx0, cy0, cx1 - cx0, cy1 - cy0].map(|v| v as u32);
+    (rect, rgba)
 }
 
 /// Queues a pointer event; a move right after one with the same buttons replaces it (the game
@@ -3098,7 +3188,12 @@ mod tests {
     /// pixels and its version move), draws it at the last cell and presents (the cells drawn
     /// before keep pixels of its old version).
     fn tile_engine() -> Engine {
-        let mut state = u6_core::State::empty();
+        tile_engine_on(u6_core::State::empty())
+    }
+
+    /// [`tile_engine`] on `state` (its records 1..=3 set as there): the pointer events queued in
+    /// front of a key are taken first, so a state with the pointer tables can be pointed at too.
+    fn tile_engine_on(mut state: u6_core::State) -> Engine {
         for (r, seed) in [(1usize, 3u32), (2, 7), (3, 3)] {
             let rec = &mut state.gfx.records[r];
             rec.pixels = (0..256u32)
@@ -3116,6 +3211,7 @@ mod tests {
             io.present();
             let mut cell = 0u16;
             loop {
+                io.take_pointer();
                 while io.key_ready() {
                     let key = io.next_key().await;
                     let s = state.borrow();
@@ -3407,7 +3503,7 @@ mod tests {
     /// An engine on screen with the plane that draws text cells of a synthetic font (glyph `c` =
     /// eight rows of the byte `c`) on keys: `t` a letter at cell (2, 2), another at (3, 2) and a
     /// space at (4, 2), in ink 3 on paper 4; `r` the first letter again in ink 5; `p` a classic
-    /// pixel over it, as the pointer sprite is drawn.
+    /// pixel over it, a classic write of the game's.
     fn text_engine() -> Engine {
         let mut engine = Engine::with_game(
             u6_core::State::empty(),
@@ -3452,7 +3548,7 @@ mod tests {
     /// or it is off; switched on with HD on it composes at once (the whole frame, the version
     /// moved, no step) and lists every letter cell, not the space (the synthetic font's space
     /// has ink, so it is not a whole space), as x, y, code, ink, paper; a recoloured letter and
-    /// a letter under the pointer change the list with their cells in the rect; off again, the
+    /// a letter under a classic write change the list with their cells in the rect; off again, the
     /// HD frame is the definition's (the pixel font); with HD off a switch moves nothing until
     /// HD is on again.
     #[test]
@@ -3496,7 +3592,7 @@ mod tests {
         assert_eq!(
             game.hd_glyphs(),
             vec![24, 16, 0x7a, ink3, paper],
-            "under the pointer"
+            "under a classic write"
         );
         assert_eq!(
             game.hd_take_dirty(),
@@ -3526,6 +3622,358 @@ mod tests {
             game.hd_glyphs(),
             vec![24, 16, 0x7a, ink3, paper],
             "HD on again"
+        );
+    }
+
+    /// The pointer shape of [`pointer_engine`]: three rows, values `(c + r) % 4` in the first
+    /// five columns (so 0, clear, inside the box too), its top left at (-2, -1) from the hot spot.
+    fn pointer_shape() -> u6_core::ui::pointer::Shape {
+        u6_core::ui::pointer::Shape {
+            dx: -2,
+            dy: -1,
+            rows: (0..3)
+                .map(|r| std::array::from_fn(|c| if c < 5 { ((c + r) % 4) as u8 } else { 0 }))
+                .collect(),
+        }
+    }
+
+    /// An engine on screen with the plane and the pointer tables of [`pointer_shape`] (shown), a
+    /// palette of distinct colours and five letters of the synthetic font at cells 2..=6 of row 2
+    /// (ink 3, paper 4); on keys `h` the pointer hidden, `s` shown again, `p` the sprite's
+    /// colours 17..=19 changed in the palette and presented.
+    fn pointer_engine() -> Engine {
+        let mut state = u6_core::State::empty();
+        state.ui.pointer =
+            u6_core::ui::pointer::PointerState::from_tables(u6_core::ui::pointer::PointerTables {
+                shapes: vec![pointer_shape()],
+                shown: true,
+                ..Default::default()
+            });
+        let mut engine = Engine::with_game(state, Files::default(), |st, io| async move {
+            let font = u6_formats::font::BitFont {
+                glyphs: (0..=255u8).map(|c| [c; 8]).collect(),
+            };
+            io.draw(|fb| {
+                for (i, c) in fb.palette.iter_mut().enumerate() {
+                    let v = i as u8;
+                    *c = u6_core::Rgb::new(v.wrapping_mul(40), 255 - v, v.wrapping_mul(7));
+                }
+                for (k, col) in (2..7).enumerate() {
+                    u6_core::ui::text::draw_glyph(fb, &font, col * 8, 16, b'a' + k as u8, 3, 4);
+                }
+            });
+            io.present();
+            loop {
+                // The pointer events in front of a key are taken first (input comes in order).
+                io.take_pointer();
+                while io.key_ready() {
+                    match io.next_key().await {
+                        Key::Char('h') => st.borrow_mut().ui.pointer.shown = false,
+                        Key::Char('s') => st.borrow_mut().ui.pointer.shown = true,
+                        Key::Char('p') => {
+                            io.draw(|fb| {
+                                for v in 17..20u8 {
+                                    fb.palette[usize::from(v)] = u6_core::Rgb::new(v, 2 * v, 3 * v);
+                                }
+                            });
+                            io.present();
+                        }
+                        _ => {}
+                    }
+                }
+                io.vblank().await;
+            }
+        });
+        engine.enable_src_plane();
+        engine
+    }
+
+    /// The pointer at (x, y), one step and a present.
+    fn point(game: &mut Game, x: i32, y: i32) {
+        game.pointer(x, y, 0);
+        game.step(20);
+        game.present();
+    }
+
+    /// Spec 11 Design 7 in the platform: with HD on, the HD frame is composed without the pointer
+    /// sprite (the shown frame has it); the pointer is given apart ([`Game::hd_pointer`]): the
+    /// sprite's box in frame pixels and its pixels in the shown frame's colours, transparent
+    /// where the shape is clear, clipped to the frame at its edges. A move of the pointer alone,
+    /// over the letters too, composes nothing (the page's version stays, no dirty rect, the same
+    /// list and the same HD frame) and moves the pointer's version; a step with the pointer where
+    /// it was moves nothing. Hidden, with HD off and before a start the box is empty, the version
+    /// moved each time it went or came back.
+    #[test]
+    fn the_pointer_is_given_apart_from_the_hd_frame() {
+        let (w, h) = (u6_render::WIDTH as u32, u6_render::HEIGHT as u32);
+        let shape = pointer_shape();
+        let mut game = Game::new();
+        assert_eq!(
+            game.hd_pointer(),
+            vec![0, 0, 0, 0, 0],
+            "before a start: none"
+        );
+        game.put_on_screen(pointer_engine());
+        game.set_hd(true, 2);
+        game.set_hd_font(true);
+        point(&mut game, 100, 60);
+        let p = game.hd_pointer();
+        assert_eq!(p[..4], [98, 59, 16, 3], "the sprite's box");
+        let e = game.engine.as_ref().unwrap();
+        let (fb, published) = (e.frame(), e.published_frame());
+        let rgba = game.hd_pointer_rgba();
+        assert_eq!(rgba.len(), 16 * 3 * 4);
+        let mut opaque = 0;
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            let (c, r) = (i % 16, i / 16);
+            let v = shape.rows[r][c];
+            let (x, y) = (98 + c, 59 + r);
+            if v == 0 {
+                assert_eq!(px[3], 0, "({c}, {r}) clear: transparent");
+                continue;
+            }
+            opaque += 1;
+            let colour = fb.palette[usize::from(16 + v)];
+            assert_eq!(px, [colour.r, colour.g, colour.b, 255], "({c}, {r})");
+            assert_eq!(fb.get(x, y), Some(16 + v), "the shown frame has it");
+            // The HD frame has the published frame's pixel there, classic, not the sprite's.
+            let under = published.palette[usize::from(published.get(x, y).unwrap())];
+            let at = ((y * 2) * u6_render::WIDTH * 2 + x * 2) * 4;
+            assert_eq!(
+                game.hd_frame_rgba()[at..at + 4],
+                [under.r, under.g, under.b, 255],
+                "({c}, {r}): the HD frame without the sprite"
+            );
+        }
+        assert!(opaque > 0 && opaque < 15, "clear pixels inside the box too");
+        drop(published);
+        // Moves of the pointer alone: nothing composed, the pointer's version moved. The baseline
+        // first: the five letters listed.
+        let (v, held, list) = (game.frame_version(), game.hd_frame_rgba(), game.hd_glyphs());
+        let e = game.engine.as_ref().unwrap();
+        let rgb = |i: usize| {
+            let c = e.frame().palette[i];
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        };
+        let letters: Vec<u32> = (2..7u32)
+            .zip(0..)
+            .flat_map(|(col, k)| [col * 8, 16, u32::from(b'a') + k, rgb(3), rgb(4)])
+            .collect();
+        assert_eq!(list, letters, "the baseline: the five letters listed");
+        game.hd_take_dirty();
+        let mut version = p[4];
+        for (x, y, what) in [(140, 80, "a move"), (27, 19, "over the letters")] {
+            point(&mut game, x, y);
+            let p = game.hd_pointer();
+            assert_eq!(
+                p[..4],
+                [x as u32 - 2, y as u32 - 1, 16, 3],
+                "{what}: the box moved"
+            );
+            assert_eq!(p[4], version + 1, "{what}: the pointer's version moved");
+            version = p[4];
+            assert_eq!(game.frame_version(), v, "{what}: nothing composed");
+            assert!(game.hd_take_dirty().is_empty(), "{what}: no dirty rect");
+            assert_eq!(game.hd_glyphs(), list, "{what}: the same letters listed");
+            assert!(game.hd_frame_rgba() == held, "{what}: the same HD frame");
+        }
+        point(&mut game, 27, 19);
+        assert_eq!(
+            game.hd_pointer()[4],
+            version,
+            "the same place: nothing moves"
+        );
+        // At the frame's edges: clipped, its pixels those of the part inside.
+        let clip = |game: &Game| {
+            let rgba = game.hd_pointer_rgba();
+            rgba.chunks_exact(4).map(|px| px[3]).collect::<Vec<u8>>()
+        };
+        let alpha = |c0: usize, r0: usize, cw: usize, rh: usize| -> Vec<u8> {
+            (0..rh * cw)
+                .map(|i| shape.rows[r0 + i / cw][c0 + i % cw])
+                .map(|v| if v == 0 { 0 } else { 255 })
+                .collect()
+        };
+        point(&mut game, w as i32 - 1, h as i32 - 1);
+        assert_eq!(
+            game.hd_pointer()[..4],
+            [w - 3, h - 2, 3, 2],
+            "the far corner"
+        );
+        assert_eq!(clip(&game), alpha(0, 0, 3, 2));
+        point(&mut game, 0, 0);
+        assert_eq!(game.hd_pointer()[..4], [0, 0, 14, 2], "the near corner");
+        assert_eq!(clip(&game), alpha(2, 1, 14, 2));
+        // Hidden, shown again; HD off, on again.
+        version = game.hd_pointer()[4];
+        let gone = |game: &Game, version: u32, what: &str| {
+            let p = game.hd_pointer();
+            assert_eq!(p, vec![0, 0, 0, 0, version + 1], "{what}: none");
+            assert!(game.hd_pointer_rgba().is_empty(), "{what}: no pixels");
+        };
+        press(&mut game, "h");
+        gone(&game, version, "hidden");
+        press(&mut game, "s");
+        assert_eq!(game.hd_pointer()[..4], [0, 0, 14, 2], "shown again");
+        version = game.hd_pointer()[4];
+        game.set_hd(false, 2);
+        gone(&game, version, "HD off");
+        point(&mut game, 100, 60);
+        assert_eq!(
+            game.hd_pointer()[4],
+            version + 1,
+            "HD off: a move gives nothing"
+        );
+        game.set_hd(true, 2);
+        assert_eq!(game.hd_pointer()[..4], [98, 59, 16, 3], "HD on again");
+    }
+
+    /// The pointer's pixels [`Game::hd_pointer_rgba`] is to give for the running engine's sprite
+    /// whole in the frame ([`pointer_shape`]'s 16 × 3): value v ≠ 0 in the shown frame's colour
+    /// 16 + v, opaque; 0 transparent.
+    fn expected_pointer(game: &Game) -> Vec<u8> {
+        let fb = game.engine.as_ref().unwrap().frame();
+        pointer_shape()
+            .rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|&v| match v {
+                0 => [0; 4],
+                v => {
+                    let c = fb.palette[usize::from(16 + v)];
+                    [c.r, c.g, c.b, 255]
+                }
+            })
+            .collect()
+    }
+
+    /// Spec 11 Design 7: the HD frame follows the published frame alone. On [`tile_engine`] with
+    /// the pointer shown: a move of the sprite alone composes the shown frame again
+    /// ([`Engine::frame_version`]) but leaves the published version, composes no HD block and
+    /// moves only the pointer's version; a publish of the sources alone (`c`: the cell drawn
+    /// classic in its colours, then `d`: the record again) moves the published version, and the
+    /// HD frame is composed for it (the page's version moved, the cell in the rect), the pointer's
+    /// version left as it was.
+    #[test]
+    fn a_publish_of_the_sources_alone_composes_and_a_sprite_move_does_not() {
+        let mut state = u6_core::State::empty();
+        state.ui.pointer =
+            u6_core::ui::pointer::PointerState::from_tables(u6_core::ui::pointer::PointerTables {
+                shapes: vec![pointer_shape()],
+                shown: true,
+                ..Default::default()
+            });
+        let mut game = Game::new();
+        game.put_on_screen(tile_engine_on(state));
+        game.set_hd(true, 4);
+        for k in ["a", "a"] {
+            press(&mut game, k);
+        }
+        point(&mut game, 200, 120);
+        let versions = |game: &Game| {
+            let e = game.engine.as_ref().unwrap();
+            (e.frame_version(), e.published_version())
+        };
+        game.hd_take_dirty();
+        let (shown, published) = versions(&game);
+        let (v, pointer) = (game.frame_version(), game.hd_pointer()[4]);
+        point(&mut game, 230, 140);
+        assert_eq!(
+            versions(&game),
+            (shown + 1, published),
+            "the sprite moved: the shown frame composed again, the published frame as it was"
+        );
+        assert_eq!(
+            game.frame_version(),
+            v,
+            "the sprite alone: nothing composed"
+        );
+        assert!(
+            game.hd_take_dirty().is_empty(),
+            "the sprite alone: no dirty rect"
+        );
+        assert_eq!(
+            game.hd_pointer()[4],
+            pointer + 1,
+            "the pointer's version moved"
+        );
+        for (key, what) in [("c", "classic"), ("d", "the record again")] {
+            let (shown, published) = versions(&game);
+            let (v, pointer) = (game.frame_version(), game.hd_pointer()[4]);
+            press(&mut game, key);
+            assert_eq!(
+                versions(&game),
+                (shown, published + 1),
+                "{what}: the sources alone published (the colours as they were)"
+            );
+            assert_eq!(
+                game.frame_version(),
+                v + 1.0,
+                "{what}: composed for the sources"
+            );
+            assert_eq!(
+                game.hd_take_dirty(),
+                vec![32 * 4, 32 * 4, 16 * 4, 16 * 4],
+                "{what}: the cell"
+            );
+            assert_eq!(
+                game.hd_pointer()[4],
+                pointer,
+                "{what}: the pointer as it was"
+            );
+        }
+    }
+
+    /// Spec 11 Design 7: the pointer standing still, its colours changed in the palette (`p`):
+    /// the same box, its pixels in the new colours, the version moved; a new engine put on
+    /// screen (a start) gives no pointer until its first step, then its own sprite's box and
+    /// pixels, each time with the version moved.
+    #[test]
+    fn the_pointer_follows_its_colours_and_a_new_engine() {
+        let mut game = Game::new();
+        game.put_on_screen(pointer_engine());
+        game.set_hd(true, 2);
+        point(&mut game, 100, 60);
+        let (before, rgba) = (game.hd_pointer(), game.hd_pointer_rgba());
+        assert_eq!(before[..4], [98, 59, 16, 3]);
+        assert_eq!(
+            rgba,
+            expected_pointer(&game),
+            "its pixels in the frame's colours"
+        );
+        press(&mut game, "p");
+        let after = game.hd_pointer();
+        assert_eq!(after[..4], before[..4], "the colours changed: the same box");
+        assert_eq!(
+            after[4],
+            before[4] + 1,
+            "the colours changed: the version moved"
+        );
+        assert!(
+            game.hd_pointer_rgba() != rgba,
+            "the pixels in the new colours"
+        );
+        assert_eq!(game.hd_pointer_rgba(), expected_pointer(&game));
+        // A start: a new engine, no sprite before its first step, then its own.
+        let version = after[4];
+        game.put_on_screen(pointer_engine());
+        assert_eq!(
+            game.hd_pointer(),
+            vec![0, 0, 0, 0, version + 1],
+            "the new engine before its first step: no pointer"
+        );
+        assert!(game.hd_pointer_rgba().is_empty());
+        point(&mut game, 140, 80);
+        let p = game.hd_pointer();
+        assert_eq!(
+            p,
+            vec![138, 79, 16, 3, version + 2],
+            "the new engine's sprite"
+        );
+        assert_eq!(
+            game.hd_pointer_rgba(),
+            expected_pointer(&game),
+            "its pixels"
         );
     }
 
