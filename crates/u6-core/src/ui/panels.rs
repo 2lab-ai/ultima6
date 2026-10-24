@@ -689,18 +689,23 @@ fn first_row(s: &mut State) {
 
 /// Spec 14 Design 3 (Wide): the container the inventory view shows for `base`, the member's actor
 /// or the open container: the panel's container as the last draw left it, the page kept, while
-/// `base` is the last draw's and that container is `base` itself, or still the object the last
-/// draw showed (the same type and frame word in its slot) held in `base` ([`held_in`]). Else
-/// `base`, from the first page: the member shown changed, there was no last draw (the first,
-/// after a Restore or a Save), the container left `base` (taken by another actor, left on the
-/// map), or its slot was freed or handed to another object (its block written back as the
-/// region moved, and read again). The container shown and its word are recorded.
+/// `base` is the last draw's and that container is `base` itself, or its slot was not freed since
+/// the last draw (the free count `Objects::freed` it recorded) and it is held in `base`
+/// ([`held_in`]). Else `base`, from the first page: the member shown changed, there was no last
+/// draw (the first, after a Restore or a Save), the container left `base` (taken by another
+/// actor, left on the map), or its slot was freed (its block written back as the region moved,
+/// the object removed): the slot may hold another object by now, one with the same type and frame
+/// word held in `base` too (a block read again after a slot was taken meanwhile hands its records
+/// the freed slots one further on), so the word is no test. `base` itself is kept whatever its
+/// word (walking changes an actor's frame). The container shown and its slot's count are
+/// recorded.
 #[cfg(feature = "wide")]
 fn kept_container(s: &mut State, base: u16) -> u16 {
+    use crate::objects::Slot;
     let kept = s.ui.panel.container;
     let o = &s.objects;
     let slots = &s.ui.panel.slots;
-    let same_object = || o.tf(kept as crate::objects::Slot) == slots.tf && held_in(o, kept, base);
+    let same_object = || o.freed_of(kept as Slot) == slots.freed && held_in(o, kept, base);
     let keep = slots.base == Some(base) && (kept == base || same_object());
     let shown = if keep {
         kept
@@ -709,15 +714,17 @@ fn kept_container(s: &mut State, base: u16) -> u16 {
         base
     };
     s.ui.panel.slots.base = Some(base);
-    s.ui.panel.slots.tf = s.objects.tf(shown as crate::objects::Slot);
+    s.ui.panel.slots.freed = s.objects.freed_of(shown as Slot);
     shown
 }
 
 /// `obj` is `base`, or its chain of containers reaches `base` as `inventory::weight::holder`
 /// walks it (`inventory/weight.rs`), through objects that are there (a type and frame word not
-/// 0: a slot freed by a block's write-back keeps the rest of its entry). False when the chain
-/// ends elsewhere: at another actor, on the map, at a freed slot, or at the walk's bound (a
-/// chain that comes back on itself).
+/// 0). [`kept_container`] tells the container's own slot by its free count; the word is a guard
+/// for the links above it, whose counts nothing records (a slot freed by a block's write-back
+/// keeps the rest of its entry, its parent too). False when the chain ends elsewhere: at another
+/// actor, on the map, at a freed slot, or at the walk's bound (a chain that comes back on
+/// itself).
 #[cfg(feature = "wide")]
 fn held_in(o: &crate::objects::Objects, obj: u16, base: u16) -> bool {
     use crate::objects::{ACTOR_SLOTS, OBJECT_SLOTS, Slot};

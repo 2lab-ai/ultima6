@@ -239,6 +239,12 @@ pub struct Objects {
     pub free: (Slot, i16),
     /// Original: A4+0x1300 / A4+0x1302 (first free temporary-actor slot, free count)
     pub free_actors: (Slot, i16),
+    /// Port-only (spec 14, Wide): per slot, how many times the slot was freed (a block's
+    /// write-back, [`remove`]), [`OBJECT_SLOTS`] entries. A freed slot can be handed to another
+    /// object before the inventory view's next draw, one with the same type and frame word; an
+    /// unchanged count says the slot still holds the object it held.
+    #[cfg(feature = "wide")]
+    pub freed: Vec<u32>,
     /// Location cursor of 0x10ad1a / 0x10aaca.
     pub at: LocationCursor,
     /// Child cursor of 0x10ae52 / 0x10aed6 / 0x10b18c / 0x10b0ba.
@@ -294,6 +300,8 @@ impl Default for Objects {
             coord_mask: 0x3ff,
             free: (NONE, 0),
             free_actors: (NONE, 0),
+            #[cfg(feature = "wide")]
+            freed: vec![0; OBJECT_SLOTS],
             at: LocationCursor::default(),
             children: ChildCursor::default(),
             area: AreaCursor::default(),
@@ -369,6 +377,20 @@ impl Objects {
     /// Type (10 bits) of `slot`.
     pub fn kind(&self, slot: Slot) -> u16 {
         self.tf(slot) & 0x3ff
+    }
+
+    /// Port-only (spec 14, Wide): [`Objects::freed`] of `slot` (0 for -1).
+    #[cfg(feature = "wide")]
+    pub fn freed_of(&self, slot: Slot) -> u32 {
+        ix(slot).map_or(0, |i| self.freed[i])
+    }
+
+    /// Port-only (spec 14, Wide): counts `slot` freed in [`Objects::freed`].
+    #[cfg(feature = "wide")]
+    pub(crate) fn note_freed(&mut self, slot: Slot) {
+        if let Some(i) = ix(slot) {
+            self.freed[i] = self.freed[i].wrapping_add(1);
+        }
     }
 
     /// Quality / quantity word of `slot`.

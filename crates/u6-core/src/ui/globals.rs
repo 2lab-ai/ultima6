@@ -126,9 +126,12 @@ pub struct Slots {
     /// The actor (or open container) the inventory view last showed; the inventory context
     /// starts again when it changes (Design 3). `None` before the first draw.
     pub base: Option<u16>,
-    /// The type and frame word (`Objects::tf`) of the container the inventory view last showed:
-    /// a kept container must still be that object, not another one its slot was handed to.
-    pub tf: u16,
+    /// The free count (`Objects::freed`) of the slot of the container the inventory view last
+    /// showed, as that draw, or the panel code that opened the container (0x9f / 0xa0), recorded
+    /// it. A kept container's slot must not have been freed since: a freed slot can be handed to
+    /// another object before the next draw, even one with the same type and frame word and the
+    /// same holder, so neither tells the object the view showed from another.
+    pub freed: u32,
 }
 
 /// The inventory view's state outside the panel's inventory context (spec 14 Designs 2 and 3:
