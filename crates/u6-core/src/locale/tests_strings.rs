@@ -1822,7 +1822,8 @@ fn caster_world() -> State {
 
 /// What [`spellwork`] runs: the Cast command, Detect Magic (spell 1) with its target chosen,
 /// the key `A` under the spell cursor, the search of the typed syllables, or Wind Change (spell
-/// 0x39) or Move (the object commands' push) answered with the up key (north, direction 0).
+/// 0x39), Telekinesis (spell 0x15, its target chosen) or Move (the object commands' push)
+/// answered with the up key (north, direction 0).
 #[derive(Clone, Copy, Debug)]
 enum Spellwork {
     Cast,
@@ -1830,6 +1831,7 @@ enum Spellwork {
     Syllable,
     Search,
     Wind,
+    Telekinesis,
     Push,
 }
 
@@ -1867,11 +1869,12 @@ fn spellwork(work: Spellwork, setup: fn(&mut State), pack: Option<Pack>) -> (Str
                 crate::magic::find_typed_spell(&st, &io).await;
             }
             Spellwork::Wind => crate::magic::dispatch(&st, &io, 0x39, false).await,
+            Spellwork::Telekinesis => crate::magic::dispatch(&st, &io, 0x15, true).await,
             Spellwork::Push => crate::objects::commands::push(&st, &io).await,
         }
     });
     e.tick(&[], 16);
-    if let Spellwork::Wind | Spellwork::Push = work {
+    if let Spellwork::Wind | Spellwork::Telekinesis | Spellwork::Push = work {
         e.tick(
             &[crate::engine::InputEvent::Key(crate::engine::Key::Up)],
             16,
@@ -1952,6 +1955,16 @@ fn magics_refusals_results_potions_and_directions_print_the_packs_forms_and_else
     let up_arrow: fn(&mut State) = |s| {
         s.ui.tables.keymap[0x4c] = [0x148; 4];
     };
+    // An object of weight 5 two tiles east of the leader, selected and targeted for Telekinesis.
+    let weighty: fn(&mut State) = |s| {
+        s.ui.tables.keymap[0x4c] = [0x148; 4];
+        s.tables.tileflags.weight = vec![0; 0x400];
+        s.tables.tileflags.weight[0x77] = 5;
+        let at = crate::objects::create_on_map(&mut s.objects, 0x77, 0, 1, 102, 100, 0);
+        assert!(at >= 0x100, "an object slot");
+        s.ui.input.selection = at;
+        s.ui.input.target = (102, 100);
+    };
     // A weightless object one tile east of the leader, selected and targeted for Move.
     let beside: fn(&mut State) = |s| {
         s.ui.tables.keymap[0x4c] = [0x148; 4];
@@ -1960,7 +1973,7 @@ fn magics_refusals_results_potions_and_directions_print_the_packs_forms_and_else
         s.ui.input.selection = at;
         s.ui.input.target = (101, 100);
     };
-    let cases: [SpellCase; 8] = [
+    let cases: [SpellCase; 9] = [
         // Cast refused: no book readied, the books' magic negated, no spell in the book.
         (
             "no book",
@@ -2031,6 +2044,16 @@ fn magics_refusals_results_potions_and_directions_print_the_packs_forms_and_else
         // Move: the object's name, the prompt, then north's name (a label read for display)
         // through the direction's line (`%s.\n`, no word: as it is), then the not-possible
         // message (a weightless object) through `\n%s\n`.
+        // Telekinesis: the dispatcher's newline, the prompt for a target and the object's name,
+        // the direction prompt, then north's name (a label read for display) through `%s\n`.
+        (
+            "a telekinesis",
+            Spellwork::Telekinesis,
+            weighty,
+            "\n바zo\n카타".into(),
+            3,
+            format!("\nZr08zo\n{}Zn0", spell_text(DIRECTION_PROMPT)),
+        ),
         (
             "a push",
             Spellwork::Push,

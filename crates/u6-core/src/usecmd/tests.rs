@@ -765,6 +765,87 @@ fn the_telescope_pointed_nowhere_leaves_the_view_on_it() {
     assert_eq!((c.x, c.y), (100, 99), "the centre stays on the telescope");
 }
 
+/// Dig's and the telescope's direction prompts and the direction's line (`%s.\n`) both print,
+/// and the direction names' slots (A4-0x61be + 4 n), the test's own copies of the addresses;
+/// where the synthetic `game` keeps north's name (no site there).
+const DIG_PROMPT: u32 = 0x0012_cd00;
+const SCOPE_PROMPT: u32 = 0x0012_ced6;
+const DIR_LINE: u32 = 0x0012_cd16;
+const DIR_SLOTS: u32 = crate::image::A4 - 0x61be;
+const NORTH_TEXT: u32 = crate::image::IMAGE_BASE + 0x400;
+
+/// The synthetic `game` of a direction's line (the test's own text): the two prompts, the
+/// line's format and north's name at the direction table's first slot (an absolute pointer).
+fn direction_parts() -> Vec<(u32, Vec<u8>)> {
+    vec![
+        (DIG_PROMPT, b"Zq1".to_vec()),
+        (SCOPE_PROMPT, b"Zq2".to_vec()),
+        (DIR_LINE, b"%s.\n".to_vec()),
+        (DIR_SLOTS, NORTH_TEXT.to_be_bytes().to_vec()),
+        (NORTH_TEXT, b"Zn0".to_vec()),
+    ]
+}
+
+/// Dig, or (`scope`) the telescope A, answered with the up arrow (north) under the `game` of
+/// [`direction_parts`], with a Korean pack of a form for north's name installed (`pack`) or no
+/// pack: the scroll (each cell as its character) and the counts.
+fn direction_line(scope: bool, pack: bool) -> (String, [u32; 2]) {
+    use crate::engine::{InputEvent, Key};
+    let parts = direction_parts();
+    let refs: Vec<(u32, &[u8])> = parts.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+    let mut s = world();
+    s.ui = crate::main_loop::test_support::test_ui();
+    // The up arrow (raw 0x4c) gives north's cursor-key code.
+    s.ui.tables.keymap[0x4c] = [0x148; 4];
+    put(&mut s, A, 0x9a, 100, 99);
+    link(&mut s);
+    tiles(&mut s, 0, 0);
+    if pack {
+        crate::locale::strings::install_test_forms(&mut s, &refs, &[(b"Zn0", "북")]);
+    }
+    let mut e = Engine::with_game(s, game_with(&refs), move |st, io| async move {
+        let ux = Ux::new(&st, &io);
+        if scope {
+            super::travel::telescope(ux, A).await;
+        } else {
+            mech::dig(ux).await;
+        }
+    });
+    e.tick(&[InputEvent::Key(Key::Up)], 16);
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    let t = &s.ui.text;
+    let mut all = s.ui.messages.join("\n");
+    let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
+    let cells = t.transcript_line.iter().chain(pending);
+    all.extend(cells.map(|&c| crate::ui::wide::cell_char(c)));
+    (all.trim_end().to_string(), s.locale.texts.get())
+}
+
+#[test]
+fn dig_and_the_telescope_show_the_packs_direction_name_and_without_a_pack_the_english() {
+    // The prompt, then north's name (a label read for display) through the line's format (no
+    // word of its own: as it is); the name the pack's, found there, or the English uncounted.
+    for (what, scope, prompt) in [("dig", false, "Zq1"), ("the telescope", true, "Zq2")] {
+        assert_eq!(
+            direction_line(scope, true),
+            (format!("{prompt}북."), [1, 0]),
+            "{what}: the pack's name"
+        );
+        assert_eq!(
+            direction_line(scope, false),
+            (format!("{prompt}Zn0."), [0, 0]),
+            "{what}: the English"
+        );
+    }
+}
+
 /// The made-up map tiles of the drawbridge site: water everywhere, one row of a bank tile the
 /// made-up end list holds (A4-0x6614 in [`bridge_game`]).
 const MOAT: u8 = 2;

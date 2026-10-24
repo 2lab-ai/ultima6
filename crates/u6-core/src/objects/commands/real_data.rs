@@ -896,9 +896,11 @@ fn the_string_export_of_the_owners_game_holds_the_inventorys_ready_and_unready_l
 /// books' no-magic, no-spells and nothing lines, the three refusals of the checks, the typed
 /// spell's not-in-book line (A4-0x7387), the detections' lines and the not-possible line; the 13
 /// result messages, the 8 potion descriptions and the 8 direction names as labels
-/// (`magic::LABELS`, A4-0x6c6c + 4 n, A4-0x6b4c + 4 n and A4-0x61be + 4 n); and none of the incantations' syllables (A4-0x70b8) or the spells' names
-/// (A4-0x6f4c), which stay English, nor the result formats of no word of their own. Prints
-/// pass/fail only: a failure names the site, never its text.
+/// (`magic::LABELS`, A4-0x6c6c + 4 n, A4-0x6b4c + 4 n and A4-0x61be + 4 n); and none of the
+/// incantations' syllables (A4-0x70b8), the spells' names (A4-0x6f4c) or the circles' names
+/// (A4-0x6c9c), which stay English, nor the spellbook page's line (0x1158b4, a panel's) or the
+/// result formats of no word of their own. Prints pass/fail only: a failure names the site,
+/// never its text.
 #[test]
 fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_syllable() {
     use crate::converse::disasm::catalog::hash64;
@@ -972,8 +974,19 @@ fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_sy
     for (i, name) in tables.names.iter().enumerate() {
         assert!(!has(name), "spell name {i} not in the export");
     }
+    for (i, circle) in tables.circles.iter().enumerate() {
+        assert!(!has(circle), "circle name {i} not in the export");
+    }
+    assert!(
+        !printed.contains(&0x0011_58b4),
+        "the book page's line is not in magic's list"
+    );
+    assert!(
+        !has(&img.cstr(0x0011_58b4).quiet()),
+        "the book page's line not in the export"
+    );
     eprintln!(
-        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, and no result format, syllable or spell name: pass"
+        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, and no result format, syllable, spell or circle name or book page line: pass"
     );
 }
 

@@ -288,6 +288,52 @@ pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     Ok(export)
 }
 
+/// Tests (2026-10-24): installs over `s` a Korean pack of `forms` (an English string and the
+/// pack's text for it, each the test's own), checked against the catalogue of a synthetic `game`
+/// holding `parts` (one CODE hunk from the image base: each part's bytes at its image address),
+/// as the page installs one. For a module's own test of a label read for display
+/// ([`super::shown`]).
+#[cfg(test)]
+pub(crate) fn install_test_forms(
+    s: &mut crate::state::State,
+    parts: &[(u32, &[u8])],
+    forms: &[(&[u8], &str)],
+) {
+    let at = |addr: u32| (addr - crate::image::IMAGE_BASE) as usize;
+    let end = parts.iter().map(|&(a, b)| at(a) + b.len() + 1).max();
+    let mut hunk = vec![0u8; end.unwrap_or(0).next_multiple_of(4)];
+    for &(addr, bytes) in parts {
+        hunk[at(addr)..at(addr) + bytes.len()].copy_from_slice(bytes);
+    }
+    let game = crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build();
+    let strings = forms.iter().map(|&(en, ko)| {
+        let text = super::StringText {
+            len: en.len() as u32,
+            text: ko.as_bytes().to_vec(),
+        };
+        (hash64(en), text)
+    });
+    let pack = super::Pack::new(
+        crate::ui::Language::Korean,
+        "test/1",
+        super::fingerprint([]),
+        [],
+    )
+    .and_then(|p| p.with_strings(strings))
+    .expect("the test's pack reads");
+    let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    super::install_catalogued(
+        s,
+        &files,
+        std::rc::Rc::new(pack),
+        None,
+        Catalogue::from_game(&game),
+    )
+    .expect("the pack checks");
+}
+
 impl Catalogue {
     /// The catalogue of `game` (the decrunched executable): every site's string that reads
     /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer, a label of a pointer table

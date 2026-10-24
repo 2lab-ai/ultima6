@@ -416,6 +416,68 @@ fn friends_of_gargoyles_get_peaceful_gargoyles() {
     assert_eq!(s.actors.worktype[m as usize], 0xc);
 }
 
+/// A scout's warning (A4-0x763a) and the direction names' slots (A4-0x61be + 4 n), the test's own
+/// copies of the addresses; where the made-up image keeps east's name (no site there).
+const WARNING: i32 = -0x763a;
+const DIR_SLOTS: i32 = -0x61be;
+const EAST_TEXT: u32 = crate::image::IMAGE_BASE + 0x400;
+
+/// The name the scout's warning queues for its `%s` when an egg 20 tiles east of the leader
+/// hatches a hostile (RNG seeded with `seed`), with a Korean pack of a form for east's name
+/// installed (`pack`) or no pack: the warning `Zw1 %s`, east's name `Zn2` at the third slot of
+/// the direction table (an absolute pointer), actor 3 a member (status 0x80) beside the leader;
+/// the made-up image's bytes are the test's own. `None` when no warning is queued.
+fn scouts_warning(pack: bool, seed: u16) -> Option<Vec<u8>> {
+    let mut s = monster_world();
+    let parts = vec![
+        (a4(WARNING), b"Zw1 %s".to_vec()),
+        (a4(DIR_SLOTS) + 8, EAST_TEXT.to_be_bytes().to_vec()),
+        (EAST_TEXT, b"Zn2".to_vec()),
+    ];
+    with_data(&mut s, parts.clone());
+    if pack {
+        let refs: Vec<(u32, &[u8])> = parts.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        crate::locale::strings::install_test_forms(&mut s, &refs, &[(b"Zn2", "동")]);
+    }
+    s.map.centre = crate::objects::pack_xyz(500, 500, 0);
+    s.objects.type_frame[3] = 0x17a;
+    s.objects.set_xyz(3, 501, 500, 0);
+    s.actors.attrs.status[3] = 0x80;
+    s.rng = crate::rng::Rng::seeded(seed);
+    let egg = put(&mut s, 0x14f, 520, 500);
+    s.objects.qq[egg as usize] = 0x0264; // quality 2 (alignment 2: hostile), 100%
+    s.objects.obj_status[egg as usize] = 0; // not marked (0x20): its hostiles are warned of
+    create_in(&mut s, 0x16b, 0x08, 0x0801, egg);
+    hatch_egg(&mut s, egg);
+    let warning = super::text::a4_string(&s, WARNING);
+    s.main.pending_print.iter().find_map(|p| match p {
+        Pending::Print(f, args) if *f == warning => match args.as_slice() {
+            [PrintArg::Str(name)] => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn a_scouts_warning_names_the_packs_direction_and_without_a_pack_the_english() {
+    // The warning's `%s` gets east's name read for display: the pack's form, else the English.
+    // A seed whose draw (1 in 3 says nothing) lets the scout speak.
+    let seed = (1..64)
+        .find(|&n| scouts_warning(false, n).is_some())
+        .expect("a seed where the scout warns");
+    assert_eq!(
+        scouts_warning(true, seed),
+        Some("동".as_bytes().to_vec()),
+        "the pack's name"
+    );
+    assert_eq!(
+        scouts_warning(false, seed),
+        Some(b"Zn2".to_vec()),
+        "the English"
+    );
+}
+
 #[test]
 fn takeable_needs_every_content_marked() {
     let mut s = world();

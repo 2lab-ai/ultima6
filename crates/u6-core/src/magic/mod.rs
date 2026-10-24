@@ -87,8 +87,8 @@ pub(crate) const PRINTED: [&[u32]; 10] = [
     travel::PRINTED,
 ];
 
-/// Port-only (spec 08, slice K2): the result messages' and the potions' labels for the locale
-/// layer's catalogue.
+/// Port-only (spec 08, slice K2): the result messages', the potions' and the direction names'
+/// labels for the locale layer's catalogue.
 pub(crate) use tables::LABELS;
 
 /// Spellbook object type.

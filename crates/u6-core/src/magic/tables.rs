@@ -40,10 +40,10 @@ const DIRECTIONS: u32 = 0x61be;
 /// potion descriptions (A4-0x6b4c + 4 n; Detect Magic's potion line), and (2026-10-24) the 8
 /// direction names (A4-0x61be + 4 n, a word of the UI the player reads: Wind Change's and
 /// Telekinesis' direction line, and the other modules' that show one, Move's, Dig's, the
-/// telescope's and a scout's warning, read it the same way). Ten messages are the shared messages Use and the object commands
-/// read too ([`crate::locale::strings::SHARED_MESSAGES`]) and the last the amulet's line
-/// ([`crate::inventory::LABELS`]): the catalogue keeps each once. Logic reads [`MagicTables`] as
-/// it is.
+/// telescope's and a scout's warning, read it the same way). Ten messages are the shared
+/// messages Use and the object commands read too ([`crate::locale::strings::SHARED_MESSAGES`])
+/// and the last the amulet's line ([`crate::inventory::LABELS`]): the catalogue keeps each once.
+/// Logic reads [`MagicTables`] as it is.
 pub(crate) const LABELS: &[u32] = &[
     A4.wrapping_sub(MESSAGES),
     A4.wrapping_sub(MESSAGES) + 0x4,
