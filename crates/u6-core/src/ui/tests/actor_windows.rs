@@ -479,6 +479,50 @@ mod wide {
         assert_eq!(got, (1, 0));
     }
 
+    /// Spec 14 Design 3, a slot freed by `remove` and handed out again (the free chain gives back
+    /// the slot freed last): member 0's bag removed and a bag given, in the same slot, its free
+    /// count 1 while the base's is 0. Opened from the backpack slot (0xa0) while the roster is
+    /// shown, it is kept by the redraw: the open records the bag's count, not the base's. Removed
+    /// again and another bag given, in the same slot with the same type and frame, member 0's:
+    /// the next redraw starts again, as the remove counted the slot freed.
+    #[test]
+    fn a_bag_removed_and_given_again_in_its_slot_starts_again() {
+        use crate::objects::{IN_INVENTORY, remove};
+        let mut pre = world();
+        let old = object(&pre, BAG);
+        remove(&mut pre, old);
+        let bag = give(&mut pre, BAG, IN_INVENTORY, 0, 1);
+        assert_eq!(bag, old, "the freed slot handed out again");
+        assert_eq!(
+            (pre.objects.freed_of(bag), pre.objects.freed_of(1)),
+            (1, 0),
+            "the bag's slot freed once, the base's never"
+        );
+        let (x, y) = in_slot(2, cell_of(&pre, bag));
+        let mut s = press(pre, &click_then_key(x, y)).state;
+        assert_eq!(
+            (s.ui.panel.mode, s.ui.panel.container),
+            (0x91, bag as u16),
+            "the bag opened from the slot, kept by the redraw"
+        );
+        let tf = s.objects.tf(bag);
+        remove(&mut s, bag);
+        let again = give(&mut s, BAG, IN_INVENTORY, 0, 1);
+        let o = &s.objects;
+        assert_eq!(
+            (again, o.tf(again), o.parent(again), o.place(again)),
+            (bag, tf, 1, IN_INVENTORY),
+            "another bag in the slot: the same type and frame, member 0's"
+        );
+        s.ui.panel.dirty = true;
+        let r = redraw(s).state;
+        assert_eq!(
+            (r.ui.panel.container, r.ui.panel.inventory_first),
+            (1, 0),
+            "member 0's actor, the first row"
+        );
+    }
+
     /// The container and page a redraw leaves with `container` kept on the second page and the
     /// inventory view's last base `base`.
     fn kept_after(s: &State, container: Slot, base: Option<u16>) -> (u16, u8) {

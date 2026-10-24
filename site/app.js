@@ -253,10 +253,17 @@ const screenBox = document.getElementById('screen-box');
 const fullscreenButton = document.getElementById('fullscreen');
 const fullscreenExit = document.getElementById('fullscreen-exit');
 
+// One-shot marks for the page loaded next (`setMark`, `takeMark`): Restart asked for the focus
+// on the canvas; the switch to the other build (`switchBuild`) cut a download of the voice model
+// the visitor started, so the page it loads goes on with downloads allowed.
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
-// sessionStorage, one-shot: the switch to the other build (`switchBuild`) cut a download of the
-// voice model the visitor started; the page it loads goes on with downloads allowed.
 const VOICE_DOWNLOAD_AFTER_RELOAD = 'u6-voice-download-after-reload';
+// Where sessionStorage throws, a mark is kept in the page's own history entry (history.state,
+// which a reload keeps, only this site's document writes, and no other tab sees; it is not Web
+// Storage): under `MARKS_STATE`, each mark's time, taken only this long after it was set (one
+// whose load never came starts nothing later).
+const MARKS_STATE = 'u6Marks';
+const MARK_FALLBACK_MS = 60_000;
 
 // The engine (wasm-bindgen's glue of one of the two builds, spec 13 Decision 2: `pkg` Original,
 // `pkg-wide` Wide), imported at the engine's operation (`ENGINE_URL`); until then none of these.
@@ -347,10 +354,16 @@ function t(key, ...args) {
 // `say` writes one key's line and remembers it, so a change of language rewrites it.
 let mirror = false;
 let said = null;
+// Whether the chooser's line shows the switch line (`showSwitchOnChooser`), which a change of
+// OK's label or of the language writes again (`refreshSwitchLine`).
+let switchShown = false;
 function setStatus(text) {
   said = null;
   statusLine.textContent = text;
-  if (mirror) setupStatus.textContent = text;
+  if (mirror) {
+    setupStatus.textContent = text;
+    switchShown = false;
+  }
 }
 
 function say(key, ...args) {
@@ -373,8 +386,9 @@ function setLang(next) {
   mute.textContent = t(audio.muted ? 'unmute' : 'mute');
   showSpeed();
   showStorage();
-  if (said) say(said[0], ...said[1]);
-  if (said?.[0] === 'layoutSwitchAtOk') setupStatus.textContent = statusLine.textContent;
+  // The switch line names OK as it reads now (relabelled above).
+  if (said && said[0] !== 'layoutSwitchAtOk') say(said[0], ...said[1]);
+  refreshSwitchLine();
 }
 
 function message(err) {
@@ -1893,32 +1907,49 @@ async function switchBuild() {
     switchTo = null;
     switching = false;
     showHd();
+    showSwitchLine();
     say('layoutNotKept');
     return;
   }
   // A download of the voice model the visitor started (not a start from the cache) goes on in
-  // the page loaded next, which would otherwise start the voices from the cache only.
-  if (!voiceQuiet && (voiceState === 'checking' || voiceState === 'loading')) {
-    try {
-      sessionStorage.setItem(VOICE_DOWNLOAD_AFTER_RELOAD, '1');
-    } catch {
-      // No session storage: the next page starts the voices from the cache only.
-    }
-  }
+  // the page loaded next, which would otherwise start the voices from the cache only (as it does
+  // with no storage for the mark).
+  if (!voiceQuiet && (voiceState === 'checking' || voiceState === 'loading')) setMark(VOICE_DOWNLOAD_AFTER_RELOAD);
   leaving = true;
   location.reload();
 }
 
-// The line of a switch to the other build noted for OK (`switchTo`): on the status line and the
-// chooser's, in the page's language; gone with the switch called off.
+// What the line of a switch to the other build names: the screen noted (`switchTo`) and OK as it
+// reads now ("Accept and start" while NPC voices is ticked: `showVoiceTerms`).
+function switchWords() {
+  return [switchTo, t(setupOk.dataset.i18n)];
+}
+
+// The switch line on the chooser's line only, in the page's language.
+function showSwitchOnChooser() {
+  setupStatus.textContent = t('layoutSwitchAtOk', ...switchWords());
+  switchShown = true;
+}
+
+// The line of a switch to the other build noted for OK: on the status line and the chooser's;
+// gone from both with the switch called off.
 function showSwitchLine() {
   if (switchTo !== null) {
-    say('layoutSwitchAtOk', switchTo);
-    setupStatus.textContent = statusLine.textContent;
-  } else if (said?.[0] === 'layoutSwitchAtOk') {
-    setStatus('');
-    setupStatus.textContent = '';
+    say('layoutSwitchAtOk', ...switchWords());
+    showSwitchOnChooser();
+    return;
   }
+  if (said?.[0] === 'layoutSwitchAtOk') setStatus('');
+  if (switchShown) setupStatus.textContent = '';
+  switchShown = false;
+}
+
+// The switch line written again where it shows (OK relabelled, another language): on both lines
+// while the status line shows it, else on the chooser's only (the status line says something
+// else since: a wait, a download).
+function refreshSwitchLine() {
+  if (said?.[0] === 'layoutSwitchAtOk') showSwitchLine();
+  else if (switchShown && switchTo !== null) showSwitchOnChooser();
 }
 
 // --- the Wide layout (spec 13) -----------------------------------------------------------------
@@ -3214,23 +3245,31 @@ async function showPacks() {
 }
 
 // The chooser's NPC voices as checked: the model's use restrictions shown, and OK read as their
-// acceptance, only while it is.
+// acceptance, only while it is (a switch line shown names OK as it reads now).
 function showVoiceTerms() {
   setupTerms.hidden = !setupVoices.checked;
   setupOk.dataset.i18n = setupVoices.checked ? 'acceptStart' : 'ok';
   setupOk.textContent = t(setupOk.dataset.i18n);
+  refreshSwitchLine();
 }
 
 // Opens the chooser on the language, the HD choice and the voices now (NPC voices checked on the
-// first run, else while the voices are on).
+// first run, else while the voices are on), its line empty unless a switch to the other build is
+// pending (noted, or under way): then the switch line, on the chooser's line only (the status
+// line keeps what it says: a wait, a download).
 function openSetup() {
   for (const input of setup.querySelectorAll('input[name="setup-lang"]')) input.checked = input.value === lang;
-  setupStatus.textContent = '';
   setup.hidden = false;
   showHdChoice();
   setupVoices.checked = setupFirst || voiceIsOn();
   setupRestrictions.textContent = RESTRICTIONS;
   showVoiceTerms();
+  if (switchTo !== null) {
+    showSwitchOnChooser();
+  } else {
+    setupStatus.textContent = '';
+    switchShown = false;
+  }
   showPacks();
 }
 
@@ -3741,11 +3780,8 @@ document.addEventListener('fullscreenchange', () => {
 // The Exit button while the pointer moves over the fullscreen box (a touch too).
 for (const kind of ['pointermove', 'pointerdown']) screenBox.addEventListener(kind, showExit);
 restart.addEventListener('click', () => {
-  try {
-    sessionStorage.setItem(FOCUS_AFTER_RELOAD, '1');
-  } catch {
-    // No session storage: the reload just does not move the focus.
-  }
+  // With no storage for the mark, the reload just does not move the focus.
+  setMark(FOCUS_AFTER_RELOAD);
   location.reload();
 });
 window.addEventListener('unhandledrejection', (e) => {
@@ -3753,25 +3789,90 @@ window.addEventListener('unhandledrejection', (e) => {
   say('unexpected', message(e.reason));
 });
 
-// The mark the switch to the other build left for a voice download it cut, taken once.
-function takeVoiceDownload() {
+// Whether the page's history state is an object (or none) the marks can be kept in, its other
+// keys with them.
+function stateHoldsMarks(state) {
+  return state === null || (typeof state === 'object' && !Array.isArray(state));
+}
+
+// A copy of the marks this page's history entry keeps ({} with none), or null when its state is
+// of another kind or its marks do not read: no mark is set or taken there then.
+function stateMarks() {
+  const state = history.state;
+  if (!stateHoldsMarks(state)) return null;
+  if (state === null || !Object.hasOwn(state, MARKS_STATE)) return {};
+  const marks = state[MARKS_STATE];
+  return marks !== null && typeof marks === 'object' && !Array.isArray(marks) ? { ...marks } : null;
+}
+
+// Writes `marks` into this page's history entry, its state's other keys kept (the marks' key gone
+// with none), and reads it back: whether the entry holds `key` as `marks` does (that time, or
+// none).
+function keepStateMarks(marks, key) {
+  const next = { ...history.state };
+  if (Object.keys(marks).length > 0) next[MARKS_STATE] = marks;
+  else delete next[MARKS_STATE];
+  history.replaceState(next, '');
+  const kept = history.state?.[MARKS_STATE];
+  const holds = kept !== null && typeof kept === 'object' && Object.hasOwn(kept, key);
+  return Object.hasOwn(marks, key) ? holds && kept[key] === marks[key] : !holds;
+}
+
+// Sets the one-shot mark `key` for the page loaded next: in sessionStorage, else (it throws: some
+// privacy modes) in the page's history entry with its time; with neither, the next page goes
+// without it.
+function setMark(key) {
   try {
-    const set = sessionStorage.getItem(VOICE_DOWNLOAD_AFTER_RELOAD) === '1';
-    sessionStorage.removeItem(VOICE_DOWNLOAD_AFTER_RELOAD);
-    return set;
+    sessionStorage.setItem(key, '1');
+    return;
   } catch {
-    return false;
+    // No session storage: the history entry.
+  }
+  try {
+    const marks = stateMarks();
+    if (marks !== null) keepStateMarks({ ...marks, [key]: Date.now() }, key);
+  } catch {
+    // A history entry that cannot be written: no mark.
   }
 }
 
-function takeFocusFlag() {
+// Whether the mark `key` was set for this page, taken once (never a throw): sessionStorage's when
+// it can be removed (else it would count again), then the history entry's while its time is a
+// number 0 to MARK_FALLBACK_MS old and its removal reads back. The entry's is removed whatever it
+// holds, the other marks kept; marks that do not read are removed.
+function takeMark(key) {
+  let set = false;
   try {
-    const set = sessionStorage.getItem(FOCUS_AFTER_RELOAD) === '1';
-    sessionStorage.removeItem(FOCUS_AFTER_RELOAD);
-    return set;
+    if (sessionStorage.getItem(key) === '1') {
+      sessionStorage.removeItem(key);
+      set = true;
+    }
   } catch {
-    return false;
+    // No session storage, or a mark it does not let go: none from there.
   }
+  try {
+    const marks = stateMarks();
+    if (marks === null) {
+      if (stateHoldsMarks(history.state)) keepStateMarks({}, key);
+    } else if (Object.hasOwn(marks, key)) {
+      const at = marks[key];
+      delete marks[key];
+      const age = typeof at === 'number' && Number.isFinite(at) ? Date.now() - at : NaN;
+      if (keepStateMarks(marks, key) && age >= 0 && age < MARK_FALLBACK_MS) set = true;
+    }
+  } catch {
+    // A history entry that cannot be read or written: no mark from there.
+  }
+  return set;
+}
+
+// The mark the switch to the other build left for a voice download it cut, taken once.
+function takeVoiceDownload() {
+  return takeMark(VOICE_DOWNLOAD_AFTER_RELOAD);
+}
+
+function takeFocusFlag() {
+  return takeMark(FOCUS_AFTER_RELOAD);
 }
 
 // A choice kept before this version counts as none, once: the chooser opens as on a first run
@@ -3796,6 +3897,9 @@ reflectVoice();
 // switch to the other build cut (`switchBuild`) goes on, downloads allowed.
 const voiceDownload = takeVoiceDownload();
 if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: !voiceDownload });
+// Restart's mark, taken as the page loads (its age is the reload's; an engine that fails to load
+// leaves none behind), is applied once the kept game is back (`opRestore`).
+const focusAfterReload = takeFocusFlag();
 // The chooser first while no choice of this version is kept.
 if (setupFirst) openSetup();
 enqueue('opEngine', async () => {
@@ -3830,7 +3934,7 @@ enqueue('opRestore', async () => {
     if (wasm) await restoreLocalePack();
     // In 한글 the site's Korean pack first (spec 08 K6), so the first game starts with it.
     const hosted = wasm ? await hostedLocalePack() : null;
-    if (wasm) await restoreKept(takeFocusFlag(), hosted?.line ?? '');
+    if (wasm) await restoreKept(focusAfterReload, hosted?.line ?? '');
   } finally {
     if (wasm) picker.disabled = false;
     // Storage that could not say what it keeps: the drop line shows.

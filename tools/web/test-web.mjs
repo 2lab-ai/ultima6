@@ -9331,11 +9331,24 @@ test('Wide layout (spec 13 Decision 2, the first-run chooser): on a first visit 
 // state the page showed (`__voiceStates`). From the cache only it answers as the real worker does
 // when the model is not there (notcached); with downloads allowed, in the tab's first document a
 // download that goes on (progress, never ready), as the 400 MB model's would; in a later one,
-// ready.
-function voiceLoadsLog() {
-  const list = (key) => JSON.parse(sessionStorage.getItem(key) ?? '[]');
-  const doc = Number(sessionStorage.getItem('__voiceDocs') ?? 0) + 1;
-  sessionStorage.setItem('__voiceDocs', String(doc));
+// ready. `window.__voiceLog()` reads both lists. With `sessionThrows`, the page's sessionStorage
+// throws on access (as in some privacy modes; localStorage works): the log keeps the tab's real
+// one, taken before. With `cacheSilent`, a load from the cache only gets no answer (as one still
+// reading the cache): its tab does not fail, so it does not turn the voices off for the site.
+function voiceLoadsLog({ sessionThrows = false, cacheSilent = false } = {}) {
+  const store = sessionStorage;
+  if (sessionThrows) {
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('test: session storage refused', 'SecurityError');
+      },
+    });
+  }
+  const list = (key) => JSON.parse(store.getItem(key) ?? '[]');
+  window.__voiceLog = () => ({ loads: list('__voiceLoads'), states: list('__voiceStates') });
+  const doc = Number(store.getItem('__voiceDocs') ?? 0) + 1;
+  store.setItem('__voiceDocs', String(doc));
   window.Worker = class FakeVoiceWorker extends EventTarget {
     postMessage(m) {
       const reply = (data) => setTimeout(() => {
@@ -9344,9 +9357,10 @@ function voiceLoadsLog() {
         this.onmessage?.(e);
       }, 0);
       if (m?.type === 'load') {
-        sessionStorage.setItem('__voiceLoads', JSON.stringify([...list('__voiceLoads'), [doc, Boolean(m.cachedOnly)]]));
-        if (m.cachedOnly) reply({ type: 'error', code: 'notcached' });
-        else if (doc === 1) reply({ type: 'progress', got: 1 << 20, total: 400 << 20 });
+        store.setItem('__voiceLoads', JSON.stringify([...list('__voiceLoads'), [doc, Boolean(m.cachedOnly)]]));
+        if (m.cachedOnly) {
+          if (!cacheSilent) reply({ type: 'error', code: 'notcached' });
+        } else if (doc === 1) reply({ type: 'progress', got: 1 << 20, total: 400 << 20 });
         else reply({ type: 'ready', ms: 1, refetched: 0, path: 'cpu' });
       } else if (m?.type === 'speak') reply({ type: 'done', id: m.id });
     }
@@ -9357,7 +9371,7 @@ function voiceLoadsLog() {
     const note = () => {
       const states = list('__voiceStates');
       const v = document.body.dataset.voice;
-      if (v !== undefined && states.at(-1) !== v) sessionStorage.setItem('__voiceStates', JSON.stringify([...states, v]));
+      if (v !== undefined && states.at(-1) !== v) store.setItem('__voiceStates', JSON.stringify([...states, v]));
     };
     note();
     new MutationObserver(note).observe(document.body, { attributes: true, attributeFilter: ['data-voice'] });
@@ -9401,6 +9415,376 @@ test('Wide layout (spec 13 Decision 2, the first-run chooser with voices): NPC v
   console.log(`  receipt: voices ticked at the first run with HD 16:9: the voices started, one load at OK, then the model asked for with downloads allowed (loads ${after.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready, kept on (states ${after.states.join(' > ')}): pass`);
 });
 
+// The status line and the chooser's line, and the chooser's button as it reads.
+const switchLines = (page) => page.evaluate(() => ({
+  lines: [document.getElementById('status').textContent, document.getElementById('setup-status').textContent],
+  ok: document.getElementById('setup-ok').textContent,
+  lang: document.documentElement.lang,
+}));
+
+test('Wide layout (spec 13 Decision 2, the switch line names the button): on a first visit (the Wide build, the chooser in Korean, NPC voices ticked), a choice across the builds shows its line on the status line and the chooser\'s naming the button as it reads ("Accept and start" while NPC voices is ticked, else "OK"); unticking and ticking NPC voices names the button anew, in Korean and in English, and so does a change of language', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
+  const names = async (lang, button, label) => {
+    const s = await switchLines(page);
+    assert.ok(s.lang === lang && s.ok === TEXT[lang][button], `${label}: the button`);
+    assert.ok(s.lines.every((line) => line.includes(s.ok)), `${label}: the line names the button as it reads`);
+    const want = TEXT[lang].layoutSwitchAtOk('hd', TEXT[lang][button]);
+    assert.deepEqual(s.lines, [want, want], `${label}: the line, twice`);
+  };
+  await page.check('input[name="layout"][value="hd"]');
+  await names('ko', 'acceptStart', 'Korean, NPC voices ticked');
+  await page.uncheck('#setup-voices');
+  await names('ko', 'ok', 'Korean, unticked');
+  await page.check('#setup-voices');
+  await names('ko', 'acceptStart', 'Korean, ticked again');
+  await page.check('input[name="setup-lang"][value="en"]');
+  await names('en', 'acceptStart', 'English, ticked');
+  await page.uncheck('#setup-voices');
+  await names('en', 'ok', 'English, unticked');
+  await page.check('input[name="setup-lang"][value="ko"]');
+  await names('ko', 'ok', 'Korean again, unticked');
+  await context.close();
+  console.log('  receipt: the switch line named the button as it read in 6 states (Korean and English, NPC voices ticked and unticked, after a change of the tick and of the language): pass');
+});
+
+test('Wide layout (spec 13 Decision 2, the switch line kept by Settings): on a first visit (the Wide build), with a switch to the other build noted, Settings pressed again keeps the line on the status line and the chooser\'s (naming the button as Settings sets it: NPC voices ticked again, a first run), the radio still on the screen chosen; with none noted, Settings empties the chooser\'s line as before (a pack that failed to download said why there)', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'gone.zip', label: 'Gone' }] }) });
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  await listed(page, 1);
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.check('input[name="layout"][value="hd"]');
+  const line = TEXT.en.layoutSwitchAtOk('hd', TEXT.en.acceptStart);
+  assert.deepEqual((await switchLines(page)).lines, [line, line], 'HD 16:9 noted: its line');
+  await page.click('#settings');
+  assert.deepEqual((await switchLines(page)).lines, [line, line], 'Settings again: the line kept');
+  assert.equal(await page.isChecked('input[name="layout"][value="hd"]'), true, 'the radio still on HD 16:9');
+  await page.uncheck('#setup-voices');
+  await page.click('#settings');
+  let s = await switchLines(page);
+  assert.ok(await page.isChecked('#setup-voices') && s.ok === TEXT.en.acceptStart, 'Settings ticks NPC voices again (a first run)');
+  assert.deepEqual(s.lines, [line, line], 'the line kept, naming the button as Settings set it');
+  // Called off; a pack that is not there chosen, NPC voices unticked: OK says why on the chooser's
+  // line and leaves the chooser open; Settings again empties it.
+  await page.check('input[name="layout"][value="wide"]');
+  assert.deepEqual((await switchLines(page)).lines, ['', ''], 'called off: the line gone');
+  await page.uncheck('#setup-voices');
+  await page.check('#setup-hd input[value="gone.zip"]');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
+  s = await switchLines(page);
+  assert.ok(!(await page.evaluate(() => document.getElementById('setup').hidden)), 'the pack not downloaded: the chooser open');
+  assert.ok(s.lines[1] !== '' && s.lines[1] === s.lines[0], 'its reason on the chooser\'s line');
+  await page.click('#settings');
+  assert.equal((await switchLines(page)).lines[1], '', 'no switch noted: Settings empties the chooser\'s line');
+  await context.close();
+  console.log('  receipt: a switch noted kept its line (twice) through 2 presses of Settings, the radio on HD 16:9; with none noted Settings emptied the chooser\'s line: pass');
+});
+
+test('Wide layout (spec 13 Decision 2, the switch line on the chooser only): on a first visit (the Wide build), HD 16:9 and the site\'s pack chosen, OK (the pack\'s answer held: its download\'s line on the status line), Settings pressed again leaves the status line as it is and puts the switch line on the chooser\'s line; then a Forget voices admitted behind it (its store held) and the pack let go: the chooser closes and the switch waits (its line on the status line), Settings again leaves that line and puts the switch line on the chooser\'s; the Forget let go, the page loads once into the Original build', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const hdPack = await madePack(env);
+  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }), 'test-pack.zip': hdPack });
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  await listed(page, 1);
+  await page.check('input[name="setup-lang"][value="en"]');
+  await page.uncheck('#setup-voices');
+  await page.check('input[name="layout"][value="hd"]');
+  await page.check('#setup-hd input[value="test-pack.zip"]');
+  const pack = h.holdPack(env, 'test-pack.zip');
+  await page.click('#setup-ok');
+  await pack.asked;
+  // The download's line (the chooser's operation, mirrored on the chooser's line).
+  const download = (await switchLines(page)).lines[0];
+  assert.ok(download !== '' && download !== TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok), 'the download\'s line on the status line');
+  await page.click('#settings');
+  let s = await switchLines(page);
+  assert.equal(s.lines[0], download, 'Settings during the download: the status line as it was');
+  // A first run still (OK has not kept the choices): Settings ticks NPC voices again.
+  assert.equal(s.lines[1], TEXT.en.layoutSwitchAtOk('hd', TEXT.en.acceptStart), 'the switch line on the chooser\'s line, naming the button');
+  // The wait: a Forget voices admitted while the chooser's operation is held, its store held.
+  await page.evaluate(() => {
+    window.__hold('voicepack-forget');
+    document.getElementById('kept').open = true;
+  });
+  await page.click('#forget-voices');
+  await page.waitForFunction(() => document.body.dataset.ops === '2', null, { timeout: 30_000 });
+  pack.release();
+  await page.waitForFunction(() => document.getElementById('setup').hidden, null, { timeout: 30_000 });
+  await page.waitForFunction((want) => document.getElementById('status').textContent === want, TEXT.en.layoutSwitchWaiting, { timeout: 30_000 });
+  assert.equal(loads, 1, 'no load while the Forget is held');
+  await page.click('#settings');
+  s = await switchLines(page);
+  assert.equal(s.lines[0], TEXT.en.layoutSwitchWaiting, 'Settings while the switch waits: its line on the status line as it was');
+  assert.equal(s.lines[1], TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok), 'the switch line on the chooser\'s line, naming the button');
+  await loadAfter(page, () => page.evaluate(() => window.__release('voicepack-forget')));
+  await h.waitSettled(page);
+  const after = await page.evaluate(() => ({ layout: document.body.dataset.layout, wide: globalThis.__u6Layout.wide }));
+  assert.equal(loads, 2, 'one load, once the Forget is done');
+  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
+  await context.close();
+  console.log('  receipt: Settings pressed during the chooser\'s download and during the switch\'s wait left the status line as it was (2 of 2) and put the switch line on the chooser\'s line; one load after the wait: pass');
+});
+
+test('Wide layout (spec 13 Decision 2, the voice mark without session storage): where sessionStorage throws, NPC voices ticked and HD 16:9 at the first run (the model stubbed: a download that goes on), OK loads the page once into the Original build; there the voices go on with downloads allowed (the mark the switch left in the tab\'s history entry) and are ready; the mark is taken (gone from the entry)', async (env) => {
+  const { context, page } = await h.openPage(env, { setup: null, layout: null });
+  await context.addInitScript(voiceLoadsLog, { sessionThrows: true });
+  let loads = 0;
+  page.on('load', () => { loads += 1; });
+  await h.load(page, env);
+  await page.waitForFunction(() => !document.getElementById('setup').hidden);
+  const refused = () => page.evaluate(() => {
+    try {
+      void window.sessionStorage;
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  assert.equal(await refused(), true, 'the page\'s sessionStorage throws');
+  await page.check('input[name="setup-lang"][value="en"]');
+  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
+  await page.check('input[name="layout"][value="hd"]');
+  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
+  await h.waitSettled(page);
+  assert.equal(await refused(), true, 'the page loaded again: its sessionStorage throws too');
+  await page.waitForFunction(() => window.__voiceLog().loads.some(([d]) => d === 2), null, { timeout: 30_000 });
+  let log = await page.evaluate(() => window.__voiceLog());
+  assert.ok(log.loads.filter(([d]) => d === 2).every(([, cached]) => !cached), 'the page loaded again asked for the model with downloads allowed');
+  await page.waitForFunction(() => ['ready', 'failed'].includes(document.body.dataset.voice), null, { timeout: 30_000 });
+  log = await page.evaluate(() => window.__voiceLog());
+  const after = await page.evaluate(() => ({
+    mark: history.state?.u6Marks ?? null,
+    voices: localStorage.getItem('u6.voices'),
+    layout: document.body.dataset.layout,
+    wide: globalThis.__u6Layout.wide,
+    error: document.body.dataset.voiceError,
+  }));
+  assert.equal(loads, 2, 'one load at OK');
+  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
+  assert.ok(log.loads.every(([, cached]) => !cached), 'no load from the cache only');
+  assert.ok(!log.states.includes('failed') && after.error === '', 'never failed');
+  assert.equal(log.states.at(-1), 'ready', 'the voices ready');
+  assert.equal(after.voices, 'on', 'the voices kept on');
+  assert.equal(after.mark, null, 'the mark taken');
+  await context.close();
+  console.log(`  receipt: sessionStorage throwing, voices ticked at the first run with HD 16:9: one load at OK, then the model asked for with downloads allowed (loads ${log.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready (states ${log.states.join(' > ')}), the mark taken: pass`);
+});
+
+// Before the page's scripts: the page's sessionStorage throws on access (as in some privacy
+// modes); localStorage works.
+function sessionStorageThrows() {
+  Object.defineProperty(window, 'sessionStorage', {
+    configurable: true,
+    get() {
+      throw new DOMException('test: session storage refused', 'SecurityError');
+    },
+  });
+}
+
+// Holds `page`'s next request for app.js (the script of the document it loads next) until
+// `release()`; `asked` resolves once it came. Another page of the context loads meanwhile, so it
+// runs before that document does.
+async function holdScript(page) {
+  let arrived;
+  let release;
+  const asked = new Promise((done) => { arrived = done; });
+  const gate = new Promise((done) => { release = done; });
+  await page.route(/\/app\.js$/, async (route) => {
+    arrived();
+    await gate;
+    await route.continue();
+  });
+  return { asked, release };
+}
+
+test('Wide layout (spec 13 Decision 2, the voice mark is the tab\'s): where sessionStorage throws in every tab, the switch (NPC voices ticked and HD 16:9 at the first run, the model stubbed: a download that goes on) leaves its mark for its own tab only: a second tab of the site, loaded before the first tab\'s page has loaded again, starts the voices from the cache only (the stub does not answer it: a failure there would turn the voices off for the site) and holds no mark; the first tab\'s mark is in its own history entry (not its window.name) while it loads again; loaded again, it asks for the model with downloads allowed and is ready, the mark taken', async (env) => {
+  const { context, page: a } = await h.openPage(env, { setup: null, layout: null });
+  await context.addInitScript(voiceLoadsLog, { sessionThrows: true, cacheSilent: true });
+  await h.load(a, env);
+  await a.waitForFunction(() => !document.getElementById('setup').hidden);
+  await a.check('input[name="setup-lang"][value="en"]');
+  assert.equal(await a.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
+  await a.check('input[name="layout"][value="hd"]');
+  const script = await holdScript(a);
+  const reloaded = a.waitForEvent('load', { timeout: 120_000 });
+  reloaded.catch(() => {}); // awaited below; a failure before that closes the page under it
+  await a.click('#setup-ok', { noWaitAfter: true });
+  await script.asked;
+  // The first tab's next document is in, its script held: the mark in the tab's history entry.
+  const held = await a.evaluate(() => ({ at: history.state?.u6Marks?.['u6-voice-download-after-reload'], name: window.name }));
+  assert.ok(Number.isFinite(held.at) && held.name === '', 'the first tab loading again: its mark in its history entry, not its name');
+  const b = await context.newPage();
+  await h.load(b, env);
+  await b.waitForFunction(() => window.__voiceLog().loads.length > 0, null, { timeout: 30_000 });
+  const other = await b.evaluate(() => ({ loads: window.__voiceLog().loads, mark: history.state?.u6Marks ?? null }));
+  assert.deepEqual(other.loads, [[1, true]], 'the second tab: the voices from the cache only');
+  assert.equal(other.mark, null, 'the second tab: no mark');
+  script.release();
+  await reloaded;
+  await h.waitSettled(a);
+  await a.waitForFunction(() => window.__voiceLog().loads.some(([d]) => d === 2), null, { timeout: 30_000 });
+  assert.ok((await a.evaluate(() => window.__voiceLog().loads)).filter(([d]) => d === 2).every(([, cached]) => !cached), 'the first tab loaded again: its load with downloads allowed');
+  await a.waitForFunction(() => ['ready', 'failed'].includes(document.body.dataset.voice), null, { timeout: 30_000 });
+  const first = await a.evaluate(() => ({
+    loads: window.__voiceLog().loads,
+    mark: history.state?.u6Marks ?? null,
+    voice: document.body.dataset.voice,
+    layout: document.body.dataset.layout,
+    wide: globalThis.__u6Layout.wide,
+  }));
+  assert.ok(first.layout === 'hd' && !first.wide, 'the first tab loaded again: the Original build, HD 16:9');
+  assert.ok(first.loads.some(([d]) => d === 2) && first.loads.every(([, cached]) => !cached), 'the first tab loaded again: the model asked for with downloads allowed');
+  assert.equal(first.voice, 'ready', 'the voices ready');
+  assert.equal(first.mark, null, 'the mark taken');
+  await context.close();
+  console.log(`  receipt: sessionStorage throwing in 2 tabs: the second tab loaded during the first's reload started from the cache only (loads ${other.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}); the first, loaded again, went on downloading (loads ${first.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready: pass`);
+});
+
+test('Restart where sessionStorage throws in every tab: its focus mark is the tab\'s: a second tab of the site, loaded before the restarted tab\'s page has loaded again, starts the kept game without moving its focus to the canvas and holds no mark; the restarted tab\'s mark is in its own history entry (not its window.name) while it loads again; loaded again, it has the focus on the canvas, the mark taken', async (env) => {
+  const { context, page: a } = await h.openPage(env);
+  await context.addInitScript(sessionStorageThrows);
+  await h.load(a, env);
+  await h.dropFiles(a, h.HFES);
+  await started(a, FILES);
+  await a.evaluate(() => { globalThis.__trap = true; });
+  await a.waitForFunction(() => document.body.dataset.state === 'crashed');
+  const script = await holdScript(a);
+  const reloaded = a.waitForEvent('load', { timeout: 120_000 });
+  reloaded.catch(() => {}); // awaited below; a failure before that closes the page under it
+  await a.click('#restart', { noWaitAfter: true });
+  await script.asked;
+  const held = await a.evaluate(() => ({ at: history.state?.u6Marks?.['u6-focus-after-reload'], name: window.name }));
+  assert.ok(Number.isFinite(held.at) && held.name === '', 'the restarted tab loading again: its mark in its history entry, not its name');
+  const b = await context.newPage();
+  await h.load(b, env);
+  await started(b, FILES);
+  assert.notEqual((await h.state(b)).focused, 'screen', 'the second tab: the focus not moved to the canvas');
+  assert.equal(await b.evaluate(() => history.state?.u6Marks ?? null), null, 'the second tab: no mark');
+  script.release();
+  await reloaded;
+  await started(a, FILES);
+  assert.equal((await h.state(a)).focused, 'screen', 'the restarted tab: the focus on the canvas');
+  assert.equal(await a.evaluate(() => history.state?.u6Marks ?? null), null, 'the mark taken');
+  await context.close();
+  console.log('  receipt: sessionStorage throwing in 2 tabs: the second tab loaded during the Restart\'s reload left the focus where it was; the restarted tab put it on the canvas: pass');
+}, { needs: h.haveHfes });
+
+test('the tab\'s fallback marks (where sessionStorage throws, in the page\'s history entry: history.state.u6Marks): a mark is taken only while 0 to 59.999 s old and removed whatever it holds, the entry\'s other marks and other keys kept: 0 s and 59.999 s old taken (the voices with downloads allowed), and after a reload of the tab not taken again; 61 s old, exactly 60 s old, a future time, a time that is not a number and an object that turns into no number ignored (the voices from the cache only), no page error; marks that do not read ignored and removed; a state that is not an object ignored and left as it is', async (env) => {
+  const { REVISION } = await import('../../site/voice/model.js');
+  const NOW = 1_800_000_000_000;
+  const KEY = 'u6-voice-download-after-reload';
+  const OTHER = { 'u6-test-other': NOW };
+  const planted = (value) => ({ u6Marks: { [KEY]: value, ...OTHER }, test: 'kept' });
+  const rest = { u6Marks: OTHER, test: 'kept' };
+  // [label, the entry's state before, whether the voices start from the cache only, its state
+  // after, whether the tab is loaded again (the mark found no more)]
+  const cases = [
+    ['0 s old', planted(NOW), false, rest, true],
+    ['59.999 s old', planted(NOW - 59_999), false, rest, false],
+    ['61 s old', planted(NOW - 61_000), true, rest, false],
+    ['exactly 60 s old', planted(NOW - 60_000), true, rest, false],
+    ['a future time', planted(NOW + 1_000), true, rest, false],
+    ['not a number', planted(String(NOW)), true, rest, false],
+    ['an object that turns into no number', planted({ toString: null, valueOf: null }), true, rest, false],
+    ['marks that do not read', { u6Marks: 'not marks', test: 'kept' }, true, { test: 'kept' }, false],
+    ['a state that is not an object', 'a state of another kind', true, 'a state of another kind', false],
+  ];
+  for (const [label, before, cachedOnly, after, again] of cases) {
+    const { context, page } = await h.openPage(env);
+    let errors = 0;
+    page.on('pageerror', () => { errors += 1; });
+    // The clock fixed in every document; the state planted in the tab's first only (the tab's
+    // real session storage remembers it: this runs before voiceLoadsLog makes it throw).
+    await context.addInitScript(([revision, now, state]) => {
+      try {
+        localStorage.setItem('u6.voices', 'on');
+        localStorage.setItem('u6.voiceTerms', revision);
+      } catch {
+        return; // An opaque origin (about:blank) has no storage.
+      }
+      Date.now = () => now;
+      if (sessionStorage.getItem('test:planted') === null) {
+        sessionStorage.setItem('test:planted', '1');
+        history.replaceState(state, '');
+      }
+    }, [REVISION, NOW, before]);
+    await context.addInitScript(voiceLoadsLog, { sessionThrows: true });
+    await h.load(page, env);
+    await page.waitForFunction(() => window.__voiceLog().loads.length > 0, null, { timeout: 30_000 });
+    let seen = await page.evaluate(() => ({ loads: window.__voiceLog().loads, state: history.state }));
+    assert.deepEqual(seen.loads, [[1, cachedOnly]], `${label}: ${cachedOnly ? 'ignored, the voices from the cache only' : 'taken, downloads allowed'}`);
+    assert.deepEqual(seen.state, after, `${label}: the entry's state after`);
+    if (again) {
+      await page.reload();
+      await h.waitSettled(page);
+      await page.waitForFunction(() => window.__voiceLog().loads.length > 1, null, { timeout: 30_000 });
+      seen = await page.evaluate(() => ({ loads: window.__voiceLog().loads, state: history.state }));
+      assert.deepEqual(seen.loads, [[1, cachedOnly], [2, true]], `${label}: loaded again, the mark not taken again`);
+      assert.deepEqual(seen.state, after, `${label}: the entry's state after the second load`);
+    }
+    assert.equal(errors, 0, `${label}: no page error`);
+    await context.close();
+  }
+  console.log(`  receipt: ${cases.length} cases of the tab's fallback mark, each taken or ignored and removed as listed, one loaded again: pass`);
+});
+
+test('Restart\'s mark is taken as the page loads (where sessionStorage throws): with the engine not loading, the page fails and the mark is gone from its history entry, none left for a later load', async (env) => {
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript(sessionStorageThrows);
+  await context.addInitScript(() => {
+    history.replaceState({ u6Marks: { 'u6-focus-after-reload': Date.now() } }, '');
+  });
+  await page.route(/\/pkg(-wide)?\/u6_web\.js$/, (route) => route.abort());
+  await h.load(page, env);
+  await page.waitForFunction(() => document.body.dataset.state === 'failed', null, { timeout: 30_000 });
+  const marks = await page.evaluate(() => history.state?.u6Marks ?? null);
+  assert.equal(marks, null, 'the engine failed: the mark taken all the same');
+  await context.close();
+  console.log('  receipt: an engine that did not load, the focus mark taken as the page loaded: pass');
+});
+
+test('a mark in sessionStorage that it refuses to remove is not taken (it would count again on the next load): the voices kept on start from the cache only, the mark left', async (env) => {
+  const { REVISION } = await import('../../site/voice/model.js');
+  const { context, page } = await h.openPage(env);
+  await context.addInitScript((revision) => {
+    try {
+      localStorage.setItem('u6.voices', 'on');
+      localStorage.setItem('u6.voiceTerms', revision);
+      const session = sessionStorage;
+      session.setItem('u6-voice-download-after-reload', '1');
+      const remove = Storage.prototype.removeItem;
+      Storage.prototype.removeItem = function removeItem(key) {
+        if (this === session) throw new DOMException('test: removal refused', 'SecurityError');
+        return remove.call(this, key);
+      };
+    } catch {
+      // An opaque origin (about:blank) has no storage.
+    }
+  }, REVISION);
+  await context.addInitScript(voiceLoadsLog);
+  await h.load(page, env);
+  await page.waitForFunction(() => window.__voiceLog().loads.length > 0, null, { timeout: 30_000 });
+  const seen = await page.evaluate(() => ({
+    loads: window.__voiceLog().loads,
+    mark: sessionStorage.getItem('u6-voice-download-after-reload'),
+  }));
+  assert.deepEqual(seen.loads, [[1, true]], 'not taken: the voices from the cache only');
+  assert.equal(seen.mark, '1', 'the mark left (its removal refused)');
+  await context.close();
+  console.log('  receipt: a session mark whose removal was refused: 1 load, from the cache only: pass');
+});
+
 test('Wide layout (spec 13 Decision 2, one switch): two choices across the builds before OK load the page once, into the last; a choice across the builds shows a line (on the status line and the chooser\'s, in the page\'s language) that OK loads the page again with that screen and what the game has not saved is lost, gone when the choice is called off; a choice across and back (or to the other layout of the build that runs) before OK loads nothing, the latter at once; after OK the switch waits for every operation admitted before the page loads again, with a line that it waits: a Save held in its store when the switch starts, then a second Save admitted while it waits, held too: no load when the first is done, one load only once the second is, and the second resumes after it', async (env) => {
   const hdPack = await madePack(env);
   const listing = { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }), 'test-pack.zip': hdPack };
@@ -9416,15 +9800,15 @@ test('Wide layout (spec 13 Decision 2, one switch): two choices across the build
   await page.click('#settings');
   await listed(page, 1);
   await page.check('input[name="layout"][value="hd"]');
-  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('hd'), TEXT.en.layoutSwitchAtOk('hd')], 'HD 16:9 across the builds: the line, twice');
+  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok), TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok)], 'HD 16:9 across the builds: the line, twice');
   await page.check('input[name="setup-lang"][value="ko"]');
-  assert.deepEqual(await lines(), [TEXT.ko.layoutSwitchAtOk('hd'), TEXT.ko.layoutSwitchAtOk('hd')], 'in Korean');
+  assert.deepEqual(await lines(), [TEXT.ko.layoutSwitchAtOk('hd', TEXT.ko.ok), TEXT.ko.layoutSwitchAtOk('hd', TEXT.ko.ok)], 'in Korean');
   await page.check('input[name="setup-lang"][value="en"]');
   await page.check('input[name="layout"][value="wide"]');
   assert.deepEqual(await lines(), ['', ''], 'called off: the line gone');
   await page.check('input[name="layout"][value="hd"]');
   await page.check('input[name="layout"][value="original"]');
-  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('original'), TEXT.en.layoutSwitchAtOk('original')], 'Original 16:10: its line');
+  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('original', TEXT.en.ok), TEXT.en.layoutSwitchAtOk('original', TEXT.en.ok)], 'Original 16:10: its line');
   assert.equal(await stored(), 'wide', 'noted only: nothing kept before OK');
   let n = glues.length;
   await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
