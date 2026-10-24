@@ -126,6 +126,9 @@ pub struct Slots {
     /// The actor (or open container) the inventory view last showed; the inventory context
     /// starts again when it changes (Design 3). `None` before the first draw.
     pub base: Option<u16>,
+    /// The type and frame word (`Objects::tf`) of the container the inventory view last showed:
+    /// a kept container must still be that object, not another one its slot was handed to.
+    pub tf: u16,
 }
 
 /// The inventory view's state outside the panel's inventory context (spec 14 Designs 2 and 3:

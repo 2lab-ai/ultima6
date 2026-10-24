@@ -1343,14 +1343,19 @@ fn back_from(s: State, container: u16) -> u16 {
 fn back_from_a_container_goes_to_its_parent_or_from_the_map_to_the_actor() {
     let mut s = st();
     s.actors.party.members[0] = 1;
-    // A bag (slot 0x150) inside a chest (slot 0x9d2): the location word holds the chest; the
-    // chest is the member's (actor 1).
+    // A bag (slot 0x150) inside a chest (slot 0x9d2): the location word holds the chest.
     let (bag, chest) = (0x150usize, 0x9d2u16);
     s.objects.obj_status[bag] = crate::objects::IN_CONTAINER;
     s.objects.location[bag].x = chest & 0x3ff;
     s.objects.location[bag].y = chest >> 10;
-    s.objects.obj_status[usize::from(chest)] = crate::objects::IN_INVENTORY;
-    s.objects.location[usize::from(chest)].x = 1;
+    // Wide: the chest is the member's (actor 1) and an object (a type), so the redraw after
+    // the code keeps it (spec 14 Design 3).
+    #[cfg(feature = "wide")]
+    {
+        s.objects.obj_status[usize::from(chest)] = crate::objects::IN_INVENTORY;
+        s.objects.location[usize::from(chest)].x = 1;
+        s.objects.type_frame[usize::from(chest)] = 0x62;
+    }
     assert_eq!(
         back_from(s.clone(), bag as u16),
         chest,
