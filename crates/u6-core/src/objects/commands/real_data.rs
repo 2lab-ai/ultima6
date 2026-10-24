@@ -834,6 +834,63 @@ fn the_string_export_of_the_owners_game_holds_combats_wound_report_graze_and_dea
     );
 }
 
+/// Spec 08 (slice K2, 2026-10-24): the string export of the owner's files holds the inventory's
+/// lines, by the hashes of the strings at Ready's and Unready's sites (`inventory::PRINTED`): the
+/// Ready line, its three refusals and the Unready line; the locked chest's line
+/// (`ui::click::PRINTED`); and the amulet's line as a label (`inventory::LABELS`, the pointer
+/// A4-0x6c3c). The prompts of the command loop, the click and Ready are three strings at three
+/// addresses, each of no word of its own: none is in the export. Prints pass/fail only: a
+/// failure names the site, never its text.
+#[test]
+fn the_string_export_of_the_owners_game_holds_the_inventorys_ready_and_unready_lines() {
+    use crate::converse::disasm::catalog::hash64;
+    use crate::image::{A4, GameImage};
+    use crate::locale::strings::Kind;
+    let Some(files) = files() else { return };
+    let export = crate::locale::strings::export(&files).quiet();
+    let img = GameImage::parse(files.get("game").quiet()).quiet();
+    let has = |text: &[u8]| export.strings.iter().any(|e| e.hash == hash64(text));
+    for (site, at, list) in [
+        ("READY", 0x0011_0c14, crate::inventory::PRINTED),
+        ("CANT", 0x0011_0c24, crate::inventory::PRINTED),
+        ("HEAVY", 0x0011_0c38, crate::inventory::PRINTED),
+        ("NO_PLACE", 0x0011_0c46, crate::inventory::PRINTED),
+        ("UNREADY", 0x0011_0c6a, crate::inventory::PRINTED),
+        ("LOCKED", 0x0010_4fe6, crate::ui::click::PRINTED),
+    ] {
+        assert!(list.contains(&at), "{site} is in its site's list");
+        assert!(has(&img.cstr(at).quiet()), "{site} in the export");
+    }
+    let amulet = A4 - 0x6c3c;
+    assert!(
+        crate::inventory::LABELS.contains(&amulet),
+        "AMULET is in Unready's labels"
+    );
+    let h = hash64(&img.pointer(amulet).and_then(|p| img.cstr(p)).quiet());
+    assert!(
+        export
+            .strings
+            .iter()
+            .any(|e| e.hash == h && e.kind == Kind::Label),
+        "AMULET in the export as a label"
+    );
+    for (site, at, list) in [
+        (
+            "LOOP_PROMPT",
+            0x0010_1f3c,
+            crate::main_loop::commands::PRINTED,
+        ),
+        ("CLICK_PROMPT", 0x0010_4ff4, crate::ui::click::PRINTED),
+        ("READY_PROMPT", 0x0011_0c5a, crate::inventory::PRINTED),
+    ] {
+        assert!(list.contains(&at), "{site} is in its site's list");
+        assert!(!has(&img.cstr(at).quiet()), "{site} not in the export");
+    }
+    eprintln!(
+        "string export holds the inventory's Ready, refusal, Unready, locked chest and amulet lines, and no prompt: pass"
+    );
+}
+
 /// The keys (type 0x40) of quality `q` the port holds, anywhere (the slot list).
 fn keys_of(s: &State, q: u8) -> Vec<Slot> {
     let o = &s.objects;

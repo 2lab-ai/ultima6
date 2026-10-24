@@ -58,6 +58,10 @@ pub use weight::{
     carried_weight, contents_weight, counted_type, object_weight, ready_slot, stones, weights,
 };
 
+/// Port-only (spec 08, slice K2): Ready's and Unready's strings and label for the locale
+/// layer's catalogue.
+pub(crate) use ready::{LABELS, PRINTED};
+
 use crate::files::Files;
 use crate::state::LoadError;
 use crate::ui::pointer::LEADER_PIXEL;
