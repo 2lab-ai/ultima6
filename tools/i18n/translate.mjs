@@ -6,7 +6,8 @@
 // (ultima6-npc-bundles.json, one u6.npc-bundle/1 per conversation script, each text segment keyed
 // to its run, each table string to its offset), and the game strings the page's second export
 // writes (ultima6-strings.json, u6.string-bundle/1: the executable's strings the engine shows,
-// each keyed by its hash, its
+// each keyed by its hash, one drawn at a fixed cell with its `cells`, the cells its Korean takes
+// at most; its
 // `texts`: the object names of look.lzd and the books and signs of book.dat, each keyed by its
 // index with its length and hash, and its `u`: the strings the u program prints, each keyed by
 // its hash, with its kind, the place u prints it), translates what is chosen into archaic Korean
@@ -148,7 +149,9 @@
 // layer reads them, each `@{…}` the Korean word of the key its English `@` word hits, or that
 // English word for a key with no word or for none, the runic text and the line breaks at its
 // ends kept; for a table string the engine copies into a slot, its capacity and no marker;
-// for a game string the same `%` directives in the same order and the reader's length; for an
+// for a game string the same `%` directives in the same order and the reader's length (and for one
+// with `cells`, drawn at a fixed cell, at most that many cells, a character each, and its English's
+// count of line breaks); for an
 // object name no plural marker (the Korean rule drops `/` and `\` with the letters after them,
 // so a Korean name holds none and shows one form), no josa marker or `@{` (it is put inside other
 // text), the directives, the reader's length and a Hangul syllable; for a book the line's gates,
@@ -951,13 +954,22 @@ export function tableGate(u, ko, keyed = null) {
   return null;
 }
 
+/// The cells `ko` takes where the engine draws it in place (2026-10-24, a panel's string): a
+/// character each, a Hangul syllable, an ASCII character and each character of a `%` directive
+/// alike (the line's gates let no other through), as the engine counts the English's (its bytes).
+export const cellsOf = (ko) => [...ko].length;
+
 /// Why `ko` is not a translation of game string `en` the engine can take, or null: the line's
-/// gates, the same `%` directives in the same order, and the reader's length.
-export function stringGate(en, ko) {
+/// gates, the same `%` directives in the same order, for a string drawn at a fixed cell its
+/// `cells` at most (cellsOf) and as many line breaks as its English (the engine refuses either
+/// at display, u6_core::locale::within_place), and the reader's length.
+export function stringGate(en, ko, cells = undefined) {
   const why = gate(en, ko);
   if (why) return why;
   const [a, b] = [directivesOf(en), directivesOf(ko)];
   if (a.length !== b.length || a.some((d, i) => d !== b[i])) return 'directives';
+  const breaks = (t) => t.split('\n').length - 1;
+  if (Number.isInteger(cells) && (cellsOf(ko) > cells || breaks(ko) !== breaks(en))) return 'cells';
   if (Buffer.byteLength(ko) > MAX_STRING_TEXT_BYTES) return 'long';
   return null;
 }
@@ -1416,9 +1428,13 @@ export function stringsSystemOf(style) {
     'You translate the strings a role-playing game, Ultima VI, prints itself (its command prompts',
     'and their results, the frame of a conversation, a few words it puts inside other lines) from',
     'English into archaic Korean (사극체), following the guide below. The request is JSON: the',
-    'strings, each {"n": <number>, "en": "<string>", "kind": "message" | "format" | "label"}.',
-    'Keep every % directive of a format exactly, in the same order. Answer with one JSON object',
-    'and nothing else:',
+    'strings, each {"n": <number>, "en": "<string>", "kind": "message" | "format" | "label"}, and',
+    '"cells": <number> on a string the game draws in a fixed place (a panel\'s line or heading, a',
+    'name centred in its field). Keep every % directive of a format exactly, in the same order. A',
+    'string with "cells" takes at most that many cells in Korean, where a Hangul syllable, an',
+    'ASCII character and each character of a % directive is one cell, and keeps exactly the line',
+    'breaks of its English: short noun forms (명사형) are right there, with no sentence ending.',
+    'Answer with one JSON object and nothing else:',
     '{"lines": [{"n": <number>, "ko": "<the Korean string>"}]}',
     'with exactly one entry for every string asked, its own n.',
     '',
@@ -1428,7 +1444,9 @@ export function stringsSystemOf(style) {
 
 /// The request body for game strings `units` (the exact bytes sent): a Messages call.
 export function stringsBodyOf(model, system, units) {
-  const user = JSON.stringify({ strings: units.map((u) => ({ n: u.n, en: u.text, kind: u.skind })) });
+  const user = JSON.stringify({
+    strings: units.map((u) => ({ n: u.n, en: u.text, kind: u.skind, ...(u.cells !== undefined ? { cells: u.cells } : {}) })),
+  });
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: [{ role: 'user', content: user }] });
 }
 
@@ -1779,7 +1797,9 @@ export function textsRecheckOf(existing, all) {
 /// requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS characters. Throws a fixed
 /// message (a count at most) when the file is not of that form or a string's text, length and hash
 /// disagree, or one is under MIN_STRING_BYTES but a label (the engine catalogues a label from 1
-/// byte: a wind's name is 2).
+/// byte: a wind's name is 2), or its `cells` (2026-10-24: a string drawn at a fixed cell, the
+/// cells its Korean takes at most) is not a whole number of the engine's range (0..=0xffff). A
+/// unit keeps its `cells`, sent with it and checked against its answer (stringGate).
 export function stringsPlanOf(value) {
   if (!plain(value) || value.format !== STRINGS_FORMAT || !Array.isArray(value.strings)) {
     throw new InputError(`the file is not ${STRINGS_FORMAT}`);
@@ -1787,7 +1807,8 @@ export function stringsPlanOf(value) {
   const ok = (s) => plain(s) && hex16(s.hash) && Number.isInteger(s.len) && KINDS.includes(s.kind) && typeof s.text === 'string'
     && ![...s.text].some((c) => c.charCodeAt(0) > 0xff) && latin1(s.text).length === s.len
     && hex64(hash64(latin1(s.text))) === s.hash && s.len >= (s.kind === 'label' ? 1 : MIN_STRING_BYTES)
-    && s.len <= MAX_STRING_BYTES;
+    && s.len <= MAX_STRING_BYTES
+    && (s.cells === undefined || (Number.isInteger(s.cells) && s.cells >= 0 && s.cells <= 0xffff));
   const bad = value.strings.filter((s) => !ok(s)).length;
   if (bad > 0) throw new InputError(`${bad} entries of the file are not strings of ${STRINGS_FORMAT}`);
   const unique = [...new Map(value.strings.map((s) => [s.hash, s])).values()];
@@ -1800,7 +1821,8 @@ export function stringsPlanOf(value) {
       batch = [];
       chars = 0;
     }
-    batch.push({ kind: 'string', n: batch.length, hash: s.hash, len: s.len, text: s.text, skind: s.kind });
+    const cells = s.cells !== undefined ? { cells: s.cells } : {};
+    batch.push({ kind: 'string', n: batch.length, hash: s.hash, len: s.len, text: s.text, skind: s.kind, ...cells });
     chars += s.text.length;
   }
   if (batch.length > 0) batches.push(batch);
@@ -1812,7 +1834,7 @@ export function stringsPlanOf(value) {
 // Why `ko` is not a translation of unit `u` the engine can take, or null: the gate of its kind, a
 // conversation's runs and table strings with their script's keys and words (`keyed`).
 function unitGate(u, ko, keyed = null) {
-  return u.kind === 'table' ? tableGate(u, ko, keyed) : u.kind === 'string' ? stringGate(u.text, ko)
+  return u.kind === 'table' ? tableGate(u, ko, keyed) : u.kind === 'string' ? stringGate(u.text, ko, u.cells)
     : u.kind === 'look' ? lookGate(u.text, ko) : u.kind === 'book' ? bookGate(u.text, ko)
       : u.kind === 'program' ? uGate(u.text, ko, u.keys) : gate(u.text, ko, keyed);
 }

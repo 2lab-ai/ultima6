@@ -2087,3 +2087,518 @@ fn a_typed_syllable_stays_english_with_a_packs_form_for_it() {
     assert_eq!((with, counts), (without, none), "as without a pack");
     assert_eq!(counts, [0, 0]);
 }
+
+/// The panels' sites (2026-10-24), the test's own copies of `ui::tables`' addresses (pinned to
+/// its lists in the test): the three attribute lines and the magic, health and level headings,
+/// which it lists as printed; the two weight labels, which it lists as read for display at
+/// their addresses; the roster's number, the bare string and the four values, which it leaves
+/// out (the name line is [`NAME_LINE`]).
+const ATTRIBUTES: [u32; 3] = [0x0011_0bb2, 0x0011_0bba, 0x0011_0bc2];
+const MAGIC_HEADING: u32 = 0x0011_0bca;
+const HEALTH_HEADING: u32 = 0x0011_0bd8;
+const LEVEL_HEADING: u32 = 0x0011_0bea;
+const WEIGHTS: [u32; 2] = [0x0011_0c0c, 0x0011_0c10];
+const ROSTER_HP: u32 = 0x0011_0ba4;
+const PLAIN: u32 = 0x0011_0bae;
+const MAGIC_VALUE: u32 = 0x0011_0bd0;
+const HP_VALUE: u32 = 0x0011_0be0;
+const HP_MAX: u32 = 0x0011_0be4;
+const LEVEL_VALUE: u32 = 0x0011_0bf4;
+/// The combat-mode names' pointer slots (A4-0x7230 + 4 × mode, modes 2..=8), and where the
+/// synthetic `game` keeps the names and the first two shared messages, 8 bytes apart (no
+/// catalogued site there).
+const MODE_SLOTS: u32 = crate::image::A4 - 0x7230;
+const PANEL_LABELS: u32 = crate::image::IMAGE_BASE + 0x600;
+
+/// The synthetic text at each panel site (the test's own; each fits before the next site with
+/// its NUL): a line with a conversion at each attribute, a heading at the other printed sites
+/// (the level's with a `%/`), a weight label of two bytes at each weight site (as each is in the
+/// original, under the print hooks' three), a format of no word of its own at each site it
+/// leaves out; and three inventory lines: Ready's the bytes of the health heading, the torch
+/// line's `Z` and a Hangul syllable's UTF-8 (4 bytes, 2 cells: a weight label's form may be
+/// these bytes) and the first refusal's its own.
+fn panel_texts() -> SiteLines {
+    [
+        (ROSTER_HP, &b"%3d\n"[..]),
+        (NAME_LINE, b"%s\n"),
+        (PLAIN, b"%s"),
+        (ATTRIBUTES[0], b"Zs1%d\n"),
+        (ATTRIBUTES[1], b"Zs2%d\n"),
+        (ATTRIBUTES[2], b"Zs3%d\n"),
+        (MAGIC_HEADING, b"Zgmag"),
+        (MAGIC_VALUE, b"%2d%/%d"),
+        (HEALTH_HEADING, b"Zghth"),
+        (HP_VALUE, b"%3d"),
+        (HP_MAX, b"%/%d"),
+        (LEVEL_HEADING, b"Zl%/Zx"),
+        (LEVEL_VALUE, b"%d%/%d"),
+        (WEIGHTS[0], b"Zv"),
+        (WEIGHTS[1], b"Zy"),
+        (READY, b"Zghth"),
+        (TORCH_LINE, "Z가".as_bytes()),
+        (CANT, b"Zrf1"),
+    ]
+    .into_iter()
+    .map(|(at, text)| (at, text.to_vec()))
+    .collect()
+}
+
+/// The synthetic combat-mode names, modes 2..=8 (the test's own): three bytes each, but two
+/// for mode 3 and the magic heading's bytes for mode 4.
+fn mode_names() -> Vec<Vec<u8>> {
+    (2..=8u8)
+        .map(|m| match m {
+            3 => b"Zk".to_vec(),
+            4 => b"Zgmag".to_vec(),
+            _ => format!("Zc{m}").into_bytes(),
+        })
+        .collect()
+}
+
+/// A synthetic `game` (one CODE hunk from the image base up to A4, so the text layer's tables
+/// read from it, [`crate::ui::UiTables::load`]) holding [`panel_texts`], each NUL-ended at its
+/// site, the combat-mode names' pointers and the first two shared messages' (absolute: no
+/// RELOC32) to their texts: the first message the first weight label's bytes.
+fn panel_game() -> Vec<u8> {
+    let base = crate::image::IMAGE_BASE;
+    let mut hunk = vec![0u8; (crate::image::A4 - base) as usize];
+    let mut put = |at: u32, bytes: &[u8]| {
+        let o = (at - base) as usize;
+        hunk[o..o + bytes.len()].copy_from_slice(bytes);
+    };
+    for (at, text) in panel_texts() {
+        put(at, &[text.as_slice(), &[0]].concat());
+    }
+    let shared = [
+        (strings::SHARED_MESSAGES[0], b"Zv".to_vec()),
+        (strings::SHARED_MESSAGES[1], b"Zsm".to_vec()),
+    ];
+    let modes = (2..=8u32).map(|m| MODE_SLOTS + 4 * m).zip(mode_names());
+    for (k, (slot, name)) in modes.chain(shared).enumerate() {
+        let at = PANEL_LABELS + 8 * k as u32;
+        put(slot, &at.to_be_bytes());
+        put(at, &[name.as_slice(), &[0]].concat());
+    }
+    crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build()
+}
+
+#[test]
+fn the_panels_lines_and_mode_names_are_catalogued_with_their_cells_and_exported_with_them_only() {
+    // The lists in full, as the test's own literals (a constant dropped, added twice or moved
+    // fails here).
+    let [a, b, c] = ATTRIBUTES;
+    assert_eq!(
+        crate::ui::tables::PRINTED,
+        [a, b, c, MAGIC_HEADING, HEALTH_HEADING, LEVEL_HEADING]
+    );
+    assert_eq!(crate::ui::tables::SHOWN_AT, WEIGHTS);
+    let slots: Vec<u32> = (2..=8).map(|m| MODE_SLOTS + 4 * m).collect();
+    assert_eq!(crate::ui::tables::LABELS, slots);
+    assert_eq!(crate::ui::tables::MODE_CELLS, 7);
+    let game = panel_game();
+    // The text layer reads its panel strings at the sites the list names.
+    let panel = crate::ui::UiTables::load(&game).unwrap().panel;
+    assert_eq!(
+        panel.attributes.to_vec(),
+        panel_texts()[3..6]
+            .iter()
+            .map(|l| l.1.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        (
+            panel.magic.as_slice(),
+            panel.health.as_slice(),
+            panel.level_exp.as_slice()
+        ),
+        (&b"Zgmag"[..], &b"Zghth"[..], &b"Zl%/Zx"[..])
+    );
+    assert_eq!(panel.weights, [b"Zv".to_vec(), b"Zy".to_vec()]);
+    assert_eq!(panel.combat_modes, mode_names());
+    let cat = Catalogue::from_game(&game);
+    let entry = |text: &[u8]| cat.label_of(text).map(|e| (e.kind, e.cells));
+    // Each listed line within its English's cells (its bytes, the directives as written).
+    for line in [&b"Zs1%d\n"[..], b"Zs2%d\n", b"Zs3%d\n"] {
+        assert_eq!(entry(line), Some((Kind::Format, Some(6))));
+    }
+    // Ready prints the health heading's bytes: one entry, the panel's budget (a site with none
+    // bounds nothing).
+    assert_eq!(entry(b"Zghth"), Some((Kind::Message, Some(5))));
+    assert_eq!(
+        entry(b"Zl%/Zx"),
+        Some((Kind::Message, Some(6))),
+        "`%/` is no conversion"
+    );
+    // Each weight label a label from 1 byte within its English's cells; the first shared message
+    // is the first one's bytes: one entry, the weight label's budget. A print never finds them.
+    assert_eq!(entry(b"Zv"), Some((Kind::Label, Some(2))));
+    assert_eq!(entry(b"Zy"), Some((Kind::Label, Some(2))));
+    assert!(cat.of(b"Zv").is_none() && cat.of(b"Zy").is_none());
+    // Mode 4's name is the magic heading's bytes: one entry, a label, the smaller budget.
+    assert_eq!(entry(b"Zgmag"), Some((Kind::Label, Some(5))));
+    // Each other mode's name within the line's field, a two-byte one too.
+    for name in [&b"Zc2"[..], b"Zk", b"Zc5", b"Zc6", b"Zc7", b"Zc8"] {
+        assert_eq!(entry(name), Some((Kind::Label, Some(7))));
+    }
+    // No budget anywhere else; the left-out formats are not catalogued.
+    assert_eq!(entry(b"Zrf1"), Some((Kind::Message, None)));
+    assert_eq!(entry("Z가".as_bytes()), Some((Kind::Message, None)));
+    assert_eq!(entry(b"Zsm"), Some((Kind::Label, None)));
+    for at in [
+        ROSTER_HP,
+        NAME_LINE,
+        PLAIN,
+        MAGIC_VALUE,
+        HP_VALUE,
+        HP_MAX,
+        LEVEL_VALUE,
+    ] {
+        let text = &panel_texts().into_iter().find(|l| l.0 == at).unwrap().1;
+        assert!(cat.label_of(text).is_none(), "the format at {at:#x}");
+    }
+    assert_eq!(cat.len(), 17);
+    // The export: `cells` on exactly the panels' entries, in site order; every other entry has
+    // the four fields it had.
+    let export = cat.export();
+    let budgets: Vec<(&str, u16)> = export
+        .strings
+        .iter()
+        .filter_map(|e| e.cells.map(|c| (e.text.as_str(), c)))
+        .collect();
+    assert_eq!(
+        budgets,
+        [
+            ("Zghth", 5),
+            ("Zs1%d\n", 6),
+            ("Zs2%d\n", 6),
+            ("Zs3%d\n", 6),
+            ("Zgmag", 5),
+            ("Zl%/Zx", 6),
+            ("Zv", 2),
+            ("Zc2", 7),
+            ("Zk", 7),
+            ("Zc5", 7),
+            ("Zc6", 7),
+            ("Zc7", 7),
+            ("Zc8", 7),
+            ("Zy", 2),
+        ]
+    );
+    let json = export.to_json();
+    assert_eq!(json.matches("\"cells\":").count(), budgets.len());
+    assert!(json.contains("\"kind\":\"label\",\"text\":\"Zk\",\"cells\":7}"));
+    assert!(json.contains("\"len\":2,\"kind\":\"label\",\"text\":\"Zy\",\"cells\":2}"));
+    assert!(json.contains("\"kind\":\"message\",\"text\":\"Zrf1\"}"));
+    assert!(json.contains("\"kind\":\"label\",\"text\":\"Zsm\"}"));
+    assert_eq!(
+        strings::Export::from_json(&json),
+        Ok(export),
+        "it reads back"
+    );
+}
+
+/// The view an engine over [`panel_game`] draws in [`panel_rows`].
+#[derive(Clone, Copy)]
+enum PanelView {
+    /// The stats view of member 0.
+    Stats,
+    /// The inventory view of the member shown (0), with the combat-mode line after it.
+    Inventory,
+    /// The combat-mode line alone.
+    ModeLine,
+}
+
+/// Party member `Zm` (actor 1: strength 20, dexterity 15, intelligence 12, combat mode `mode`)
+/// leading a party of one with nothing in its inventory (tiles 4 × type + frame, slots linked),
+/// over a text layer with a font and the panel strings of `game` ([`crate::ui::UiTables::load`]),
+/// main's three windows open; with `pack` installed over the game's catalogue, with a Hangul
+/// table, or no pack.
+fn panel_world(game: &[u8], pack: Option<Pack>, mode: u8) -> State {
+    let mut s = State::empty();
+    let mut t = crate::main_loop::test_support::test_ui().tables;
+    t.panel = crate::ui::UiTables::load(game).unwrap().panel;
+    let font = u6_formats::font::BitFont {
+        glyphs: vec![[0; 8]; 256],
+    };
+    s.ui = crate::ui::UiState::from_parts(Some(font), t.clone());
+    s.ui.text.main_windows(&t);
+    s.tables.basetile.base = (0..1024).map(|t| t * 4).collect();
+    s.tables.tileflags.weight = vec![0; 1024];
+    crate::objects::init_slots(&mut s.objects);
+    crate::objects::link_actors(&mut s.objects);
+    let p = &mut s.actors.party;
+    p.size = 1;
+    p.members[0] = 1;
+    p.names = vec!["Zm".into()];
+    let a = &mut s.actors.attrs;
+    a.strength[1] = 20;
+    a.dexterity[1] = 15;
+    a.intelligence[1] = 12;
+    a.status[1] = 0x80;
+    a.combat_mode[1] = mode;
+    s.objects.type_frame[1] = 0x178;
+    if let Some(p) = pack {
+        let glyphs = vec![[0; 8]; u6_formats::font::HANGUL_GLYPHS];
+        let hangul = HangulFont::from_glyphs(glyphs).unwrap();
+        let files = Files::new(BTreeMap::from([("game".to_string(), game.to_vec())]));
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            Some(Rc::new(hangul)),
+            Catalogue::from_game(game),
+        )
+        .expect("the pack checks");
+    }
+    s
+}
+
+/// `view` drawn for [`panel_world`] (combat mode `mode`) in an engine over [`panel_game`], with
+/// `pack` installed or none: the status window's 12 rows of 17 cells as the source plane names
+/// them (a glyph's character, a space where none is drawn), and the counts.
+fn panel_rows(pack: Option<Pack>, mode: u8, view: PanelView) -> (Vec<String>, [u32; 2]) {
+    use crate::ui::panels;
+    let game = panel_game();
+    let s = panel_world(&game, pack, mode);
+    let files = Files::new(BTreeMap::from([("game".to_string(), game)]));
+    let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
+        match view {
+            PanelView::Stats => panels::stats(&st, &io, 0).await,
+            PanelView::Inventory => panels::inventory(&st, &io).await,
+            PanelView::ModeLine => panels::combat_mode_line(&st, &io).await,
+        }
+        io.present();
+    });
+    e.enable_src_plane();
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let rows = {
+        let fb = e.published_frame();
+        let cell = crate::ui::text::CELL;
+        (0..12)
+            .map(|row| {
+                (0..17)
+                    .map(
+                        |col| match fb.src_at((0x16 + col) * cell, (1 + row) * cell) {
+                            Some(src) if src.kind == u6_render::Kind::Glyph => {
+                                crate::ui::wide::cell_char(src.id)
+                            }
+                            _ => ' ',
+                        },
+                    )
+                    .collect()
+            })
+            .collect()
+    };
+    (rows, e.state().locale.texts.get())
+}
+
+/// Row `row` of `rows` from column `from`, its end trimmed.
+fn from_col(rows: &[String], row: usize, from: usize) -> String {
+    rows[row]
+        .chars()
+        .skip(from)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The combat-mode line of `rows` (row 11): its first drawn column and its text.
+fn mode_line(rows: &[String]) -> (usize, String) {
+    let line = &rows[11];
+    let col = line.chars().position(|c| c != ' ').unwrap_or(17);
+    (col, from_col(rows, 11, col))
+}
+
+/// The forms of [`panel_ko`]: one for each attribute line, the three headings, the two weight
+/// labels, mode 2's and mode 5's names (the test's own syllables, each within its English's
+/// cells; mode 2's two syllables are 6 bytes, mode 5's three 9), and one for Ready's torch line
+/// (`Z가`, [`panel_texts`]).
+const PANEL_FORMS: [(&str, &str); 11] = [
+    ("Zs1%d\n", "가%d\n"),
+    ("Zs2%d\n", "나%d\n"),
+    ("Zs3%d\n", "다%d\n"),
+    ("Zgmag", "라마"),
+    ("Zghth", "바사"),
+    ("Zl%/Zx", "아%/자"),
+    ("Zv", "차"),
+    ("Zy", "카"),
+    ("Zc2", "타파"),
+    ("Zc5", "가나다"),
+    ("Z가", "하"),
+];
+
+/// A pack of [`PANEL_FORMS`].
+fn panel_ko() -> Pack {
+    panel_ko_but("", "")
+}
+
+/// A pack of [`PANEL_FORMS`], the form for English `en` (when one of theirs) `ko` instead.
+fn panel_ko_but(en: &str, ko: &str) -> Pack {
+    let forms = PANEL_FORMS.map(|(e, k)| string(e, if e == en { ko } else { k }));
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings(forms)
+        .unwrap()
+}
+
+#[test]
+fn the_stats_view_prints_the_packs_attribute_magic_health_and_level_forms_and_else_the_english() {
+    let (rows, counts) = panel_rows(Some(panel_ko()), 2, PanelView::Stats);
+    let at = |row| from_col(&rows, row, 10);
+    assert_eq!(
+        [at(2), at(3), at(4), at(6), at(8), at(10)],
+        ["가20", "나15", "다12", "라마", "바사", "아/자"].map(String::from),
+        "the pack's forms, each at its cell, the values after them"
+    );
+    assert_eq!(counts, [6, 0], "six lines found, no miss");
+    let (rows, counts) = panel_rows(None, 2, PanelView::Stats);
+    let at = |row| from_col(&rows, row, 10);
+    assert_eq!(
+        [at(2), at(3), at(4), at(6), at(8), at(10)],
+        ["Zs120", "Zs215", "Zs312", "Zgmag", "Zghth", "Zl/Zx"].map(String::from),
+        "without a pack, the English"
+    );
+    assert_eq!(counts, [0, 0]);
+}
+
+#[test]
+fn the_inventory_view_prints_the_packs_weight_labels_and_else_the_english() {
+    // The weight labels are two bytes (as in the original), under the print hooks' three: the
+    // view reads each for display, so the pack's form prints, each at its cell.
+    let (rows, counts) = panel_rows(Some(panel_ko()), 2, PanelView::Inventory);
+    let weights = |rows: &[String]| {
+        let row: Vec<char> = rows[9].chars().collect();
+        let label = |from: usize| {
+            row[from..from + 2]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        [label(0), label(9)]
+    };
+    assert_eq!(weights(&rows), ["차", "카"].map(String::from));
+    assert_eq!(
+        mode_line(&rows),
+        (13, "타파".into()),
+        "and the mode line's name"
+    );
+    assert_eq!(counts, [3, 0], "the two labels and the name found, no miss");
+    // Without a pack, the English as before.
+    let (rows, counts) = panel_rows(None, 2, PanelView::Inventory);
+    assert_eq!(weights(&rows), ["Zv", "Zy"].map(String::from));
+    assert_eq!(mode_line(&rows), (12, "Zc2".into()));
+    assert_eq!(counts, [0, 0]);
+}
+
+#[test]
+fn the_combat_mode_line_prints_the_packs_name_centred_by_its_cells_and_else_the_english() {
+    // Mode 2's two syllables (6 bytes) and mode 3's two letters sit at the same column, half of
+    // 8 less the cells, from column 10; mode 5's three syllables (odd cells, 9 bytes) at half of
+    // 5, rounded toward zero; a name the pack lacks (mode 6's) stays English, centred as before.
+    let line = |pack: Option<Pack>, mode| mode_line(&panel_rows(pack, mode, PanelView::ModeLine).0);
+    assert_eq!(line(Some(panel_ko()), 2), (13, "타파".into()));
+    assert_eq!(line(Some(panel_ko()), 3), (13, "Zk".into()));
+    assert_eq!(line(Some(panel_ko()), 5), (12, "가나다".into()));
+    assert_eq!(line(Some(panel_ko()), 6), (12, "Zc6".into()));
+    let (_, counts) = panel_rows(Some(panel_ko()), 2, PanelView::ModeLine);
+    assert_eq!(counts, [1, 0], "the name read for display, found");
+    // Without a pack: the English, each centred by its bytes as before.
+    assert_eq!(line(None, 2), (12, "Zc2".into()));
+    assert_eq!(line(None, 3), (13, "Zk".into()));
+    assert_eq!(line(None, 5), (12, "Zc5".into()));
+    // A mode with no name draws nothing on the line.
+    assert_eq!(line(Some(panel_ko()), 0), (17, String::new()));
+}
+
+#[test]
+fn a_panel_form_over_its_cells_or_with_another_count_of_line_breaks_stays_english_counted_missed() {
+    let (rows, counts) = panel_rows(Some(panel_ko()), 2, PanelView::Stats);
+    assert_eq!(
+        (from_col(&rows, 2, 10), counts),
+        ("가20".into(), [6, 0]),
+        "within its 6 cells, one line break as the English: the pack's form"
+    );
+    // Over the attribute line's 6 cells (9: six syllables, the directive's two, the line break),
+    // or within them with one more line break than the English: the English, one miss; the
+    // other lines the pack's forms.
+    for (case, ko) in [
+        ("over its cells", "가나다라마바%d\n"),
+        ("a line break more", "가\n%d\n"),
+    ] {
+        let (rows, counts) = panel_rows(Some(panel_ko_but("Zs1%d\n", ko)), 2, PanelView::Stats);
+        assert_eq!(from_col(&rows, 2, 10), "Zs120", "{case}: the English");
+        assert_eq!(
+            from_col(&rows, 3, 10),
+            "나15",
+            "{case}: the next line the pack's"
+        );
+        assert_eq!(counts, [5, 1], "{case}: one miss");
+    }
+    // A label read for display likewise: a mode name over the line's 7 cells.
+    let (rows, counts) = panel_rows(
+        Some(panel_ko_but("Zc2", "가나다라마바사아")),
+        2,
+        PanelView::ModeLine,
+    );
+    assert_eq!((mode_line(&rows), counts), ((12, "Zc2".into()), [0, 1]));
+}
+
+#[test]
+fn a_weight_labels_form_with_the_bytes_of_another_catalogued_string_shows_as_it_is() {
+    // The first weight label's form is the torch line's English bytes (`Z가`, 2 cells, within the
+    // label's 2), which the pack translates otherwise: the view puts the form as it is, not
+    // looking it up again.
+    let (rows, counts) = panel_rows(Some(panel_ko_but("Zv", "Z가")), 2, PanelView::Inventory);
+    let row: Vec<char> = rows[9].chars().collect();
+    assert_eq!(row[..2].iter().collect::<String>(), "Z가");
+    assert_eq!(row[9..10].iter().collect::<String>(), "카");
+    assert_eq!(
+        counts,
+        [3, 0],
+        "the two labels and the mode name, each once"
+    );
+}
+
+#[test]
+fn the_cell_budget_of_one_string_two_sites_catalogue_is_the_smaller_whatever_their_order() {
+    let cat = Catalogue::from_budgeted([
+        // A later smaller budget tightens an earlier one; a later larger one does not loosen it.
+        (Kind::Message, b"Zb1".to_vec(), Some(7)),
+        (Kind::Message, b"Zb1".to_vec(), Some(4)),
+        (Kind::Message, b"Zb2".to_vec(), Some(4)),
+        (Kind::Message, b"Zb2".to_vec(), Some(7)),
+        // A site with none bounds nothing, before or after.
+        (Kind::Message, b"Zb3".to_vec(), Some(5)),
+        (Kind::Message, b"Zb3".to_vec(), None),
+        (Kind::Format, b"Zb4 %d".to_vec(), None),
+        (Kind::Format, b"Zb4 %d".to_vec(), Some(6)),
+        // A label's kind wins, the budgets merged as above.
+        (Kind::Message, b"Zb5".to_vec(), Some(6)),
+        (Kind::Label, b"Zb5".to_vec(), Some(3)),
+        (Kind::Message, b"Zb6".to_vec(), Some(3)),
+        (Kind::Label, b"Zb6".to_vec(), None),
+        (Kind::Label, b"Zb7".to_vec(), None),
+        (Kind::Message, b"Zb7".to_vec(), Some(4)),
+        (Kind::Label, b"Zb8".to_vec(), Some(7)),
+        (Kind::Format, b"Zb8".to_vec(), Some(2)),
+    ]);
+    let entry = |text: &[u8]| cat.label_of(text).map(|e| (e.kind, e.cells));
+    assert_eq!(cat.len(), 8, "each once");
+    assert_eq!(entry(b"Zb1"), Some((Kind::Message, Some(4))));
+    assert_eq!(entry(b"Zb2"), Some((Kind::Message, Some(4))));
+    assert_eq!(entry(b"Zb3"), Some((Kind::Message, Some(5))));
+    assert_eq!(entry(b"Zb4 %d"), Some((Kind::Format, Some(6))));
+    assert_eq!(entry(b"Zb5"), Some((Kind::Label, Some(3))));
+    assert_eq!(entry(b"Zb6"), Some((Kind::Label, Some(3))));
+    assert_eq!(entry(b"Zb7"), Some((Kind::Label, Some(4))));
+    assert_eq!(entry(b"Zb8"), Some((Kind::Label, Some(2))));
+}

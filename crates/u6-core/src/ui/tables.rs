@@ -58,6 +58,56 @@ pub struct PanelStrings {
     pub combat_modes: Vec<Vec<u8>>,
 }
 
+/// Port-only (spec 08, slice K2; 2026-10-24): the panel strings the stats view passes to
+/// `printf` as its format ([`PanelStrings`]), for the locale layer's catalogue
+/// ([`crate::locale::strings`]): the strength, dexterity and intelligence lines and the magic,
+/// health and level / experience headings. Each is drawn at a fixed cell, the portrait or its
+/// value beside it, so the catalogue gives each the English's cells as its budget. The
+/// roster's hit points (a 3-cell field at column 0x0e of the 17-cell window), the name line (a
+/// name and a newline), the bare string the combat-mode name goes through, and the values
+/// (magic points, hit points and their maximum, level and experience) hold no word of their
+/// own and are not listed: they stay as they are. The inventory view's weight labels are read
+/// for display instead ([`SHOWN_AT`]).
+pub(crate) const PRINTED: &[u32] = &[
+    0x0011_0bb2,
+    0x0011_0bba,
+    0x0011_0bc2,
+    0x0011_0bca,
+    0x0011_0bd8,
+    0x0011_0bea,
+];
+
+/// Port-only (spec 08, slice K2; 2026-10-24): the image addresses of the panel strings read for
+/// display as labels, the strings' own addresses (no pointer slot holds them): the inventory
+/// view's two weight labels, 2 bytes each in the original, under the 3 a print hook looks up. The
+/// view reads each through [`crate::locale::shown`] and puts what it gives without a lookup
+/// again (`ui::printf::format`), so the locale layer's catalogue takes each as a label from 1
+/// byte, within its English's cells (the next column beside it).
+pub(crate) const SHOWN_AT: &[u32] = &[0x0011_0c0c, 0x0011_0c10];
+
+/// Port-only (spec 08, slice K2; 2026-10-24): the pointers of the combat-mode names, A4-0x7230 +
+/// 4 × mode for modes 2..=8, labels of the locale layer's catalogue; the combat-mode line reads
+/// the name for display through [`crate::locale::shown`]. Logic reads [`PanelStrings`] as it is.
+pub(crate) const LABELS: &[u32] = &[
+    mode_pointer(2),
+    mode_pointer(3),
+    mode_pointer(4),
+    mode_pointer(5),
+    mode_pointer(6),
+    mode_pointer(7),
+    mode_pointer(8),
+];
+
+/// Port-only (spec 08, 2026-10-24): the cells a combat-mode name takes at most, the field its
+/// line centres it in: status-window columns 10..=16, x 0x100..=0x137 (the window opens at cell
+/// 0x16, x 0xb0; the line's paper clear spans the field).
+pub(crate) const MODE_CELLS: u16 = 7;
+
+/// The pointer slot of combat mode `mode`'s name.
+const fn mode_pointer(mode: u32) -> u32 {
+    crate::image::A4.wrapping_sub(0x7230) + 4 * mode
+}
+
 /// Initial values of the text and input globals (data hunk 33).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Initial {
@@ -134,7 +184,7 @@ impl UiTables {
             .collect();
         let mut combat_modes = Vec::new();
         for mode in COMBAT_MODES {
-            let ptr = img.pointer(crate::image::A4.wrapping_sub(0x7230) + 4 * u32::from(mode))?;
+            let ptr = img.pointer(mode_pointer(u32::from(mode)))?;
             combat_modes.push(img.cstr(ptr)?);
         }
         let w = img.a4_bytes(-0x7a1a, 9)?;

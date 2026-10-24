@@ -30,7 +30,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  MAX_PACK_BYTES, MAX_RUNS, MAX_STRING_TEXT_BYTES, PackReadError, STRINGS_PER_REQUEST, directivesOf,
+  MAX_PACK_BYTES, MAX_RUNS, MAX_STRING_TEXT_BYTES, PackReadError, STRINGS_PER_REQUEST, cellsOf, directivesOf,
   duplicateMembers, fingerprint, hash64, hex64, latin1, main, packBytes, readPack, stringGate, stringsPlanOf,
   tableGate, tablesOf, unitsOf,
 } from './translate.mjs';
@@ -343,6 +343,116 @@ test('a label of 1 or 2 bytes (a wind\'s name) is planned, translated and merged
     assert.equal(t2.bodies.length, 0, 'nothing asked');
     await rm(g.dir, { recursive: true });
   }
+  await rm(f.dir, { recursive: true });
+});
+
+// Slice K2 (2026-10-24): the strings the engine draws at a fixed cell (a panel's line, a heading,
+// a mode name centred in its field) carry `cells` in the export, the test's own text: a line with
+// a conversion, a heading and a two-byte label, beside a message with none.
+const PANEL = [
+  { ...str('Zs1%d\n', 'format'), cells: 6 },
+  { ...str('Zgmag', 'message'), cells: 5 },
+  { ...str('Zk', 'label'), cells: 7 },
+  str('Naught is there.', 'message'),
+];
+
+// Nothing the tool printed holds a panel string's hash or a Korean line (nothingTold); the panel
+// strings are too short to look for as text (a temporary directory's name may hold them).
+function noPanelTold(printed) {
+  nothingTold(printed);
+  for (const s of PANEL) assert.ok(!printed.includes(s.hash), 'no hash printed');
+}
+
+test('a string with cells: sent with them, the guide told what a cell is; an answer within them lands; an entry without them is sent and lands as before', async () => {
+  assert.deepEqual(stringsPlanOf({ ...EXPORT, strings: PANEL }).batches[0].units.map((u) => [u.text, u.cells]),
+    [['Zs1%d\n', 6], ['Zgmag', 5], ['Zk', 7], ['Naught is there.', undefined]]);
+  // A cell each: a Hangul syllable, an ASCII character, each character of a directive.
+  assert.equal(cellsOf('가나%d\n'), 5);
+  assert.equal(stringGate('Zs1%d\n', '가나다%d\n', 6), null, 'six cells: within');
+  assert.equal(stringGate('Zs1%d\n', '가나다라%d\n', 6), 'cells', 'seven cells: over');
+  assert.equal(stringGate('Zs1%d\n', '가나다라%d\n'), null, 'no budget: as before');
+  assert.equal(stringGate('Zs1%d\n', '가%s\n', 6), 'directives', 'the directives first');
+  const f = await fixture({ strings: { ...EXPORT, strings: PANEL } });
+  const t = fakeTransport();
+  const out = output();
+  assert.equal(await main(['--strings', f.strings, '--out', f.out, '--send'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() }), 0);
+  assert.equal(t.bodies.length, 1);
+  const body = JSON.parse(t.bodies[0]);
+  const user = JSON.parse(body.messages[0].content);
+  assert.deepEqual(user.strings.map((u) => Object.keys(u)), [['n', 'en', 'kind', 'cells'], ['n', 'en', 'kind', 'cells'], ['n', 'en', 'kind', 'cells'], ['n', 'en', 'kind']]);
+  assert.deepEqual(user.strings.map((u) => u.cells), [6, 5, 7, undefined]);
+  assert.ok(body.system.includes('"cells": <number>') && body.system.includes('명사형'), 'the guide says what cells are');
+  const pack = await packOf(f.out);
+  assert.equal(pack.strings.length, PANEL.length, 'each landed');
+  for (const s of pack.strings) {
+    const en = PANEL.find((p) => p.hash === s.hash);
+    assert.ok(en && stringGate(en.text, s.text, en.cells) === null);
+    assert.deepEqual(Object.keys(s), ['hash', 'len', 'text'], 'the pack\'s strings as before');
+  }
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.strings, { read: 4, found: 4, translated: 4, leftEnglish: 0, byReason: {}, unexplained: 0 });
+  noPanelTold(out.text);
+  // An entry whose cells are not a whole number of the engine's range is refused unasked.
+  for (const cells of [-1, 1.5, '6', 0x10000, null]) {
+    const g = await fixture({ strings: { ...EXPORT, strings: [{ ...PANEL[0], cells }, PANEL[3]] } });
+    const t2 = fakeTransport();
+    const o = output();
+    assert.equal(await main(['--strings', g.strings, '--out', g.out, '--send'], { transport: t2.send, stdout: o, isTTY: false, signals: new EventEmitter() }), 2, String(cells));
+    assert.match(o.text, /translate: 1 entries of the file are not strings of u6\.string-bundle\/1/);
+    assert.equal(t2.bodies.length, 0, 'nothing asked');
+    await rm(g.dir, { recursive: true });
+  }
+  await rm(f.dir, { recursive: true });
+});
+
+test('a string with cells keeps its English\'s line breaks: one more or one fewer inside it does not land (cells), asked again once; without cells the count is free as before', async () => {
+  // One more break inside, within the cells and with the ends' breaks kept.
+  assert.equal(stringGate('Zs1%d\n', '가\n%d\n', 6), 'cells');
+  // One fewer inside (the ends have none).
+  assert.equal(stringGate('Zl\nZx', '가나', 5), 'cells');
+  assert.equal(stringGate('Zl\nZx', '가\n나', 5), null, 'as many: within');
+  assert.equal(stringGate('Zl\nZx', '가나'), null, 'no cells: as before');
+  assert.equal(stringGate('Zs1%d\n', '가\n%d\n'), null, 'no cells: as before');
+  const f = await fixture({ strings: { ...EXPORT, strings: PANEL } });
+  const t = fakeTransport((l, first) => (l.en === 'Zs1%d\n' ? (first ? '가\n%d\n' : '가\n나\n%d\n') : null));
+  const out = output();
+  assert.equal(await main(['--strings', f.strings, '--out', f.out, '--send'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() }), 3, 'written, a string left English');
+  assert.equal(t.bodies.length, 2, 'asked again once');
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.strings.byReason, { cells: 1 });
+  assert.ok(!(await packOf(f.out)).strings.some((s) => s.hash === PANEL[0].hash), 'not in the pack');
+  assert.match(JSON.parse(t.bodies[0]).system, /keeps exactly the line\nbreaks of its English/);
+  noPanelTold(out.text);
+  await rm(f.dir, { recursive: true });
+});
+
+test('an answer over a string\'s cells does not land: asked again once, then left English and counted (cells), as a changed directive is; one within them the second time lands; a form over them the pack had before stays as it was', async () => {
+  const f = await fixture({ strings: { ...EXPORT, strings: PANEL } });
+  // The pack there holds, from before, a form of the heading over its 5 cells.
+  await mkdir(f.out, { recursive: true, mode: 0o700 });
+  const before = { hash: PANEL[1].hash, len: PANEL[1].len, text: '가나다라마바' };
+  await writeFile(join(f.out, 'ko.u6lp'), packBytes({ base: fingerprint([]), runs: [], strings: [before] }), { mode: 0o600 });
+  // The heading's answer is over its cells both times; the line's the first time only.
+  const t = fakeTransport((l, first) => {
+    if (l.en === 'Zgmag') return '가나다라마바';
+    if (l.en === 'Zs1%d\n' && first) return '가나다라마%d\n';
+    return null;
+  });
+  const out = output();
+  assert.equal(await main(['--strings', f.strings, '--out', f.out, '--send'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() }), 3, 'written, a string left English');
+  const asks = t.bodies.map((b) => JSON.parse(JSON.parse(b).messages[0].content).strings.map((u) => [u.en, u.cells]));
+  assert.deepEqual(asks, [
+    [['Zs1%d\n', 6], ['Zgmag', 5], ['Zk', 7], ['Naught is there.', undefined]],
+    [['Zs1%d\n', 6], ['Zgmag', 5]],
+  ], 'the two over their cells asked again once, with their cells');
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.strings, { read: 4, found: 4, translated: 3, leftEnglish: 1, byReason: { cells: 1 }, unexplained: 0 });
+  assert.match(out.text, /Game strings: 4 found, 3 translated, 1 left English \(cells 1\)\./);
+  const pack = await packOf(f.out);
+  assert.deepEqual(pack.strings.find((s) => s.hash === PANEL[1].hash), before, 'the form the pack had, as it was');
+  const line = pack.strings.find((s) => s.hash === PANEL[0].hash);
+  assert.equal(stringGate(PANEL[0].text, line.text, 6), null, 'the line\'s second answer, within its cells');
+  noPanelTold(out.text);
   await rm(f.dir, { recursive: true });
 });
 

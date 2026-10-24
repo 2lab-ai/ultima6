@@ -990,6 +990,107 @@ fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_sy
     );
 }
 
+/// Spec 08 (slice K2, 2026-10-24): the string export of the owner's files holds the panels'
+/// lines, by the hashes of the strings at the panel sites, each with its English's cells (its
+/// length): the stats view's three attribute lines and its magic, health and level headings
+/// (`ui::tables::PRINTED`), and the inventory view's two weight labels as labels, read for
+/// display at their addresses (`ui::tables::SHOWN_AT`; under three bytes, so no print finds
+/// them); the seven combat-mode names as labels (`ui::tables::LABELS`, A4-0x7230 + 4 × mode),
+/// each within the line's 7 cells; none of the panel formats it leaves out (the roster's number,
+/// the name line, the bare string, the values); and `cells` on no other entry. Prints pass/fail
+/// only: a failure names the site, never its text.
+#[test]
+fn the_string_export_of_the_owners_game_holds_the_panels_lines_and_mode_names_with_their_cells() {
+    use crate::converse::disasm::catalog::hash64;
+    use crate::image::{A4, GameImage};
+    use crate::locale::strings::Kind;
+    use crate::ui::tables::{LABELS, MODE_CELLS, PRINTED, SHOWN_AT};
+    let Some(files) = files() else { return };
+    let export = crate::locale::strings::export(&files).quiet();
+    let img = GameImage::parse(files.get("game").quiet()).quiet();
+    let find = |text: &[u8]| export.strings.iter().find(|e| e.hash == hash64(text));
+    let cells_of = |text: &[u8]| u16::try_from(text.len()).ok();
+    let mut budgeted = Vec::new();
+    for (site, at) in [
+        ("STRENGTH", 0x0011_0bb2),
+        ("DEXTERITY", 0x0011_0bba),
+        ("INTELLIGENCE", 0x0011_0bc2),
+        ("MAGIC", 0x0011_0bca),
+        ("HEALTH", 0x0011_0bd8),
+        ("LEVEL_EXP", 0x0011_0bea),
+    ] {
+        assert!(PRINTED.contains(&at), "{site} is in the panels' list");
+        let text = img.cstr(at).quiet();
+        let e = find(&text);
+        assert!(e.is_some(), "{site} in the export");
+        assert!(
+            e.is_some_and(|e| e.cells == cells_of(&text)),
+            "{site} with its English's cells"
+        );
+        budgeted.push(hash64(&text));
+    }
+    for (site, at) in [("WEIGHT_0", 0x0011_0c0c), ("WEIGHT_1", 0x0011_0c10)] {
+        assert!(
+            SHOWN_AT.contains(&at) && !PRINTED.contains(&at),
+            "{site} is in the panels' labels read at their addresses"
+        );
+        let text = img.cstr(at).quiet();
+        let e = find(&text);
+        assert!(
+            e.is_some_and(|e| e.kind == Kind::Label),
+            "{site} in the export as a label"
+        );
+        assert!(
+            e.is_some_and(|e| e.cells == cells_of(&text)),
+            "{site} with its English's cells"
+        );
+        budgeted.push(hash64(&text));
+    }
+    for mode in 2..=8u32 {
+        let ptr = A4 - 0x7230 + 4 * mode;
+        assert!(
+            LABELS.contains(&ptr),
+            "mode {mode} is in the panels' labels"
+        );
+        let text = img.pointer(ptr).and_then(|p| img.cstr(p)).quiet();
+        let e = find(&text);
+        assert!(
+            e.is_some_and(|e| e.kind == Kind::Label),
+            "mode {mode} in the export as a label"
+        );
+        assert!(
+            e.is_some_and(|e| e.cells == Some(MODE_CELLS)),
+            "mode {mode} within the line's cells"
+        );
+        budgeted.push(hash64(&text));
+    }
+    for (site, at) in [
+        ("ROSTER_HP", 0x0011_0ba4),
+        ("NAME_LINE", 0x0011_0baa),
+        ("PLAIN", 0x0011_0bae),
+        ("MAGIC_VALUE", 0x0011_0bd0),
+        ("HP_VALUE", 0x0011_0be0),
+        ("HP_MAX", 0x0011_0be4),
+        ("LEVEL_EXP_VALUE", 0x0011_0bf4),
+    ] {
+        assert!(!PRINTED.contains(&at), "{site} is not in the panels' list");
+        assert!(
+            find(&img.cstr(at).quiet()).is_none(),
+            "{site} not in the export"
+        );
+    }
+    assert!(
+        export
+            .strings
+            .iter()
+            .all(|e| e.cells.is_none() || budgeted.contains(&e.hash)),
+        "no other entry carries cells"
+    );
+    eprintln!(
+        "string export holds the panels' attribute lines and headings with their cells, the 2 weight labels and the 7 combat-mode names as labels within their cells, none of the panel formats left out, and cells on no other entry: pass"
+    );
+}
+
 /// The keys (type 0x40) of quality `q` the port holds, anywhere (the slot list).
 fn keys_of(s: &State, q: u8) -> Vec<Slot> {
     let o = &s.objects;
