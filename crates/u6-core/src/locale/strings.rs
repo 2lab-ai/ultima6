@@ -18,7 +18,9 @@
 //! world turn's ([`crate::actors::turn::PRINTED`]), the party's
 //! ([`crate::actors::party::PRINTED`]), the NPC turn's ([`crate::actors::npc::PRINTED`]), the
 //! step test's ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
-//! ([`crate::objects::PRINTED`])) and the conversation's own messages
+//! ([`crate::objects::PRINTED`])), the panels' (2026-10-24: the stats view's attribute lines and
+//! its magic, health and level headings ([`crate::ui::tables::PRINTED`]), each within its cells)
+//! and the conversation's own messages
 //! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format. And
 //! the strings a loader table holds that game code shows through an escape (labels): the command
 //! names before their dash ([`crate::main_loop::commands::LABELS`]), the shared messages Use and
@@ -26,10 +28,16 @@
 //! Unready prints through `%s` (2026-10-24, [`crate::inventory::LABELS`]), the spells' result
 //! messages (that table's 13), potion descriptions and direction names they print through `%s`
 //! (2026-10-24, [`crate::magic::LABELS`]), the wind's names the date line prints through `%s`
-//! ([`crate::actors::clock::LABELS`]), and the conversation's `$G`, `$T` and `$Y` words. Every
-//! other string of the executable is not catalogued: the panels (but the date line; the
-//! spellbook page is one), the spells' incantation syllables (the game's magic words), the names
-//! the spells print through `%s` (the spells', the circles'), object names and articles. It is
+//! ([`crate::actors::clock::LABELS`]), the combat-mode names the panels' line prints through
+//! `%s` (2026-10-24, [`crate::ui::tables::LABELS`], each within the line's field), and the
+//! conversation's `$G`, `$T` and `$Y` words. And (2026-10-24) the inventory view's two weight
+//! labels, which it reads for display at their own addresses and puts with no lookup again
+//! ([`crate::ui::tables::SHOWN_AT`]): labels from 1 byte (each is 2 in the original), within
+//! its English's cells. So the panels are catalogued (2026-10-24): the stats, inventory and
+//! combat-mode lines, each within its cells ([`Entry::cells`]); their name line and values hold
+//! no word of their own. Every other string of the executable is not catalogued: the spellbook
+//! page's lines, the spells' incantation syllables (the game's magic words), the names the
+//! spells print through `%s` (the spells', the circles'), object names and articles. It is
 //! substituted only where its bytes are a catalogued string's, as the lookup is by content: a
 //! string two sites print is catalogued once (magic's not-possible line is the string of the
 //! staff's refusal, the one address 0x1159f8 in both [`crate::combat::seams::PRINTED`] and
@@ -54,8 +62,10 @@
 //! text. Slice K4 adds, compatibly as well, `u`: the strings the `u` program prints (the opening,
 //! the story, the gypsy, character creation and the transfer; [`super::program`]), each with its
 //! kind (its role there: `opening`, `story`, `gypsy`, `creation`, `transfer`), hash, length,
-//! text and (when a key read follows it) the keys that read takes. It holds the user's game
-//! text: it is made in the user's browser and leaves it only as his own download
+//! text and (when a key read follows it) the keys that read takes. A string drawn at a fixed cell
+//! (2026-10-24, a panel's: [`Entry::cells`]) carries, compatibly as well, `cells`: the cells its
+//! translation takes at most, written only when set, so every other entry is as before. It holds
+//! the user's game text: it is made in the user's browser and leaves it only as his own download
 //! (`tests/no_string_bundle_in_repo.rs`).
 
 use std::collections::BTreeMap;
@@ -188,11 +198,23 @@ fn has_words(text: &[u8]) -> bool {
     false
 }
 
+/// The cells the English `text` takes drawn in place (2026-10-24, [`Entry::cells`]): its bytes, a
+/// byte a cell, the `%` directives counted as written.
+fn english_cells(text: &[u8]) -> u16 {
+    u16::try_from(text.len()).unwrap_or(u16::MAX)
+}
+
 /// One catalogued string: its English bytes and how it is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub kind: Kind,
     pub text: Vec<u8>,
+    /// Port-only (2026-10-24): the cells its translation takes at most, for a string drawn at a
+    /// fixed cell (a panel's: [`crate::ui::tables::PRINTED`]'s and
+    /// [`crate::ui::tables::SHOWN_AT`]'s the English's cells, its bytes with the `%` directives
+    /// as written; a combat-mode name [`crate::ui::tables::MODE_CELLS`]); `None` for one with no
+    /// such place. Two sites of the same bytes keep the smaller.
+    pub cells: Option<u16>,
 }
 
 /// The catalogued strings of one `game`, by [`hash64`] of their bytes, in site order.
@@ -214,6 +236,9 @@ pub struct ExportString {
     pub kind: Kind,
     /// Its bytes, one character per byte (U+0000..U+00FF).
     pub text: String,
+    /// 2026-10-24: its cell budget ([`Entry::cells`]), only when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cells: Option<u16>,
 }
 
 /// The export ([`FORMAT`]).
@@ -364,7 +389,8 @@ impl Catalogue {
             .chain(crate::actors::party::PRINTED)
             .chain(crate::actors::npc::PRINTED)
             .chain(crate::actors::walk::PRINTED)
-            .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()));
+            .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()))
+            .chain(crate::ui::tables::PRINTED);
         for &at in printed {
             if let Ok(text) = img.cstr(at) {
                 let kind = if has_conversion(&text) {
@@ -372,7 +398,11 @@ impl Catalogue {
                 } else {
                     Kind::Message
                 };
-                c.add(kind, text);
+                // A panel's string is drawn at a fixed cell: the English's cells.
+                let cells = crate::ui::tables::PRINTED
+                    .contains(&at)
+                    .then(|| english_cells(&text));
+                c.add_within(kind, text, MIN_BYTES, cells);
             }
         }
         let labels = crate::main_loop::commands::LABELS
@@ -380,10 +410,22 @@ impl Catalogue {
             .chain(&SHARED_MESSAGES)
             .chain(crate::inventory::LABELS)
             .chain(crate::magic::LABELS)
-            .chain(crate::actors::clock::LABELS);
+            .chain(crate::actors::clock::LABELS)
+            .chain(crate::ui::tables::LABELS);
         for &ptr in labels {
             if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
-                c.add_label(text);
+                // A combat-mode name is centred in its line's field.
+                let cells = crate::ui::tables::LABELS
+                    .contains(&ptr)
+                    .then_some(crate::ui::tables::MODE_CELLS);
+                c.add_label(text, cells);
+            }
+        }
+        // The panel labels read for display at their own addresses, each at a fixed cell.
+        for &at in crate::ui::tables::SHOWN_AT {
+            if let Ok(text) = img.cstr(at) {
+                let cells = english_cells(&text);
+                c.add_label(text, Some(cells));
             }
         }
         if let Ok(messages) = ConverseText::from_game(game) {
@@ -408,7 +450,7 @@ impl Catalogue {
         let mut c = Catalogue::default();
         for (kind, text) in entries {
             if kind == Kind::Label {
-                c.add_label(text);
+                c.add_label(text, None);
             } else {
                 c.add(kind, text);
             }
@@ -419,21 +461,24 @@ impl Catalogue {
     /// Adds `text` (once per content: the first site's kind, a label's over the others). A string
     /// with no letter but its directives' and escapes' (`%s\n`, `%d `, `\n%s:\n%>`) has nothing
     /// to translate and is not catalogued: such a format is shared with sites the catalogue does
-    /// not hold (the panels), which keep it as it is. A string under [`MIN_BYTES`] is not
-    /// catalogued.
+    /// not hold (the panels' name line and values), which keep it as it is. A string under
+    /// [`MIN_BYTES`] is not catalogued.
     fn add(&mut self, kind: Kind, text: Vec<u8>) {
-        self.add_over(kind, text, MIN_BYTES);
+        self.add_within(kind, text, MIN_BYTES, None);
     }
 
     /// [`Catalogue::add`] of a label of a pointer table, which game code reads for display
     /// through [`super::shown`] only (2026-10-21): 1 byte or longer. One under [`MIN_BYTES`] is
-    /// found only by [`Catalogue::label_of`], never by the print hooks.
-    fn add_label(&mut self, text: Vec<u8>) {
-        self.add_over(Kind::Label, text, 1);
+    /// found only by [`Catalogue::label_of`], never by the print hooks. With the cell budget of
+    /// its site (2026-10-24, [`Catalogue::add_within`]).
+    fn add_label(&mut self, text: Vec<u8>, cells: Option<u16>) {
+        self.add_within(Kind::Label, text, 1, cells);
     }
 
-    /// [`Catalogue::add`] of a string of `min` bytes or longer.
-    fn add_over(&mut self, kind: Kind, text: Vec<u8>, min: usize) {
+    /// [`Catalogue::add`] of a string of `min` bytes or longer, with the cell budget of its site
+    /// (2026-10-24, [`Entry::cells`]): the same bytes catalogued again keep the smaller budget, a
+    /// site with none bounding nothing.
+    fn add_within(&mut self, kind: Kind, text: Vec<u8>, min: usize, cells: Option<u16>) {
         if text.len() < min || text.len() > MAX_BYTES || text.contains(&0) || !has_words(&text) {
             return;
         }
@@ -441,13 +486,19 @@ impl Catalogue {
         match self.by_hash.get(&h) {
             Some(&i) => {
                 let e = &mut self.entries[i].1;
-                if e.text == text && kind == Kind::Label {
-                    e.kind = Kind::Label;
+                if e.text == text {
+                    if kind == Kind::Label {
+                        e.kind = Kind::Label;
+                    }
+                    e.cells = match (e.cells, cells) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
                 }
             }
             None => {
                 self.by_hash.insert(h, self.entries.len());
-                self.entries.push((h, Entry { kind, text }));
+                self.entries.push((h, Entry { kind, text, cells }));
             }
         }
     }
@@ -503,6 +554,7 @@ impl Catalogue {
                     len: e.text.len() as u32,
                     kind: e.kind,
                     text: e.text.iter().map(|&b| char::from(b)).collect(),
+                    cells: e.cells,
                 })
                 .collect(),
             texts: Vec::new(),

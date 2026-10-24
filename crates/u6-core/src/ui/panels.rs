@@ -489,20 +489,29 @@ pub async fn roster(state: &RefCell<State>, io: &Io, first: i16) {
 
 /// Original: 0x110c76 (ui: the combat-mode name of the shown member, centred on row 11 of the
 /// status window from column 10)
+///
+/// Port (spec 08, 2026-10-24): the name is read for display ([`crate::locale::shown`]: the
+/// pack's form when it has one) and centred by the cells it takes as the text layer puts it
+/// (with `wide` on its Hangul syllables a cell each, [`super::wide::decode`]), not its bytes.
 pub async fn combat_mode_line(state: &RefCell<State>, io: &Io) {
     let saved = state.borrow().ui.text.current;
     select_window(state, io, WindowId::Status).await;
-    let (name, fmt) = {
+    let (name, cells, fmt) = {
         let s = state.borrow();
         let paper = s.ui.tables.colours.paper;
         let map = s.ui.paper.as_ref();
         io.draw(|fb| fill_rect(fb, 0x100, 0x60, 0x137, 0x67, paper, map));
         let actor = member_actor(&s, s.ui.panel.member);
         let mode = s.actors.attrs.combat_mode[usize::from(actor)];
-        let name = s.ui.tables.combat_mode_name(mode).to_vec();
-        (name, s.ui.tables.panel.plain.clone())
+        let name = crate::locale::shown(&s, s.ui.tables.combat_mode_name(mode).to_vec());
+        let cells = if s.ui.text.wide {
+            super::wide::decode(&name).len()
+        } else {
+            name.len()
+        };
+        (name, cells, s.ui.tables.panel.plain.clone())
     };
-    let col = half(8 - name.len() as i16) + 10;
+    let col = half(8 - cells as i16) + 10;
     set_cursor(state, io, col, 0x0b).await;
     printf(state, io, &fmt, &[Arg::Str(&name)]).await;
     select_window(state, io, saved).await;
@@ -514,6 +523,17 @@ pub async fn combat_mode_line(state: &RefCell<State>, io: &Io) {
 async fn at(state: &RefCell<State>, io: &Io, col: i16, row: i16, fmt: &[u8], args: &[Arg<'_>]) {
     set_cursor(state, io, col, row).await;
     printf(state, io, fmt, args).await;
+}
+
+/// Port (spec 08, 2026-10-24): [`at`] of a panel label the original prints as a format of no
+/// arguments, read for display instead ([`crate::locale::shown`]: the pack's form when it has
+/// one; each weight label is 2 bytes in the original, under the 3 `printf`'s lookup takes) and
+/// put without a lookup again ([`super::printf::format`]). With no pack the bytes put are the
+/// English's, as `printf` put them.
+async fn label_at(state: &RefCell<State>, io: &Io, col: i16, row: i16, english: &[u8]) {
+    let label = crate::locale::shown(&state.borrow(), english.to_vec());
+    set_cursor(state, io, col, row).await;
+    super::printf::format(state, io, &label, &[]).await;
 }
 
 /// The bottom icons of the stats and inventory panels: previous member (not for the first),
@@ -641,8 +661,8 @@ pub async fn inventory(state: &RefCell<State>, io: &Io) {
         .await;
     }
     figure_frame(&state.borrow(), io, 0xc0, 0x20);
-    at(state, io, 0, 9, &p.weights[0], &[]).await;
-    at(state, io, 9, 9, &p.weights[1], &[]).await;
+    label_at(state, io, 0, 9, &p.weights[0]).await;
+    label_at(state, io, 9, 9, &p.weights[1]).await;
     let shown = {
         let mut s = state.borrow_mut();
         if open == 0 {
