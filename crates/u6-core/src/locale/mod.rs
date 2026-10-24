@@ -69,10 +69,14 @@
 //!   prints it ([`exe_string`]: `printf`'s format, `puts`, `put_raw_str`) or reads a label for
 //!   display ([`shown`]), and never on what an escape generates (`$n`, `#n`, `printf`'s `%s`):
 //!   logic keeps the English. A string under [`strings::MIN_BYTES`] is never substituted, but a
-//!   label of a pointer table [`shown`] reads (2026-10-21: the catalogue holds it from 1 byte,
+//!   label [`shown`] reads for display, a pointer table's or (2026-10-24) a panel label at its
+//!   own address (`ui::tables::SHOWN_AT`) (2026-10-21: the catalogue holds it from 1 byte,
 //!   [`strings::Catalogue::label_of`]; the print hooks never find it). At install every pack
 //!   string the catalogue has must hold the same `%` directives, in the same order, as its
-//!   English ([`strings::directives`]), else the pack is refused (the strings part).
+//!   English ([`strings::directives`]), else the pack is refused (the strings part). A string
+//!   drawn at a fixed cell (2026-10-24, a panel's: [`strings::Entry::cells`]) takes the pack's
+//!   text only within its cells and with as many line breaks as its English ([`lookup`]); else
+//!   it stays English, counted missed, as a table string over its slot does.
 //!
 //! **Slice K3: object names and books.** A pack may also hold the object names of `look.lzd`
 //! and the books and signs of `book.dat` (each map left out of the file when empty):
@@ -1442,7 +1446,8 @@ pub(crate) fn run_at(state: &mut State, at: i32) -> Option<(Rc<Pack>, RunKey)> {
 /// it, counted: `None` without a pack, for a string the catalogue does not have (not counted;
 /// a print hook never has one under [`strings::MIN_BYTES`], [`strings::Catalogue::of`], while a
 /// `label` read has the catalogue's short labels, [`strings::Catalogue::label_of`]), and for a
-/// catalogued one the pack lacks (a miss); else the pack's language and text (a hit).
+/// catalogued one the pack lacks or whose text does not keep to its place ([`within_place`]: a
+/// miss); else the pack's language and text (a hit).
 fn lookup(state: &State, english: &[u8], label: bool) -> Option<(Language, Vec<u8>)> {
     let l = &state.locale;
     let pack = l.pack.as_ref()?;
@@ -1451,14 +1456,14 @@ fn lookup(state: &State, english: &[u8], label: bool) -> Option<(Language, Vec<u
         .position(|&b| b == 0)
         .unwrap_or(english.len())];
     let catalogue = l.catalogue.as_ref()?;
-    if label {
-        catalogue.label_of(english)?;
+    let entry = if label {
+        catalogue.label_of(english)?
     } else {
-        catalogue.of(english)?;
-    }
+        catalogue.of(english)?
+    };
     match pack
         .string(hash64(english))
-        .filter(|t| t.len as usize == english.len())
+        .filter(|t| t.len as usize == english.len() && within_place(entry, &t.text))
     {
         Some(t) => {
             l.texts.hit();
@@ -1471,6 +1476,19 @@ fn lookup(state: &State, english: &[u8], label: bool) -> Option<(Language, Vec<u
     }
 }
 
+/// 2026-10-24: whether the pack's `text` for catalogued `entry` keeps to the place it is drawn
+/// at: for a string with a cell budget ([`strings::Entry::cells`], a panel's), its cells as the
+/// text layer counts them ([`crate::ui::wide::decode`]: a Hangul syllable one, every other byte
+/// one) at most the budget, and as many line breaks as its English; any text for a string with
+/// no budget. Display only: logic and the English are untouched.
+fn within_place(entry: &strings::Entry, text: &[u8]) -> bool {
+    let breaks = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count();
+    entry.cells.is_none_or(|cells| {
+        crate::ui::wide::decode(text).len() <= usize::from(cells)
+            && breaks(text) == breaks(&entry.text)
+    })
+}
+
 /// Slice K2: the translation of the format, string or line `english` game code prints (the
 /// outermost call: `printf`'s format, `puts`, `put_raw_str`), with the pack's language for its
 /// grammar; `None` (English) as [`lookup`] says. Never called on what an escape generates.
@@ -1478,10 +1496,11 @@ pub(crate) fn exe_string(state: &State, english: &[u8]) -> Option<(Language, Vec
     lookup(state, english, false)
 }
 
-/// Slice K2: a label a loader table holds, read for display (a command's name, a shared
-/// message, a wind's name): the pack's text for it, else `english` itself ([`lookup`], counted),
-/// a label under [`strings::MIN_BYTES`] included (2026-10-21). Only for reads whose result is
-/// shown; logic reads the table as it is.
+/// Slice K2: a label read for display, a pointer table's (a command's name, a shared message, a
+/// wind's name, a combat-mode name) or (2026-10-24) a panel label at its own address (a weight
+/// label, `ui::tables::SHOWN_AT`): the pack's text for it, else `english` itself ([`lookup`],
+/// counted), a label under [`strings::MIN_BYTES`] included (2026-10-21). Only for reads whose
+/// result is shown; logic reads the table as it is.
 pub fn shown(state: &State, english: Vec<u8>) -> Vec<u8> {
     match lookup(state, &english, true) {
         Some((_, text)) => text,
@@ -1492,14 +1511,15 @@ pub fn shown(state: &State, english: Vec<u8>) -> Vec<u8> {
 /// [`shown`] without counting, with the language of the pack's text (`None`: English) and only
 /// for a catalogued label: the copy of the escape layer that `printf`'s cell count runs reads a
 /// slot as the escape layer will, and counts nothing. It finds what [`exe_string`] finds, not a
-/// label under [`strings::MIN_BYTES`]: the escape layer reads the slot it copies
-/// (`converse::vars::shown_ref`) through [`exe_string`].
+/// label under [`strings::MIN_BYTES`] nor a text that does not keep to its place
+/// ([`within_place`]): the escape layer reads the slot it copies (`converse::vars::shown_ref`)
+/// through [`exe_string`].
 pub(crate) fn label_quiet(state: &State, english: &[u8]) -> Option<Vec<u8>> {
     let l = &state.locale;
     let pack = l.pack.as_ref()?;
-    l.catalogue.as_ref()?.of(english)?;
+    let entry = l.catalogue.as_ref()?.of(english)?;
     pack.string(hash64(english))
-        .filter(|t| t.len as usize == english.len())
+        .filter(|t| t.len as usize == english.len() && within_place(entry, &t.text))
         .map(|t| t.text.clone())
 }
 

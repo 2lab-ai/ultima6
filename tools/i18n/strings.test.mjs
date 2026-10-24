@@ -405,6 +405,27 @@ test('a string with cells: sent with them, the guide told what a cell is; an ans
   await rm(f.dir, { recursive: true });
 });
 
+test('a string with cells keeps its English\'s line breaks: one more or one fewer inside it does not land (cells), asked again once; without cells the count is free as before', async () => {
+  // One more break inside, within the cells and with the ends' breaks kept.
+  assert.equal(stringGate('Zs1%d\n', '가\n%d\n', 6), 'cells');
+  // One fewer inside (the ends have none).
+  assert.equal(stringGate('Zl\nZx', '가나', 5), 'cells');
+  assert.equal(stringGate('Zl\nZx', '가\n나', 5), null, 'as many: within');
+  assert.equal(stringGate('Zl\nZx', '가나'), null, 'no cells: as before');
+  assert.equal(stringGate('Zs1%d\n', '가\n%d\n'), null, 'no cells: as before');
+  const f = await fixture({ strings: { ...EXPORT, strings: PANEL } });
+  const t = fakeTransport((l, first) => (l.en === 'Zs1%d\n' ? (first ? '가\n%d\n' : '가\n나\n%d\n') : null));
+  const out = output();
+  assert.equal(await main(['--strings', f.strings, '--out', f.out, '--send'], { transport: t.send, stdout: out, isTTY: false, signals: new EventEmitter() }), 3, 'written, a string left English');
+  assert.equal(t.bodies.length, 2, 'asked again once');
+  const coverage = JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8'));
+  assert.deepEqual(coverage.strings.byReason, { cells: 1 });
+  assert.ok(!(await packOf(f.out)).strings.some((s) => s.hash === PANEL[0].hash), 'not in the pack');
+  assert.match(JSON.parse(t.bodies[0]).system, /keeps exactly the line\nbreaks of its English/);
+  noPanelTold(out.text);
+  await rm(f.dir, { recursive: true });
+});
+
 test('an answer over a string\'s cells does not land: asked again once, then left English and counted (cells), as a changed directive is; one within them the second time lands; a form over them the pack had before stays as it was', async () => {
   const f = await fixture({ strings: { ...EXPORT, strings: PANEL } });
   // The pack there holds, from before, a form of the heading over its 5 cells.

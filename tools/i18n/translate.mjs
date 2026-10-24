@@ -150,7 +150,8 @@
 // English word for a key with no word or for none, the runic text and the line breaks at its
 // ends kept; for a table string the engine copies into a slot, its capacity and no marker;
 // for a game string the same `%` directives in the same order and the reader's length (and for one
-// with `cells`, drawn at a fixed cell, at most that many cells: a character each); for an
+// with `cells`, drawn at a fixed cell, at most that many cells, a character each, and its English's
+// count of line breaks); for an
 // object name no plural marker (the Korean rule drops `/` and `\` with the letters after them,
 // so a Korean name holds none and shows one form), no josa marker or `@{` (it is put inside other
 // text), the directives, the reader's length and a Hangul syllable; for a book the line's gates,
@@ -960,13 +961,15 @@ export const cellsOf = (ko) => [...ko].length;
 
 /// Why `ko` is not a translation of game string `en` the engine can take, or null: the line's
 /// gates, the same `%` directives in the same order, for a string drawn at a fixed cell its
-/// `cells` at most (cellsOf), and the reader's length.
+/// `cells` at most (cellsOf) and as many line breaks as its English (the engine refuses either
+/// at display, u6_core::locale::within_place), and the reader's length.
 export function stringGate(en, ko, cells = undefined) {
   const why = gate(en, ko);
   if (why) return why;
   const [a, b] = [directivesOf(en), directivesOf(ko)];
   if (a.length !== b.length || a.some((d, i) => d !== b[i])) return 'directives';
-  if (Number.isInteger(cells) && cellsOf(ko) > cells) return 'cells';
+  const breaks = (t) => t.split('\n').length - 1;
+  if (Number.isInteger(cells) && (cellsOf(ko) > cells || breaks(ko) !== breaks(en))) return 'cells';
   if (Buffer.byteLength(ko) > MAX_STRING_TEXT_BYTES) return 'long';
   return null;
 }
@@ -1429,8 +1432,9 @@ export function stringsSystemOf(style) {
     '"cells": <number> on a string the game draws in a fixed place (a panel\'s line or heading, a',
     'name centred in its field). Keep every % directive of a format exactly, in the same order. A',
     'string with "cells" takes at most that many cells in Korean, where a Hangul syllable, an',
-    'ASCII character and each character of a % directive is one cell: short noun forms (명사형)',
-    'are right there, with no sentence ending. Answer with one JSON object and nothing else:',
+    'ASCII character and each character of a % directive is one cell, and keeps exactly the line',
+    'breaks of its English: short noun forms (명사형) are right there, with no sentence ending.',
+    'Answer with one JSON object and nothing else:',
     '{"lines": [{"n": <number>, "ko": "<the Korean string>"}]}',
     'with exactly one entry for every string asked, its own n.',
     '',

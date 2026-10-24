@@ -2114,8 +2114,9 @@ const PANEL_LABELS: u32 = crate::image::IMAGE_BASE + 0x600;
 /// its NUL): a line with a conversion at each attribute, a heading at the other printed sites
 /// (the level's with a `%/`), a weight label of two bytes at each weight site (as each is in the
 /// original, under the print hooks' three), a format of no word of its own at each site it
-/// leaves out; and two inventory lines, Ready's the bytes of the health heading and the first
-/// refusal's its own.
+/// leaves out; and three inventory lines: Ready's the bytes of the health heading, the torch
+/// line's `Z` and a Hangul syllable's UTF-8 (4 bytes, 2 cells: a weight label's form may be
+/// these bytes) and the first refusal's its own.
 fn panel_texts() -> SiteLines {
     [
         (ROSTER_HP, &b"%3d\n"[..]),
@@ -2134,6 +2135,7 @@ fn panel_texts() -> SiteLines {
         (WEIGHTS[0], b"Zv"),
         (WEIGHTS[1], b"Zy"),
         (READY, b"Zghth"),
+        (TORCH_LINE, "Z가".as_bytes()),
         (CANT, b"Zrf1"),
     ]
     .into_iter()
@@ -2242,6 +2244,7 @@ fn the_panels_lines_and_mode_names_are_catalogued_with_their_cells_and_exported_
     }
     // No budget anywhere else; the left-out formats are not catalogued.
     assert_eq!(entry(b"Zrf1"), Some((Kind::Message, None)));
+    assert_eq!(entry("Z가".as_bytes()), Some((Kind::Message, None)));
     assert_eq!(entry(b"Zsm"), Some((Kind::Label, None)));
     for at in [
         ROSTER_HP,
@@ -2255,7 +2258,7 @@ fn the_panels_lines_and_mode_names_are_catalogued_with_their_cells_and_exported_
         let text = &panel_texts().into_iter().find(|l| l.0 == at).unwrap().1;
         assert!(cat.label_of(text).is_none(), "the format at {at:#x}");
     }
-    assert_eq!(cat.len(), 16);
+    assert_eq!(cat.len(), 17);
     // The export: `cells` on exactly the panels' entries, in site order; every other entry has
     // the four fields it had.
     let export = cat.export();
@@ -2414,23 +2417,35 @@ fn mode_line(rows: &[String]) -> (usize, String) {
     (col, from_col(rows, 11, col))
 }
 
-/// A pack of a form for each attribute line, the three headings, the two weight labels and
-/// mode 2's name (the test's own syllables, each within its English's cells; mode 2's two
-/// syllables are 6 bytes).
+/// The forms of [`panel_ko`]: one for each attribute line, the three headings, the two weight
+/// labels, mode 2's and mode 5's names (the test's own syllables, each within its English's
+/// cells; mode 2's two syllables are 6 bytes, mode 5's three 9), and one for Ready's torch line
+/// (`Z가`, [`panel_texts`]).
+const PANEL_FORMS: [(&str, &str); 11] = [
+    ("Zs1%d\n", "가%d\n"),
+    ("Zs2%d\n", "나%d\n"),
+    ("Zs3%d\n", "다%d\n"),
+    ("Zgmag", "라마"),
+    ("Zghth", "바사"),
+    ("Zl%/Zx", "아%/자"),
+    ("Zv", "차"),
+    ("Zy", "카"),
+    ("Zc2", "타파"),
+    ("Zc5", "가나다"),
+    ("Z가", "하"),
+];
+
+/// A pack of [`PANEL_FORMS`].
 fn panel_ko() -> Pack {
+    panel_ko_but("", "")
+}
+
+/// A pack of [`PANEL_FORMS`], the form for English `en` (when one of theirs) `ko` instead.
+fn panel_ko_but(en: &str, ko: &str) -> Pack {
+    let forms = PANEL_FORMS.map(|(e, k)| string(e, if e == en { ko } else { k }));
     Pack::new(Language::Korean, "test/1", fingerprint([]), [])
         .unwrap()
-        .with_strings([
-            string("Zs1%d\n", "가%d\n"),
-            string("Zs2%d\n", "나%d\n"),
-            string("Zs3%d\n", "다%d\n"),
-            string("Zgmag", "라마"),
-            string("Zghth", "바사"),
-            string("Zl%/Zx", "아%/자"),
-            string("Zv", "차"),
-            string("Zy", "카"),
-            string("Zc2", "타파"),
-        ])
+        .with_strings(forms)
         .unwrap()
 }
 
@@ -2487,12 +2502,13 @@ fn the_inventory_view_prints_the_packs_weight_labels_and_else_the_english() {
 #[test]
 fn the_combat_mode_line_prints_the_packs_name_centred_by_its_cells_and_else_the_english() {
     // Mode 2's two syllables (6 bytes) and mode 3's two letters sit at the same column, half of
-    // 8 less the cells, from column 10; a name the pack lacks (mode 5's) stays English, centred
-    // as before.
+    // 8 less the cells, from column 10; mode 5's three syllables (odd cells, 9 bytes) at half of
+    // 5, rounded toward zero; a name the pack lacks (mode 6's) stays English, centred as before.
     let line = |pack: Option<Pack>, mode| mode_line(&panel_rows(pack, mode, PanelView::ModeLine).0);
     assert_eq!(line(Some(panel_ko()), 2), (13, "타파".into()));
     assert_eq!(line(Some(panel_ko()), 3), (13, "Zk".into()));
-    assert_eq!(line(Some(panel_ko()), 5), (12, "Zc5".into()));
+    assert_eq!(line(Some(panel_ko()), 5), (12, "가나다".into()));
+    assert_eq!(line(Some(panel_ko()), 6), (12, "Zc6".into()));
     let (_, counts) = panel_rows(Some(panel_ko()), 2, PanelView::ModeLine);
     assert_eq!(counts, [1, 0], "the name read for display, found");
     // Without a pack: the English, each centred by its bytes as before.
@@ -2501,4 +2517,88 @@ fn the_combat_mode_line_prints_the_packs_name_centred_by_its_cells_and_else_the_
     assert_eq!(line(None, 5), (12, "Zc5".into()));
     // A mode with no name draws nothing on the line.
     assert_eq!(line(Some(panel_ko()), 0), (17, String::new()));
+}
+
+#[test]
+fn a_panel_form_over_its_cells_or_with_another_count_of_line_breaks_stays_english_counted_missed() {
+    let (rows, counts) = panel_rows(Some(panel_ko()), 2, PanelView::Stats);
+    assert_eq!(
+        (from_col(&rows, 2, 10), counts),
+        ("가20".into(), [6, 0]),
+        "within its 6 cells, one line break as the English: the pack's form"
+    );
+    // Over the attribute line's 6 cells (9: six syllables, the directive's two, the line break),
+    // or within them with one more line break than the English: the English, one miss; the
+    // other lines the pack's forms.
+    for (case, ko) in [
+        ("over its cells", "가나다라마바%d\n"),
+        ("a line break more", "가\n%d\n"),
+    ] {
+        let (rows, counts) = panel_rows(Some(panel_ko_but("Zs1%d\n", ko)), 2, PanelView::Stats);
+        assert_eq!(from_col(&rows, 2, 10), "Zs120", "{case}: the English");
+        assert_eq!(
+            from_col(&rows, 3, 10),
+            "나15",
+            "{case}: the next line the pack's"
+        );
+        assert_eq!(counts, [5, 1], "{case}: one miss");
+    }
+    // A label read for display likewise: a mode name over the line's 7 cells.
+    let (rows, counts) = panel_rows(
+        Some(panel_ko_but("Zc2", "가나다라마바사아")),
+        2,
+        PanelView::ModeLine,
+    );
+    assert_eq!((mode_line(&rows), counts), ((12, "Zc2".into()), [0, 1]));
+}
+
+#[test]
+fn a_weight_labels_form_with_the_bytes_of_another_catalogued_string_shows_as_it_is() {
+    // The first weight label's form is the torch line's English bytes (`Z가`, 2 cells, within the
+    // label's 2), which the pack translates otherwise: the view puts the form as it is, not
+    // looking it up again.
+    let (rows, counts) = panel_rows(Some(panel_ko_but("Zv", "Z가")), 2, PanelView::Inventory);
+    let row: Vec<char> = rows[9].chars().collect();
+    assert_eq!(row[..2].iter().collect::<String>(), "Z가");
+    assert_eq!(row[9..10].iter().collect::<String>(), "카");
+    assert_eq!(
+        counts,
+        [3, 0],
+        "the two labels and the mode name, each once"
+    );
+}
+
+#[test]
+fn the_cell_budget_of_one_string_two_sites_catalogue_is_the_smaller_whatever_their_order() {
+    let cat = Catalogue::from_budgeted([
+        // A later smaller budget tightens an earlier one; a later larger one does not loosen it.
+        (Kind::Message, b"Zb1".to_vec(), Some(7)),
+        (Kind::Message, b"Zb1".to_vec(), Some(4)),
+        (Kind::Message, b"Zb2".to_vec(), Some(4)),
+        (Kind::Message, b"Zb2".to_vec(), Some(7)),
+        // A site with none bounds nothing, before or after.
+        (Kind::Message, b"Zb3".to_vec(), Some(5)),
+        (Kind::Message, b"Zb3".to_vec(), None),
+        (Kind::Format, b"Zb4 %d".to_vec(), None),
+        (Kind::Format, b"Zb4 %d".to_vec(), Some(6)),
+        // A label's kind wins, the budgets merged as above.
+        (Kind::Message, b"Zb5".to_vec(), Some(6)),
+        (Kind::Label, b"Zb5".to_vec(), Some(3)),
+        (Kind::Message, b"Zb6".to_vec(), Some(3)),
+        (Kind::Label, b"Zb6".to_vec(), None),
+        (Kind::Label, b"Zb7".to_vec(), None),
+        (Kind::Message, b"Zb7".to_vec(), Some(4)),
+        (Kind::Label, b"Zb8".to_vec(), Some(7)),
+        (Kind::Format, b"Zb8".to_vec(), Some(2)),
+    ]);
+    let entry = |text: &[u8]| cat.label_of(text).map(|e| (e.kind, e.cells));
+    assert_eq!(cat.len(), 8, "each once");
+    assert_eq!(entry(b"Zb1"), Some((Kind::Message, Some(4))));
+    assert_eq!(entry(b"Zb2"), Some((Kind::Message, Some(4))));
+    assert_eq!(entry(b"Zb3"), Some((Kind::Message, Some(5))));
+    assert_eq!(entry(b"Zb4 %d"), Some((Kind::Format, Some(6))));
+    assert_eq!(entry(b"Zb5"), Some((Kind::Label, Some(3))));
+    assert_eq!(entry(b"Zb6"), Some((Kind::Label, Some(3))));
+    assert_eq!(entry(b"Zb7"), Some((Kind::Label, Some(4))));
+    assert_eq!(entry(b"Zb8"), Some((Kind::Label, Some(2))));
 }

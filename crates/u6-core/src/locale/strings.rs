@@ -44,15 +44,20 @@
 //! [`crate::magic::PRINTED`]); a direction name, read through [`super::shown`] wherever it is
 //! shown (the spells', Move's, Dig's and the telescope's lines, a scout's warning), follows the
 //! pack everywhere. A string shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`, a
-//! name and a space), is not catalogued either; but (2026-10-21) a label of a pointer table,
-//! read through [`super::shown`], is catalogued from 1 byte (a wind's name is 2). The
-//! conversation's words keep the minimum: its display reads them as the print hooks do.
+//! name and a space), is not catalogued either; but (2026-10-21) a label read for display
+//! through [`super::shown`] (a pointer table's, or a panel label at its own address,
+//! [`crate::ui::tables::SHOWN_AT`]) is catalogued from 1 byte (a wind's name is 2, a weight
+//! label 2). The conversation's words keep the minimum: its display reads them as the print
+//! hooks do.
 //!
 //! **Lookup.** By content: [`hash64`] of the English bytes, only where game code prints them
 //! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`], [`Catalogue::of`]) or reads
-//! a label of a pointer table for display ([`super::shown`], [`Catalogue::label_of`]); never on
-//! what an escape generates, and never where logic reads a string. A string under [`MIN_BYTES`]
-//! is found only at such a label read: the same bytes printed as a format stay English.
+//! a label for display (a pointer table's, or a panel label at its own address,
+//! [`crate::ui::tables::SHOWN_AT`]; [`super::shown`], [`Catalogue::label_of`]); never on what an
+//! escape generates, and never where logic reads a string. A string under [`MIN_BYTES`] is
+//! found only at such a label read: the same bytes printed as a format stay English. A string
+//! with a cell budget ([`Entry::cells`]) takes the pack's text only within it (2026-10-24, the
+//! lookup's check).
 //!
 //! **The export** ([`Catalogue::to_json`], [`FORMAT`]): every catalogued string once, in the
 //! order the sites list them: its hash, its length, its kind and its text (one character per
@@ -118,7 +123,9 @@ pub enum Kind {
     Message,
     /// `printf`'s format with a conversion (`%d`, `%s`, ...): its `%` directives are kept.
     Format,
-    /// A word a table holds, shown through an escape inside other text (`%s`, `$n`).
+    /// A label read for display: a word a pointer table holds, shown through an escape inside
+    /// other text (`%s`, `$n`), or (2026-10-24) a panel label at its own address
+    /// ([`crate::ui::tables::SHOWN_AT`]), put as it is.
     Label,
 }
 
@@ -361,8 +368,9 @@ pub(crate) fn install_test_forms(
 
 impl Catalogue {
     /// The catalogue of `game` (the decrunched executable): every site's string that reads
-    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer, a label of a pointer table
-    /// 1 byte or longer ([`Catalogue::add_label`]). A file that is no hunk file gives an empty
+    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer, a label read for display (a
+    /// pointer table's, or a panel label at its own address, [`crate::ui::tables::SHOWN_AT`]) 1
+    /// byte or longer ([`Catalogue::add_label`]). A file that is no hunk file gives an empty
     /// catalogue (nothing is substituted then).
     pub fn from_game(game: &[u8]) -> Catalogue {
         let mut c = Catalogue::default();
@@ -447,12 +455,20 @@ impl Catalogue {
     /// label as a pointer table's, [`Catalogue::add_label`]).
     #[cfg(test)]
     pub(crate) fn from_entries(entries: impl IntoIterator<Item = (Kind, Vec<u8>)>) -> Catalogue {
+        Catalogue::from_budgeted(entries.into_iter().map(|(kind, text)| (kind, text, None)))
+    }
+
+    /// [`Catalogue::from_entries`] with each site's cell budget (tests, 2026-10-24).
+    #[cfg(test)]
+    pub(crate) fn from_budgeted(
+        entries: impl IntoIterator<Item = (Kind, Vec<u8>, Option<u16>)>,
+    ) -> Catalogue {
         let mut c = Catalogue::default();
-        for (kind, text) in entries {
+        for (kind, text, cells) in entries {
             if kind == Kind::Label {
-                c.add_label(text, None);
+                c.add_label(text, cells);
             } else {
-                c.add(kind, text);
+                c.add_within(kind, text, MIN_BYTES, cells);
             }
         }
         c
@@ -467,8 +483,9 @@ impl Catalogue {
         self.add_within(kind, text, MIN_BYTES, None);
     }
 
-    /// [`Catalogue::add`] of a label of a pointer table, which game code reads for display
-    /// through [`super::shown`] only (2026-10-21): 1 byte or longer. One under [`MIN_BYTES`] is
+    /// [`Catalogue::add`] of a label read for display (a pointer table's, or a panel label at its
+    /// own address, [`crate::ui::tables::SHOWN_AT`]), which game code reads through
+    /// [`super::shown`] only (2026-10-21): 1 byte or longer. One under [`MIN_BYTES`] is
     /// found only by [`Catalogue::label_of`], never by the print hooks. With the cell budget of
     /// its site (2026-10-24, [`Catalogue::add_within`]).
     fn add_label(&mut self, text: Vec<u8>, cells: Option<u16>) {
@@ -517,8 +534,9 @@ impl Catalogue {
         self.get(hash64(bytes)).filter(|e| e.text == bytes)
     }
 
-    /// The entry of exactly `bytes`, if catalogued, for a label of a pointer table read for
-    /// display ([`super::shown`]): as [`Catalogue::of`], and a label under [`MIN_BYTES`] too
+    /// The entry of exactly `bytes`, if catalogued, for a label read for display (a pointer
+    /// table's, or a panel label at its own address, [`crate::ui::tables::SHOWN_AT`];
+    /// [`super::shown`]): as [`Catalogue::of`], and a label under [`MIN_BYTES`] too
     /// (2026-10-21).
     pub fn label_of(&self, bytes: &[u8]) -> Option<&Entry> {
         if bytes.is_empty() {
