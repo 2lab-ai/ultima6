@@ -90,7 +90,7 @@ impl Scale {
 
 /// The largest image the compositor magnifies, width × height: the paper bitmap, the largest
 /// image the game draws, the game's 320 × 200 screen. In both builds: the frame of Wide mode
-/// (spec 13, [`WIDTH`] × [`HEIGHT`] 912 × 336) holds no larger image.
+/// (spec 13 and 14, [`WIDTH`] × [`HEIGHT`] 912 × 408) holds no larger image.
 pub const IMAGE_MAX: (usize, usize) = (320, 200);
 
 /// An image as the game holds it now: palette indices, row-major, at most [`IMAGE_MAX`] (a

@@ -7619,7 +7619,7 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   await page.mouse.move(...(await h.screenPoint(page, 8, 100)));
   await h.runFrames(page, 10);
   m = await moveSeen();
-  assert.ok(m.rects > 0 && m.meets && !m.full && m.sameGame && m.view === 'game', 'precondition: the pointer moved down the map\'s edge, a partial repaint meeting a source of the band');
+  assert.ok(m.rects > 0 && m.meets && !m.full && m.sameGame && m.view === 'game', 'precondition: a partial repaint whose rect (the widened take; the pointer\'s move only makes the draw) meets a source of the band');
   s = await paperShown(page);
   paperAsFrame(s, 'a source of the band changed');
   assert.notEqual(s.hash, clean.hash, 'a source of the band changed: the band painted again with it');
