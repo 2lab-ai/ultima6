@@ -2167,11 +2167,15 @@ fn the_book_save_guard_refuses_a_folder_under_a_root_named_through_another_path(
     );
     // Another case of the root's name, where the file system folds case (it names the root).
     let folded = s.0.join("r/sub");
+    let case = "the case-folding route on a fixture";
     if folded.is_dir() {
         assert!(
             !outside_repository(&folded, &roots),
             "under the root, in another case"
         );
+        eprintln!("{case}: under the root, in another case, refused: pass");
+    } else {
+        eprintln!("{case}: skipped: the file system does not fold case");
     }
     // A root whose metadata does not read refuses everything.
     let gone = [s.0.join("gone")];
@@ -2245,8 +2249,8 @@ fn the_book_save_guard_refuses_a_root_named_through_the_macos_data_volume() {
 /// named through the Data volume is refused, and a scratch folder of the system temp directory
 /// named the same way is accepted. It runs on macOS where `/System/Volumes/Data` is a
 /// directory, and prints a line saying it skipped otherwise; a case whose form through the Data
-/// volume is not a directory (a tree on another volume) prints that it skipped that case. Prints
-/// each case's label and pass/fail only.
+/// volume is not a directory (a tree whose resolved path already has the Data-volume form)
+/// prints that it skipped that case. Prints each case's label and pass/fail only.
 #[test]
 fn the_book_save_guard_refuses_the_repository_through_the_macos_data_volume() {
     let test = "the firmlink route on this repository";
