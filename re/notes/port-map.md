@@ -86,7 +86,7 @@ Totals: functions 599: ported 496, partial 6, stubbed 3, replaced 84, planned 2,
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
 | 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
-| 0x104140 | main | M | `main_loop/commands.rs:429 in dispatch` | stubbed |
+| 0x104140 | main | M | `main_loop/commands.rs:436 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `inventory/portrait.rs::direction_to` | ported |
 | 0x1051a6 | ui | M | `ui/pointer.rs::update_shape` | ported |
