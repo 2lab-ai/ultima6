@@ -3,9 +3,15 @@
 //! absent). Reads them and prints observations only. One test writes the user's data: with
 //! `U6_BOOK_SAVE=<dir>` (an existing folder outside the repository and its main checkout) it
 //! writes a save of the user's game with a spellbook given to the hero to a new `<dir>/savegame`
-//! (spec 08, 2026-10-25); without the variable it writes nothing. The tests of its guard and
-//! writer write too, only under the system temp directory: each a scratch folder of its own
-//! (fixture folders, symlinks and the test's own bytes), removed when it ends.
+//! (spec 08, 2026-10-25); without the variable it writes nothing. Its guard refuses every route
+//! to a root of the repository (the compiled tree, its main checkout), or to a directory inside
+//! one, that this host offers without administrator rights: symlinks, case folding and the
+//! Data-volume firmlink. A mount that places a part of the repository at another path, and
+//! another process replacing directories while it writes, are out of its scope; the backstop is
+//! that a file left in a working tree matters only once added, and commits are made after a
+//! `git status --porcelain` check. The tests of its guard and writer write too, only under the
+//! system temp directory: each a scratch folder of its own (fixture folders, symlinks and the
+//! test's own bytes), removed when it ends.
 // The tests read the zip, the oracle's save and the environment, and write the `U6_BOOK_SAVE`
 // save and their scratch files (`OpenOptions` for a file made new).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -1914,6 +1920,12 @@ fn repository_roots(tree: &Path) -> Result<Vec<PathBuf>, &'static str> {
 /// macOS `/System/Volumes/Data/Users/...` is `/Users/...` through the Data volume's firmlink, and
 /// resolving leaves that form as it is), so no path prefix decides. A root whose metadata does
 /// not read, or an ancestor's, refuses. Writes nothing.
+///
+/// What it catches: every route to a root itself (a symlink, another case, the firmlink), and
+/// to a directory under a root reached through such a route, as the walk up from the resolved
+/// path meets the root. What it does not: a mount that puts a subdirectory of the repository at
+/// another path (its ancestors there are not the root's); making one needs administrator
+/// rights, and it is out of scope (the module doc).
 fn outside_repository(dir: &Path, roots: &[PathBuf]) -> bool {
     use std::os::unix::fs::MetadataExt;
     let plain = dir.is_absolute()
@@ -1939,13 +1951,15 @@ fn outside_repository(dir: &Path, roots: &[PathBuf]) -> bool {
 /// `<dir>/savegame`: `dir` must pass [`outside_repository`] for `roots`, the folder must not
 /// exist yet (`create_dir`, so neither a folder nor a symlink is there), and each file is made
 /// new ([`write_new_files`]). Returns how many were written, or a fixed sentence of what refused
-/// (no path, name or byte in it). When the folder made fails the check again, it is removed
-/// (empty) before the refusal.
+/// (no path, name or byte in it). When the folder made fails the check again, it attempts to
+/// remove that folder (empty: nothing was written in it) and says in the refusal when the
+/// removal failed too.
 ///
-/// It assumes the directories stay put while it runs: it checks paths, then writes by path, so
-/// a directory another process replaces between the check and the write is out of its scope.
-/// Each file is made with `create_new` (the leaf is never followed), but its parents are not
-/// held open by handle. This is a single-user test run, not a service.
+/// It refuses what [`outside_repository`] refuses, so its scope is that guard's. It also
+/// assumes the directories stay put while it runs: it checks paths, then writes by path, so a
+/// directory another process replaces between the check and the write is out of its scope. Each
+/// file is made with `create_new` (the leaf is not followed), but its parents are not held open
+/// by handle. This is an opt-in, single-user test run, not a service.
 fn write_save(
     dir: &Path,
     roots: &[PathBuf],
@@ -1959,8 +1973,11 @@ fn write_save(
     std::fs::create_dir(&folder)
         .map_err(|_| "its savegame folder exists already or could not be made")?;
     if !outside_repository(&folder, roots) {
-        let _ = std::fs::remove_dir(&folder);
-        return Err("the savegame folder made is not outside the repository");
+        return Err(if std::fs::remove_dir(&folder).is_ok() {
+            "the savegame folder made is not outside the repository; it was removed"
+        } else {
+            "the savegame folder made is not outside the repository, and removing it failed"
+        });
     }
     write_new_files(
         &folder,
@@ -2148,6 +2165,14 @@ fn the_book_save_guard_refuses_a_folder_under_a_root_named_through_another_path(
         outside_repository(&beside, &roots),
         "a folder beside the root"
     );
+    // Another case of the root's name, where the file system folds case (it names the root).
+    let folded = s.0.join("r/sub");
+    if folded.is_dir() {
+        assert!(
+            !outside_repository(&folded, &roots),
+            "under the root, in another case"
+        );
+    }
     // A root whose metadata does not read refuses everything.
     let gone = [s.0.join("gone")];
     assert!(
@@ -2156,19 +2181,80 @@ fn the_book_save_guard_refuses_a_folder_under_a_root_named_through_another_path(
     );
 }
 
-/// The live check (writes nothing; macOS, where the Data volume is mounted, else it does
-/// nothing): each root of this tree (the worktree and its main checkout) named through
-/// `/System/Volumes/Data`, which names the same directories as `/` and which resolving a path
-/// leaves as it is, is refused; the dispatch folder beside the repository, named the same way,
-/// is not. Prints each case's label and pass/fail only.
-#[test]
-fn the_book_save_guard_refuses_the_repository_through_the_macos_data_volume() {
+/// macOS's Data volume (`/System/Volumes/Data`), which names the same directories as `/` through
+/// its firmlinks, and which resolving a path leaves as it is; `None` (with a line saying the test
+/// skipped) where this host has none: another system, or a macOS without it.
+fn data_volume(test: &str) -> Option<&'static Path> {
     let data = Path::new("/System/Volumes/Data");
-    let dispatch = data.join("Users/zhugehyuk/Games/ultima6/work/dispatch/r1023-wide");
-    if !cfg!(target_os = "macos") || !dispatch.is_dir() {
+    if cfg!(target_os = "macos") && data.is_dir() {
+        Some(data)
+    } else {
+        eprintln!("{test}: skipped: no /System/Volumes/Data on this host");
+        None
+    }
+}
+
+/// `path` (absolute) named through the Data volume `data`.
+fn through(data: &Path, path: &Path) -> PathBuf {
+    data.join(path.strip_prefix("/").quiet())
+}
+
+/// The firmlink route on a fixture (writes only its scratch folder): a root `R` of the scratch
+/// folder, given as `[R]`, named through the Data volume (the system temp directory has that
+/// form on macOS): `R` and `R/sub` are refused, a folder beside `R` is accepted. It runs where
+/// the Data volume is a directory and `R`'s form through it is one too; else it prints a line
+/// saying it skipped.
+#[test]
+fn the_book_save_guard_refuses_a_root_named_through_the_macos_data_volume() {
+    let test = "the firmlink route on a fixture";
+    let Some(data) = data_volume(test) else {
+        return;
+    };
+    let s = Scratch::new("firmlink");
+    let root = s.dir("R");
+    s.dir("R/sub");
+    s.dir("beside");
+    let aliased = through(data, &root);
+    if !aliased.is_dir() {
+        eprintln!("{test}: skipped: the temp folder has no Data-volume form");
         return;
     }
+    let roots = [root];
+    let beside = through(data, &s.0.join("beside"));
+    assert!(
+        beside.is_dir(),
+        "the folder beside it, through the Data volume"
+    );
+    assert!(
+        !outside_repository(&aliased, &roots),
+        "the root, through it"
+    );
+    assert!(
+        !outside_repository(&aliased.join("sub"), &roots),
+        "under the root, through it"
+    );
+    assert!(
+        outside_repository(&beside, &roots),
+        "a folder beside the root, through it"
+    );
+    eprintln!("{test}: the root and a folder under it refused, a folder beside it accepted: pass");
+}
+
+/// The live check on this repository (writes only its scratch folder): each root of the tree
+/// this test is compiled from (the tree, and its main checkout when it is a linked worktree)
+/// named through the Data volume is refused, and a scratch folder of the system temp directory
+/// named the same way is accepted. It runs on macOS where `/System/Volumes/Data` is a
+/// directory, and prints a line saying it skipped otherwise; a case whose form through the Data
+/// volume is not a directory (a tree on another volume) prints that it skipped that case. Prints
+/// each case's label and pass/fail only.
+#[test]
+fn the_book_save_guard_refuses_the_repository_through_the_macos_data_volume() {
+    let test = "the firmlink route on this repository";
+    let Some(data) = data_volume(test) else {
+        return;
+    };
     let roots = repository_roots(&compiled_tree()).quiet();
+    let s = Scratch::new("live");
     let mut cases: Vec<(String, PathBuf, bool)> = roots
         .iter()
         .enumerate()
@@ -2178,18 +2264,25 @@ fn the_book_save_guard_refuses_the_repository_through_the_macos_data_volume() {
             } else {
                 "the main checkout"
             };
-            let aliased = data.join(r.strip_prefix("/").quiet());
-            (format!("{label} through the Data volume"), aliased, false)
+            (
+                format!("{label} through the Data volume"),
+                through(data, r),
+                false,
+            )
         })
         .collect();
     cases.push((
-        "the dispatch folder through the Data volume".into(),
-        dispatch,
+        "a temp folder through the Data volume".into(),
+        through(data, &s.0),
         true,
     ));
     let mut failed = Vec::new();
     for (case, dir, accepted) in &cases {
-        let ok = dir.is_dir() && outside_repository(dir, &roots) == *accepted;
+        if !dir.is_dir() {
+            eprintln!("{case}: skipped: no such form");
+            continue;
+        }
+        let ok = outside_repository(dir, &roots) == *accepted;
         let verdict = if *accepted { "accepted" } else { "refused" };
         eprintln!("{case}: {verdict}: {}", if ok { "pass" } else { "fail" });
         if !ok {

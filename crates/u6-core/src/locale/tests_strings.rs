@@ -3067,15 +3067,17 @@ fn looks_description_of_a_spell_shows_the_packs_spell_and_reagent_names_and_the_
 fn looks_description_of_a_spell_falls_back_to_the_english_name_over_its_field_counted_missed() {
     // An enabled pack whose form for spell 1's name is 14 syllables, over its 13 cells: the
     // page's line and the description's name stay English, each counted a miss (the page is
-    // drawn twice). A reagent form with a line break its English lacks: a reagent's name has no
-    // cell budget, and the line-break rule belongs to the budget (`locale::within_place`, as the
-    // translation tool's gate), so the pack's form is shown as it is, a hit. A reagent the pack
-    // has no form for: English, a miss.
+    // drawn twice). A reagent form with a line break inside it, which its English lacks: a
+    // reagent's name has no cell budget, and the engine checks the count of line breaks only
+    // within a budget (`locale::within_place`); the translation tool's gate likewise counts
+    // interior breaks only for a budgeted string (it refuses a leading or trailing break its
+    // English lacks for every string, so the break is inside). The pack's form is shown as it
+    // is, a hit. A reagent the pack has no form for: English, a miss.
     let forms = book_forms()
         .into_iter()
         .filter_map(|(en, ko)| match en.as_str() {
             "Zw01" => Some(string(&en, "가나다라마바사아자차카타파하")),
-            "Zj0" => Some(string(&en, "사\n")),
+            "Zj0" => Some(string(&en, "사\n아")),
             "Zj2" => None,
             _ => Some(string(&en, &ko)),
         });
@@ -3085,8 +3087,8 @@ fn looks_description_of_a_spell_falls_back_to_the_english_name_over_its_field_co
         .unwrap();
     let (ko, counts) = spellwork(Spellwork::LookChosen, book_looked_at, Some(pack));
     let (en, _) = spellwork(Spellwork::LookChosen, book_looked_at, None);
-    assert!(ko.ends_with("Zw01-Zsyl\n사\n\nZj2"), "the English name");
-    assert_eq!(ko, en.replace("\nZj0\n", "\n사\n\n"));
+    assert!(ko.ends_with("Zw01-Zsyl\n사\n아\nZj2"), "the English name");
+    assert_eq!(ko, en.replace("\nZj0\n", "\n사\n아\n"));
     // Found: the circle and the level word twice, and the first reagent's form. Missed: the
     // name twice on the page and once in the description, and the second reagent.
     assert_eq!(counts, [5, 4]);
