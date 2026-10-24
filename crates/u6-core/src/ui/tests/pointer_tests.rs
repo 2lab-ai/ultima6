@@ -1443,3 +1443,136 @@ fn pointer_tables_from_a_synthetic_game() {
     );
     assert!(PointerTables::load(&[0; 8]).is_err());
 }
+
+/// Spec 11 Design 7 (rev 2), Acceptance 5's synthetic item: a line of eight letters the HD font
+/// lists (the synthetic font, drawn in the UI's cells, so both builds draw it at the same place)
+/// and the pointer sprite over one of them, its shape inside that cell. The HD frame as the
+/// platform composes it ([`crate::hd::HdView`], HD and the HD font on) lists every cell of the
+/// line, as with the pointer away, and holds the same blocks: the cell under the sprite is its
+/// paper, no pixel of the sprite. The shown frame still has the sprite there (classic, colour
+/// 16 + v).
+#[test]
+fn the_pointer_over_a_line_of_text_leaves_every_cell_listed_and_out_of_the_hd_frame() {
+    use crate::hd::HdView;
+    use u6_render::hd::{HdGlyph, Scale, word};
+
+    const ROW: usize = 15;
+    const COLS: std::ops::Range<usize> = 23..31;
+    const UNDER: usize = 26;
+    // The shape: values 1..=3 in a 6 × 6 square, its top left at the hot spot.
+    let rows: Vec<[u8; 16]> = (0..6)
+        .map(|r| std::array::from_fn(|c| if c < 6 { (r + c) as u8 % 3 + 1 } else { 0 }))
+        .collect();
+    let run = |at: (i16, i16)| {
+        let mut s = state();
+        s.ui.pointer = PointerState::from_tables(PointerTables {
+            shapes: vec![Shape {
+                dx: 0,
+                dy: 0,
+                rows: rows.clone(),
+            }],
+            shown: true,
+            ..PointerTables::default()
+        });
+        let mut e = Engine::with_game(s, Files::default(), |_st, io| async move {
+            let font = font();
+            io.draw(|fb| {
+                for (i, c) in fb.palette.iter_mut().enumerate() {
+                    let v = i as u8;
+                    *c = u6_render::Rgb::new(v.wrapping_mul(9), 255 - v, 7);
+                }
+                for (k, col) in COLS.enumerate() {
+                    text::draw_glyph(
+                        fb,
+                        &font,
+                        col * CELL,
+                        ROW * CELL,
+                        b'A' + k as u8,
+                        INK,
+                        PAPER,
+                    );
+                }
+            });
+            io.present();
+            loop {
+                io.vblank().await;
+            }
+        });
+        e.enable_src_plane();
+        let p = InputEvent::Pointer {
+            x: at.0,
+            y: at.1,
+            buttons: 0,
+        };
+        e.tick(&[p], 16);
+        e.tick(&[], 16);
+        e
+    };
+    let over = (UNDER * CELL) as i16 + 1;
+    let (over, away) = (run((over, (ROW * CELL) as i16 + 1)), run((2, 2)));
+    let fb = over.frame();
+    let sprite: Vec<(usize, usize, u8)> = (0..36)
+        .map(|k| (k % 6, k / 6))
+        .map(|(c, r)| (UNDER * CELL + 1 + c, ROW * CELL + 1 + r, rows[r][c]))
+        .collect();
+    for &(x, y, v) in &sprite {
+        assert_eq!(
+            fb.get(x, y),
+            Some(16 + v),
+            "precondition: the sprite in the shown frame at ({x}, {y})"
+        );
+    }
+    let (ink, paper) = (fb.palette[usize::from(INK)], fb.palette[usize::from(PAPER)]);
+    let line: Vec<HdGlyph> = COLS
+        .enumerate()
+        .map(|(k, col)| HdGlyph {
+            x: (col * CELL) as u16,
+            y: (ROW * CELL) as u16,
+            code: u16::from(b'A' + k as u8),
+            ink,
+            paper,
+        })
+        .collect();
+    let blank = Framebuffer::new();
+    for scale in [Scale::X2, Scale::X4] {
+        let view = |e: &Engine| {
+            let mut v = HdView::new();
+            v.set(true, scale);
+            v.set_font(true);
+            v.present(Some(e), &blank);
+            v
+        };
+        let (a, b) = (view(&over), view(&away));
+        println!(
+            "{scale:?}: {} cells listed with the pointer over the line, {} with it away",
+            a.glyphs().len(),
+            b.glyphs().len()
+        );
+        assert_eq!(
+            b.glyphs(),
+            line.as_slice(),
+            "{scale:?}: the pointer away: the line listed"
+        );
+        assert_eq!(
+            a.glyphs(),
+            line.as_slice(),
+            "{scale:?}: the pointer over the line: every cell listed"
+        );
+        let n = scale.factor();
+        let width = u6_render::WIDTH * n;
+        for &(x, y, _) in &sprite {
+            for k in 0..n * n {
+                let at = (y * n + k / n) * width + x * n + k % n;
+                assert_eq!(
+                    a.rgba()[at],
+                    word(paper),
+                    "{scale:?}: ({x}, {y}) is the cell's paper"
+                );
+            }
+        }
+        assert!(
+            a.rgba() == b.rgba(),
+            "{scale:?}: the HD frame as with the pointer away"
+        );
+    }
+}

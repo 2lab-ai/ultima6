@@ -17,7 +17,8 @@
 //!
 //! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale, the pack
 //! ([`HdPack`], spec 07 H2), the HD font mode (spec 11) and when to compose (the web page's
-//! `Game::set_hd`, `Game::set_hd_pack`, `Game::set_hd_font` and `Game::present` are it).
+//! `Game::set_hd`, `Game::set_hd_pack`, `Game::set_hd_font` and `Game::present` are it). It is
+//! composed from the published frame, without the pointer sprite (spec 11 Design 7).
 
 use std::rc::Rc;
 
@@ -33,10 +34,13 @@ use crate::converse::Msg;
 use crate::engine::{Engine, Io};
 use crate::state::State;
 
-/// Port-only (spec 07 HD0): the HD frame of an engine's shown frame, on or off, at 2× or 4×. On,
-/// [`HdView::present`] composes it when the shown frame's colours ([`Engine::frame_version`]) or
-/// sources ([`Engine::src_version`]) or the setting changed since the frame it holds; off, it
-/// does nothing (the pack included: nothing of it runs).
+/// Port-only (spec 07 HD0): the HD frame of an engine's published frame, on or off, at 2× or
+/// 4×. On, [`HdView::present`] composes it when the published frame
+/// ([`Engine::published_version`]) or the setting changed since the frame it holds; off, it does
+/// nothing (the pack included: nothing of it runs). Spec 11 Design 7: the published frame is the
+/// screen without the pointer sprite ([`Engine::published_frame`]), so the HD frame and its glyph
+/// list are the screen as the game drew it, and a move of the sprite alone composes nothing; the
+/// platform draws the sprite over the HD frame ([`Engine::sprite`]).
 pub struct HdView {
     on: bool,
     scale: Scale,
@@ -44,9 +48,9 @@ pub struct HdView {
     version: u64,
     compositor: Compositor,
     images: ImageCache,
-    /// What the frame holds: the engine frame's versions (`None` for the black frame before a
+    /// What the frame holds: the published frame's version (`None` for the black frame before a
     /// start) and `version`; `None` before the first composition and after a start.
-    holds: Option<(Option<(u64, u64)>, u64)>,
+    holds: Option<(Option<u64>, u64)>,
 }
 
 impl Default for HdView {
@@ -137,17 +141,14 @@ impl HdView {
         self.images = ImageCache::new();
     }
 
-    /// With HD on: composes the shown frame of `engine` (`blank` before a start) when the HD
-    /// frame does not hold its colours and sources at the setting now. Returns whether a block
-    /// of the HD frame changed.
+    /// With HD on: composes the published frame of `engine` ([`Engine::published_frame`], without
+    /// the pointer sprite; `blank` before a start) when the HD frame does not hold it at the
+    /// setting now. Returns whether a block of the HD frame changed.
     pub fn present(&mut self, engine: Option<&Engine>, blank: &Framebuffer) -> bool {
         if !self.on {
             return false;
         }
-        let key = (
-            engine.map(|e| (e.frame_version(), e.src_version())),
-            self.version,
-        );
+        let key = (engine.map(Engine::published_version), self.version);
         if self.holds == Some(key) {
             return false;
         }
@@ -155,7 +156,8 @@ impl HdView {
             Some(e) => {
                 let state = e.state();
                 let mut images = self.images.images(&state, e.io());
-                self.compositor.compose(e.frame(), &mut images, self.scale)
+                self.compositor
+                    .compose(&e.published_frame(), &mut images, self.scale)
             }
             None => self.compositor.compose(blank, &mut NoImages, self.scale),
         };
