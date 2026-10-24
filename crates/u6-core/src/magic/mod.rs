@@ -71,9 +71,10 @@ pub use travel::{locate, wizard_eye};
 /// addresses, for the locale layer's catalogue ([`crate::locale::strings`]). A format of no word
 /// of its own (the result formats, the newlines, the announcement's, the book's number, the
 /// direction's and Locate's) and a string under three bytes the catalogue leaves out: they stay
-/// as they are. The incantation's syllables (printed as a format, the game's magic words), the
-/// names the spells put through `%s` (the spells', the circles') and the spellbook page's line
-/// (a panel's: it stays English) are not listed.
+/// as they are. The incantation's syllables (printed as a format, the game's magic words) are
+/// not listed: they stay English. The spellbook page's level word, drawn at a fixed cell, is
+/// listed apart with its cells ([`PAGE_PRINTED`], 2026-10-25), and the names the spells put
+/// through `%s` (the spells', the circles') are labels ([`NAME_LABELS`], [`CIRCLE_LABELS`]).
 pub(crate) const PRINTED: [&[u32]; 10] = [
     book::PRINTED,
     cast::PRINTED,
@@ -90,6 +91,14 @@ pub(crate) const PRINTED: [&[u32]; 10] = [
 /// Port-only (spec 08, slice K2): the result messages', the potions' and the direction names'
 /// labels for the locale layer's catalogue.
 pub(crate) use tables::LABELS;
+
+/// Port-only (spec 08, 2026-10-25): the spellbook page's strings for the locale layer's
+/// catalogue, each within its field there: the level word, a `printf` format within its
+/// English's cells ([`book::PAGE_PRINTED`]); the spells' names, labels within
+/// [`tables::NAME_CELLS`], and the circles' names, labels within [`tables::CIRCLE_CELLS`]. Cast's
+/// announcement and Detect Magic's charge line read the same names.
+pub(crate) use book::PAGE_PRINTED;
+pub(crate) use tables::{CIRCLE_CELLS, CIRCLE_LABELS, NAME_CELLS, NAME_LABELS};
 
 /// Spellbook object type.
 pub const SPELLBOOK: u16 = 0x39;

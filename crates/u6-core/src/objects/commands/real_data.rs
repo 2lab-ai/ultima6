@@ -896,11 +896,13 @@ fn the_string_export_of_the_owners_game_holds_the_inventorys_ready_and_unready_l
 /// books' no-magic, no-spells and nothing lines, the three refusals of the checks, the typed
 /// spell's not-in-book line (A4-0x7387), the detections' lines and the not-possible line; the 13
 /// result messages, the 8 potion descriptions and the 8 direction names as labels
-/// (`magic::LABELS`, A4-0x6c6c + 4 n, A4-0x6b4c + 4 n and A4-0x61be + 4 n); and none of the
-/// incantations' syllables (A4-0x70b8), the spells' names (A4-0x6f4c) or the circles' names
-/// (A4-0x6c9c), which stay English, nor the spellbook page's line (0x1158b4, a panel's) or the
-/// result formats of no word of their own. Prints pass/fail only: a failure names the site,
-/// never its text.
+/// (`magic::LABELS`, A4-0x6c6c + 4 n, A4-0x6b4c + 4 n and A4-0x61be + 4 n); (2026-10-25) the
+/// spellbook page's strings, each with its cells: every spell's name that is not empty
+/// (A4-0x6f4c + 4 n, `magic::NAME_LABELS`) and the 8 circles' names (A4-0x6c9c + 4 n,
+/// `magic::CIRCLE_LABELS`) as labels within the page's fields, each English within it too, and
+/// the level word (0x1158b4, `magic::PAGE_PRINTED`) within its English's cells; and none of the
+/// incantations' syllables (A4-0x70b8), which stay English, or the result formats of no word of
+/// their own. Prints pass/fail only: a failure names the site, never its text.
 #[test]
 fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_syllable() {
     use crate::converse::disasm::catalog::hash64;
@@ -971,22 +973,61 @@ fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_sy
     for (i, syllable) in tables.syllables.iter().enumerate() {
         assert!(!has(syllable), "syllable {i} not in the export");
     }
+    // The spellbook page's strings, each within its field (2026-10-25).
+    use crate::magic::{CIRCLE_CELLS, CIRCLE_LABELS, NAME_CELLS, NAME_LABELS, PAGE_PRINTED};
+    let entry = |text: &[u8]| {
+        export
+            .strings
+            .iter()
+            .find(|e| e.hash == hash64(text))
+            .map(|e| (e.kind, e.cells))
+    };
+    let cells_of = |text: &[u8]| u16::try_from(text.len()).ok();
+    let mut named = 0;
     for (i, name) in tables.names.iter().enumerate() {
-        assert!(!has(name), "spell name {i} not in the export");
+        let ptr = A4 - 0x6f4c + 4 * i as u32;
+        assert!(NAME_LABELS.contains(&ptr), "spell {i} is in magic's names");
+        if name.is_empty() {
+            continue;
+        }
+        named += 1;
+        assert!(
+            cells_of(name).is_some_and(|c| c <= NAME_CELLS),
+            "spell name {i}'s English within the page's field"
+        );
+        assert!(
+            entry(name) == Some((Kind::Label, Some(NAME_CELLS))),
+            "spell name {i} in the export as a label within the page's field"
+        );
     }
+    assert!(named > 0, "the spells have names");
+    assert!(tables.circles.len() == 8, "eight circles");
     for (i, circle) in tables.circles.iter().enumerate() {
-        assert!(!has(circle), "circle name {i} not in the export");
+        let ptr = A4 - 0x6c9c + 4 * i as u32;
+        assert!(
+            CIRCLE_LABELS.contains(&ptr),
+            "circle {i} is in magic's circles"
+        );
+        assert!(
+            !circle.is_empty() && cells_of(circle).is_some_and(|c| c <= CIRCLE_CELLS),
+            "circle name {i}'s English within the page's field"
+        );
+        assert!(
+            entry(circle) == Some((Kind::Label, Some(CIRCLE_CELLS))),
+            "circle name {i} in the export as a label within the page's field"
+        );
     }
+    let level = img.cstr(0x0011_58b4).quiet();
     assert!(
-        !printed.contains(&0x0011_58b4),
-        "the book page's line is not in magic's list"
+        !printed.contains(&0x0011_58b4) && PAGE_PRINTED == [0x0011_58b4],
+        "the book page's level word is listed apart from magic's lines"
     );
     assert!(
-        !has(&img.cstr(0x0011_58b4).quiet()),
-        "the book page's line not in the export"
+        entry(&level).is_some_and(|(kind, cells)| kind != Kind::Label && cells == cells_of(&level)),
+        "the book page's level word in the export within its English's cells"
     );
     eprintln!(
-        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, and no result format, syllable, spell or circle name or book page line: pass"
+        "string export holds magic's refusals, detections and not-in-book line, its 13 result messages, 8 potions and 8 directions as labels, the spells' and circles' names as labels within the book page's fields and its level word within its cells, and no result format or syllable: pass"
     );
 }
 
@@ -997,8 +1038,9 @@ fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_sy
 /// display at their addresses (`ui::tables::SHOWN_AT`; under three bytes, so no print finds
 /// them); the seven combat-mode names as labels (`ui::tables::LABELS`, A4-0x7230 + 4 × mode),
 /// each within the line's 7 cells; none of the panel formats it leaves out (the roster's number,
-/// the name line, the bare string, the values); and `cells` on no other entry. Prints pass/fail
-/// only: a failure names the site, never its text.
+/// the name line, the bare string, the values); and `cells` on no other entry but the
+/// spellbook page's (2026-10-25: its spells' and circles' names and its level word, the test
+/// above). Prints pass/fail only: a failure names the site, never its text.
 #[test]
 fn the_string_export_of_the_owners_game_holds_the_panels_lines_and_mode_names_with_their_cells() {
     use crate::converse::disasm::catalog::hash64;
@@ -1079,6 +1121,17 @@ fn the_string_export_of_the_owners_game_holds_the_panels_lines_and_mode_names_wi
             "{site} not in the export"
         );
     }
+    // The spellbook page's strings carry cells too (2026-10-25).
+    let book = crate::magic::NAME_LABELS
+        .iter()
+        .chain(&crate::magic::CIRCLE_LABELS)
+        .filter_map(|&ptr| img.pointer(ptr).and_then(|p| img.cstr(p)).ok())
+        .chain(
+            crate::magic::PAGE_PRINTED
+                .iter()
+                .map(|&at| img.cstr(at).quiet()),
+        );
+    budgeted.extend(book.map(|text| hash64(&text)));
     assert!(
         export
             .strings

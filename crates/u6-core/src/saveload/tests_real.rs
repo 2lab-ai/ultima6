@@ -64,6 +64,8 @@ enum Cmd {
     /// its next offer hatches for sure: 0x1319b2 draws 1..=100 against the quantity
     /// (`objects/commands/eggs.rs` `hatch_egg`).
     Rearm(Position),
+    /// A change to the state, as the objects API makes it (2026-10-25: a spellbook given).
+    Edit(fn(&mut State)),
 }
 
 /// The real game future (`main_loop::game_first`) with commands run at the start of a poll, inside
@@ -86,6 +88,7 @@ impl Future for Inject {
             match cmd {
                 Cmd::Save => save(&mut s),
                 Cmd::Restore => restore(&mut s, &self.io).quiet(),
+                Cmd::Edit(edit) => edit(&mut s),
                 Cmd::Rearm(at) => {
                     let o = &mut s.objects;
                     for e in 0x100..crate::objects::OBJECT_SLOTS {
@@ -1781,4 +1784,166 @@ fn an_egg_the_shipped_blocks_lack_vouches_for_nothing() {
         got.err().unwrap_or_default().contains(NO_HATCH),
         "beside an egg never offered"
     );
+}
+
+/// The spells [`give_spellbook`] puts in the book: each of the first three circles' spells the
+/// magic tables name (spell numbers 0..0x30, circle × 16 + index).
+fn book_spells(s: &State) -> Vec<u8> {
+    (0u8..0x30)
+        .filter(|&n| !s.magic.tables.name(usize::from(n)).is_empty())
+        .collect()
+}
+
+/// The hero (the party's first member, the view's actor at the start) given a readied spellbook
+/// holding [`book_spells`] and 10 of each reagent, through the objects API as
+/// `magic::tests_real`'s `give_book` does.
+fn give_spellbook(s: &mut State) {
+    let hero = Slot::from(s.actors.party.members[0]);
+    let spells = book_spells(s);
+    let book =
+        crate::objects::create_in(s, crate::magic::SPELLBOOK, crate::objects::READIED, 0, hero);
+    for n in spells {
+        crate::objects::create_in(
+            s,
+            crate::magic::SPELL,
+            crate::objects::IN_CONTAINER,
+            u16::from(n) << 8,
+            book,
+        );
+    }
+    for kind in s.magic.tables.reagents {
+        crate::objects::add_to_owner(s, hero, kind, 10);
+    }
+}
+
+/// The spell numbers inside each spellbook the hero has readied, each book's in ascending order
+/// (a new object is linked right after its owner, so the list holds a book's spells in no fixed
+/// order).
+fn readied_books(s: &State) -> Vec<Vec<u8>> {
+    let mut s = s.clone();
+    let hero = Slot::from(s.actors.party.members[0]);
+    let o = &mut s.objects;
+    // The child walk passes over readied objects while this is set.
+    o.skip_readied = 0;
+    let mut books = Vec::new();
+    let mut c = crate::objects::first_child(o, hero);
+    while c >= 0 {
+        if o.place(c) == crate::objects::READIED && o.kind(c) == crate::magic::SPELLBOOK {
+            books.push(c);
+        }
+        c = crate::objects::next_child(o);
+    }
+    books
+        .into_iter()
+        .map(|book| {
+            let mut spells = Vec::new();
+            let mut c = crate::objects::first_child(o, book);
+            while c >= 0 {
+                if o.kind(c) == crate::magic::SPELL {
+                    spells.push((o.qq_of(c) >> 8) as u8);
+                }
+                c = crate::objects::next_child(o);
+            }
+            spells.sort_unstable();
+            spells
+        })
+        .collect()
+}
+
+/// Spec 08 (2026-10-25): a save for the owner's own look at the spellbook page in Korean. With
+/// `U6_BOOK_SAVE=<dir>` (an absolute path outside the repository) and the zip present: the boot
+/// of his files to the prompt, the hero given a readied spellbook holding the first circle's
+/// spells and the next two circles' ([`give_spellbook`]), the engine's own Save, its files
+/// handed to a store as the platform's flush hands them ([`SaveSync::flush`]) and written to
+/// `<dir>/savegame/<name>` under the original's names: the folder the page takes as the save to
+/// start from. A fresh engine booted from the files read back from there has that book readied
+/// on the hero, holding those spells. Without the variable it does nothing. Prints the count of
+/// files and pass/fail only.
+#[test]
+fn with_u6_book_save_a_save_with_a_readied_spellbook_is_written_there() {
+    let Some(dir) = std::env::var_os("U6_BOOK_SAVE") else {
+        return;
+    };
+    let Some(files) = zip_files() else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .quiet();
+    // Outside the repository, symlinks resolved: checked before anything is written.
+    let lexical = dir.is_absolute()
+        && dir
+            .components()
+            .all(|c| !matches!(c, std::path::Component::ParentDir));
+    let existing = dir.ancestors().find(|a| a.exists()).map(Path::canonicalize);
+    let outside = |p: &Path| !p.starts_with(&repo);
+    assert!(
+        lexical && outside(&dir) && existing.is_some_and(|e| e.is_ok_and(|e| outside(&e))),
+        "U6_BOOK_SAVE is an absolute path outside the repository"
+    );
+    let mut run = Run::boot(files.clone());
+    let spells = book_spells(&run.state());
+    assert!(!spells.is_empty(), "the first circles name spells");
+    run.command(Cmd::Edit(give_spellbook));
+    assert!(
+        readied_books(&run.state()).contains(&spells),
+        "the hero holds the readied book"
+    );
+    run.command(Cmd::Save);
+    let mut store = MemStore::default();
+    let written = SaveSync::default().flush(&run.e, &mut store).quiet();
+    assert!(
+        written > 0 && written == store.files.len(),
+        "the Save hands its files to the store"
+    );
+    let folder = dir.join("savegame");
+    std::fs::create_dir_all(&folder).quiet();
+    assert!(
+        outside(&folder.canonicalize().quiet()),
+        "the folder made lies outside the repository"
+    );
+    let mut back = MemStore::default();
+    for (name, bytes) in &store.files {
+        let bare = name.strip_prefix("savegame/").quiet();
+        assert!(
+            !bare.is_empty() && !bare.contains(['/', '\\']),
+            "a save file's name is one file of savegame/"
+        );
+        std::fs::write(folder.join(bare), bytes).quiet();
+        back.files
+            .insert(name.clone(), std::fs::read(folder.join(bare)).quiet());
+    }
+    eprintln!("book save: {written} files written to U6_BOOK_SAVE/savegame");
+    // The page lays the folder over the game files; the boot reads it as the save to start from.
+    let mut f = files;
+    assert!(
+        attach(&mut f, &back).quiet() == written,
+        "every file laid over"
+    );
+    let fresh = Run::boot(f);
+    assert!(
+        readied_books(&fresh.state()) == [spells],
+        "booted from the files written, the hero holds the readied book with its spells"
+    );
+    assert!(
+        book_equipped(&fresh.state()),
+        "the inventory view puts the book in an equipment slot"
+    );
+    eprintln!(
+        "book save: booted back, the hero holds the readied spellbook with its spells, in an equipment slot: pass"
+    );
+}
+
+/// Whether the inventory's count of the hero's objects (0x110f96 by way of the weights, as the
+/// inventory view runs it) puts a readied spellbook of his in an equipment slot.
+fn book_equipped(s: &State) -> bool {
+    let mut s = s.clone();
+    let hero = Slot::from(s.actors.party.members[0]);
+    crate::inventory::carried_weight(&mut s, hero);
+    (0x100..crate::objects::OBJECT_SLOTS as Slot).any(|o| {
+        s.objects.kind(o) == crate::magic::SPELLBOOK
+            && s.objects.place(o) == crate::objects::READIED
+            && s.objects.parent(o) == hero
+            && crate::inventory::equipped_index(&s, o) >= 0
+    })
 }

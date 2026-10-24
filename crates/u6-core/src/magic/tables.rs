@@ -2,6 +2,12 @@
 //! incantations, syllables, reagents, circle names and the result messages. Each is a table of
 //! longword pointers (or words) at an A4 offset; the pointers are resolved through the hunk
 //! relocations and the strings read where they point (hunk 11, 0x1153d0..0x115876).
+//!
+//! Port-only (spec 08): the lists of the strings among them the locale layer catalogues, as
+//! labels read for display ([`crate::locale::shown`]): [`LABELS`] (the result messages, potions
+//! and directions) and (2026-10-25) [`NAME_LABELS`] and [`CIRCLE_LABELS`] (the spells' and the
+//! circles' names, each within its field on the spellbook page, [`NAME_CELLS`] and
+//! [`CIRCLE_CELLS`]). The incantations and their syllables are not listed: they stay English.
 
 use crate::image::{A4, GameImage};
 
@@ -35,15 +41,17 @@ const POTIONS: u32 = 0x6b4c;
 const DIRECTIONS: u32 = 0x61be;
 
 /// Port-only (spec 08, slice K2; 2026-10-24): the pointers of the strings the spells show through
-/// `%s`, labels of the locale layer's catalogue ([`crate::locale::strings`]): the 13 result
-/// messages (A4-0x6c6c + 4 n, `Msg` order; `effects::say` reads them for display) and the 8
-/// potion descriptions (A4-0x6b4c + 4 n; Detect Magic's potion line), and (2026-10-24) the 8
-/// direction names (A4-0x61be + 4 n, a word of the UI the player reads: Wind Change's and
-/// Telekinesis' direction line, and the other modules' that show one, Move's, Dig's, the
-/// telescope's and a scout's warning, read it the same way). Ten messages are the shared
-/// messages Use and the object commands read too ([`crate::locale::strings::SHARED_MESSAGES`])
-/// and the last the amulet's line ([`crate::inventory::LABELS`]): the catalogue keeps each once.
-/// Logic reads [`MagicTables`] as it is.
+/// `%s` with no cell budget, labels of the locale layer's catalogue ([`crate::locale::strings`];
+/// 2026-10-25: the spells' and circles' names, each within its field, are [`NAME_LABELS`] and
+/// [`CIRCLE_LABELS`]): the 13 result messages (A4-0x6c6c + 4 n, `Msg` order; `effects::say`
+/// reads them for display) and the 8 potion descriptions (A4-0x6b4c + 4 n; Detect Magic's
+/// potion line), and (2026-10-24) the 8 direction names (A4-0x61be + 4 n, a word of the UI the
+/// player reads: Wind Change's and Telekinesis' direction line, and the other modules' that show
+/// one, Move's, Dig's, the telescope's and a scout's warning, read it the same way). Ten
+/// messages are the shared messages Use and the object commands read too
+/// ([`crate::locale::strings::SHARED_MESSAGES`]) and the last the amulet's line
+/// ([`crate::inventory::LABELS`]): the catalogue keeps each once. Logic reads [`MagicTables`] as
+/// it is.
 pub(crate) const LABELS: &[u32] = &[
     A4.wrapping_sub(MESSAGES),
     A4.wrapping_sub(MESSAGES) + 0x4,
@@ -75,6 +83,43 @@ pub(crate) const LABELS: &[u32] = &[
     A4.wrapping_sub(DIRECTIONS) + 0x18,
     A4.wrapping_sub(DIRECTIONS) + 0x1c,
 ];
+
+/// Port-only (spec 08, 2026-10-25): the pointers of the spells' names, A4-0x6f4c + 4 n for every
+/// spell number n < [`SPELLS`] (circle × 16 + index; a slot that names no spell holds an empty
+/// string, which the catalogue leaves out), labels of the locale layer's catalogue
+/// ([`crate::locale::strings`]), each within [`NAME_CELLS`]. The spellbook page, Cast's
+/// announcement and Detect Magic's charge line read the name for display through
+/// [`crate::locale::shown`]. The incantations' syllables are not listed (the game's magic words
+/// stay English), and logic (a typed spell is matched on its letters) reads [`MagicTables`] as
+/// it is.
+pub(crate) const NAME_LABELS: [u32; SPELLS] = slots(NAMES);
+
+/// Port-only (spec 08, 2026-10-25): the cells a spell's name takes at most, the spellbook page's
+/// field: the name at status-window column 1, its reagent count at column 14
+/// (`book::draw_book_page`), so 13 cells. It is the tightest of the name's sites: Cast's
+/// announcement and the charge line print it in the message window, which wraps.
+pub(crate) const NAME_CELLS: u16 = 13;
+
+/// Port-only (spec 08, 2026-10-25): the pointers of the circles' names, A4-0x6c9c + 4 n for the
+/// 8 circles, labels of the locale layer's catalogue, each within [`CIRCLE_CELLS`]; the
+/// spellbook page reads its circle's name for display through [`crate::locale::shown`].
+pub(crate) const CIRCLE_LABELS: [u32; 8] = slots(CIRCLES);
+
+/// Port-only (spec 08, 2026-10-25): the cells a circle's name takes at most: the page draws it
+/// at status-window column 11, so columns 11..=16 of the window's 17 (`ui::panels`
+/// `STATUS_WIDTH`), 6 cells; the page's level word follows on the next line, from column 10.
+pub(crate) const CIRCLE_CELLS: u16 = 6;
+
+/// The `N` pointer slots of the table at A4 - `off`, 4 bytes apart.
+const fn slots<const N: usize>(off: u32) -> [u32; N] {
+    let mut out = [0; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = A4.wrapping_sub(off) + 4 * i as u32;
+        i += 1;
+    }
+    out
+}
 
 /// The result messages at A4-0x6c6c + 4 n.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

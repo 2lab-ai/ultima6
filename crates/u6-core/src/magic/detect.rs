@@ -20,8 +20,8 @@ pub(super) const MSG_MAGICAL: u32 = 0x0011_59ba;
 const MSG_TRAPPED: u32 = 0x0011_595e;
 const MSG_NO_TRAP: u32 = 0x0011_596e;
 /// Port-only (spec 08, slice K2; 2026-10-24): the detections' lines, for the locale layer's
-/// catalogue ([`super::PRINTED`]). The charge line puts the spell's name through `%s`: it stays
-/// English.
+/// catalogue ([`super::PRINTED`]). The charge line puts the spell's name through `%s`, read for
+/// display (2026-10-25, [`super::tables::NAME_LABELS`]).
 pub(super) const PRINTED: &[u32] = &[
     MSG_CHARGE,
     MSG_NOT_MAGICAL,
@@ -180,6 +180,8 @@ pub async fn detect(
 
 /// Detect Magic (1): a magic tile gets the magical line (0x1159ba; a potion names its kind);
 /// else a charge inside (type 0x150) shows its spell; else the not-magical line (0x115994).
+/// Port (spec 08, 2026-10-25): the charge's spell name is read for display
+/// ([`crate::locale::shown`]: the pack's form when it has one).
 async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
     seams::flash_actor(&mut state.borrow_mut(), io, sel as u16, 1);
     let (found, charge) = {
@@ -192,7 +194,7 @@ async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
             while o >= 0 {
                 if s.objects.kind(o) == CHARGE {
                     let n = usize::from(quality(&s.objects, o));
-                    charge = Some(s.magic.tables.name(n).to_vec());
+                    charge = Some(crate::locale::shown(&s, s.magic.tables.name(n).to_vec()));
                     break;
                 }
                 o = crate::objects::next_child(&mut s.objects);

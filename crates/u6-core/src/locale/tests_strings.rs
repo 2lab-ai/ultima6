@@ -1664,7 +1664,8 @@ const PUSH_DIR_LINE: u32 = 0x0012_860c;
 const PUSH_NL_LINE_NL: u32 = 0x0012_859a;
 
 /// [`spell_lines`] and Move's lines (the test's own text): the prompt (`Zp1`: the next site lies
-/// 4 bytes on), the direction's line and the message format (no word of their own).
+/// 4 bytes on), the direction's line and the message format (no word of their own); and
+/// (2026-10-25) the spellbook page's [`book_lines`].
 fn spellwork_lines() -> SiteLines {
     let mut lines = spell_lines();
     lines.extend([
@@ -1672,6 +1673,7 @@ fn spellwork_lines() -> SiteLines {
         (PUSH_DIR_LINE, b"%s.\n".to_vec()),
         (PUSH_NL_LINE_NL, b"\n%s\n".to_vec()),
     ]);
+    lines.extend(book_lines());
     lines
 }
 
@@ -1679,8 +1681,9 @@ fn spellwork_lines() -> SiteLines {
 fn magics_lines_and_results_are_catalogued_but_its_formats_of_no_word_and_its_syllables_not() {
     let a4 = crate::image::A4;
     // Each file's list in full, as the test's own literals (a constant dropped, added twice or
-    // moved fails here): the book page's two formats (its line, a panel's, is not listed); Cast's
-    // and the books'; the creature spells'; the
+    // moved fails here): the book page's two formats (its level word, drawn at a fixed cell, is
+    // listed apart with its cells: `magic::PAGE_PRINTED`); Cast's and the books'; the creature
+    // spells'; the
     // detections'; the dispatcher's; the effects' (with a torch's burned-out line); the typed
     // spell's; the object spells'; the spells of their own; the travel spells'.
     assert_eq!(
@@ -1823,10 +1826,12 @@ fn caster_world() -> State {
 /// What [`spellwork`] runs: the Cast command, Detect Magic (spell 1) with its target chosen,
 /// the key `A` under the spell cursor, the search of the typed syllables, or Wind Change (spell
 /// 0x39), Telekinesis (spell 0x15, its target chosen) or Move (the object commands' push)
-/// answered with the up key (north, direction 0).
+/// answered with the up key (north, direction 0); or (2026-10-25) the Cast command answered with
+/// Return in the open book, which chooses the line of the current spell.
 #[derive(Clone, Copy, Debug)]
 enum Spellwork {
     Cast,
+    CastChosen,
     Detect,
     Syllable,
     Search,
@@ -1860,7 +1865,7 @@ fn spellwork(work: Spellwork, setup: fn(&mut State), pack: Option<Pack>) -> (Str
     }
     let mut e = crate::engine::Engine::with_game(s, files, move |st, io| async move {
         match work {
-            Spellwork::Cast => crate::magic::cast(&st, &io).await,
+            Spellwork::Cast | Spellwork::CastChosen => crate::magic::cast(&st, &io).await,
             Spellwork::Detect => crate::magic::dispatch(&st, &io, 1, true).await,
             Spellwork::Syllable => {
                 crate::magic::spell_key(&st, &io, 0x41).await;
@@ -1877,6 +1882,12 @@ fn spellwork(work: Spellwork, setup: fn(&mut State), pack: Option<Pack>) -> (Str
     if let Spellwork::Wind | Spellwork::Telekinesis | Spellwork::Push = work {
         e.tick(
             &[crate::engine::InputEvent::Key(crate::engine::Key::Up)],
+            16,
+        );
+    }
+    if let Spellwork::CastChosen = work {
+        e.tick(
+            &[crate::engine::InputEvent::Key(crate::engine::Key::Enter)],
             16,
         );
     }
@@ -2379,25 +2390,28 @@ fn panel_rows(pack: Option<Pack>, mode: u8, view: PanelView) -> (Vec<String>, [u
         e.tick(&[], 16);
     }
     assert!(e.finished());
-    let rows = {
-        let fb = e.published_frame();
-        let cell = crate::ui::text::CELL;
-        (0..12)
-            .map(|row| {
-                (0..17)
-                    .map(
-                        |col| match fb.src_at((0x16 + col) * cell, (1 + row) * cell) {
-                            Some(src) if src.kind == u6_render::Kind::Glyph => {
-                                crate::ui::wide::cell_char(src.id)
-                            }
-                            _ => ' ',
-                        },
-                    )
-                    .collect()
-            })
-            .collect()
-    };
-    (rows, e.state().locale.texts.get())
+    (status_rows(&e), e.state().locale.texts.get())
+}
+
+/// The status window's 12 rows of 17 cells in `e`'s published frame (its source plane on), as
+/// the plane names them: a glyph's character, a space where none is drawn.
+fn status_rows(e: &crate::engine::Engine) -> Vec<String> {
+    let fb = e.published_frame();
+    let cell = crate::ui::text::CELL;
+    (0..12)
+        .map(|row| {
+            (0..17)
+                .map(
+                    |col| match fb.src_at((0x16 + col) * cell, (1 + row) * cell) {
+                        Some(src) if src.kind == u6_render::Kind::Glyph => {
+                            crate::ui::wide::cell_char(src.id)
+                        }
+                        _ => ' ',
+                    },
+                )
+                .collect()
+        })
+        .collect()
 }
 
 /// Row `row` of `rows` from column `from`, its end trimmed.
@@ -2601,4 +2615,378 @@ fn the_cell_budget_of_one_string_two_sites_catalogue_is_the_smaller_whatever_the
     assert_eq!(entry(b"Zb6"), Some((Kind::Label, Some(3))));
     assert_eq!(entry(b"Zb7"), Some((Kind::Label, Some(4))));
     assert_eq!(entry(b"Zb8"), Some((Kind::Label, Some(2))));
+}
+
+/// The spellbook page's level word (2026-10-25), the test's own copy of `magic::book`'s address
+/// (pinned to its list in the test), and Cast's refusal of a level under the circle (pinned in
+/// Cast's list by the test of magic's lists).
+const LEVEL_WORD: u32 = 0x0011_58b4;
+const LEVEL_LOW: u32 = 0x0011_5ae8;
+/// The pointer slots of the spells' names (A4-0x6f4c + 4 n) and of the circles' names
+/// (A4-0x6c9c + 4 n), and where the synthetic `game` keeps the names they point to, 0x10 bytes
+/// apart (no catalogued site there).
+const NAME_SLOTS: u32 = crate::image::A4 - 0x6f4c;
+const CIRCLE_SLOTS: u32 = crate::image::A4 - 0x6c9c;
+const BOOK_LABELS: u32 = crate::image::IMAGE_BASE + 0x800;
+
+/// The spells the synthetic `game` names (the test's own text): three of the first circle, one
+/// of the second, and a slot of the first circle holding an empty string (the catalogue leaves
+/// it out); every other slot holds 0, a pointer to nothing the catalogue reads.
+const NAMED: [(u8, &[u8]); 5] = [
+    (0x00, b"Zw00"),
+    (0x01, b"Zw01"),
+    (0x02, b"Zw02"),
+    (0x03, b""),
+    (0x10, b"Zw10"),
+];
+
+/// The synthetic name of circle `c` (index 0..8, the test's own).
+fn circle_name(c: u32) -> Vec<u8> {
+    format!("Zo{c}").into_bytes()
+}
+
+/// The spellbook page's lines (the test's own text): the level word (`Zlv`: the next site lies 6
+/// bytes on), and the name slots of [`NAMED`] and of the 8 circles (absolute pointers: no
+/// RELOC32) with their texts.
+fn book_lines() -> SiteLines {
+    let mut lines = vec![(LEVEL_WORD, b"Zlv".to_vec())];
+    let names = NAMED
+        .iter()
+        .map(|&(n, text)| (NAME_SLOTS + 4 * u32::from(n), text.to_vec()));
+    let circles = (0..8).map(|c| (CIRCLE_SLOTS + 4 * c, circle_name(c)));
+    for (i, (slot, text)) in (0u32..).zip(names.chain(circles)) {
+        let at = BOOK_LABELS + 0x10 * i;
+        lines.push((slot, at.to_be_bytes().to_vec()));
+        lines.push((at, text));
+    }
+    lines
+}
+
+#[test]
+fn the_spells_and_circles_names_and_the_level_word_are_catalogued_with_their_cells() {
+    // The lists in full, as the test's own literals (a slot dropped, added twice or moved fails
+    // here), and the budgets: the page's name field (columns 1..=13, the count at 14) and its
+    // circle field (columns 11..=16 of 17).
+    let names: Vec<u32> = (0..0x80).map(|n| NAME_SLOTS + 4 * n).collect();
+    assert_eq!(crate::magic::NAME_LABELS.to_vec(), names);
+    let circles: Vec<u32> = (0..8).map(|c| CIRCLE_SLOTS + 4 * c).collect();
+    assert_eq!(crate::magic::CIRCLE_LABELS.to_vec(), circles);
+    assert_eq!(crate::magic::PAGE_PRINTED, [LEVEL_WORD]);
+    assert_eq!(
+        (crate::magic::NAME_CELLS, crate::magic::CIRCLE_CELLS),
+        (13, 6)
+    );
+    let cat = Catalogue::from_game(&game_of(&spellwork_lines()));
+    let entry = |text: &[u8]| cat.label_of(text).map(|e| (e.kind, e.cells));
+    // Each name a label within the page's field; the empty slot is not catalogued.
+    for name in [&b"Zw00"[..], b"Zw01", b"Zw02", b"Zw10"] {
+        assert_eq!(entry(name), Some((Kind::Label, Some(13))));
+    }
+    for c in 0..8 {
+        assert_eq!(
+            entry(&circle_name(c)),
+            Some((Kind::Label, Some(6))),
+            "circle {c}"
+        );
+    }
+    // The level word, a format of no conversion, within its English's cells: a print finds it.
+    assert_eq!(entry(b"Zlv"), Some((Kind::Message, Some(3))));
+    assert!(cat.of(b"Zlv").is_some());
+    // Still no syllable.
+    assert!(cat.of(SYLLABLE).is_none() && cat.label_of(SYLLABLE).is_none());
+    assert_eq!(
+        cat.len(),
+        60 + 1 + 4 + 8 + 1,
+        "magic's 60, Move's prompt, 4 names, 8 circles and the level word"
+    );
+    // The export: `cells` on exactly these, in site order (the printed strings first).
+    let export = cat.export();
+    let budgets: Vec<(String, u16)> = export
+        .strings
+        .iter()
+        .filter_map(|e| e.cells.map(|c| (e.text.clone(), c)))
+        .collect();
+    let mut want = vec![("Zlv".to_string(), 3)];
+    want.extend(["Zw00", "Zw01", "Zw02", "Zw10"].map(|n| (n.to_string(), 13)));
+    want.extend((0..8).map(|c| (format!("Zo{c}"), 6)));
+    assert_eq!(budgets, want);
+    let json = export.to_json();
+    assert_eq!(json.matches("\"cells\":").count(), want.len());
+    assert!(json.contains("\"len\":4,\"kind\":\"label\",\"text\":\"Zw00\",\"cells\":13}"));
+    assert!(json.contains("\"len\":3,\"kind\":\"label\",\"text\":\"Zo7\",\"cells\":6}"));
+    assert!(json.contains("\"len\":3,\"kind\":\"message\",\"text\":\"Zlv\",\"cells\":3}"));
+    assert_eq!(
+        strings::Export::from_json(&json),
+        Ok(export),
+        "it reads back"
+    );
+}
+
+/// Magic's tables for the spellbook (the test's own): [`NAMED`]'s names, the 8 circles' names,
+/// `AA` the incantation of spell 1 (`A`'s syllable twice), and one reagent each named spell
+/// needs, of a type no one carries (each line's count is 0).
+fn book_tables(s: &mut State) {
+    let t = &mut s.magic.tables;
+    t.names = vec![Vec::new(); 0x80];
+    t.masks = vec![0; 0x80];
+    for &(n, text) in &NAMED {
+        t.names[usize::from(n)] = text.to_vec();
+        t.masks[usize::from(n)] = 1;
+    }
+    t.words = vec![Vec::new(); 0x80];
+    t.words[1] = b"AA".to_vec();
+    t.circles = (0..8).map(circle_name).collect();
+    t.reagents = [0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
+}
+
+/// Party member `Zm` (actor 1) leading a party of one, slots linked, over a text layer with a
+/// font and main's three windows open; magic's [`book_tables`], the books holding spells 0..=2
+/// and 0x10, the first page to show and the current spell off it (no marker); with `pack`
+/// installed over the catalogue of `game`, with a Hangul table, or no pack.
+fn book_world(game: &[u8], pack: Option<Pack>) -> State {
+    let mut s = State::empty();
+    let t = crate::main_loop::test_support::test_ui().tables;
+    let font = u6_formats::font::BitFont {
+        glyphs: vec![[0; 8]; 256],
+    };
+    s.ui = crate::ui::UiState::from_parts(Some(font), t.clone());
+    s.ui.text.main_windows(&t);
+    s.objects.type_frame[1] = 0x17a;
+    s.objects.location[1] = crate::objects::pack_xyz(100, 100, 0);
+    s.actors.attrs.status[1] = 0x80;
+    let p = &mut s.actors.party;
+    p.size = 1;
+    p.members[0] = 1;
+    p.names = vec!["Zm".into()];
+    crate::objects::init_slots(&mut s.objects);
+    crate::objects::link_actors(&mut s.objects);
+    book_tables(&mut s);
+    s.magic.known = [0b111, 0b1, 0, 0, 0, 0, 0, 0];
+    s.magic.page_first = 0;
+    s.magic.current = 0x10;
+    if let Some(p) = pack {
+        let glyphs = vec![[0; 8]; u6_formats::font::HANGUL_GLYPHS];
+        let hangul = HangulFont::from_glyphs(glyphs).unwrap();
+        let files = Files::new(BTreeMap::from([("game".to_string(), game.to_vec())]));
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            Some(Rc::new(hangul)),
+            Catalogue::from_game(game),
+        )
+        .expect("the pack checks");
+    }
+    s
+}
+
+/// The page `magic::draw_book_page` draws for [`book_world`] in an engine over the `game` of
+/// [`spellwork_lines`], with `pack` installed or none: the status window's rows
+/// ([`status_rows`]) and the counts.
+fn book_rows(pack: Option<Pack>) -> (Vec<String>, [u32; 2]) {
+    let game = game_of(&spellwork_lines());
+    let s = book_world(&game, pack);
+    let files = Files::new(BTreeMap::from([("game".to_string(), game)]));
+    let mut e = crate::engine::Engine::with_game(s, files, |st, io| async move {
+        crate::magic::draw_book_page(&st, &io).await;
+        io.present();
+    });
+    e.enable_src_plane();
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    (status_rows(&e), e.state().locale.texts.get())
+}
+
+/// A status-window row of 17 cells holding each `(column, text)` of `parts`, a character a cell,
+/// spaces elsewhere.
+fn row_of(parts: &[(usize, &str)]) -> String {
+    let mut cells = [' '; 17];
+    for &(col, text) in parts {
+        for (i, c) in text.chars().enumerate() {
+            cells[col + i] = c;
+        }
+    }
+    cells.iter().collect()
+}
+
+/// The page [`book_rows`] draws: the first circle's three spells' `names` at column 1 of rows
+/// 1..=3, each line's count (0) at column 14, the circle's name at (11, 10) and the level word
+/// at (10, 11), every other cell blank.
+fn page_of(names: [&str; 3], circle: &str, level: &str) -> Vec<String> {
+    (0..12)
+        .map(|row| match row {
+            1..=3 => row_of(&[(1, names[row - 1]), (14, "0")]),
+            10 => row_of(&[(11, circle)]),
+            11 => row_of(&[(10, level)]),
+            _ => row_of(&[]),
+        })
+        .collect()
+}
+
+/// A Korean form of 13 syllables, the whole of the page's name field (the test's own).
+const KO13: &str = "가나다라마바사아자차카타파";
+
+/// The forms of [`book_ko`] (the test's own syllables): one for each named spell (the first
+/// one's [`KO13`]), the first circle's (6 syllables, the whole field), the level word's, Cast's
+/// level refusal's, the charge line's, the on-what message's and `A`'s syllable's, which is never
+/// looked up.
+fn book_forms() -> Vec<(String, String)> {
+    [
+        ("Zw00".to_string(), KO13),
+        ("Zw01".into(), "가나"),
+        ("Zw02".into(), "다라"),
+        ("Zw10".into(), "마"),
+        ("Zo0".into(), "바사아자차카"),
+        ("Zlv".into(), "타파"),
+        (spell_text(LEVEL_LOW), "하"),
+        (spell_text(CHARGE_LINE), "카 %s\n"),
+        ("Zr08".into(), "바"),
+        ("Zsyl".into(), "차"),
+    ]
+    .into_iter()
+    .map(|(en, ko)| (en, ko.to_string()))
+    .collect()
+}
+
+/// A pack of [`book_forms`], the form for English `en` (when one of theirs) `ko` instead.
+fn book_ko_but(en: &str, ko: &str) -> Pack {
+    let forms = book_forms()
+        .into_iter()
+        .map(|(e, k)| string(&e, if e == en { ko } else { k.as_str() }));
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings(forms)
+        .unwrap()
+}
+
+/// A pack of [`book_forms`].
+fn book_ko() -> Pack {
+    book_ko_but("", "")
+}
+
+#[test]
+fn the_book_page_prints_the_packs_spell_names_circle_name_and_level_word_in_their_columns() {
+    // The first name's form fills the 13 cells of its field: its count stays at column 14. The
+    // circle's form fills columns 11..=16; the level word's form starts at column 10.
+    let (rows, counts) = book_rows(Some(book_ko()));
+    assert_eq!(
+        rows,
+        page_of([KO13, "가나", "다라"], "바사아자차카", "타파")
+    );
+    assert_eq!(
+        counts,
+        [5, 0],
+        "three names, the circle's and the level word found, no miss"
+    );
+}
+
+#[test]
+fn without_a_pack_the_book_page_is_the_english_in_every_cell() {
+    let (rows, counts) = book_rows(None);
+    assert_eq!(rows, page_of(["Zw00", "Zw01", "Zw02"], "Zo0", "Zlv"));
+    assert_eq!(counts, [0, 0]);
+}
+
+#[test]
+fn a_spell_or_circle_names_form_over_its_field_prints_the_english_counted_missed() {
+    // 14 syllables for a name (its field 13 cells), 7 for the circle's (its field 6): the
+    // English, one miss; the other strings the pack's forms, each at its column.
+    let (rows, counts) = book_rows(Some(book_ko_but("Zw00", "가나다라마바사아자차카타파하")));
+    assert_eq!(
+        rows,
+        page_of(["Zw00", "가나", "다라"], "바사아자차카", "타파")
+    );
+    assert_eq!(counts, [4, 1]);
+    let (rows, counts) = book_rows(Some(book_ko_but("Zo0", "바사아자차카타")));
+    assert_eq!(rows, page_of([KO13, "가나", "다라"], "Zo0", "타파"));
+    assert_eq!(counts, [4, 1]);
+}
+
+/// Spell 1 in a book readied by the caster, chosen with Return under the spell cursor (as the
+/// command loop leaves Cast); the caster's level (0) is under its circle, so Cast's level refusal
+/// follows the announcement.
+fn chosen_from_the_book(s: &mut State) {
+    book_tables(s);
+    let book = crate::objects::create_in(s, crate::magic::SPELLBOOK, crate::objects::READIED, 0, 1);
+    crate::objects::create_in(
+        s,
+        crate::magic::SPELL,
+        crate::objects::IN_CONTAINER,
+        1 << 8,
+        book,
+    );
+    let input = &mut s.ui.input;
+    input.targeting = 3;
+    input.target_command = 0x82;
+    input.target_pending = 1;
+}
+
+/// [`chosen_from_the_book`], the spell typed (its syllables under the spell cursor).
+fn typed_and_chosen(s: &mut State) {
+    chosen_from_the_book(s);
+    s.magic.typed = 1;
+}
+
+#[test]
+fn casts_announcement_shows_the_packs_spell_name_and_the_english_syllables() {
+    // The name through the announcement's format, then `A`'s syllable twice (the second after a
+    // space) in English though the pack has a form for it, the closing quote and the refusal.
+    // Found: the page's name, circle and level word twice (the book opens on the page, and
+    // Return chooses the current spell, which draws the page again: `magic::input`'s `choose`),
+    // the announcement's name and the refusal.
+    let refusal = spell_text(LEVEL_LOW);
+    assert_eq!(
+        spellwork(Spellwork::CastChosen, chosen_from_the_book, Some(book_ko())),
+        ("가나\nZsyl ZsylZ하".into(), [8, 0]),
+        "the pack's name"
+    );
+    assert_eq!(
+        spellwork(Spellwork::CastChosen, chosen_from_the_book, None),
+        (format!("Zw01\nZsyl ZsylZ{refusal}"), [0, 0]),
+        "the English"
+    );
+    // Typed: the name in the parentheses' format, no syllables.
+    assert_eq!(
+        spellwork(Spellwork::CastChosen, typed_and_chosen, Some(book_ko())),
+        ("(가나)하".into(), [8, 0]),
+        "typed: the pack's name"
+    );
+    assert_eq!(
+        spellwork(Spellwork::CastChosen, typed_and_chosen, None),
+        (format!("(Zw01){refusal}"), [0, 0]),
+        "typed: the English"
+    );
+}
+
+/// An object (type 0x30, not a magic tile) two tiles east of the caster holding a charge (type
+/// 0x150, `detect`'s own) of spell 2, selected and targeted for Detect Magic.
+fn charged(s: &mut State) {
+    book_tables(s);
+    let at = crate::objects::create_on_map(&mut s.objects, 0x30, 0, 0, 102, 100, 0);
+    assert!(at >= 0x100, "an object slot");
+    crate::objects::create_in(s, 0x150, crate::objects::IN_CONTAINER, 2 << 8, at);
+    s.ui.input.selection = at;
+    s.ui.input.target = (102, 100);
+}
+
+#[test]
+fn detects_charge_line_shows_the_packs_spell_name() {
+    // The dispatcher's newline, the on-what message and the object's name, then the charge line
+    // with the spell's name through `%s` (a label read for display).
+    assert_eq!(
+        spellwork(Spellwork::Detect, charged, Some(book_ko())),
+        ("\n바zo\n카 다라".into(), [3, 0]),
+        "the pack's forms"
+    );
+    let line = spell_text(CHARGE_LINE).replace("%s", "Zw02");
+    assert_eq!(
+        spellwork(Spellwork::Detect, charged, None),
+        (format!("\nZr08zo\n{}", line.trim_end()), [0, 0]),
+        "the English"
+    );
 }
