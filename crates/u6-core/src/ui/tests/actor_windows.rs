@@ -438,8 +438,7 @@ mod wide {
     fn after_the_bag(moved: impl FnOnce(&mut State, Slot)) -> (u16, u8) {
         let mut pre = world();
         let bag = object(&pre, BAG);
-        pre.ui.panel.container = bag as u16;
-        pre.ui.panel.inventory_first = 4;
+        open_on_page_two(&mut pre, bag);
         for _ in 0..12 {
             give(&mut pre, PEBBLE, crate::objects::IN_CONTAINER, 0, bag);
         }
@@ -478,6 +477,66 @@ mod wide {
             assert_eq!(s.objects.place(bag), 0, "on the map");
         });
         assert_eq!(got, (1, 0));
+    }
+
+    /// The container and page a redraw leaves with `container` kept on the second page and the
+    /// inventory view's last base `base`.
+    fn kept_after(s: &State, container: Slot, base: Option<u16>) -> (u16, u8) {
+        let mut s = s.clone();
+        s.ui.panel.container = container as u16;
+        s.ui.panel.inventory_first = 4;
+        s.ui.panel.slots.base = base;
+        s.ui.panel.slots.tf = s.objects.tf(container);
+        let r = redraw(s).state;
+        (r.ui.panel.container, r.ui.panel.inventory_first)
+    }
+
+    /// A world whose bag holds a second bag with thirteen pebbles in it (a second page).
+    fn nested() -> (State, Slot, Slot) {
+        let mut s = world();
+        let bag = object(&s, BAG);
+        let inner = give(&mut s, BAG, crate::objects::IN_CONTAINER, 0, bag);
+        for _ in 0..13 {
+            give(&mut s, PEBBLE, crate::objects::IN_CONTAINER, 0, inner);
+        }
+        (s, bag, inner)
+    }
+
+    /// Spec 14 Design 3, the base check alone: member 0's own bag with no last draw (no base:
+    /// the first draw, a Restore, a Save) starts again; with member 0's base it is kept.
+    #[test]
+    fn an_owned_bag_with_no_last_draw_starts_again() {
+        let (s, _, inner) = nested();
+        assert_eq!(kept_after(&s, inner, None), (1, 0), "no base");
+        assert_eq!(
+            kept_after(&s, inner, Some(1)),
+            (inner as u16, 4),
+            "member 0's"
+        );
+        assert_eq!(kept_after(&s, inner, Some(2)), (1, 0), "another base");
+    }
+
+    /// Spec 14 Design 3, the chain walk alone: a bag in a bag in member 0 is kept (two links to
+    /// the actor), and so is its page.
+    #[test]
+    fn a_bag_in_a_bag_of_the_member_is_kept() {
+        let (s, bag, inner) = nested();
+        assert_eq!(s.objects.parent(inner), bag);
+        assert_eq!(s.objects.parent(bag), 1);
+        assert_eq!(kept_after(&s, inner, Some(1)), (inner as u16, 4));
+    }
+
+    /// Spec 14 Design 3, the chain walk alone: two bags each inside the other (a chain that comes
+    /// back on itself, reaching no actor) are not kept, and the walk ends (the redraw returns).
+    #[test]
+    fn a_cyclic_chain_is_not_kept() {
+        let (mut s, bag, inner) = nested();
+        s.objects.set_parent(bag, inner);
+        assert_eq!(
+            (s.objects.parent(bag), s.objects.parent(inner)),
+            (inner, bag)
+        );
+        assert_eq!(kept_after(&s, inner, Some(1)), (1, 0));
     }
 
     /// Spec 14 Design 3: a Restore (0x1052c8) with a bag open and a later page: the slots'
@@ -650,6 +709,166 @@ mod wide {
             differing(after, PANEL, &want.screen, PANEL),
             0,
             "the panel drawn after it"
+        );
+    }
+
+    /// [`world`] on the map, its region loaded from block files: member 0 at (100, 100) in block
+    /// 0, member 1 in the next block east (x 128..255) with three pebbles, member 0's bag
+    /// holding twelve more pebbles, open on its second page and kept by a redraw. The state and
+    /// the bag.
+    fn bag_open_in_a_region() -> (State, Slot) {
+        let mut pre = world();
+        let bag = object(&pre, BAG);
+        for _ in 0..12 {
+            give(&mut pre, PEBBLE, crate::objects::IN_CONTAINER, 0, bag);
+        }
+        let at = u6_formats::position::Position {
+            x: 100,
+            y: 100,
+            z: 0,
+        };
+        pre.objects.location[1] = at;
+        pre.objects.location[2] = u6_formats::position::Position { x: 200, ..at };
+        for _ in 0..3 {
+            give(&mut pre, PEBBLE, crate::objects::IN_INVENTORY, 0, 2);
+        }
+        pre.map.centre = at;
+        pre.objects.blocks = u6_formats::objblk::ObjBlockId::all()
+            .map(|id| {
+                (
+                    id,
+                    u6_formats::objblk::ObjBlock {
+                        objects: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        crate::main_loop::test_support::link_placed_objects(&mut pre);
+        let c = pre.map.centre;
+        crate::objects::load_region(&mut pre, c.x, c.y, 0);
+        open_on_page_two(&mut pre, bag);
+        let kept = redraw(pre).state;
+        assert_eq!(
+            (kept.ui.panel.container, kept.ui.panel.inventory_first),
+            (bag as u16, 4),
+            "kept"
+        );
+        (kept, bag)
+    }
+
+    /// `bag` open in member 0's inventory view on its second page, as the last draw left it.
+    fn open_on_page_two(s: &mut State, bag: Slot) {
+        s.ui.panel.container = bag as u16;
+        s.ui.panel.inventory_first = 4;
+        s.ui.panel.slots.base = Some(1);
+        s.ui.panel.slots.tf = s.objects.tf(bag);
+    }
+
+    /// Spec 14 Design 3: a Save (0x105716) with a bag open on the second page. The save writes
+    /// the region back to its blocks and reads it again (`saveload/save.rs` `write_back_region`):
+    /// the party's objects come back in other slots (blocks 0 and 1 each put their freed run at
+    /// the front of the free chain, block 0 is read first), the bag's old slot naming another
+    /// object member 0 holds. The slots' record is cleared, and the next redraw shows member 0's
+    /// actor from the first row (as the original's redraw after a Save does).
+    #[test]
+    fn a_save_starts_the_inventory_context_again() {
+        let (kept, bag) = bag_open_in_a_region();
+        let mut saved = kept;
+        crate::saveload::save(&mut saved);
+        let now = (0x100..saved.objects.type_frame.len() as Slot)
+            .find(|&o| saved.objects.kind(o) == BAG && saved.objects.place(o) != 0)
+            .expect("the bag back after the save");
+        assert_ne!(now, bag, "the bag in another slot");
+        assert_eq!(
+            (saved.objects.kind(bag), saved.objects.parent(bag)),
+            (RING, 1),
+            "its old slot member 0's ring now"
+        );
+        assert_ne!(saved.objects.place(bag), 0, "held");
+        let cleared = saved.ui.panel.slots == Default::default();
+        let r = redraw(saved).state;
+        assert_eq!(
+            (r.ui.panel.container, r.ui.panel.inventory_first),
+            (1, 0),
+            "member 0's actor, the first row"
+        );
+        assert!(cleared, "the slots' record cleared by the save");
+    }
+
+    /// Spec 14 Design 3, a region crossing: member 0's block written back (0x10d6ac, as
+    /// `load_region` writes a block that left the window, `objects/blocks.rs`) while member 0
+    /// is shown with the bag open: the bag's slot is freed (its type cleared, the rest of its
+    /// entry as it was), and the next redraw starts again.
+    #[test]
+    fn a_block_written_back_under_the_shown_bag_starts_again() {
+        let (mut s, bag) = bag_open_in_a_region();
+        crate::objects::write_back_surface(&mut s, 0);
+        assert_eq!(s.objects.tf(bag), 0, "the bag's slot freed");
+        assert_eq!(
+            (s.objects.parent(bag), s.objects.place(bag) != 0),
+            (1, true)
+        );
+        s.ui.panel.dirty = true;
+        let r = redraw(s).state;
+        assert_eq!((r.ui.panel.container, r.ui.panel.inventory_first), (1, 0));
+    }
+
+    /// Spec 14 Design 3, a region crossing and back: member 0's block written back, a new object
+    /// made meanwhile (it takes the first freed slot), the block read again: the bag's old slot
+    /// now holds one of member 0's pebbles (another type and frame, still member 0's). The next
+    /// redraw starts again.
+    #[test]
+    fn a_block_read_again_with_another_item_in_the_bag_slot_starts_again() {
+        let (mut s, bag) = bag_open_in_a_region();
+        crate::objects::write_back_surface(&mut s, 0);
+        give(&mut s, PEBBLE, crate::objects::IN_INVENTORY, 0, 2);
+        let i = s
+            .objects
+            .loaded_surface
+            .iter()
+            .position(|&b| b == 0)
+            .expect("block 0 in");
+        s.objects.loaded_surface[i] = -1;
+        let c = s.map.centre;
+        crate::objects::load_region(&mut s, c.x, c.y, 0);
+        assert_eq!(
+            (s.objects.kind(bag), s.objects.parent(bag)),
+            (PEBBLE, 1),
+            "the bag's old slot one of member 0's pebbles now"
+        );
+        assert_ne!(s.objects.place(bag), 0, "held");
+        s.ui.panel.dirty = true;
+        let r = redraw(s).state;
+        assert_eq!((r.ui.panel.container, r.ui.panel.inventory_first), (1, 0));
+    }
+
+    /// Spec 14 Design 3, a region crossing and back with nothing taken meanwhile: the block read
+    /// again gives the bag its slot back (the freed run is handed out in the order it was
+    /// freed), the same type and frame, still member 0's: kept, on its page.
+    #[test]
+    fn a_block_read_again_with_the_same_bag_keeps_it() {
+        let (mut s, bag) = bag_open_in_a_region();
+        let tf = s.objects.tf(bag);
+        crate::objects::write_back_surface(&mut s, 0);
+        let i = s
+            .objects
+            .loaded_surface
+            .iter()
+            .position(|&b| b == 0)
+            .expect("block 0 in");
+        s.objects.loaded_surface[i] = -1;
+        let c = s.map.centre;
+        crate::objects::load_region(&mut s, c.x, c.y, 0);
+        assert_eq!(
+            (s.objects.tf(bag), s.objects.parent(bag)),
+            (tf, 1),
+            "the bag back"
+        );
+        s.ui.panel.dirty = true;
+        let r = redraw(s).state;
+        assert_eq!(
+            (r.ui.panel.container, r.ui.panel.inventory_first),
+            (bag as u16, 4)
         );
     }
 
@@ -1212,6 +1431,7 @@ mod wide {
         let bag_at = in_slot(2, cell_of(&pre, bag));
         let mut open = pre.clone();
         open.ui.panel.container = bag as u16;
+        open.ui.panel.slots.tf = open.objects.tf(bag);
         let food_at = in_slot(2, cell_of(&open, food));
         let (e, _) = command_steps(
             pre.clone(),

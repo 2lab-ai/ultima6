@@ -689,25 +689,35 @@ fn first_row(s: &mut State) {
 
 /// Spec 14 Design 3 (Wide): the container the inventory view shows for `base`, the member's actor
 /// or the open container: the panel's container as the last draw left it, the page kept, while
-/// `base` is the last draw's and that container is still `base` or held in it ([`held_in`]).
-/// Else `base`, from the first page: the member shown changed, there was no last draw (the
-/// first, or after a Restore), or the container left `base` (taken by another actor, left on
-/// the map).
+/// `base` is the last draw's and that container is `base` itself, or still the object the last
+/// draw showed (the same type and frame word in its slot) held in `base` ([`held_in`]). Else
+/// `base`, from the first page: the member shown changed, there was no last draw (the first,
+/// after a Restore or a Save), the container left `base` (taken by another actor, left on the
+/// map), or its slot was freed or handed to another object (its block written back as the
+/// region moved, and read again). The container shown and its word are recorded.
 #[cfg(feature = "wide")]
 fn kept_container(s: &mut State, base: u16) -> u16 {
     let kept = s.ui.panel.container;
-    let same = s.ui.panel.slots.base == Some(base);
+    let o = &s.objects;
+    let slots = &s.ui.panel.slots;
+    let same_object = || o.tf(kept as crate::objects::Slot) == slots.tf && held_in(o, kept, base);
+    let keep = slots.base == Some(base) && (kept == base || same_object());
+    let shown = if keep {
+        kept
+    } else {
+        s.ui.panel.inventory_first = 0;
+        base
+    };
     s.ui.panel.slots.base = Some(base);
-    if same && held_in(&s.objects, kept, base) {
-        return kept;
-    }
-    s.ui.panel.inventory_first = 0;
-    base
+    s.ui.panel.slots.tf = s.objects.tf(shown as crate::objects::Slot);
+    shown
 }
 
 /// `obj` is `base`, or its chain of containers reaches `base` as `inventory::weight::holder`
-/// walks it (`inventory/weight.rs`). False when the chain ends elsewhere: at another actor, on
-/// the map, or at the walk's bound (a chain that comes back on itself).
+/// walks it (`inventory/weight.rs`), through objects that are there (a type and frame word not
+/// 0: a slot freed by a block's write-back keeps the rest of its entry). False when the chain
+/// ends elsewhere: at another actor, on the map, at a freed slot, or at the walk's bound (a
+/// chain that comes back on itself).
 #[cfg(feature = "wide")]
 fn held_in(o: &crate::objects::Objects, obj: u16, base: u16) -> bool {
     use crate::objects::{ACTOR_SLOTS, OBJECT_SLOTS, Slot};
@@ -716,7 +726,7 @@ fn held_in(o: &crate::objects::Objects, obj: u16, base: u16) -> bool {
         if c == base as Slot {
             return true;
         }
-        if c < ACTOR_SLOTS as Slot || o.place(c) == 0 {
+        if c < ACTOR_SLOTS as Slot || o.place(c) == 0 || o.tf(c) == 0 {
             return false;
         }
         c = o.parent(c);
