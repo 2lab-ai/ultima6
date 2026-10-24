@@ -30,6 +30,51 @@ const MAGIC_TILES: u32 = 0x6c38;
 const DOORS: u32 = 0x6b54;
 /// A4-0x6b4c: potion description per potion frame (8 pointers).
 const POTIONS: u32 = 0x6b4c;
+/// A4-0x61be: the direction names, a pointer per direction 0..7 (north first, clockwise; Wind
+/// Change and Telekinesis print one).
+const DIRECTIONS: u32 = 0x61be;
+
+/// Port-only (spec 08, slice K2; 2026-10-24): the pointers of the strings the spells show through
+/// `%s`, labels of the locale layer's catalogue ([`crate::locale::strings`]): the 13 result
+/// messages (A4-0x6c6c + 4 n, `Msg` order; `effects::say` reads them for display) and the 8
+/// potion descriptions (A4-0x6b4c + 4 n; Detect Magic's potion line), and (2026-10-24) the 8
+/// direction names (A4-0x61be + 4 n, a word of the UI the player reads: Wind Change's and
+/// Telekinesis' direction line, and the other modules' that show one, Move's, Dig's, the
+/// telescope's and a scout's warning, read it the same way). Ten messages are the shared messages Use and the object commands
+/// read too ([`crate::locale::strings::SHARED_MESSAGES`]) and the last the amulet's line
+/// ([`crate::inventory::LABELS`]): the catalogue keeps each once. Logic reads [`MagicTables`] as
+/// it is.
+pub(crate) const LABELS: &[u32] = &[
+    A4.wrapping_sub(MESSAGES),
+    A4.wrapping_sub(MESSAGES) + 0x4,
+    A4.wrapping_sub(MESSAGES) + 0x8,
+    A4.wrapping_sub(MESSAGES) + 0xc,
+    A4.wrapping_sub(MESSAGES) + 0x10,
+    A4.wrapping_sub(MESSAGES) + 0x14,
+    A4.wrapping_sub(MESSAGES) + 0x18,
+    A4.wrapping_sub(MESSAGES) + 0x1c,
+    A4.wrapping_sub(MESSAGES) + 0x20,
+    A4.wrapping_sub(MESSAGES) + 0x24,
+    A4.wrapping_sub(MESSAGES) + 0x28,
+    A4.wrapping_sub(MESSAGES) + 0x2c,
+    A4.wrapping_sub(MESSAGES) + 0x30,
+    A4.wrapping_sub(POTIONS),
+    A4.wrapping_sub(POTIONS) + 0x4,
+    A4.wrapping_sub(POTIONS) + 0x8,
+    A4.wrapping_sub(POTIONS) + 0xc,
+    A4.wrapping_sub(POTIONS) + 0x10,
+    A4.wrapping_sub(POTIONS) + 0x14,
+    A4.wrapping_sub(POTIONS) + 0x18,
+    A4.wrapping_sub(POTIONS) + 0x1c,
+    A4.wrapping_sub(DIRECTIONS),
+    A4.wrapping_sub(DIRECTIONS) + 0x4,
+    A4.wrapping_sub(DIRECTIONS) + 0x8,
+    A4.wrapping_sub(DIRECTIONS) + 0xc,
+    A4.wrapping_sub(DIRECTIONS) + 0x10,
+    A4.wrapping_sub(DIRECTIONS) + 0x14,
+    A4.wrapping_sub(DIRECTIONS) + 0x18,
+    A4.wrapping_sub(DIRECTIONS) + 0x1c,
+];
 
 /// The result messages at A4-0x6c6c + 4 n.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

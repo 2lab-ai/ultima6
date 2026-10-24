@@ -19,6 +19,17 @@ pub(super) const MSG_NORTH: u32 = 0x0011_5a7a;
 pub(super) const FMT_LONG: u32 = 0x0011_5a7c;
 pub(super) const MSG_EAST: u32 = 0x0011_5a82;
 pub(super) const MSG_WEST: u32 = 0x0011_5a86;
+/// Port-only (spec 08, slice K2; 2026-10-24): those strings, for the locale layer's catalogue
+/// ([`super::PRINTED`]).
+pub(super) const PRINTED: &[u32] = &[
+    MSG_TO_PHASE,
+    FMT_LAT,
+    MSG_SOUTH,
+    MSG_NORTH,
+    FMT_LONG,
+    MSG_EAST,
+    MSG_WEST,
+];
 /// The wizard's eye object.
 const EYE: u16 = 0x34;
 /// Wizard Eye's moves.

@@ -22,6 +22,12 @@ use crate::ui::text::WindowId;
 const FMT_S: u32 = 0x0011_58b0;
 const FMT_D: u32 = 0x0011_58ac;
 const MSG_LEVEL: u32 = 0x0011_58b4;
+/// Port-only (spec 08, slice K2; 2026-10-24): the formats of the page's names and counts, for
+/// the locale layer's catalogue ([`super::PRINTED`]; of no word of their own, it leaves them
+/// out). The page is drawn in the status window, a panel (spec 08 keeps the panels English): its
+/// line [`MSG_LEVEL`] is not listed, and the spells' and the circle's names go through `%s`; all
+/// stay English.
+pub(super) const PRINTED: &[u32] = &[FMT_S, FMT_D];
 /// A4-0x61de: pointer to the file name of the book picture.
 const BOOK_BMP: u32 = 0x61de;
 /// The marker glyph of the current spell's line.

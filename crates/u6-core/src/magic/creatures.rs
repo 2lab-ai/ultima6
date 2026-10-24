@@ -21,6 +21,9 @@ const DAEMON: u16 = 0x16f;
 /// Hunk 11: the line of a daemon summoned hostile, and the line of no foe in view.
 const MSG_HOSTILE: u32 = 0x0011_59dc;
 pub(super) const MSG_NO_FOES: u32 = 0x0011_5a66;
+/// Port-only (spec 08, slice K2; 2026-10-24): those lines, for the locale layer's catalogue
+/// ([`super::PRINTED`]).
+pub(super) const PRINTED: &[u32] = &[MSG_HOSTILE, MSG_NO_FOES];
 /// The Wing Strike dragon (two parts) and the A4 rows it reads: the step sign, the frames.
 const DRAGON_PART: u16 = 0x19b;
 

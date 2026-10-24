@@ -15,6 +15,11 @@ use crate::ui::printf::Arg;
 
 pub(super) const MSG_FOOD: u32 = 0x0011_59ca;
 const MSG_TOO_OLD: u32 = 0x0011_58ea;
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings these spells pass to `printf` as its
+/// format, for the locale layer's catalogue ([`super::PRINTED`]): the food and too-old lines and
+/// Wind Change's prompt, no-direction word and name format (the direction's name goes through
+/// `%s`, a label read for display, [`super::tables::LABELS`]).
+pub(super) const PRINTED: &[u32] = &[MSG_FOOD, MSG_TOO_OLD, MSG_DIRECTION, MSG_NOWHERE, FMT_S_DOT];
 /// Food object type.
 const FOOD: u16 = 0x81;
 /// [replaced] Engine milliseconds of one pass of [`flash_window`] (the XOR 0x1521f4, the border,
@@ -295,7 +300,9 @@ pub async fn wind_change(state: &RefCell<State>, io: &Io) {
     let dir = state.borrow().ui.input.direction;
     if key == 0x80 {
         let at = crate::image::A4.wrapping_sub(DIRECTION_NAMES) + 4 * (dir as u32);
-        let name = crate::main_loop::pointed_string(io, at);
+        // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
+        // it when it has one ([`super::tables::LABELS`], [`crate::locale::shown`]).
+        let name = crate::locale::shown(&state.borrow(), crate::main_loop::pointed_string(io, at));
         print_at(state, io, FMT_S_DOT, &[Arg::Str(&name)]).await;
     } else {
         print_at(state, io, MSG_NOWHERE, &[]).await;

@@ -19,6 +19,20 @@ pub(super) const FMT_NL_S_NL: u32 = 0x0011_58ce;
 pub(super) const FMT_NL_S_BANG: u32 = 0x0011_58e4;
 const MSG_PARALYZED: u32 = 0x0011_58d4;
 const MSG_CHARMED: u32 = 0x0011_58bc;
+/// Port-only (spec 08, slice K2; 2026-10-24): the strings the effects pass to `printf` as its
+/// format, for the locale layer's catalogue ([`super::PRINTED`]): the result formats [`say`]
+/// prints, the paralyzed and charmed lines and a torch's burned-out line (A4-0x756f, the
+/// inventory's too, [`crate::inventory::PRINTED`]; the catalogue keeps it once).
+pub(super) const PRINTED: &[u32] = &[
+    FMT_S,
+    NEWLINE,
+    FMT_S_NL,
+    FMT_NL_S_NL,
+    FMT_NL_S_BANG,
+    MSG_PARALYZED,
+    MSG_CHARMED,
+    crate::image::A4.wrapping_sub(MSG_TORCH_OUT),
+];
 
 /// How 0x116f2c is called: the missile tile, the range, the kind of target (1 = an actor, -1
 /// = an object, else anything) and whether the target is chosen already.
@@ -44,9 +58,14 @@ pub(super) async fn settle(state: &RefCell<State>, io: &Io) {
     crate::combat::play_effects(state, io).await;
 }
 
-/// Prints result message `m` with format `fmt` (`%s`, `\n%s\n` or `\n%s!\n`).
+/// Prints result message `m` with format `fmt` (`%s`, `\n%s\n` or `\n%s!\n`). Port (spec 08,
+/// slice K2; 2026-10-24): the message is read for display, so the locale pack's label of it when
+/// it has one ([`super::tables::LABELS`], [`crate::locale::shown`]).
 pub(super) async fn say(state: &RefCell<State>, io: &Io, fmt: u32, m: Msg) {
-    let text = state.borrow().magic.tables.message(m).to_vec();
+    let text = {
+        let s = state.borrow();
+        crate::locale::shown(&s, s.magic.tables.message(m).to_vec())
+    };
     print_at(state, io, fmt, &[Arg::Str(&text)]).await;
 }
 
