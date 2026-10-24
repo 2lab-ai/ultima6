@@ -107,6 +107,13 @@ pub fn save(s: &mut State) {
         }
     }
     write_back_region(s);
+    // Spec 14 Design 3 (Wide): the region read again gives the party's objects other slots, so
+    // the inventory view's kept bag and page, and its slot's cells, name other objects; the next
+    // draw starts them again, as the original's redraw after the save does.
+    #[cfg(feature = "wide")]
+    {
+        s.ui.panel.slots = Default::default();
+    }
     s.actors.quest_flag = s.actors.quest_flag_copy as u8;
     s.saveload.objlist = Some(objlist::encode(s));
     crate::map::region::refresh_region(s);

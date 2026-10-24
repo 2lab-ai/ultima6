@@ -39,7 +39,9 @@ const FMT_PROMPT: u32 = 0x104ff4;
 
 /// Original: 0x10658e (ui: the code of a click, by the first region A4-0x79c2 that holds the
 /// pointer: 0 the map window, 1 the command bar, 2 the side panel, 3 the rest of the screen;
-/// 0 = nothing). In Wide region 0 is the shown map beside the UI ([`super::pointer::region`]).
+/// 0 = nothing). In Wide region 0 is the shown map beside the UI ([`super::pointer::region`]),
+/// and the slots of the side panel's views have a region each (spec 14 Design 5,
+/// [`super::pointer::SLOT_REGIONS`]).
 pub async fn click(state: &RefCell<State>, io: &Io) -> u16 {
     let region = {
         let s = state.borrow();
@@ -58,18 +60,51 @@ pub async fn click(state: &RefCell<State>, io: &Io) -> u16 {
             s.ui.input.target = (-1, -1);
             0x8f
         }
+        #[cfg(feature = "wide")]
+        Some(i) if super::pointer::SLOT_REGIONS.contains(&i) => {
+            slot_click(state, io, i - super::pointer::SLOT_REGIONS.start).await
+        }
         _ => 0,
     }
 }
 
+/// The side panel's click region (A4-0x79c2 entry 2).
+const SIDE_PANEL: usize = 2;
+
 /// The first click region (A4-0x79c2, [`super::pointer::region`]) that holds pixel (x, y), as
-/// 0x10658e scans them; `None` when none does.
+/// 0x10658e scans them; `None` when none does. The slots' regions (Wide) come after the side
+/// panel's (region 2).
 pub(crate) fn region_at(s: &State, x: i16, y: i16) -> Option<usize> {
     let tables = &s.ui.pointer.tables;
-    (0..tables.regions.len()).find(|&i| {
-        super::pointer::region(tables, i)
-            .is_some_and(|r| (r[0]..=r[2]).contains(&x) && (r[1]..=r[3]).contains(&y))
-    })
+    let n = tables.regions.len();
+    let after_panel = n.min(SIDE_PANEL + 1);
+    (0..after_panel)
+        .chain(super::pointer::SLOT_REGIONS)
+        .chain(after_panel..n)
+        .find(|&i| {
+            super::pointer::region(tables, i)
+                .is_some_and(|r| (r[0]..=r[2]).contains(&x) && (r[1]..=r[3]).contains(&y))
+        })
+}
+
+/// Spec 14 Design 5 (Wide): a press in slot `slot` acts as the same press in the side panel with
+/// the slot's view shown: [`super::panels::begin_slot_press`] maps the pointer and sets the
+/// view, then [`panel_click`] (the press check, the right-click repeat, the view's handler, the
+/// target-pending confirmation). A code goes to the key read, which handles it with that view
+/// and then puts the press back; with no code (nothing hit, or the combat-mode line or a message
+/// drawn in place) the press is put back here and the panel redrawn, as the slots show it.
+/// While the panel shows none of the three views a press is ignored (Design 6).
+#[cfg(feature = "wide")]
+async fn slot_click(state: &RefCell<State>, io: &Io, slot: usize) -> u16 {
+    if !super::panels::begin_slot_press(&mut state.borrow_mut(), slot) {
+        return 0;
+    }
+    let code = panel_click(state, io).await;
+    if code == 0 {
+        super::panels::end_slot_press(&mut state.borrow_mut());
+        super::panels::redraw_panel(state, io).await;
+    }
+    code
 }
 
 /// 0x1065f8..0x106678: the map window. Waiting for a target: the press confirms the cell under

@@ -1,9 +1,10 @@
 //! Spec 13: the geometry of the window, the view and the map's place in the frame, for both
 //! builds. Original (the default) keeps the game's sizes; Wide (the `wide` feature, which also
-//! turns on `u6-render`'s, the frame then 912 × 336, [`u6_render::WIDTH`] × [`u6_render::HEIGHT`])
-//! has a 37 × 21 view in a 60 × 60 window, the map beside the UI's 320 × 200.
+//! turns on `u6-render`'s, the frame then 912 × 408, [`u6_render::WIDTH`] × [`u6_render::HEIGHT`])
+//! has a 37 × 21 view in a 60 × 60 window, the map beside the UI's 320 × 200, and below the UI
+//! the slots of the side panel's three views (spec 14 Design 1, [`SLOTS`]).
 //!
-//! The values that differ between the builds are the five of the two `mode` blocks below; every
+//! The values that differ between the builds are the six of the two `mode` blocks below; every
 //! other constant is derived from them. Which half a site reads (spec 13 Decisions 3–5): what
 //! the player can see follows the view ([`HALF_W`], [`HALF_H`]); spell areas and targeting keep
 //! the original box round the leader ([`RULE_HALF`]).
@@ -29,6 +30,8 @@ mod mode {
     pub const MAP: (u16, u16) = (0, 0);
     /// Sight queue entries.
     pub const QUEUE_LEN: usize = 256;
+    /// No slots: the side panel shows one view.
+    pub const SLOTS: &[(u16, u16)] = &[];
 }
 
 /// The values the two builds choose; the public constants below read them.
@@ -44,10 +47,15 @@ mod mode {
     pub const MAP: (u16, u16) = (320, 0);
     /// Sight queue entries.
     pub const QUEUE_LEN: usize = 1024;
+    /// The slots' frame origins: roster, stats, inventory (spec 14 Design 1).
+    pub const SLOTS: &[(u16, u16)] = &[(8, 206), (160, 206), (8, 310)];
 }
 
 /// Pixels per map cell side.
 const CELL: u16 = 16;
+/// The UI's screen, columns × rows, in the frame's top-left corner in both builds (spec 13
+/// Geometry).
+const UI: (usize, usize) = (320, 200);
 
 /// View columns. Original 11: the `moveq #0xb` loops of 0x102c90, the 11 × 11 words of the tile
 /// cache A4-0x1476 that 0x109e74 writes (`gfx/view.rs:35-36`), and the draw-list pool's 121
@@ -102,6 +110,49 @@ const _: () = assert!(
     "a flood's cells fit the queue"
 );
 
+/// Spec 14 Design 1: the frame pixel of the top left of each slot the side panel's views are
+/// copied into, by view: roster (0x91), stats (0x90), inventory (0x92). Each is [`SLOT_W`] ×
+/// [`SLOT_H`], the side panel area's size. None in Original; in Wide (8, 206), (160, 206) and
+/// (8, 310), below the UI and left of the map, where nothing else draws, each at a multiple of 8
+/// pixels from the panel area on both axes (rev 3: the HD font draws a text cell only on the
+/// 8-pixel grid, `u6_render::hd` `glyph_cell`; asserted in `ui/panels.rs`).
+pub const SLOTS: &[(u16, u16)] = mode::SLOTS;
+/// Width of a slot: the side panel area's 144 columns (`ui/panels.rs` `PANEL` from 0xa8).
+pub const SLOT_W: u16 = 144;
+/// Height of a slot: the side panel area's 98 rows (`PANEL`, rows 6..=0x67).
+pub const SLOT_H: u16 = 98;
+// Every slot lies in the frame, outside the UI's 320 × 200 and left of the map's columns, and
+// apart from every other slot.
+const _: () = assert!(
+    slots_fit(),
+    "the slots lie in the frame, off the UI and the map, apart"
+);
+
+/// The check of the assertion above.
+const fn slots_fit() -> bool {
+    let (w, h) = (SLOT_W as usize, SLOT_H as usize);
+    let mut i = 0;
+    while i < SLOTS.len() {
+        let (x, y) = (SLOTS[i].0 as usize, SLOTS[i].1 as usize);
+        let in_frame = x + w <= u6_render::WIDTH && y + h <= u6_render::HEIGHT;
+        let off_ui = x >= UI.0 || y >= UI.1;
+        let off_map = x + w <= MAP_X as usize;
+        if !(in_frame && off_ui && off_map) {
+            return false;
+        }
+        let mut j = i + 1;
+        while j < SLOTS.len() {
+            let (a, b) = (SLOTS[j].0 as usize, SLOTS[j].1 as usize);
+            if x < a + w && a < x + w && y < b + h && b < y + h {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Spec 13's inner sight block on one axis: `lo = (LEAD - half - 1) & !7`,
 /// `hi = (LEAD + 7 + half + 1 + 8) & !7`.
 const fn block(half: usize) -> Range<usize> {
@@ -125,9 +176,6 @@ pub const fn view_offset(c: u16, origin: u16, half: u16) -> i16 {
 mod tests {
     use super::*;
     use u6_render::{HEIGHT, WIDTH};
-
-    /// The UI's screen, in the frame's top-left corner in both builds (spec 13 Geometry).
-    const UI: (usize, usize) = (320, 200);
 
     /// The frame rect of the whole view, `(xs, ys)`.
     fn map_rect() -> (Range<usize>, Range<usize>) {
@@ -153,6 +201,7 @@ mod tests {
         assert_eq!(SHOWN, (8, 8, 0xa7, 0xa7));
         assert_eq!(QUEUE_LEN, 256);
         assert_eq!((WIDTH, HEIGHT), UI);
+        assert!(SLOTS.is_empty(), "no slots: spec 14 is Wide only");
     }
 
     /// `map/region.rs:91-96`, as written there, for every surface coordinate.
@@ -258,16 +307,38 @@ mod tests {
         assert_eq!((MAP_X, MAP_Y), (320, 0));
         assert_eq!(SHOWN, (328, 8, 903, 327));
         assert_eq!(QUEUE_LEN, 1024);
-        assert_eq!((WIDTH, HEIGHT), (912, 336));
+        assert_eq!((WIDTH, HEIGHT), (912, 408), "spec 14 Design 1");
     }
 
-    /// The view fills the frame beside the UI: 37 columns across, 21 rows down. Fails with
-    /// [`VIEW_W`] and [`VIEW_H`] swapped.
+    /// The view fills the frame's width beside the UI and its top 336 rows: 37 columns across,
+    /// 21 rows down (below them, left of the map, the slots of spec 14). Fails with [`VIEW_W`]
+    /// and [`VIEW_H`] swapped.
     #[cfg(feature = "wide")]
     #[test]
     fn wide_view_fills_the_frame_beside_the_ui_columns_across() {
         let (xs, ys) = map_rect();
         assert_eq!((xs.start, xs.end), (UI.0, WIDTH), "columns");
-        assert_eq!((ys.start, ys.end), (0, HEIGHT), "rows");
+        assert_eq!((ys.start, ys.end), (0, 336), "rows");
+    }
+
+    /// Spec 14 Design 1's slot table: roster, stats, inventory, in that order (fails with any two
+    /// origins swapped), each the side panel's 144 × 98; the inventory slot ends at the frame's
+    /// bottom row, the stats slot left of the map.
+    #[cfg(feature = "wide")]
+    #[test]
+    fn wide_slots_are_the_spec_table() {
+        assert_eq!(SLOTS, [(8, 206), (160, 206), (8, 310)]);
+        assert_eq!((SLOT_W, SLOT_H), (144, 98));
+        let (x, y) = SLOTS[2];
+        assert_eq!(
+            usize::from(y + SLOT_H),
+            HEIGHT,
+            "the inventory slot at the bottom"
+        );
+        assert!(
+            SLOTS[1].0 + SLOT_W <= MAP_X && x + SLOT_W <= MAP_X,
+            "left of the map"
+        );
+        assert!(slots_fit());
     }
 }

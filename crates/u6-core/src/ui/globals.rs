@@ -107,6 +107,96 @@ pub struct PanelState {
     /// Original: A4+0x1820 (no panel row above / below the inventory grid; meaning not
     /// identified)
     pub no_rows: bool,
+    /// Port-only (spec 14, Wide): what the slots of the side panel's three views keep between
+    /// redraws.
+    #[cfg(feature = "wide")]
+    pub slots: Slots,
+}
+
+/// Port-only (spec 14, Wide): the state of the side panel's view slots ([`crate::geom::SLOTS`]).
+#[cfg(feature = "wide")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Slots {
+    /// The inventory view as its last draw left it (Design 5): what a press in its slot reads
+    /// while another view is the panel's.
+    pub inventory: ViewCells,
+    /// A press in a slot whose code the key read has not handled yet: what it changed, put back
+    /// after that code (Design 5).
+    pub press: Option<SlotPress>,
+    /// The actor (or open container) the inventory view last showed; the inventory context
+    /// starts again when it changes (Design 3). `None` before the first draw.
+    pub base: Option<u16>,
+    /// The free count (`Objects::freed`) of the slot of the container the inventory view last
+    /// showed, as that draw, or the panel code that opened the container (0x9f / 0xa0), recorded
+    /// it. A kept container's slot must not have been freed since: a freed slot can be handed to
+    /// another object before the next draw, even one with the same type and frame word and the
+    /// same holder, so neither tells the object the view showed from another.
+    pub freed: u32,
+}
+
+/// The inventory view's state outside the panel's inventory context (spec 14 Designs 2 and 3:
+/// the page and the container are the context, kept): the list and equipment cells, the list
+/// count, the two weights and the both-hands flags its draw leaves (0x1112cc, 0x1118c6).
+#[cfg(feature = "wide")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewCells {
+    /// `InventoryState::cells` (A4+0x1348).
+    pub cells: [i16; crate::inventory::CELLS],
+    /// [`PanelState::inventory_count`] (A4+0x1340).
+    pub count: u8,
+    /// `InventoryState::equip_weight` (A4+0x1342).
+    pub equip_weight: i16,
+    /// `InventoryState::carried_weight` (A4+0x1344).
+    pub carried_weight: i16,
+    /// [`PanelState::member_flags`] (A4+0x1370).
+    pub member_flags: [u8; 16],
+    /// [`PanelState::container_flag`] (A4+0x1382).
+    pub container_flag: bool,
+}
+
+#[cfg(feature = "wide")]
+impl ViewCells {
+    /// The fields as they are in `s`.
+    pub fn of(s: &crate::state::State) -> ViewCells {
+        let (inv, p) = (&s.inventory, &s.ui.panel);
+        ViewCells {
+            cells: inv.cells,
+            count: p.inventory_count,
+            equip_weight: inv.equip_weight,
+            carried_weight: inv.carried_weight,
+            member_flags: p.member_flags,
+            container_flag: p.container_flag,
+        }
+    }
+
+    /// Writes the fields into `s`.
+    pub fn put(&self, s: &mut crate::state::State) {
+        let inv = &mut s.inventory;
+        inv.cells = self.cells;
+        inv.equip_weight = self.equip_weight;
+        inv.carried_weight = self.carried_weight;
+        let p = &mut s.ui.panel;
+        p.inventory_count = self.count;
+        p.member_flags = self.member_flags;
+        p.container_flag = self.container_flag;
+    }
+}
+
+/// A press in a slot (spec 14 Design 5) until the key read that took its code has handled it.
+#[cfg(feature = "wide")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlotPress {
+    /// The panel mode before the press.
+    pub mode: u16,
+    /// The slot's view, the mode the press set.
+    pub view: u16,
+    /// Where the press was ([`InputState::pointer`], frame pixels).
+    pub pointer: (i16, i16),
+    /// The inventory state the slot's replaced, when the slot is the inventory's and the panel
+    /// showed another view.
+    pub cells: Option<ViewCells>,
+    /// The key read that got the press's code has taken it ([`crate::ui::wait::read_key`]).
+    pub claimed: bool,
 }
 
 impl PanelState {

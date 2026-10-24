@@ -21,8 +21,10 @@
 // the setting) and the HD font on it
 // (spec 11: the font file, the text drawn in runs over the listed cells, the pixel font as before,
 // the choice), and the Wide layout (spec 13: the Wide build site/pkg-wide on a fresh page, the
-// map covering the 1920 x 1080 canvas, the four framed windows over it, the pointer through them,
-// the letterbox, fullscreen, the compositor's time and scale, the setting across the builds).
+// map covering the 1920 x 1080 canvas, the framed windows over it, the pointer through them, the
+// letterbox, fullscreen, the compositor's time and scale, the setting across the builds; spec 14:
+// the actor windows, the active one marked, the side panel's own window in another mode or a
+// conversation).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
@@ -8354,24 +8356,49 @@ test('HD font (spec 11 Acceptance 3, Design 4-5): the first-run chooser and Sett
   console.log('  receipt: the chooser\'s and Settings\' Font in Korean and English; the font file from this origin (200) only while the HD font and the HD layout are in effect; the choice kept at once and across reloads; storage that throws: for the visit; a file not there: the pixel font: pass');
 });
 
-// --- the Wide layout (spec 13) -----------------------------------------------------------------
-// The Wide build (site/pkg-wide, a 912 x 336 frame: the UI's 320 x 200 at its top left, the map
-// beside it) on a 1920 x 1080 canvas: the map covering it, four framed windows over it. The
-// test's own copy of spec 13's Geometry (Wide column) and of spec 10's region rects; the window
-// rects are checked against where Design 5 puts them, read from the page's table. At W0 the
-// engine still draws its map in the UI's 11 x 11 window, so the shown map is black in the frame:
-// what these tests check of it is that the canvas shows the frame's pixels there, whatever they
-// are, and where the pointer goes.
-const WIDE_GEOM = { mapX: 320, mapY: 0, halfW: 18, halfH: 10, shown: [328, 8, 576, 320], frame: [912, 336] };
+// --- the Wide layout (spec 13, spec 14) -------------------------------------------------------
+// The Wide build (site/pkg-wide: the UI's 320 x 200 at the frame's top left, the map beside it,
+// under the UI the side panel's three views in their slots, spec 14) on a 1920 x 1080 canvas: the
+// map covering it, framed windows over it. The test's own copy of spec 13's Geometry (Wide
+// column), of spec 10's region rects and of spec 14's window rects; the window rects are checked
+// against where spec 13 Design 5 and spec 14 Design 7 put them, read from the page's table. The
+// frame's size is read from the engine (Game.width / height); spec 14's 912 x 408 is asserted
+// once, as its contract. What these tests check of the map is that the canvas shows the frame's
+// pixels there, whatever they are, and where the pointer goes.
+const WIDE_GEOM = { mapX: 320, mapY: 0, halfW: 18, halfH: 10, shown: [328, 8, 576, 320] };
 const WIDE_CANVAS = [1920, 1080];
-// Spec 10's regions, `from` (game pixels) and the size of their `to` (canvas pixels).
+// Spec 14 Design 1: the Wide frame (the contract).
+const WIDE_FRAME = [912, 408];
+// The windows: `from` (frame pixels), the size of their `to` (canvas pixels) and where they go:
+// spec 10's regions at spec 10's sizes (the date line, the message scroll, the command bar), spec
+// 14's actor windows and the side panel's own window at 3 (site/app.js ACTOR_S); `corner`, with
+// `under`, and `leftOf`, `rightOf`, `below` as site/app.js's WIDE_WINDOWS, `view` the panel mode
+// each shows, `other` the side panel's own (shown only in another mode or a conversation),
+// `named` the shown member's name in its title.
 const WIDE_PARTS = {
-  date: { from: [16, 168, 152, 8], size: [532, 28], corner: 'top-right' },
-  panel: { from: [168, 6, 144, 98], size: [504, 343], corner: 'top-right' },
-  messages: { from: [176, 112, 136, 80], size: [476, 280], corner: 'bottom-right' },
-  commands: { from: [8, 176, 160, 17], size: [640, 68], corner: 'bottom-left' },
+  date: { from: [16, 168, 152, 8], size: [532, 28], corner: 'top-right', title: 'windowDate' },
+  party: { from: [8, 206, 144, 98], size: [432, 294], corner: 'top-right', under: 'date', view: 0x91, title: 'windowParty' },
+  stats: { from: [160, 206, 144, 98], size: [432, 294], leftOf: 'party', view: 0x90, named: true, title: 'windowAttributes' },
+  doll: { from: [8, 320, 72, 88], size: [216, 264], below: 'stats', view: 0x92, named: true, title: 'windowDoll' },
+  backpack: { from: [80, 320, 72, 88], size: [216, 264], rightOf: 'doll', view: 0x92, named: true, title: 'windowBackpack' },
+  messages: { from: [176, 112, 136, 80], size: [476, 280], corner: 'bottom-right', title: 'windowMessages' },
+  commands: { from: [8, 176, 160, 17], size: [640, 68], corner: 'bottom-left', title: 'windowCommands' },
+  other: { from: [168, 6, 144, 98], size: [432, 294], corner: 'top-left', other: true, title: 'windowPanel' },
 };
+// The windows the page lists in one of the actor views' modes, in its order (the side panel's own
+// last, after them, in another mode or a conversation).
+const WIDE_NAMES = ['date', 'party', 'stats', 'doll', 'backpack', 'messages', 'commands'];
+const ACTOR_MODES = [0x90, 0x91, 0x92];
 const WIDE_EDGE = 8; // the windows' frames this far from the canvas's edges (Design 5, brief W5)
+const WIDE_GAP = 8; // a window this far from the one it is placed by (site/app.js WINDOW_GAP)
+// A window's frame: its border this wide, its title strip this tall above its content
+// (site/app.js WINDOW_BORDER, WINDOW_TITLE).
+const WIDE_BORDER = 4;
+const WIDE_TITLE = 20;
+// A title keeps this many columns at its strip's right end clear (site/app.js WINDOW_TITLE_PAD
+// less a fringe): the strip's colour alone there.
+const TITLE_CLEAR = 4;
+
 
 // A gated page of the Wide build (`openWide`; with `fresh`, a page that keeps no screen choice:
 // the page's default), the pixel font kept (as `bootLayout`: a listed cell is flat paper in the
@@ -8424,24 +8451,30 @@ const holds = ([ax, ay, aw, ah], [bx, by, bw, bh]) => bx >= ax && by >= ay && bx
 
 // Page script, the display frozen by the caller: the canvas against the frame it is drawn from
 // (`hd`: the HD frame at the layout's scale, else the classic frame). Per window, its content's
-// pixels where the frame is one colour round the game pixel shown (3 x 3 game pixels; at the
-// centre of what shows it): `compared`, `differ` (more than 2 off in a channel); a one-to-one
-// window (the command bar at x4) every pixel (`exact`, `exactDiffer`). The map likewise at a grid
-// of canvas pixels not under a window (`map`). The frames: per window, the colours of its border
-// (the outer ring), of its title strip's last 40 columns (no title there) and the title strip's
-// colours besides them (the name's ink). Counts only.
-const wideCheck = (page, hd) => page.evaluate((onHd) => {
+// pixels where the frame is one colour round the game pixel shown (3 x 3 game pixels inside the
+// frame; at the centre of what shows it, where no window in front covers it): `compared`,
+// `differ` (more than 2 off in a channel), `dimDiffer` (more than 2 off the frame's colour at
+// half over the border's, a dimmed window's); a one-to-one window (the command bar at x4) every
+// pixel (`exact`, `exactDiffer`). The map likewise at a grid of canvas pixels not under a window
+// (`map`). The frames: per window, the colours of its border (the outer ring; `ringInk` its
+// corner's), of its title strip's last `titleClear` columns (no title there; `barInk`) and the
+// title strip's colours besides them (the name's ink). Counts and the page's own window colours
+// only.
+const wideCheck = (page, hd, titleClear = TITLE_CLEAR) => page.evaluate(([onHd, clear]) => {
   const c = document.getElementById('screen');
   const L = globalThis.__u6Layout;
   const g = globalThis.__shownGame;
   const s = onHd ? g.hd_scale() : 1;
   const f = onHd ? g.hd_frame_rgba() : g.frame_rgba();
   const fw = g.width() * s;
+  const fh = g.height() * s;
   const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   const px = (x, y) => [0, 1, 2].map((k) => d[(y * c.width + x) * 4 + k]);
   const fr = (x, y) => [0, 1, 2].map((k) => f[(y * fw + x) * 4 + k]);
-  // The frame's colour of game pixel (gx, gy) when its 3 x 3 game pixels are one colour there.
+  // The frame's colour of game pixel (gx, gy) when its 3 x 3 game pixels are one colour there
+  // (all of them in the frame).
   const flat = (gx, gy) => {
+    if (gx < 1 || gy < 1 || (gx + 2) * s > fw || (gy + 2) * s > fh) return null;
     const ref = fr(gx * s, gy * s);
     for (let y = (gy - 1) * s; y < (gy + 2) * s; y += 1) {
       for (let x = (gx - 1) * s; x < (gx + 2) * s; x += 1) {
@@ -8454,15 +8487,19 @@ const wideCheck = (page, hd) => page.evaluate((onHd) => {
   const off = (a, b) => [0, 1, 2].some((k) => Math.abs(a[k] - b[k]) > 2);
   const out = { windows: {}, map: { compared: 0, differ: 0 } };
   for (const w of L.windows) {
-    const r = { compared: 0, differ: 0, exact: 0, exactDiffer: 0 };
+    const r = { compared: 0, differ: 0, dimDiffer: 0, exact: 0, exactDiffer: 0 };
     const [x0, y0, ww, wh] = w.from;
+    const paper = px(w.outer[0], w.outer[1]);
     for (let gy = y0 + 1; gy < y0 + wh - 1; gy += 1) {
       for (let gx = x0 + 1; gx < x0 + ww - 1; gx += 1) {
         const want = flat(gx, gy);
-        if (!want) continue;
-        const [cx, cy] = L.toCanvas(gx, gy).map(Math.floor);
+        const place = want ? L.toCanvas(gx, gy) : null;
+        if (!place) continue; // not flat, or under a window in front of this one
+        const [cx, cy] = place.map(Math.floor);
+        const got = px(cx, cy);
         r.compared += 1;
-        if (off(px(cx, cy), want)) r.differ += 1;
+        if (off(got, want)) r.differ += 1;
+        if (off(got, [0, 1, 2].map((k) => (want[k] + paper[k]) / 2))) r.dimDiffer += 1;
       }
     }
     if (w.to[2] === s * ww && w.to[3] === s * wh) {
@@ -8482,13 +8519,14 @@ const wideCheck = (page, hd) => page.evaluate((onHd) => {
     for (let y = oy; y < oy + oh; y += 1) ring.add(key(px(ox, y))).add(key(px(ox + ow - 1, y)));
     const [bx, by, bw, bh] = w.bar;
     const plain = new Set();
-    for (let y = by; y < by + bh; y += 1) for (let x = bx + bw - 40; x < bx + bw; x += 1) plain.add(key(px(x, y)));
+    for (let y = by; y < by + bh; y += 1) for (let x = bx + bw - clear; x < bx + bw; x += 1) plain.add(key(px(x, y)));
     const ink = new Set();
     for (let y = by; y < by + bh; y += 1) for (let x = bx; x < bx + 120; x += 1) if (!plain.has(key(px(x, y)))) ink.add(key(px(x, y)));
     r.ring = ring.size;
     r.plain = plain.size;
     r.ink = ink.size;
-    r.inkVsBar = [...ink].some((p) => p !== [...plain][0]);
+    r.ringInk = paper;
+    r.barInk = px(bx + bw - 1, by + Math.floor(bh / 2));
     out.windows[w.name] = r;
   }
   const map = L.regions.find((r) => r.name === 'map');
@@ -8504,36 +8542,55 @@ const wideCheck = (page, hd) => page.evaluate((onHd) => {
     }
   }
   return out;
-}, hd);
+}, [hd, titleClear]);
 
-// The windows of `shown` are where Design 5 puts them: content the size of spec 10's region, in
-// a frame whose title strip is above it, the frame WIDE_EDGE from the canvas's edges at its
-// corner (the side panel under the date line), none meeting another; with `label`.
-function windowsPlaced(shown, label) {
+// The windows of `shown` are where spec 13 Design 5 and spec 14 Design 7 put them (WIDE_PARTS):
+// content the size the test gives it, in a frame whose title strip is above it; at a corner the
+// frame WIDE_EDGE from the canvas's edges there (under the window `under` names, WIDE_GAP under
+// it), beside (`leftOf`, `rightOf`: the tops in line) or under (`below`: the left edges in line)
+// the window named, WIDE_GAP from it; none meeting another, nor the leader's cell (the map's
+// centre, by the test's own geometry: view cell (HALF_W, HALF_H) at frame (MAP_X, MAP_Y) plus 16
+// a cell, the shown rect scaled by 1080 / 320 from canvas x -12); with `label`. In one of the
+// actor views' modes the windows are WIDE_NAMES; with `other`, the side panel's own after them
+// (placed and meeting none too).
+function windowsPlaced(shown, label, { other = false } = {}) {
   const names = shown.windows.map((w) => w.name);
-  assert.deepEqual(names, ['date', 'panel', 'messages', 'commands'], `${label}: the four windows`);
+  assert.deepEqual(names, other ? [...WIDE_NAMES, 'other'] : WIDE_NAMES, `${label}: the windows`);
   const [cw, ch] = WIDE_CANVAS;
+  const at = Object.fromEntries(shown.windows.map((w) => [w.name, w]));
   for (const w of shown.windows) {
     const part = WIDE_PARTS[w.name];
-    assert.deepEqual(w.from, part.from, `${label}: ${w.name} shows its spec 10 rect`);
-    assert.deepEqual(w.to.slice(2), part.size, `${label}: ${w.name} at its spec 10 size`);
+    assert.deepEqual(w.from, part.from, `${label}: ${w.name} shows its rect`);
+    assert.deepEqual(w.to.slice(2), part.size, `${label}: ${w.name} at its size`);
     assert.ok(holds(w.outer, w.to) && holds(w.outer, w.bar), `${label}: ${w.name}'s frame holds its title strip and its content`);
     assert.ok(w.bar[1] + w.bar[3] <= w.to[1] && w.bar[0] === w.to[0] && w.bar[2] === w.to[2] && w.bar[3] >= 12, `${label}: ${w.name}'s title strip above its content, as wide`);
     const [ox, oy, ow, oh] = w.outer;
     assert.ok(ox >= 0 && oy >= 0 && ox + ow <= cw && oy + oh <= ch, `${label}: ${w.name} inside the canvas`);
-    const right = part.corner.endsWith('right');
-    const bottom = part.corner.startsWith('bottom');
-    assert.equal(right ? cw - (ox + ow) : ox, WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the ${right ? 'right' : 'left'} edge`);
-    if (bottom) assert.equal(ch - (oy + oh), WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the bottom`);
+    if (part.corner) {
+      const right = part.corner.endsWith('right');
+      const bottom = part.corner.startsWith('bottom');
+      assert.equal(right ? cw - (ox + ow) : ox, WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the ${right ? 'right' : 'left'} edge`);
+      if (bottom) assert.equal(ch - (oy + oh), WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the bottom`);
+      else if (part.under) assert.equal(oy, at[part.under].outer[1] + at[part.under].outer[3] + WIDE_GAP, `${label}: ${w.name} under ${part.under}`);
+      else assert.equal(oy, WIDE_EDGE, `${label}: ${w.name} ${WIDE_EDGE} px from the top`);
+    } else if (part.leftOf || part.rightOf) {
+      const [bx, by, bw] = at[part.leftOf ?? part.rightOf].outer;
+      assert.deepEqual([ox, oy], [part.leftOf ? bx - WIDE_GAP - ow : bx + bw + WIDE_GAP, by], `${label}: ${w.name} beside ${part.leftOf ?? part.rightOf}`);
+    } else {
+      const [bx, by, , bh] = at[part.below].outer;
+      assert.deepEqual([ox, oy], [bx, by + bh + WIDE_GAP], `${label}: ${w.name} under ${part.below}`);
+    }
   }
-  const at = Object.fromEntries(shown.windows.map((w) => [w.name, w]));
-  assert.equal(at.date.outer[1], WIDE_EDGE, `${label}: the date line ${WIDE_EDGE} px from the top`);
-  assert.ok(at.panel.outer[1] >= at.date.outer[1] + at.date.outer[3], `${label}: the side panel under the date line`);
   for (let i = 0; i < shown.windows.length; i += 1) {
     for (let j = i + 1; j < shown.windows.length; j += 1) {
       assert.ok(!meets(shown.windows[i].outer, shown.windows[j].outer), `${label}: ${shown.windows[i].name} and ${shown.windows[j].name} do not overlap`);
     }
   }
+  const g = WIDE_GEOM;
+  const k = WIDE_CANVAS[1] / g.shown[3];
+  const [lx, ly] = [g.mapX + g.halfW * 16, g.mapY + g.halfH * 16];
+  const leader = [-12 + (lx - g.shown[0]) * k, (ly - g.shown[1]) * k, 16 * k, 16 * k];
+  for (const w of shown.windows) assert.ok(!meets(w.outer, leader), `${label}: ${w.name} leaves the leader's cell clear`);
 }
 
 // The map region of `shown` covers the canvas: spec 13's shown rect scaled by the larger of the
@@ -8548,14 +8605,16 @@ function mapCovers(shown, label) {
   assert.ok(map.to[0] === -12 && map.to[0] + map.to[2] === cw + 12 && map.to[1] === 0 && map.to[3] === ch, `${label}: 12 px cropped at either side, the whole height`);
 }
 
-test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5): a fresh page (no screen kept) loads the Wide build (site/pkg-wide only: the frame 912 x 336) and shows the Wide layout: the canvas 1920 x 1080 in a 16:9 box, the compositor at the layout\'s scale; the map (spec 13\'s shown rect) scaled to cover the canvas, the canvas the frame\'s colours there; the date line, the side panel, the message scroll and the command bar in framed windows over it, each titled, at its corner 8 px from the edges, the side panel under the date line, at spec 10\'s sizes, none overlapping, showing the frame\'s colours (the command bar one to one with the x4 frame); HD off: the same layout from the classic frame, pixelated (each pixel the frame\'s); every window\'s centre and every pixel of a window maps to a game pixel of its rect and back; no page error', async (env) => {
+test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5; spec 14 Design 1 and 7): a fresh page (no screen kept) loads the Wide build (site/pkg-wide only: the frame 912 x 408, read from the engine) and shows the Wide layout: the canvas 1920 x 1080 in a 16:9 box, the compositor at the layout\'s scale; the map (spec 13\'s shown rect) scaled to cover the canvas, the canvas the frame\'s colours there; the date line, the party, the attributes, the paper doll, the backpack, the message scroll and the command bar in framed windows over it, each titled, at its default place (the date line, the scroll and the command bar at their corners 8 px from the edges, the party under the date line, the attributes left of it, the doll and the backpack side by side under them), at its size, none overlapping nor over the leader\'s cell, showing the frame\'s colours (the command bar one to one with the x4 frame); HD off: the same layout from the classic frame, pixelated (each pixel the frame\'s); every window\'s centre and every pixel of a window maps to a game pixel of its rect and back; no page error', async (env) => {
   const errors = [];
   const { page, glues } = await bootWide(env, { fresh: true });
   page.on('pageerror', () => errors.push(1));
   assert.ok(glues.length > 0 && glues.every((p) => p === '/pkg-wide/u6_web.js'), 'the Wide build\'s glue, and no other');
   let s = await wideShown(page);
   assert.ok(s.layout === 'wide' && s.wide && s.view === 'game', 'the Wide layout in game');
-  assert.deepEqual(s.frame, WIDE_GEOM.frame, 'the Wide frame');
+  // The frame as the engine has it: spec 14's size, its contract; every window's rect in it.
+  assert.deepEqual(s.frame, WIDE_FRAME, 'the Wide frame (spec 14 Design 1)');
+  assert.ok(s.windows.every(({ from: [x, y, w, hh] }) => x + w <= s.frame[0] && y + hh <= s.frame[1]), 'every window\'s rect in the frame');
   assert.deepEqual(s.size, WIDE_CANVAS, 'the canvas 1920 x 1080');
   assert.ok(s.hd && s.scale === s.layoutScale && [2, 4].includes(s.scale), 'HD at the layout\'s scale');
   const box = await page.evaluate(() => {
@@ -8587,7 +8646,8 @@ test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5): a fresh page (no screen 
     return { bad, n, centres };
   });
   assert.ok(mapped.n > 0 && mapped.bad === 0, 'every window pixel maps to a pixel of its rect and back');
-  for (const [name, { from }] of Object.entries(WIDE_PARTS)) {
+  for (const name of WIDE_NAMES) {
+    const { from } = WIDE_PARTS[name];
     assert.deepEqual(mapped.centres[name], [from[0] + Math.floor(from[2] / 2), from[1] + Math.floor(from[3] / 2)], `${name}: its centre is its rect's centre`);
   }
   // What the canvas shows, the display frozen.
@@ -8596,7 +8656,7 @@ test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5): a fresh page (no screen 
   let shown = await wideCheck(page, true);
   for (const [name, r] of Object.entries(shown.windows)) {
     assert.ok(r.compared > 0 && r.differ === 0, `HD on: ${name} shows the frame's colours`);
-    assert.ok(r.ring === 1 && r.plain === 1 && r.ink > 0 && r.inkVsBar, `HD on: ${name} framed in one colour, titled on a strip of one colour`);
+    assert.ok(r.ring === 1 && r.plain === 1 && r.ink > 0, `HD on: ${name} framed in one colour, titled on a strip of one colour`);
   }
   // One to one at S 4 only (the command bar's 640 x 68 is its rect at x4).
   if (s.layoutScale === 4) assert.ok(shown.windows.commands.exact === 640 * 68 && shown.windows.commands.exactDiffer === 0, 'HD on: the command bar one to one with the x4 frame');
@@ -8647,10 +8707,10 @@ test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5): a fresh page (no screen 
   await h.runFrames(page, 2);
   assert.ok((await wideShown(page)).hd, 'HD on again');
   assert.equal(errors.length, 0, 'no page error');
-  console.log(`  receipt: the Wide build from a fresh page; canvas 1920 x 1080, map cover ${s.regions[0].to.join(',')}; windows (frame / content) ${s.windows.map((w) => `${w.name} ${w.outer.join(',')} / ${w.to.join(',')}`).join('; ')}; the frame's colours in every window and on the map with HD on and off${s.layoutScale === 4 ? ', the command bar one to one at x4' : ''}: pass`);
+  console.log(`  receipt: the Wide build from a fresh page; frame ${s.frame.join(' x ')}; canvas 1920 x 1080, map cover ${s.regions[0].to.join(',')}; windows (frame / content) ${s.windows.map((w) => `${w.name} ${w.outer.join(',')} / ${w.to.join(',')}`).join('; ')}; the frame's colours in ${s.windows.length} windows and on the map with HD on and off${s.layoutScale === 4 ? ', the command bar one to one at x4' : ''}: pass`);
 }, { needs: h.haveHfes });
 
-test('Wide layout (spec 13 Design 5): the pointer through the windows and the map: a move on a window\'s frame or title strip with no button reaches the nearest pixel of its content; a click on a title strip is a gap (its press and release the rest of the screen); a click on the map 15 cells east of the leader reaches the game at its cell\'s centre (MAP_X + (HALF_W + 15) 16 + 8, the leader\'s row); a click at each window\'s centre reaches the game pixel at its rect\'s centre', async (env) => {
+test('Wide layout (spec 13 Design 5, spec 14 Design 7): the pointer through the windows and the map: a move on a window\'s frame or title strip with no button reaches the nearest pixel of its content; a click on a title strip is a gap (its press and release the rest of the screen); a click on the map 15 cells east of the leader reaches the game at its cell\'s centre (MAP_X + (HALF_W + 15) 16 + 8, the leader\'s row); a click at each window\'s centre (the actor windows\' included) reaches the game pixel at its frame rect\'s centre, which shows there', async (env) => {
   const { page } = await bootWide(env);
   await recordPointer(page);
   const s = await wideShown(page);
@@ -8665,7 +8725,8 @@ test('Wide layout (spec 13 Design 5): the pointer through the windows and the ma
   // Moves with no button on a frame and on a title strip: the nearest pixel of that content.
   const moves = [
     [at.date, [at.date.outer[0] + 1, at.date.outer[1] + 1], 'the date line\'s frame, top left'],
-    [at.panel, [at.panel.bar[0] + 40, at.panel.bar[1] + 5], 'the side panel\'s title strip'],
+    [at.party, [at.party.bar[0] + 40, at.party.bar[1] + 5], 'the party\'s title strip'],
+    [at.doll, [at.doll.outer[0] + 1, at.doll.to[1] + 100], 'the paper doll\'s left border'],
     [at.messages, [at.messages.outer[0] + at.messages.outer[2] - 2, at.messages.to[1] + 29], 'the message scroll\'s right border'],
     [at.commands, [at.commands.to[0] + 102, at.commands.outer[1] + at.commands.outer[3] - 2], 'the command bar\'s bottom border'],
   ];
@@ -8702,9 +8763,10 @@ test('Wide layout (spec 13 Design 5): the pointer through the windows and the ma
   let press = (await pointerSince(page, n)).find(([, , b]) => b === 1);
   assert.deepEqual(press, [...want, 1], 'the map click 15 cells east of the leader reaches its cell\'s centre');
   // Each window's centre: the game pixel at its rect's centre, clicked at the middle of what
-  // shows it (the date line and the scroll first; the panel and the command bar may start
-  // something in the game, which this test does not wait for).
-  for (const name of ['date', 'messages', 'panel', 'commands']) {
+  // shows it (the date line and the scroll first; the actor windows and the command bar may
+  // start something in the game, which this test does not wait for; the command bar last).
+  const centres = ['date', 'messages', 'party', 'stats', 'doll', 'backpack', 'commands'];
+  for (const name of centres) {
     const { from } = WIDE_PARTS[name];
     const centre = [from[0] + Math.floor(from[2] / 2), from[1] + Math.floor(from[3] / 2)];
     const w = at[name];
@@ -8716,7 +8778,222 @@ test('Wide layout (spec 13 Design 5): the pointer through the windows and the ma
     press = (await pointerSince(page, n)).find(([, , b]) => b === 1);
     assert.deepEqual(press, [...centre, 1], `a click at the centre of ${name} reaches its rect's centre`);
   }
-  console.log(`  receipt: ${moves.length} frame and title moves at the nearest content pixel; ${s.windows.length} title-strip clicks at the rest of the screen; the map click 15 cells east at (${want.join(', ')}); 4 window centres at their rects' centres: pass`);
+  console.log(`  receipt: ${moves.length} frame and title moves at the nearest content pixel; ${s.windows.length} title-strip clicks at the rest of the screen; the map click 15 cells east at (${want.join(', ')}); ${centres.length} window centres at their rects' centres: pass`);
+}, { needs: h.haveHfes });
+
+// The windows of `shown` as spec 14 Design 6 marks them for the side panel's mode `mode` and
+// whether a conversation runs (`talking`): in one of the actor views' modes, no conversation,
+// WIDE_NAMES; in another or in a conversation the side panel's own after them (each at its default
+// place, `windowsPlaced`); the active windows those whose view is the mode (both halves of the
+// inventory), else the side panel's own; with the side panel's own the actor windows dimmed, none
+// else; with `label`.
+function marksFollow(shown, mode, label, talking = false) {
+  const other = !ACTOR_MODES.includes(mode) || talking;
+  windowsPlaced(shown, label, { other });
+  for (const w of shown.windows) {
+    const part = WIDE_PARTS[w.name];
+    assert.equal(w.view, part.view ?? null, `${label}: ${w.name}'s view`);
+    assert.equal(w.active, other ? w.name === 'other' : part.view === mode, `${label}: ${w.name} active or not`);
+    assert.equal(w.dimmed, other && part.view !== undefined, `${label}: ${w.name} dimmed or not`);
+  }
+}
+
+// Page script: per window shown, whether its title is its English name (`names`, by window) with
+// the shown member's name (Game.panel_name) after it in the windows `named` lists, when the
+// panel shows a member by name (in one of the actor views' modes); the titles kept in the page
+// for `titlesKept`: booleans only (the name stays in the page).
+const titlesNamed = (page, names, named) => page.evaluate(([byWindow, withName]) => {
+  const member = globalThis.__shownGame.panel_name();
+  window.__titlesKept = globalThis.__u6Layout.windows.map((w) => [w.name, w.title]);
+  return globalThis.__u6Layout.windows.every((w) => w.title === (withName.includes(w.name) && member
+    ? `${byWindow[w.name]} — ${member}` : byWindow[w.name]));
+}, [names, named]);
+// Page script: whether every window `titlesNamed` read last shows the same title now (another mode
+// or a conversation: the actor windows keep their last views, and their titles): a boolean.
+const titlesKept = (page) => page.evaluate(() => {
+  const now = Object.fromEntries(globalThis.__u6Layout.windows.map((w) => [w.name, w.title]));
+  return window.__titlesKept.length > 0 && window.__titlesKept.every(([name, title]) => now[name] === title);
+});
+
+// The canvas's marks in `check` (`wideCheck`, the display frozen) for the windows of `shown`: the
+// active windows' border and title strip each of one colour, the others' of another, darker; the
+// content of a dimmed window the frame's colours at half over its paper (the border's ink), of any
+// other the frame's colours; with `label`.
+function inksFollow(check, shown, label) {
+  const luma = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const active = shown.windows.filter((w) => w.active).map((w) => check.windows[w.name]);
+  const rest = shown.windows.filter((w) => !w.active).map((w) => check.windows[w.name]);
+  assert.ok(active.length > 0 && rest.length > 0, `${label}: active windows and others`);
+  for (const key of ['barInk', 'ringInk']) {
+    const a = new Set(active.map((r) => r[key].join(',')));
+    const b = new Set(rest.map((r) => r[key].join(',')));
+    assert.ok(a.size === 1 && b.size === 1, `${label}: one ${key} for the active windows, one for the others`);
+    assert.ok(luma(active[0][key]) > luma(rest[0][key]), `${label}: the active windows' ${key} lighter`);
+  }
+  for (const w of shown.windows) {
+    const r = check.windows[w.name];
+    assert.ok(r.ring === 1 && r.plain === 1 && r.ink > 0, `${label}: ${w.name} framed in one colour, titled on a strip of one colour`);
+    if (w.dimmed) assert.ok(r.compared > 0 && r.dimDiffer === 0 && r.differ > 0, `${label}: ${w.name} dimmed, the frame's colours at half over its paper`);
+    else assert.ok(r.compared > 0 && r.differ === 0, `${label}: ${w.name} the frame's colours`);
+  }
+}
+
+test('Wide layout (spec 14 Design 6 and 7): the actor windows follow the side panel\'s mode as the engine reports it (Game.panel_view, read at each paint): at the prompt the mode is one of the three views and its window is the active one, no side panel window; Look on the leader (its portrait, another mode): the side panel\'s own window at its default place (top left, meeting none), active, the party, the attributes, the paper doll and the backpack dimmed, a press in the dimmed party reaching the game at its frame rect\'s pixel, a press at the side panel window\'s content centre (at the test\'s own canvas coordinates) at the frame pixel (240, 55); back at the prompt as before; Talk to a party member (a conversation, the mode the roster\'s): the side panel\'s own window shown and active, the actor windows dimmed, until the conversation ends. The mode (the page\'s read of it set to each of 0x91, 0x90, 0x92, another, and 0x91 in a conversation; the display frozen): the active window\'s border and title strip lighter, one colour among the active ones (both halves of the inventory), the others another; dimmed windows the frame\'s colours at half over their paper, the rest the frame\'s; each title its name, the shown member\'s name after it in the attributes, the doll and the backpack, none when no member is shown, in another mode and in a conversation the name of their last views\' member; the titles\' words in English and Korean (Party / 파티, Attributes / 능력치, Paper doll / 인형, Backpack / 배낭, Panel / 패널)', async (env) => {
+  const { TEXT } = await import('../../site/i18n.js');
+  const keys = ['windowParty', 'windowAttributes', 'windowDoll', 'windowBackpack', 'windowPanel'];
+  assert.deepEqual(keys.map((k) => TEXT.en[k]), ['Party', 'Attributes', 'Paper doll', 'Backpack', 'Panel'], 'the English titles');
+  assert.deepEqual(keys.map((k) => TEXT.ko[k]), ['파티', '능력치', '인형', '배낭', '패널'], 'the Korean titles');
+  const names = Object.fromEntries(Object.entries(WIDE_PARTS).map(([name, { title }]) => [name, TEXT.en[title]]));
+  const named = Object.entries(WIDE_PARTS).filter(([, p]) => p.named).map(([name]) => name);
+  const errors = [];
+  const { page } = await bootWide(env);
+  page.on('pageerror', () => errors.push(1));
+  const panel = () => page.evaluate(() => [[...globalThis.__shownGame.panel_view()], globalThis.__u6Layout.panel]);
+  // At the prompt: one of the three views, as the engine has it.
+  let [real, read] = await panel();
+  assert.ok(real.length === 4 && ACTOR_MODES.includes(real[0]) && real[3] === 0, 'at the prompt the panel shows one of the three views, no conversation');
+  assert.deepEqual(read, real, 'the page read the engine\'s view');
+  const start = real[0];
+  let s = await wideShown(page);
+  marksFollow(s, start, 'at the prompt');
+  assert.ok(await titlesNamed(page, names, named), 'at the prompt: the titles');
+  // Look on the leader: the portrait (another mode) until a key or a click.
+  const look = async () => {
+    await page.focus('#screen');
+    await page.keyboard.press('l');
+    await h.waitTaken(page);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction((three) => {
+      const p = globalThis.__u6Layout.panel;
+      return p !== null && p.length === 4 && !three.includes(p[0]);
+    }, ACTOR_MODES, { timeout: 30_000 });
+  };
+  await look();
+  [real, read] = await panel();
+  assert.deepEqual(read, real, 'Look: the page read the engine\'s view');
+  s = await wideShown(page);
+  marksFollow(s, real[0], 'Look');
+  assert.ok(await titlesKept(page), 'Look: the actor windows\' titles as at the prompt');
+  // A press in the dimmed party: the game pixel there, as any press (the engine ignores it).
+  await recordPointer(page);
+  const party = WIDE_PARTS.party.from;
+  const centre = [party[0] + Math.floor(party[2] / 2), party[1] + Math.floor(party[3] / 2)];
+  let n = await pointerCount(page);
+  await page.mouse.click(...(await h.screenPoint(page, ...centre)));
+  await h.waitTaken(page);
+  const press = (await pointerSince(page, n)).find(([, , b]) => b === 1);
+  assert.deepEqual(press, [...centre, 1], 'a press in the dimmed party reaches its pixel');
+  // A press at the side panel's own window's content centre (the portrait again should that press
+  // have closed it), at canvas coordinates of the test's own: the window at (WIDE_EDGE, WIDE_EDGE),
+  // its content WIDE_BORDER in and under a title strip WIDE_TITLE tall, at its size over its rect;
+  // the centre of what shows the rect's centre pixel, (168 + 72, 6 + 49).
+  await h.waitTaken(page);
+  if (!(await page.evaluate(() => globalThis.__u6Layout.windows.some((w) => w.name === 'other')))) await look();
+  const other = WIDE_PARTS.other;
+  const k = other.size[0] / other.from[2];
+  const want = [240, 55];
+  const point = [WIDE_EDGE + WIDE_BORDER + (want[0] - other.from[0] + 0.5) * k,
+    WIDE_EDGE + WIDE_BORDER + WIDE_TITLE + (want[1] - other.from[1] + 0.5) * k];
+  const shownAt = await page.evaluate(([x, y]) => globalThis.__u6Layout.toCanvas(x, y), want);
+  assert.ok(shownAt && Math.abs(shownAt[0] - point[0]) < 1e-6 && Math.abs(shownAt[1] - point[1]) < 1e-6, 'the side panel\'s centre pixel shows where the test puts it');
+  n = await pointerCount(page);
+  await page.mouse.click(...(await h.canvasPoint(page, ...point)));
+  await h.waitTaken(page);
+  const panelPress = (await pointerSince(page, n)).find(([, , b]) => b === 1);
+  assert.deepEqual(panelPress, [...want, 1], 'a press at the side panel\'s own window\'s centre reaches the frame pixel there');
+  // The portrait closed (by that press, else a key), back at the prompt.
+  await h.waitTicks(page, 30);
+  if (await promptNow(page) !== '1') await page.keyboard.press('Space');
+  await h.waitPrompt(page);
+  await page.waitForFunction((three) => three.includes(globalThis.__u6Layout.panel?.[0]), ACTOR_MODES, { timeout: 30_000 });
+  [real] = await panel();
+  s = await wideShown(page);
+  marksFollow(s, real[0], 'back at the prompt');
+  assert.ok(await titlesNamed(page, names, named), 'back at the prompt: the titles');
+  // Talk to the party's second member (the real engine): the conversation flag, whatever the mode;
+  // the side panel's own window while it runs. Ended at its line by an empty one (the game's
+  // goodbye), a key at each page of text before it.
+  await page.focus('#screen');
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => globalThis.__u6Layout.panel?.[3] === 1, null, { timeout: 30_000 });
+  [real, read] = await panel();
+  assert.deepEqual(read, real, 'Talk: the page read the engine\'s view');
+  s = await wideShown(page);
+  marksFollow(s, real[0], `Talk (the mode ${ACTOR_MODES.includes(real[0]) ? 'one of the three' : 'another'})`, true);
+  assert.ok(await titlesKept(page), 'Talk: the actor windows\' titles as before it (their last views\' member)');
+  const talkMode = real[0];
+  // The conversation ended by its state: each key only once the game took the one before (nothing
+  // queued) and waits for input: at the line it reads (it owns every key) an empty line, the
+  // game's goodbye; reading no line for 100 of its steps, a page of the scroll held for a key:
+  // Space.
+  const talking = () => page.evaluate(() => globalThis.__shownGame.panel_view()[3] === 1);
+  for (let i = 0; i < 20 && await talking(); i += 1) {
+    await h.waitTaken(page);
+    const from = await page.evaluate(() => globalThis.__ticks);
+    await page.waitForFunction((t0) => globalThis.__shownGame.panel_view()[3] !== 1
+      || (globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0')
+      || globalThis.__ticks >= t0 + 100, from, { timeout: 60_000, polling: 'raf' });
+    if (!(await talking())) break;
+    await page.keyboard.press(await page.evaluate(() => globalThis.__owned === 7) ? 'Enter' : 'Space');
+  }
+  assert.equal(await talking(), false, 'the conversation ended');
+  await h.waitPrompt(page);
+  await page.waitForFunction((three) => {
+    const p = globalThis.__u6Layout.panel;
+    return p?.[3] === 0 && three.includes(p[0]);
+  }, ACTOR_MODES, { timeout: 30_000 });
+  [real] = await panel();
+  s = await wideShown(page);
+  marksFollow(s, real[0], 'the conversation over');
+  // Each mode through the page's read (the engine's own view left as it is), the display frozen:
+  // the canvas's marks and the titles (a member's name the test's own).
+  await h.virtualDisplay(page, 60);
+  const views = [
+    [0x91, 0, 0, 'Qa', 'the roster'],
+    [0x90, 1, 0, 'Qb', 'the stats'],
+    [0x92, 2, 0, 'Qc', 'the inventory'],
+    [0x9e, 1, 0, 'Qd', 'another mode'],
+    [0x91, 1, 1, 'Qe', 'a conversation'],
+    [0x90, -1, 0, '', 'the stats, no member'],
+  ];
+  let dimCompared = [];
+  let slotsName = '';
+  for (const [mode, member, talking, name, label] of views) {
+    await page.evaluate(([v, who]) => {
+      const g = globalThis.__shownGame;
+      g.panel_view = () => Int32Array.from(v);
+      g.panel_name = () => who;
+    }, [[mode, member, 3, talking], name]);
+    await h.runFrames(page, 4);
+    assert.deepEqual(await page.evaluate(() => globalThis.__u6Layout.panel), [mode, member, 3, talking], `${label}: the page read it`);
+    s = await wideShown(page);
+    marksFollow(s, mode, label, talking === 1);
+    // The actor windows' titles: the name read in the last of their views (kept in another mode
+    // and in a conversation, with the views).
+    if (ACTOR_MODES.includes(mode) && talking === 0) slotsName = name;
+    const titled = await page.evaluate(() => Object.fromEntries(globalThis.__u6Layout.windows.map((w) => [w.name, w.title])));
+    for (const w of Object.keys(WIDE_PARTS).filter((k) => titled[k] !== undefined)) {
+      assert.equal(titled[w], named.includes(w) && slotsName ? `${names[w]} — ${slotsName}` : names[w], `${label}: ${w}'s title`);
+    }
+    inksFollow(await wideCheck(page, true), s, label);
+    if (s.windows.some((w) => w.dimmed)) dimCompared = s.windows.filter((w) => w.dimmed).map((w) => w.name);
+  }
+  // The dimmed windows compared with the frame: all four actor windows.
+  assert.deepEqual(dimCompared, ['party', 'stats', 'doll', 'backpack'], 'the dimmed windows compared');
+  // The engine's own view again.
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    delete g.panel_view;
+    delete g.panel_name;
+  });
+  await h.runFrames(page, 4);
+  s = await wideShown(page);
+  marksFollow(s, real[0], 'the engine\'s view again');
+  inksFollow(await wideCheck(page, true), s, 'the engine\'s view again');
+  assert.equal(errors.length, 0, 'no page error');
+  console.log(`  receipt: at the prompt one of the three views, its window active; Look (another mode): the side panel's own window shown and active, 4 actor windows dimmed, a press in the dimmed party at its pixel, one at the side panel window's centre at (240, 55); Talk (the real engine, the mode ${ACTOR_MODES.includes(talkMode) ? 'one of the three' : 'another'}): the side panel's own window shown and active until the conversation ended; ${views.length} views through the page's read: the active mark lighter, the dimmed windows at half, the titles with the member's name: pass`);
 }, { needs: h.haveHfes });
 
 // Page script, the display frozen by the caller: the canvas of the letterboxed screen against the
@@ -8804,9 +9081,10 @@ test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu)
   const sent = await canvasClick(page, [20, 500]);
   assert.deepEqual(sent.find(([, , b]) => b === 1).slice(0, 2), [0, Math.floor(((500.5 - 0) * 200) / 1080)], 'a press on the left side: the nearest edge pixel');
   assert.equal((await h.state(page)).program, 'u', 'still in u');
-  // The page's map shows only the UI's 320 x 200 here: no canvas place for a frame pixel past it.
-  const places = await page.evaluate(() => [[0, 0], [319, 199], [320, 0], [0, 200], [319, 200], [911, 335], [-1, 5], [5, -1]]
-    .map(([x, y]) => globalThis.__u6Layout.toCanvas(x, y)));
+  // The page's map shows only the UI's 320 x 200 here: no canvas place for a frame pixel past it
+  // (the frame's last pixel: its size read from the engine).
+  const places = await page.evaluate(([fw, fh]) => [[0, 0], [319, 199], [320, 0], [0, 200], [319, 200], [fw - 1, fh - 1], [-1, 5], [5, -1]]
+    .map(([x, y]) => globalThis.__u6Layout.toCanvas(x, y)), s.frame);
   assert.ok(places[0] && places[1], 'the UI\'s corner pixels show');
   assert.ok(places.slice(2).every((p) => p === null), 'no place for a frame pixel outside the UI\'s 320 x 200');
   // The menu, frozen: the letterbox is the UI's crop scaled, by the test's own arithmetic.
@@ -8834,7 +9112,7 @@ test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu)
     const right = await wholeCheck(page, [0, 0, 320, 200], rect, hd);
     assert.ok(right.compared >= (hd ? 200 : 2000) && right.lit >= (hd ? 50 : 500), `${label}: the menu offers lit pixels to compare`);
     assert.equal(right.differ, 0, `${label}: the letterbox is the frame's 320 x 200 crop scaled by 1080 / 200`);
-    const wrongCrop = await wholeCheck(page, [0, 0, 912, 336], rect, hd);
+    const wrongCrop = await wholeCheck(page, [0, 0, ...s.frame], rect, hd);
     const wrongScale = await wholeCheck(page, [0, 0, 320, 200], [96, 0, 1600, 1000], hd);
     assert.ok(wrongCrop.differ > 0 && wrongScale.differ > 0, `${label}: the check tells the whole frame or another scale from it`);
     results[label] = [right, wrongCrop, wrongScale];
@@ -8877,11 +9155,12 @@ test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on bl
 // A timing: it needs a lightly loaded runner. On a machine busy with other work the median grows
 // with the load (three runs of 60 are taken and the least kept, which only the load raises), and
 // a failure prints the medians measured: read them against the machine's load before choosing 2.
-test('Wide layout (spec 13 Design 6): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the 912 x 336 frame, the median of 60, the least of up to three runs of 60: the machine\'s load only adds; a lightly loaded runner) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt)', async (env) => {
+test('Wide layout (spec 13 Design 6, spec 14 Design 1): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the Wide frame, its size read from the engine: spec 14\'s 912 x 408, the median of 60, the least of up to three runs of 60: the machine\'s load only adds; a lightly loaded runner) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt, with the frame\'s size)', async (env) => {
   // The page's own frames run between the runs (the display stays real: a virtual one would
   // stop the clock the runs read).
   const { page } = await bootWide(env);
-  const scale = (await wideShown(page)).layoutScale;
+  const { layoutScale: scale, frame } = await wideShown(page);
+  assert.deepEqual(frame, WIDE_FRAME, 'spec 14\'s frame composed');
   const medians = [];
   for (let run = 0; run < 3; run += 1) {
     medians.push(await page.evaluate(() => {
@@ -8909,7 +9188,7 @@ test('Wide layout (spec 13 Design 6): the compositor\'s time per frame at S 4 on
   // needs no time (the receipt says the median at S 4).
   const runs = medians.map((v) => v.toFixed(2)).join(', ');
   if (scale === 4) assert.ok(median <= 8, `S 4: the median ${median.toFixed(2)} ms (runs: ${runs}) within 8 ms (above it on a lightly loaded runner, the Wide layout is to ask 2: site/app.js WIDE_S)`);
-  console.log(`  receipt: the compositor at S 4, a whole composition of the Wide frame on a game frame: median ${median.toFixed(2)} ms (runs: ${medians.map((m) => m.toFixed(2)).join(', ')}); the Wide layout asks S ${scale}`);
+  console.log(`  receipt: the compositor at S 4, a whole composition of the Wide frame (${frame.join(' x ')}) on a game frame: median ${median.toFixed(2)} ms (runs: ${medians.map((m) => m.toFixed(2)).join(', ')}); the Wide layout asks S ${scale}`);
 }, { needs: h.haveHfes });
 
 // Waits for the page's next load after `act` (a choice that loads the page again), without
@@ -9330,6 +9609,68 @@ test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title s
   const corners = s.windows.filter((w) => w.name !== 'date');
   windowsPlaced({ ...s, windows: [date, ...corners] }, 'the others');
   console.log(`  receipt: the date line dragged by its title strip to ${moved.outer.slice(0, 2).join(',')}, then past the corner to ${edge.outer.slice(0, 2).join(',')}, kept across a reload; its press and release a gap's (the rest pixel ${s.rest.join(',')}: the arrow there ${arrows.rest} frame pixels, none on the canvas; in the date line ${arrows.hereShown} on it); a press in it there at its pixel: pass`);
+}, { needs: h.haveHfes });
+
+// Window record `w` (the page's table) with its frame's top-left corner at canvas pixel (x, y),
+// its title strip and content with it.
+const placedAt = (w, [x, y]) => {
+  const [dx, dy] = [x - w.outer[0], y - w.outer[1]];
+  const move = ([rx, ry, rw, rh]) => [rx + dx, ry + dy, rw, rh];
+  return { ...w, outer: move(w.outer), bar: move(w.bar), to: move(w.to) };
+};
+
+test('Wide layout (spec 14 Design 7, memory): places kept before spec 14 (the date line moved, a place for the old side panel window, no place for the actor windows) leave every window without a place at its default place (the side panel\'s own window too, whatever the old window\'s place) and the date line where it was kept; the paper doll dragged by its title strip follows the pointer, in front, its place kept and back after a reload, the others where they were', async (env) => {
+  const old = { date: [700, 400], panel: [1400, 72], messages: [1428, 764], commands: [8, 976] };
+  const { page } = await bootWide(env);
+  await page.evaluate((kept) => localStorage.setItem('u6.layout.windows', kept), JSON.stringify(old));
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  let s = await wideShown(page);
+  const at = (name) => s.windows.find((w) => w.name === name);
+  assert.deepEqual(at('date').outer.slice(0, 2), old.date, 'the date line where it was kept');
+  // The others at their default places (checked with the date line at its own).
+  const dateHome = placedAt(at('date'), [WIDE_CANVAS[0] - WIDE_EDGE - at('date').outer[2], WIDE_EDGE]);
+  const home = (shown) => ({ ...shown, windows: shown.windows.map((w) => (w.name === 'date' ? dateHome : w)) });
+  windowsPlaced(home(s), 'kept before spec 14');
+  // The side panel's own window (shown in another mode, through the page's read) at its default
+  // place too.
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    g.panel_view = () => Int32Array.from([0x9e, 0, 0, 0]);
+  });
+  await page.waitForFunction(() => globalThis.__u6Layout.windows.some((w) => w.name === 'other'), null, { timeout: 10_000 });
+  s = await wideShown(page);
+  windowsPlaced(home(s), 'kept before spec 14, another mode', { other: true });
+  await page.evaluate(() => { delete globalThis.__shownGame.panel_view; });
+  await page.waitForFunction(() => !globalThis.__u6Layout.windows.some((w) => w.name === 'other'), null, { timeout: 10_000 });
+  // The paper doll dragged by its title strip, 300 canvas px left and 200 down, in steps.
+  s = await wideShown(page);
+  const doll = at('doll');
+  const box = await page.locator('#screen').boundingBox();
+  const k = box.width / WIDE_CANVAS[0];
+  const start = await h.canvasPoint(page, doll.bar[0] + 30.5, doll.bar[1] + doll.bar[3] / 2 + 0.5);
+  await page.mouse.move(...start);
+  await page.mouse.down();
+  for (let i = 1; i <= 4; i += 1) await page.mouse.move(start[0] - 75 * k * i, start[1] + 50 * k * i);
+  await page.mouse.up();
+  await h.waitTaken(page);
+  s = await wideShown(page);
+  const moved = s.windows.at(-1);
+  assert.equal(moved.name, 'doll', 'the dragged doll in front');
+  assert.deepEqual(moved.outer.slice(0, 2), [doll.outer[0] - 300, doll.outer[1] + 200], 'moved with the pointer');
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('u6.layout.windows')));
+  assert.deepEqual(kept.doll, moved.outer.slice(0, 2), 'its place kept');
+  assert.ok(!Object.hasOwn(kept, 'panel') && WIDE_NAMES.every((name) => Array.isArray(kept[name])) && Array.isArray(kept.other), 'every window\'s place kept, the old window\'s gone');
+  // After a reload: the doll and the date line where they were left, the others at home.
+  await page.reload();
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  s = await wideShown(page);
+  assert.deepEqual(at('doll').outer.slice(0, 2), moved.outer.slice(0, 2), 'the doll\'s place after a reload');
+  assert.deepEqual(at('date').outer.slice(0, 2), old.date, 'the date line\'s after a reload');
+  windowsPlaced(home({ ...s, windows: s.windows.map((w) => (w.name === 'doll' ? doll : w)) }), 'the others after a reload');
+  console.log(`  receipt: spec 13's kept places: the date line kept, ${WIDE_NAMES.length} windows and the side panel's own at their default places; the doll dragged to ${moved.outer.slice(0, 2).join(',')}, kept across a reload: pass`);
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

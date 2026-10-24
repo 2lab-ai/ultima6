@@ -272,14 +272,15 @@ fn the_side_panel_and_the_bar_keep_their_regions_beside_the_shown_map() {
     );
 }
 
-/// Wide: the view's last column and row lie at the frame's right and bottom edges, so a press on
+/// Wide: the view's last column and row lie at the frame's right edge and at the bottom of its
+/// top 336 rows (spec 13; the side panel's view slots of spec 14 are below the UI), so a press on
 /// the frame's last shown pixel walks to the view cell `(VIEW_W - 1, VIEW_H - 1)`: columns
-/// counted across the frame beside the UI, rows down it. Fails with `VIEW_W` and `VIEW_H`
+/// counted across the frame beside the UI, rows down those 336. Fails with `VIEW_W` and `VIEW_H`
 /// swapped.
 #[cfg(feature = "wide")]
 #[test]
 fn wide_the_last_shown_pixel_is_the_cell_at_the_frames_corner() {
-    let (w, h) = (u6_render::WIDTH as i16, u6_render::HEIGHT as i16);
+    let (w, h) = (u6_render::WIDTH as i16, 336);
     let (cols, rows) = ((w - MAP_X as i16) / 16, (h - MAP_Y as i16) / 16);
     let mut s = st();
     s.main.reading = 1;
@@ -1316,7 +1317,13 @@ fn back_from(s: State, container: u16) -> u16 {
     s.ui.panel.mode = 0x92;
     s.ui.panel.container = container;
     // Not dirty: no full panel redraw (0x111c30 starts again from the actor) after the code.
+    // Wide redraws after every panel code (spec 14 Design 4) and keeps the container while the
+    // member's inventory, drawn before, holds it (Design 3).
     s.ui.panel.dirty = false;
+    #[cfg(feature = "wide")]
+    {
+        s.ui.panel.slots.base = Some(1);
+    }
     let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
         let _ = wait::read_key(&st, &io).await;
     });
@@ -1341,6 +1348,14 @@ fn back_from_a_container_goes_to_its_parent_or_from_the_map_to_the_actor() {
     s.objects.obj_status[bag] = crate::objects::IN_CONTAINER;
     s.objects.location[bag].x = chest & 0x3ff;
     s.objects.location[bag].y = chest >> 10;
+    // Wide: the chest is the member's (actor 1) and an object (a type), so the redraw after
+    // the code keeps it (spec 14 Design 3).
+    #[cfg(feature = "wide")]
+    {
+        s.objects.obj_status[usize::from(chest)] = crate::objects::IN_INVENTORY;
+        s.objects.location[usize::from(chest)].x = 1;
+        s.objects.type_frame[usize::from(chest)] = 0x62;
+    }
     assert_eq!(
         back_from(s.clone(), bag as u16),
         chest,

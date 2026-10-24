@@ -28,9 +28,11 @@ pub const HEIGHT: usize = 200;
 /// Frame width in pixels, spec 13 Wide mode: the UI's 320 columns, then the 37-cell map.
 #[cfg(feature = "wide")]
 pub const WIDTH: usize = 912;
-/// Frame height in pixels, spec 13 Wide mode: the 21-cell map (the UI's 200 rows at the top).
+/// Frame height in pixels, Wide mode: the 21-cell map's 336 rows (spec 13; the UI's 200 rows at
+/// the top), and below the UI the slots of the side panel's three views to row 407 (spec 14
+/// Design 1), whole 8-row text cells ([`hd::CELL`]).
 #[cfg(feature = "wide")]
-pub const HEIGHT: usize = 336;
+pub const HEIGHT: usize = 408;
 
 /// One palette entry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -111,7 +113,7 @@ pub const fn portrait_of(id: u16) -> (u8, u8) {
 ///
 /// Layout (`repr(C)`, 12 bytes, alignment 4): `ver` at byte 0 (u32), `id` at 4, `u` at 6, `v`
 /// at 8 (u16 each), `kind` at 10 and `flags` at 11 (u8 each). A plane of 320 × 200 is 750 KiB
-/// (912 × 336 in Wide mode, 3.5 MiB).
+/// (912 × 408 in Wide mode, 4.3 MiB).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Src {

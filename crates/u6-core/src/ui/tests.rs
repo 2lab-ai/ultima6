@@ -13,6 +13,7 @@ use super::text::{CELL, itoa};
 use super::*;
 use crate::{Engine, Files, InputEvent, Io, Key, State};
 
+mod actor_windows;
 mod escaped_tests;
 mod input_tests;
 mod panel_tests;

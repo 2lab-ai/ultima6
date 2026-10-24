@@ -632,6 +632,33 @@ impl Game {
         })
     }
 
+    /// Spec 14 Design 6-7: what the side panel shows, `[mode, member, actor, talking]`: its mode
+    /// (0x90 stats, 0x91 roster, 0x92 inventory, another for the other modes), the party index
+    /// of the member it shows, that member's actor slot (0 for none), and 1 while a conversation
+    /// runs (its portrait in the panel area, whatever the mode), else 0; empty before a start.
+    /// The page reads it at each paint in Wide: the window of the mode is the active one, the
+    /// side panel's own in another mode or a conversation ([`u6_core::ui::panels::panel_view`]).
+    pub fn panel_view(&self) -> Vec<i32> {
+        self.engine.as_ref().map_or_else(Vec::new, |e| {
+            let (mode, member, actor, talking) = u6_core::ui::panels::panel_view(&e.state());
+            vec![
+                i32::from(mode),
+                i32::from(member),
+                i32::from(actor),
+                i32::from(talking),
+            ]
+        })
+    }
+
+    /// Spec 14 Design 7: the roster name of the member the side panel shows (the member of
+    /// [`Game::panel_view`]; [`u6_core::ui::panels::panel_name`]), for the page's window titles;
+    /// empty for none and before a start.
+    pub fn panel_name(&self) -> String {
+        self.engine.as_ref().map_or_else(String::new, |e| {
+            String::from_utf8_lossy(&u6_core::ui::panels::panel_name(&e.state())).into_owned()
+        })
+    }
+
     /// Number of game files the running game booted from (the save laid over them not
     /// counted; see [`Game::save_files`]).
     pub fn game_files(&self) -> u32 {
@@ -1582,8 +1609,8 @@ mod tests {
 
     /// Spec 13: the shown map as the page gets it ([`shown_map`]). Original: the game's map
     /// window. Wide: the view less half a cell, beside the UI's 320 columns and half a cell
-    /// inside the frame's right and bottom edges, 36 cells across and 20 down (fails with
-    /// `VIEW_W` and `VIEW_H` swapped: the frame is 912 × 336 either way).
+    /// inside the frame's right edge and the view's last row (the frame goes on under the UI,
+    /// spec 14), 36 cells across and 20 down (fails with `VIEW_W` and `VIEW_H` swapped).
     #[test]
     fn the_shown_map_is_the_view_less_half_a_cell_in_the_frame() {
         let [x, y, w, h] = shown_map()[..] else {
@@ -1591,8 +1618,16 @@ mod tests {
         };
         let (fw, fh) = (u6_render::WIDTH as u32, u6_render::HEIGHT as u32);
         if fw > 320 {
+            // The view's rows end above the frame's last (spec 14: the actor views' slots lie
+            // under the UI, beside the map's rows).
+            let rows = u32::from(u6_core::geom::MAP_Y) + u6_core::geom::VIEW_H as u32 * 16;
             assert_eq!((x, y), (320 + 8, 8), "beside the UI");
-            assert_eq!((x + w + 8, y + h + 8), (fw, fh), "to the frame's edges");
+            assert_eq!(
+                (x + w + 8, y + h + 8),
+                (fw, rows),
+                "to the frame's right edge and the view's last row"
+            );
+            assert!(rows <= fh, "the view's rows in the frame");
             assert_eq!((w / 16, h / 16), (36, 20), "cells across and down");
         } else {
             assert_eq!([x, y, w, h], [8, 8, 160, 160], "the map window");
@@ -2187,6 +2222,48 @@ mod tests {
         ended.step(20);
         assert!(ended.finished());
         assert_eq!(ended.keys_owned(), 0, "after the end");
+    }
+
+    /// Spec 14 Design 6-7: the side panel's view for the page: empty before a start; the mode,
+    /// the member, the member's actor slot and whether a conversation runs, and the member's
+    /// roster name, as the state holds them (synthetic state and names); no member (a negative
+    /// index or one past the roster): actor 0, no name.
+    #[test]
+    fn panel_view_reads_the_mode_the_member_its_actor_and_name() {
+        assert!(Game::new().panel_view().is_empty(), "before a start");
+        assert_eq!(Game::new().panel_name(), "", "before a start");
+        let view = |mode: u16, member: i16, talking: bool| {
+            let mut s = u6_core::State::empty();
+            s.ui.panel.mode = mode;
+            s.ui.panel.member = member;
+            s.converse.active = talking;
+            s.actors.party.names = ["Ab", "Cd", "Ef"].map(String::from).to_vec();
+            s.actors.party.members[..3].copy_from_slice(&[5, 9, 12]);
+            let mut game = Game::new();
+            game.engine = Some(Engine::with_game(
+                s,
+                Files::default(),
+                |_s, io| async move {
+                    io.sleep(u32::MAX).await;
+                },
+            ));
+            (game.panel_view(), game.panel_name())
+        };
+        let shown = |mode: u16, member: i16| view(mode, member, false);
+        assert_eq!(shown(0x90, 1), (vec![0x90, 1, 9, 0], "Cd".to_string()));
+        assert_eq!(shown(0x92, 2), (vec![0x92, 2, 12, 0], "Ef".to_string()));
+        assert_eq!(shown(0x91, 0), (vec![0x91, 0, 5, 0], "Ab".to_string()));
+        assert_eq!(shown(0x9e, -1), (vec![0x9e, -1, 0, 0], String::new()));
+        assert_eq!(
+            shown(0x90, 3),
+            (vec![0x90, 3, 0, 0], String::new()),
+            "past the names"
+        );
+        assert_eq!(
+            view(0x91, 1, true),
+            (vec![0x91, 1, 9, 1], "Cd".to_string()),
+            "a conversation, the roster's mode kept"
+        );
     }
 
     const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
