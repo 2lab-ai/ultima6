@@ -114,10 +114,11 @@ async fn open_container(state: &RefCell<State>, io: &Io, code: u16) -> Panel {
         };
         s.ui.panel.container = parent;
         s.ui.panel.inventory_first = 0;
-        // Spec 14 Design 3 (Wide): the container the view shows now, for the redraw that keeps it.
+        // Spec 14 Design 3 (Wide): the container the view shows now, its slot's free count for
+        // the redraw that keeps it.
         #[cfg(feature = "wide")]
         {
-            s.ui.panel.slots.tf = s.objects.tf(parent as crate::objects::Slot);
+            s.ui.panel.slots.freed = s.objects.freed_of(parent as Slot);
         }
         parent
     };

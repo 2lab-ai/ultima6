@@ -108,6 +108,9 @@ impl Objects {
                 self.pack_record(prints, cur, n);
                 n += 1;
                 self.free.1 += 1;
+                // Spec 14 Design 3 (Wide): the slot freed, counted (`Objects::freed`).
+                #[cfg(feature = "wide")]
+                self.note_freed(cur);
             }
             let mut last = cur;
             cur = self.next_of(cur);
@@ -118,6 +121,10 @@ impl Objects {
                     n += 1;
                 }
                 self.free.1 += 1;
+                // Spec 14 Design 3 (Wide): counted too past the buffer's end, where the slot is
+                // freed with its type and frame word left as it was.
+                #[cfg(feature = "wide")]
+                self.note_freed(cur);
                 last = cur;
                 cur = self.next_of(cur);
             }

@@ -156,6 +156,10 @@ pub fn remove(s: &mut State, slot: Slot) {
     }
     let o = &mut s.objects;
     o.type_frame[slot as usize] = 0;
+    // Spec 14 Design 3 (Wide): the object is gone from its slot, counted (`Objects::freed`)
+    // whether or not the slot goes on a free chain below.
+    #[cfg(feature = "wide")]
+    o.note_freed(slot);
     let pred = o.predecessor(slot);
     if pred >= 0 {
         o.set_next(pred, o.next_of(slot));
