@@ -6,7 +6,7 @@ tags: [ultima6, hd, ui, layout, wide]
 
 # 14 — Actor windows: the side panel's views open at once, U7-style
 
-Status: rev 4, 2026-10-24. Trinity review (grok-4.7, gpt-6-astra, fable) reached a unanimous verdict in round 2: C, rev 2. The briefs and positions are kept outside the repo, under `work/dispatch/r1023-wide/trinity-spec14-*`.
+Status: rev 5, 2026-10-24. Trinity review (grok-4.7, gpt-6-astra, fable) reached a unanimous verdict in round 2: C, rev 2. The briefs and positions are kept outside the repo, under `work/dispatch/r1023-wide/trinity-spec14-*`.
 
 Rev 3 (during G1 and G2, from G2's report) changes two things:
 - **Slot rows.** The slots move onto the HD font's 8-pixel grid, so the frame is 912 × 408. `hd.rs:613-616` `glyph_cell` draws a cell in the HD font only at `(col*8, row*8)`, and the Status window's text is on that grid (`ui/text.rs:99`, text rows 1..12). Rev 2's rows 202 and 338 moved panel text 196 and 332 rows, which is off the grid, so the actor windows would have shown the pixel font.
@@ -17,6 +17,11 @@ Rev 4 (from the G1 and G2 reviews, built that way) records four points:
 - **Design 5 step 3.** The inventory slot uses the inventory view's saved cells instead of `recount`.
 - **Design 4.** It also mirrors in-place cursor draws.
 - **Design 7's titles.** They carry the member the slots were last drawn for.
+
+Rev 5 (from the G1 round 3–5 reviews, built that way) adds three points to Design 3:
+- **A Save clears the record.** A Save writes the region back to its blocks and reads it again, so the party's objects come back in other slots. The next redraw shows the member's actor from the first row, as Original's redraw after a Save does.
+- **A kept bag is the same object, not the same kind.** A container other than the base is kept only while its slot has not been freed since the last draw. Each slot counts its frees: a block's write-back and `remove` bump the count. A type word is not identity. A block written back and read again can put another bag of the same type, held by the same member, in the old slot.
+- **The chain walk stops at a freed link** (a type word of 0), where `inventory::weight::holder` would walk on.
 
 This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's words are in `hd-layout-font-register/ssot.md` §Round 2. The reference image is nuvie.png; its right half shows one member's paper-doll window, portrait-and-attributes window and backpack window open at once over the map.
 
@@ -81,8 +86,8 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
    - The extra draws leave every other state as a current-mode-only draw would leave it. The exception is the inventory context in Design 3.
    - A mode other than the three (spellbook, conversation, 0x9e) is drawn as today. The slots then keep their last views (see Design 6).
 3. **The inventory context is kept.** In Wide, `inventory()` keeps `inventory_first` and `container`.
-   - It resets the page and re-derives the container only when the shown member's base (the member, or `open_container`) differs from the last draw's. This covers 0x90, 0x92 with a selection, 0x99, 0x9a and 0x91, and also the solo override, Drop's or Tab's leader, a conversation and a restore. A code that names the member already shown keeps the page (rev 4).
-   - The container is kept only while its chain of parents reaches that base, as `inventory::weight::holder` walks it. A chain that ends on the map, at another actor or at the walk's limit starts the page and container again. So does a missing last draw. Restore clears the record (rev 4).
+   - It resets the page and re-derives the container only when the shown member's base (the member, or `open_container`) differs from the last draw's, or after a Save (rev 5). This covers 0x90, 0x92 with a selection, 0x99, 0x9a and 0x91, and also the solo override, Drop's or Tab's leader, a conversation and a restore. A code that names the member already shown keeps the page (rev 4).
+   - The container is kept only while its slot has not been freed since the last draw (rev 5), and its chain of parents reaches that base, as `inventory::weight::holder` walks it but stopping at a freed link (rev 5). A chain that ends on the map, at another actor or at the walk's limit starts the page and container again. So does a missing last draw. Restore clears the record (rev 4).
    - It also resets on 0x9f and 0xa0, as today.
    - So the slot's pixels and the cells a click reads are always the same page and container.
 4. **Every change reaches the slots.** In Wide, one place sets `panel.dirty = true`: after each panel code is handled (`ui/wait.rs` `read_key`) and after each command completes. The draws that need no code, the keyboard panel cursor and the combat-mode line, copy the current view into its slot where they draw (rev 4). This covers the in-place draws and the mode-gated refreshes listed above. Under Design 3, the redraw keeps the page and the open bag.
@@ -124,7 +129,7 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
   - scroll past 12 items, then any dirty redraw: the slot shows page N, and `inventory_first == N`;
   - open a bag in the 배낭 slot, Use an item in it: the bag stays open;
   - Use and Drop through the command loop give the same result from the slot as from the panel;
-  - a bag taken by another actor, a bag left on the map, and a Restore each start the page and container again;
+  - a bag taken by another actor, a bag left on the map, a Restore, a Save, a block written back under the open bag, and another bag of the same type read into its slot each start the page and container again; the member's own list stays on its page while the member walks;
   - ready or unready by key while the roster is current: the inventory slot shows it in the same turn;
   - a press in each slot selects the same object, and gives the same ready/unready/use/drop result, as the same press in the panel in that mode;
   - the pointer is back after a slot press;
