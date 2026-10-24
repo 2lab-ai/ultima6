@@ -1,12 +1,25 @@
 //! Save and restore on the user's files: the archive.org zip (skipped when absent) and the
 //! original's own save taken in the oracle (`~/Games/ultima6/oracle/saveload/`, skipped when
-//! absent). Reads them, copies nothing; prints observations only.
-#![allow(clippy::disallowed_methods)] // tests may read files
+//! absent). Reads them and prints observations only. One test writes the user's data: with
+//! `U6_BOOK_SAVE=<dir>` (an existing folder outside the repository and its main checkout) it
+//! writes a save of the user's game with a spellbook given to the hero to a new `<dir>/savegame`
+//! (spec 08, 2026-10-25); without the variable it writes nothing. Its guard refuses every route
+//! to a root of the repository (the compiled tree, its main checkout), or to a directory inside
+//! one, that this host offers without administrator rights: symlinks, case folding and the
+//! Data-volume firmlink. A mount that places a part of the repository at another path, and
+//! another process replacing directories while it writes, are out of its scope; the backstop is
+//! that a file left in a working tree matters only once added, and commits are made after a
+//! `git status --porcelain` check. The tests of its guard and writer write too, only under the
+//! system temp directory: each a scratch folder of its own (fixture folders, symlinks and the
+//! test's own bytes), removed when it ends.
+// The tests read the zip, the oracle's save and the environment, and write the `U6_BOOK_SAVE`
+// save and their scratch files (`OpenOptions` for a file made new).
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
@@ -64,6 +77,8 @@ enum Cmd {
     /// its next offer hatches for sure: 0x1319b2 draws 1..=100 against the quantity
     /// (`objects/commands/eggs.rs` `hatch_egg`).
     Rearm(Position),
+    /// A change to the state, as the objects API makes it (2026-10-25: a spellbook given).
+    Edit(fn(&mut State)),
 }
 
 /// The real game future (`main_loop::game_first`) with commands run at the start of a poll, inside
@@ -86,6 +101,7 @@ impl Future for Inject {
             match cmd {
                 Cmd::Save => save(&mut s),
                 Cmd::Restore => restore(&mut s, &self.io).quiet(),
+                Cmd::Edit(edit) => edit(&mut s),
                 Cmd::Rearm(at) => {
                     let o = &mut s.objects;
                     for e in 0x100..crate::objects::OBJECT_SLOTS {
@@ -1781,4 +1797,666 @@ fn an_egg_the_shipped_blocks_lack_vouches_for_nothing() {
         got.err().unwrap_or_default().contains(NO_HATCH),
         "beside an egg never offered"
     );
+}
+
+/// The spells [`give_spellbook`] puts in the book: each of the first three circles' spells the
+/// magic tables name (spell numbers 0..0x30, circle × 16 + index).
+fn book_spells(s: &State) -> Vec<u8> {
+    (0u8..0x30)
+        .filter(|&n| !s.magic.tables.name(usize::from(n)).is_empty())
+        .collect()
+}
+
+/// The hero (the party's first member, the view's actor at the start) given a readied spellbook
+/// holding [`book_spells`] and 10 of each reagent, through the objects API as
+/// `magic::tests_real`'s `give_book` does.
+fn give_spellbook(s: &mut State) {
+    let hero = Slot::from(s.actors.party.members[0]);
+    let spells = book_spells(s);
+    let book =
+        crate::objects::create_in(s, crate::magic::SPELLBOOK, crate::objects::READIED, 0, hero);
+    for n in spells {
+        crate::objects::create_in(
+            s,
+            crate::magic::SPELL,
+            crate::objects::IN_CONTAINER,
+            u16::from(n) << 8,
+            book,
+        );
+    }
+    for kind in s.magic.tables.reagents {
+        crate::objects::add_to_owner(s, hero, kind, 10);
+    }
+}
+
+/// The spell numbers inside each spellbook the hero has readied, each book's in ascending order
+/// (a new object is linked right after its owner, so the list holds a book's spells in no fixed
+/// order).
+fn readied_books(s: &State) -> Vec<Vec<u8>> {
+    let mut s = s.clone();
+    let hero = Slot::from(s.actors.party.members[0]);
+    let o = &mut s.objects;
+    // The child walk passes over readied objects while this is set.
+    o.skip_readied = 0;
+    let mut books = Vec::new();
+    let mut c = crate::objects::first_child(o, hero);
+    while c >= 0 {
+        if o.place(c) == crate::objects::READIED && o.kind(c) == crate::magic::SPELLBOOK {
+            books.push(c);
+        }
+        c = crate::objects::next_child(o);
+    }
+    books
+        .into_iter()
+        .map(|book| {
+            let mut spells = Vec::new();
+            let mut c = crate::objects::first_child(o, book);
+            while c >= 0 {
+                if o.kind(c) == crate::magic::SPELL {
+                    spells.push((o.qq_of(c) >> 8) as u8);
+                }
+                c = crate::objects::next_child(o);
+            }
+            spells.sort_unstable();
+            spells
+        })
+        .collect()
+}
+
+/// The folder of the save under `U6_BOOK_SAVE` (the original's directory name).
+const SAVE_FOLDER: &str = "savegame";
+
+/// The tree this test is compiled from (the workspace root, symlinks resolved).
+fn compiled_tree() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .quiet()
+}
+
+/// The roots a save written for the owner must lie outside: `tree` (the tree the test is
+/// compiled from) and, when `tree` is a linked worktree, its main checkout, each with symlinks
+/// resolved. A worktree's `.git` is a file whose `gitdir: <dir>` line names its git directory
+/// (`<main>/.git/worktrees/<name>`, relative to `tree` when not absolute); that directory's
+/// `commondir` names the main checkout's `.git` (relative to it), whose parent is the main
+/// checkout. A `.git` directory makes `tree` the main checkout itself; no `.git`, `tree` alone.
+/// A `.git` file that does not read so is an error (a fixed sentence): nothing may be written.
+fn repository_roots(tree: &Path) -> Result<Vec<PathBuf>, &'static str> {
+    let tree = tree
+        .canonicalize()
+        .map_err(|_| "the tree does not resolve")?;
+    let dot_git = tree.join(".git");
+    if !dot_git.is_file() {
+        return Ok(vec![tree]);
+    }
+    let line = std::fs::read_to_string(&dot_git).map_err(|_| "its .git file does not read")?;
+    let gitdir = line
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .ok_or("its .git file holds no gitdir line")?;
+    let gitdir = tree.join(gitdir);
+    let common = std::fs::read_to_string(gitdir.join("commondir"))
+        .map_err(|_| "its git directory holds no commondir")?;
+    let main = gitdir
+        .join(common.trim())
+        .canonicalize()
+        .map_err(|_| "the main checkout's git directory does not resolve")?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or("the main checkout's git directory has no parent")?;
+    Ok(if main == tree {
+        vec![tree]
+    } else {
+        vec![tree, main]
+    })
+}
+
+/// Whether `dir` is a place the save may be written: an absolute path with no `..` step (the
+/// first layer, on the path as written), that exists, and that is not inside any of `roots` by
+/// identity: no ancestor of its resolved path (itself included) is the same directory, by device
+/// and inode, as a root. A path names a directory in more ways than resolving it undoes (on
+/// macOS `/System/Volumes/Data/Users/...` is `/Users/...` through the Data volume's firmlink, and
+/// resolving leaves that form as it is), so no path prefix decides. A root whose metadata does
+/// not read, or an ancestor's, refuses. Writes nothing.
+///
+/// What it catches: every route to a root itself (a symlink, another case, the firmlink), and
+/// to a directory under a root reached through such a route, as the walk up from the resolved
+/// path meets the root. What it does not: a mount that puts a subdirectory of the repository at
+/// another path (its ancestors there are not the root's); making one needs administrator
+/// rights, and it is out of scope (the module doc).
+fn outside_repository(dir: &Path, roots: &[PathBuf]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let plain = dir.is_absolute()
+        && dir
+            .components()
+            .all(|c| !matches!(c, std::path::Component::ParentDir));
+    if !plain {
+        return false;
+    }
+    let Ok(resolved) = dir.canonicalize() else {
+        return false;
+    };
+    let id = |p: &Path| std::fs::metadata(p).map(|m| (m.dev(), m.ino())).ok();
+    let Some(roots) = roots.iter().map(|r| id(r)).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    resolved
+        .ancestors()
+        .all(|a| id(a).is_some_and(|i| !roots.contains(&i)))
+}
+
+/// Writes `files` (each named `savegame/<name>`, the original's names) into a new folder
+/// `<dir>/savegame`: `dir` must pass [`outside_repository`] for `roots`, the folder must not
+/// exist yet (`create_dir`, so neither a folder nor a symlink is there), and each file is made
+/// new ([`write_new_files`]). Returns how many were written, or a fixed sentence of what refused
+/// (no path, name or byte in it). When the folder made fails the check again, it attempts to
+/// remove that folder (empty: nothing was written in it) and says in the refusal when the
+/// removal failed too.
+///
+/// It refuses what [`outside_repository`] refuses, so its scope is that guard's. It also
+/// assumes the directories stay put while it runs: it checks paths, then writes by path, so a
+/// directory another process replaces between the check and the write is out of its scope. Each
+/// file is made with `create_new` (the leaf is not followed), but its parents are not held open
+/// by handle. This is an opt-in, single-user test run, not a service.
+fn write_save(
+    dir: &Path,
+    roots: &[PathBuf],
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<usize, &'static str> {
+    if !outside_repository(dir, roots) {
+        return Err("the folder is not an existing absolute path outside the repository");
+    }
+    let names = save_names(files)?;
+    let folder = dir.join(SAVE_FOLDER);
+    std::fs::create_dir(&folder)
+        .map_err(|_| "its savegame folder exists already or could not be made")?;
+    if !outside_repository(&folder, roots) {
+        return Err(if std::fs::remove_dir(&folder).is_ok() {
+            "the savegame folder made is not outside the repository; it was removed"
+        } else {
+            "the savegame folder made is not outside the repository, and removing it failed"
+        });
+    }
+    write_new_files(
+        &folder,
+        &names.into_iter().zip(files.values()).collect::<Vec<_>>(),
+    )
+}
+
+/// The bare names of `files` (`savegame/<name>`, each one file of the folder), else a fixed
+/// sentence.
+fn save_names(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<&str>, &'static str> {
+    files
+        .keys()
+        .map(|name| {
+            name.strip_prefix("savegame/")
+                .filter(|b| !b.is_empty() && *b != "." && *b != ".." && !b.contains(['/', '\\']))
+                .ok_or("a save file's name is not one file of savegame/")
+        })
+        .collect()
+}
+
+/// Writes each (bare name, bytes) of `files` into `folder`, each file made new
+/// (`create_new`: an existing path, a symlink included, is refused, not followed). Every name is
+/// checked absent before the first is written, so that refusal (a name there already) writes
+/// nothing. A later failure (a file that cannot be made new, or a write that fails) returns the
+/// error with the files before it, and part of that one, already written: the write is not
+/// transactional.
+fn write_new_files(folder: &Path, files: &[(&str, &Vec<u8>)]) -> Result<usize, &'static str> {
+    use std::io::Write;
+    if files
+        .iter()
+        .any(|(bare, _)| std::fs::symlink_metadata(folder.join(bare)).is_ok())
+    {
+        return Err("a save file's name exists already in the folder");
+    }
+    for (bare, bytes) in files {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join(bare))
+            .and_then(|mut f| f.write_all(bytes))
+            .map_err(|_| "a save file could not be made new")?;
+    }
+    Ok(files.len())
+}
+
+/// A scratch folder of its own under the system temp directory for one test (no game data),
+/// symlinks resolved, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(test: &str) -> Scratch {
+        let at = std::env::temp_dir().join(format!("u6-k10-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir(&at).quiet();
+        Scratch(at.canonicalize().quiet())
+    }
+
+    /// `rel` under the folder, made as a directory.
+    fn dir(&self, rel: &str) -> PathBuf {
+        let at = self.0.join(rel);
+        std::fs::create_dir_all(&at).quiet();
+        at
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A main checkout with a linked worktree, as git lays them out: `main/.git/` a directory whose
+/// `worktrees/wt` holds `commondir` (`../..`), and `main/.worktrees/wt/.git` a file naming that
+/// directory (`gitdir: ...`); and `out/`, a folder beside them. Returns (main, worktree, out).
+fn checkout_with_worktree(s: &Scratch) -> (PathBuf, PathBuf, PathBuf) {
+    let main = s.dir("main");
+    let admin = s.dir("main/.git/worktrees/wt");
+    std::fs::write(admin.join("commondir"), "../..\n").quiet();
+    let wt = s.dir("main/.worktrees/wt");
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).quiet();
+    (main, wt, s.dir("out"))
+}
+
+#[test]
+fn the_book_save_guard_finds_the_main_checkout_of_a_linked_worktree() {
+    let s = Scratch::new("roots");
+    let (main, wt, _) = checkout_with_worktree(&s);
+    assert_eq!(repository_roots(&wt), Ok(vec![wt.clone(), main.clone()]));
+    assert_eq!(
+        repository_roots(&main),
+        Ok(vec![main.clone()]),
+        "a main checkout alone"
+    );
+    // A worktree's `gitdir:` line relative to the worktree reads the same.
+    let rel = s.dir("main/.worktrees/rel");
+    let admin = s.dir("main/.git/worktrees/rel");
+    std::fs::write(admin.join("commondir"), "../..").quiet();
+    std::fs::write(rel.join(".git"), "gitdir: ../../.git/worktrees/rel").quiet();
+    assert_eq!(repository_roots(&rel), Ok(vec![rel.clone(), main.clone()]));
+    // A `.git` file that names no git directory: no roots, so nothing is written.
+    let bad = s.dir("bad");
+    std::fs::write(bad.join(".git"), "not a gitdir line").quiet();
+    assert!(repository_roots(&bad).is_err());
+    // The tree this test is compiled from: itself, and its main checkout when it is a linked
+    // worktree (its `.git` a file).
+    let tree = compiled_tree();
+    let roots = repository_roots(&tree).quiet();
+    assert_eq!(roots[0], tree);
+    if tree.join(".git").is_file() {
+        assert!(
+            roots.len() == 2 && roots[1].join(".git").is_dir(),
+            "the main checkout"
+        );
+    } else {
+        assert_eq!(roots.len(), 1);
+    }
+}
+
+#[test]
+fn the_book_save_guard_refuses_the_worktree_the_main_checkout_a_parent_step_a_relative_path_and_a_symlinked_ancestor()
+ {
+    let s = Scratch::new("guard");
+    let (main, wt, out) = checkout_with_worktree(&s);
+    let roots = repository_roots(&wt).quiet();
+    assert!(outside_repository(&out, &roots), "a folder beside them");
+    let inside_wt = s.dir("main/.worktrees/wt/sub");
+    let inside_main = s.dir("main/sub");
+    for (case, dir) in [
+        ("the worktree", wt.clone()),
+        ("inside the worktree", inside_wt),
+        ("the main checkout", main.clone()),
+        ("inside the main checkout", inside_main.clone()),
+        ("a folder that does not exist", s.0.join("missing")),
+    ] {
+        assert!(!outside_repository(&dir, &roots), "{case}");
+    }
+    // Each of these resolves outside the roots (its resolved form passes), so only its own rule
+    // refuses it: a `..` step (back into `out`), and a relative path (the current directory, the
+    // crate's own, not under the fixture's roots).
+    for (case, dir) in [
+        ("a parent step", out.join("../out")),
+        ("a relative path", PathBuf::from(".")),
+    ] {
+        assert!(
+            outside_repository(&dir.canonicalize().quiet(), &roots),
+            "{case}: resolved, it passes"
+        );
+        assert!(!outside_repository(&dir, &roots), "{case}");
+    }
+    let link = s.0.join("link");
+    std::os::unix::fs::symlink(&main, &link).quiet();
+    assert!(
+        !outside_repository(&link, &roots),
+        "a symlink to the main checkout"
+    );
+    assert!(
+        !outside_repository(&link.join("sub"), &roots),
+        "under a symlinked ancestor"
+    );
+    // The real roots: the compiled tree and its main checkout are refused, the temp folder not.
+    let real = repository_roots(&compiled_tree()).quiet();
+    assert!(real.iter().all(|r| !outside_repository(r, &real)));
+    assert!(outside_repository(&out, &real));
+}
+
+/// The guard decides by identity (device and inode), not by path: a root named through another
+/// path to the same directory (here a symlink; on macOS also the Data volume's firmlink, which
+/// resolving a path leaves as it is) still guards it. The roots are given as `[L]`, a symlink to
+/// the real root `R`: a folder under `R`'s real path is refused, a folder beside `R` is not.
+#[test]
+fn the_book_save_guard_refuses_a_folder_under_a_root_named_through_another_path() {
+    let s = Scratch::new("alias");
+    let real = s.dir("R");
+    let under = s.dir("R/sub");
+    let beside = s.dir("beside");
+    let alias = s.0.join("L");
+    std::os::unix::fs::symlink(&real, &alias).quiet();
+    let roots = [alias];
+    assert!(!outside_repository(&real, &roots), "the root's real path");
+    assert!(
+        !outside_repository(&under, &roots),
+        "under the root's real path"
+    );
+    assert!(
+        outside_repository(&beside, &roots),
+        "a folder beside the root"
+    );
+    // Another case of the root's name, where the file system folds case (it names the root).
+    let folded = s.0.join("r/sub");
+    let case = "the case-folding route on a fixture";
+    if folded.is_dir() {
+        assert!(
+            !outside_repository(&folded, &roots),
+            "under the root, in another case"
+        );
+        eprintln!("{case}: under the root, in another case, refused: pass");
+    } else {
+        eprintln!("{case}: skipped: the file system does not fold case");
+    }
+    // A root whose metadata does not read refuses everything.
+    let gone = [s.0.join("gone")];
+    assert!(
+        !outside_repository(&beside, &gone),
+        "a root that does not read"
+    );
+}
+
+/// macOS's Data volume (`/System/Volumes/Data`), which names the same directories as `/` through
+/// its firmlinks, and which resolving a path leaves as it is; `None` (with a line saying the test
+/// skipped) where this host has none: another system, or a macOS without it.
+fn data_volume(test: &str) -> Option<&'static Path> {
+    let data = Path::new("/System/Volumes/Data");
+    if cfg!(target_os = "macos") && data.is_dir() {
+        Some(data)
+    } else {
+        eprintln!("{test}: skipped: no /System/Volumes/Data on this host");
+        None
+    }
+}
+
+/// `path` (absolute) named through the Data volume `data`.
+fn through(data: &Path, path: &Path) -> PathBuf {
+    data.join(path.strip_prefix("/").quiet())
+}
+
+/// The firmlink route on a fixture (writes only its scratch folder): a root `R` of the scratch
+/// folder, given as `[R]`, named through the Data volume (the system temp directory has that
+/// form on macOS): `R` and `R/sub` are refused, a folder beside `R` is accepted. It runs where
+/// the Data volume is a directory and `R`'s form through it is one too; else it prints a line
+/// saying it skipped.
+#[test]
+fn the_book_save_guard_refuses_a_root_named_through_the_macos_data_volume() {
+    let test = "the firmlink route on a fixture";
+    let Some(data) = data_volume(test) else {
+        return;
+    };
+    let s = Scratch::new("firmlink");
+    let root = s.dir("R");
+    s.dir("R/sub");
+    s.dir("beside");
+    let aliased = through(data, &root);
+    if !aliased.is_dir() {
+        eprintln!("{test}: skipped: the temp folder has no Data-volume form");
+        return;
+    }
+    let roots = [root];
+    let beside = through(data, &s.0.join("beside"));
+    assert!(
+        beside.is_dir(),
+        "the folder beside it, through the Data volume"
+    );
+    assert!(
+        !outside_repository(&aliased, &roots),
+        "the root, through it"
+    );
+    assert!(
+        !outside_repository(&aliased.join("sub"), &roots),
+        "under the root, through it"
+    );
+    assert!(
+        outside_repository(&beside, &roots),
+        "a folder beside the root, through it"
+    );
+    eprintln!("{test}: the root and a folder under it refused, a folder beside it accepted: pass");
+}
+
+/// The live check on this repository (writes only its scratch folder): each root of the tree
+/// this test is compiled from (the tree, and its main checkout when it is a linked worktree)
+/// named through the Data volume is refused, and a scratch folder of the system temp directory
+/// named the same way is accepted. It runs on macOS where `/System/Volumes/Data` is a
+/// directory, and prints a line saying it skipped otherwise; a case whose form through the Data
+/// volume is not a directory (a tree whose resolved path already has the Data-volume form)
+/// prints that it skipped that case. Prints each case's label and pass/fail only.
+#[test]
+fn the_book_save_guard_refuses_the_repository_through_the_macos_data_volume() {
+    let test = "the firmlink route on this repository";
+    let Some(data) = data_volume(test) else {
+        return;
+    };
+    let roots = repository_roots(&compiled_tree()).quiet();
+    let s = Scratch::new("live");
+    let mut cases: Vec<(String, PathBuf, bool)> = roots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let label = if i == 0 {
+                "the compiled tree"
+            } else {
+                "the main checkout"
+            };
+            (
+                format!("{label} through the Data volume"),
+                through(data, r),
+                false,
+            )
+        })
+        .collect();
+    cases.push((
+        "a temp folder through the Data volume".into(),
+        through(data, &s.0),
+        true,
+    ));
+    let mut failed = Vec::new();
+    for (case, dir, accepted) in &cases {
+        if !dir.is_dir() {
+            eprintln!("{case}: skipped: no such form");
+            continue;
+        }
+        let ok = outside_repository(dir, &roots) == *accepted;
+        let verdict = if *accepted { "accepted" } else { "refused" };
+        eprintln!("{case}: {verdict}: {}", if ok { "pass" } else { "fail" });
+        if !ok {
+            failed.push(case.clone());
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
+}
+
+#[test]
+fn the_book_save_writer_refuses_an_existing_folder_or_a_leaf_symlink_and_writes_nothing() {
+    let s = Scratch::new("writer");
+    let (main, wt, out) = checkout_with_worktree(&s);
+    let roots = repository_roots(&wt).quiet();
+    // The test's own bytes, under two of the original's names.
+    let files = BTreeMap::from([
+        ("savegame/objblkAA".to_string(), b"Zb1".to_vec()),
+        ("savegame/objlist".to_string(), b"Zl2".to_vec()),
+    ]);
+    let entries = |dir: &Path| {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .quiet()
+            .map(|e| e.quiet().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    // A fresh folder: both files, made new.
+    assert_eq!(write_save(&out, &roots, &files), Ok(2));
+    let folder = out.join(SAVE_FOLDER);
+    assert_eq!(entries(&folder), ["objblkAA", "objlist"]);
+    assert_eq!(std::fs::read(folder.join("objlist")).quiet(), b"Zl2");
+    // Again: the folder exists, refused, the files as they were.
+    let again = BTreeMap::from([("savegame/objlist".to_string(), b"Zl3".to_vec())]);
+    assert!(
+        write_save(&out, &roots, &again).is_err(),
+        "an existing folder"
+    );
+    assert_eq!(std::fs::read(folder.join("objlist")).quiet(), b"Zl2");
+    // An existing folder holding a leaf symlink into the main checkout: refused, nothing made
+    // there or beside the link.
+    let target = main.join("planted");
+    let out2 = s.dir("out2");
+    let leafy = s.dir("out2/savegame");
+    std::os::unix::fs::symlink(&target, leafy.join("objlist")).quiet();
+    assert!(
+        write_save(&out2, &roots, &files).is_err(),
+        "a folder with a leaf symlink"
+    );
+    assert!(!target.exists() && entries(&leafy) == ["objlist"]);
+    // The file writer on its own: a leaf symlink among the names refuses before any file.
+    let pairs: Vec<(&str, &Vec<u8>)> = save_names(&files)
+        .quiet()
+        .into_iter()
+        .zip(files.values())
+        .collect();
+    assert!(write_new_files(&leafy, &pairs).is_err(), "a leaf symlink");
+    assert!(
+        !target.exists() && entries(&leafy) == ["objlist"],
+        "nothing written"
+    );
+    // `savegame` itself a symlink into the main checkout: refused, nothing made there.
+    let out3 = s.dir("out3");
+    std::os::unix::fs::symlink(&main, out3.join(SAVE_FOLDER)).quiet();
+    let before = entries(&main);
+    assert!(
+        write_save(&out3, &roots, &files).is_err(),
+        "a symlinked folder"
+    );
+    assert_eq!(entries(&main), before);
+    // A folder inside the main checkout, and a name that is not one file of savegame/.
+    let inside = s.dir("main/sub");
+    assert!(
+        write_save(&inside, &roots, &files).is_err(),
+        "inside the main checkout"
+    );
+    assert!(!inside.join(SAVE_FOLDER).exists());
+    let out4 = s.dir("out4");
+    let bad = BTreeMap::from([("savegame/../objlist".to_string(), b"Zl4".to_vec())]);
+    assert!(
+        write_save(&out4, &roots, &bad).is_err(),
+        "a name with a parent step"
+    );
+    assert!(!out4.join("objlist").exists());
+}
+
+/// Spec 08 (2026-10-25): a save for the owner's own look at the spellbook page in Korean. With
+/// `U6_BOOK_SAVE=<dir>` (an existing absolute path outside the repository and its main
+/// checkout, [`outside_repository`]) and the zip present: the boot of his files to the prompt,
+/// the hero given a readied spellbook holding the first circle's spells and the next two
+/// circles' ([`give_spellbook`]), the engine's own Save, its files handed to a store as the
+/// platform's flush hands them ([`SaveSync::flush`]) and written to a new `<dir>/savegame`, each
+/// file made new under the original's name ([`write_save`]: an existing folder is refused, so
+/// remove an old one first): the folder the page takes as the save to start from. A fresh
+/// engine booted from the files read back from there has that book readied on the hero, holding
+/// those spells. Without the variable it does nothing. Prints the count of files and pass/fail
+/// only.
+#[test]
+fn with_u6_book_save_a_save_with_a_readied_spellbook_is_written_there() {
+    let Some(dir) = std::env::var_os("U6_BOOK_SAVE") else {
+        return;
+    };
+    let Some(files) = zip_files() else { return };
+    let dir = PathBuf::from(dir);
+    let roots = repository_roots(&compiled_tree());
+    assert!(roots.is_ok(), "the repository's roots are found");
+    let roots = roots.quiet();
+    // Checked before anything runs; the writer checks again.
+    assert!(
+        outside_repository(&dir, &roots),
+        "U6_BOOK_SAVE is an existing absolute path outside the repository and its main checkout"
+    );
+    let mut run = Run::boot(files.clone());
+    let spells = book_spells(&run.state());
+    assert!(!spells.is_empty(), "the first circles name spells");
+    run.command(Cmd::Edit(give_spellbook));
+    assert!(
+        readied_books(&run.state()).contains(&spells),
+        "the hero holds the readied book"
+    );
+    run.command(Cmd::Save);
+    let mut store = MemStore::default();
+    let written = SaveSync::default().flush(&run.e, &mut store).quiet();
+    assert!(
+        written > 0 && written == store.files.len(),
+        "the Save hands its files to the store"
+    );
+    let wrote = write_save(&dir, &roots, &store.files);
+    assert!(
+        wrote == Ok(written),
+        "the save is written to a new U6_BOOK_SAVE/savegame"
+    );
+    let mut back = MemStore::default();
+    let folder = dir.join(SAVE_FOLDER);
+    for name in store.files.keys() {
+        let bare = name.strip_prefix("savegame/").quiet();
+        back.files
+            .insert(name.clone(), std::fs::read(folder.join(bare)).quiet());
+    }
+    eprintln!("book save: {written} files written to U6_BOOK_SAVE/savegame");
+    // The page lays the folder over the game files; the boot reads it as the save to start from.
+    let mut f = files;
+    assert!(
+        attach(&mut f, &back).quiet() == written,
+        "every file laid over"
+    );
+    let fresh = Run::boot(f);
+    assert!(
+        readied_books(&fresh.state()) == [spells],
+        "booted from the files written, the hero holds the readied book with its spells"
+    );
+    assert!(
+        book_equipped(&fresh.state()),
+        "the inventory view puts the book in an equipment slot"
+    );
+    eprintln!(
+        "book save: booted back, the hero holds the readied spellbook with its spells, in an equipment slot: pass"
+    );
+}
+
+/// Whether the inventory's count of the hero's objects (0x110f96 by way of the weights, as the
+/// inventory view runs it) puts a readied spellbook of his in an equipment slot.
+fn book_equipped(s: &State) -> bool {
+    let mut s = s.clone();
+    let hero = Slot::from(s.actors.party.members[0]);
+    crate::inventory::carried_weight(&mut s, hero);
+    (0x100..crate::objects::OBJECT_SLOTS as Slot).any(|o| {
+        s.objects.kind(o) == crate::magic::SPELLBOOK
+            && s.objects.place(o) == crate::objects::READIED
+            && s.objects.parent(o) == hero
+            && crate::inventory::equipped_index(&s, o) >= 0
+    })
 }

@@ -24,10 +24,16 @@ const FMT_D: u32 = 0x0011_58ac;
 const MSG_LEVEL: u32 = 0x0011_58b4;
 /// Port-only (spec 08, slice K2; 2026-10-24): the formats of the page's names and counts, for
 /// the locale layer's catalogue ([`super::PRINTED`]; of no word of their own, it leaves them
-/// out). The page is drawn in the status window, a panel (spec 08 keeps the panels English): its
-/// line [`MSG_LEVEL`] is not listed, and the spells' and the circle's names go through `%s`; all
-/// stay English.
+/// out). The page's other strings are drawn at fixed cells of the status window, each within
+/// its field (2026-10-25): its level word is [`PAGE_PRINTED`], and the spells' and the circle's
+/// names, put through `%s`, are read for display ([`super::tables::NAME_LABELS`],
+/// [`super::tables::CIRCLE_LABELS`]).
 pub(super) const PRINTED: &[u32] = &[FMT_S, FMT_D];
+/// Port-only (spec 08, 2026-10-25): the page's level word ([`MSG_LEVEL`]), which it passes to
+/// `printf` as its format at status-window cell (10, 11), under the circle's name: for the
+/// locale layer's catalogue, within its English's cells (a panel's string, as
+/// `ui::tables::PRINTED`'s are). The `printf` lookup finds it; the page needs nothing more.
+pub(crate) const PAGE_PRINTED: &[u32] = &[MSG_LEVEL];
 /// A4-0x61de: pointer to the file name of the book picture.
 const BOOK_BMP: u32 = 0x61de;
 /// The marker glyph of the current spell's line.
@@ -318,6 +324,11 @@ pub(super) fn layout(m: &mut MagicState) -> (Vec<u16>, i16) {
 /// 0x19d where a previous / next page exists (else the blank 0x19b) at x = 0xc0 / 0xd0, y = 0x58;
 /// then the circle name at (11, 10) and the level word (0x1158b4) at (10, 11), and the message
 /// scroll is current again.
+///
+/// Port (spec 08, 2026-10-25): the spells' and the circle's names are read for display
+/// ([`crate::locale::shown`]: the pack's form when it has one within its field,
+/// [`super::tables::NAME_CELLS`] and [`super::tables::CIRCLE_CELLS`]); the counts keep their
+/// column. The level word is a `printf` format its lookup finds ([`PAGE_PRINTED`]).
 pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
     let (lines, circle, caster) = {
         let mut s = state.borrow_mut();
@@ -332,12 +343,10 @@ pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
         let row = i as i16 + 1;
         state.borrow_mut().magic.page[i] = spell as u8;
         set_cursor(state, io, 1, row).await;
-        let name = state
-            .borrow()
-            .magic
-            .tables
-            .name(usize::from(spell))
-            .to_vec();
+        let name = {
+            let s = state.borrow();
+            crate::locale::shown(&s, s.magic.tables.name(usize::from(spell)).to_vec())
+        };
         print_at(state, io, FMT_S, &[Arg::Str(&name)]).await;
         set_cursor(state, io, 14, row).await;
         reagent_count(state, io, caster, spell, i as i16).await;
@@ -360,10 +369,14 @@ pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
         });
     }
     set_cursor(state, io, 11, 10).await;
-    let name = usize::try_from(circle)
-        .ok()
-        .and_then(|c| state.borrow().magic.tables.circles.get(c).cloned())
-        .unwrap_or_default();
+    let name = {
+        let s = state.borrow();
+        let english = usize::try_from(circle)
+            .ok()
+            .and_then(|c| s.magic.tables.circles.get(c).cloned())
+            .unwrap_or_default();
+        crate::locale::shown(&s, english)
+    };
     print_at(state, io, FMT_S, &[Arg::Str(&name)]).await;
     set_cursor(state, io, 10, 11).await;
     print_at(state, io, MSG_LEVEL, &[]).await;

@@ -33,7 +33,8 @@ const MSG_NO_REAGENTS: u32 = 0x0011_5b26;
 /// its format, for the locale layer's catalogue ([`super::PRINTED`]): the no-book, no-magic,
 /// no-spells and nothing lines, the announcement's formats and closing quote, and the three
 /// refusals of the checks. The announcement puts the spell's name and syllables through `%s`:
-/// they stay English.
+/// the name is read for display (2026-10-25, [`super::tables::NAME_LABELS`]), the syllables (the
+/// game's magic words) stay English.
 pub(super) const PRINTED: &[u32] = &[
     MSG_NO_BOOK,
     MSG_NO_MAGIC,
@@ -107,13 +108,15 @@ async fn close_book(state: &RefCell<State>, io: &Io) {
 
 /// Prints the spell's name and incantation: `(Name)` when it was typed with the cursor in a
 /// mode (the typed syllables are cleared), else `Name`, a newline and the syllables in quotes.
+/// Port (spec 08, 2026-10-25): the name, in either form, is read for display
+/// ([`crate::locale::shown`]: the pack's form when it has one); the syllables are not.
 async fn announce(state: &RefCell<State>, io: &Io, spell: u16) {
     let (typed, name, word) = {
         let s = state.borrow();
         let m = &s.magic;
         (
             s.ui.input.targeting != 0 && m.typed != 0,
-            m.tables.name(usize::from(spell)).to_vec(),
+            crate::locale::shown(&s, m.tables.name(usize::from(spell)).to_vec()),
             m.tables.word(usize::from(spell)).to_vec(),
         )
     };

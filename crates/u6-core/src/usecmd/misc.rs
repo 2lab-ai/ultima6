@@ -88,8 +88,9 @@ pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
 
 /// Original: 0x12d204 (objects: use a wand: list its spells, cast one, a charge goes)
 ///
-/// The wand's first content (a charge 0x150) names the spell list by its quality (A4-0x71b4,
-/// names at A4-0x70b8, after the line 0x12c944); none → the no-effect message. The spell is
+/// The wand's first content (a charge 0x150) names the spell by its quality: its incantation's
+/// letters (A4-0x71b4) are printed as their syllables (A4-0x70b8; the game's magic words, not
+/// the spell's name), after the line 0x12c944; none → the no-effect message. The spell is
 /// cast through magic 0x11a586 and one charge of that quality is taken (0x10d16e).
 pub async fn wand(ux: Ux<'_>, obj: Slot) {
     let charge = crate::objects::first_child(&mut ux.s().objects, obj);
@@ -101,9 +102,9 @@ pub async fn wand(ux: Ux<'_>, obj: Slot) {
     ux.print(STR_WITH, &[]).await;
     let list = defs::a4_pointed_list(ux.io, defs::WAND_SPELLS, usize::from(q));
     for (i, &spell) in list.iter().enumerate() {
-        let name = defs::a4_pointed(ux.io, defs::SPELL_NAMES, usize::from(spell));
+        let syllable = defs::a4_pointed(ux.io, defs::SPELL_NAMES, usize::from(spell));
         let fmt = if i == 0 { FMT_STR } else { FMT_SP_STR };
-        ux.print(fmt, &[Arg::Str(&name)]).await;
+        ux.print(fmt, &[Arg::Str(&syllable)]).await;
     }
     {
         let mut s = ux.s();

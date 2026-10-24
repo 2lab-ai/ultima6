@@ -19,25 +19,31 @@
 //! ([`crate::actors::party::PRINTED`]), the NPC turn's ([`crate::actors::npc::PRINTED`]), the
 //! step test's ([`crate::actors::walk::PRINTED`]), the passthroughs' and the object blocks'
 //! ([`crate::objects::PRINTED`])), the panels' (2026-10-24: the stats view's attribute lines and
-//! its magic, health and level headings ([`crate::ui::tables::PRINTED`]), each within its cells)
-//! and the conversation's own messages
+//! its magic, health and level headings ([`crate::ui::tables::PRINTED`]), each within its cells;
+//! 2026-10-25: the spellbook page's level word ([`crate::magic::PAGE_PRINTED`]), within its
+//! English's cells) and the conversation's own messages
 //! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format. And
 //! the strings a loader table holds that game code shows through an escape (labels): the command
 //! names before their dash ([`crate::main_loop::commands::LABELS`]), the shared messages Use and
 //! the object commands print through `%s` ([`SHARED_MESSAGES`]), the amulet's line of that table
 //! Unready prints through `%s` (2026-10-24, [`crate::inventory::LABELS`]), the spells' result
 //! messages (that table's 13), potion descriptions and direction names they print through `%s`
-//! (2026-10-24, [`crate::magic::LABELS`]), the wind's names the date line prints through `%s`
+//! (2026-10-24, [`crate::magic::LABELS`]), the spells' and the circles' names the spellbook
+//! page, Cast's announcement, Detect Magic's charge line and Look's description of a spell print
+//! through `%s` (2026-10-25, [`crate::magic::NAME_LABELS`] and [`crate::magic::CIRCLE_LABELS`],
+//! each within its field on the page), the reagents' names that description prints through `%s`
+//! (2026-10-25, [`crate::objects::commands::LABELS`], each on a wrapping line: no budget), the
+//! wind's names the date line prints through `%s`
 //! ([`crate::actors::clock::LABELS`]), the combat-mode names the panels' line prints through
 //! `%s` (2026-10-24, [`crate::ui::tables::LABELS`], each within the line's field), and the
 //! conversation's `$G`, `$T` and `$Y` words. And (2026-10-24) the inventory view's two weight
 //! labels, which it reads for display at their own addresses and puts with no lookup again
 //! ([`crate::ui::tables::SHOWN_AT`]): labels from 1 byte (each is 2 in the original), within
 //! its English's cells. So the panels are catalogued (2026-10-24): the stats, inventory and
-//! combat-mode lines, each within its cells ([`Entry::cells`]); their name line and values hold
-//! no word of their own. Every other string of the executable is not catalogued: the spellbook
-//! page's lines, the spells' incantation syllables (the game's magic words), the names the
-//! spells print through `%s` (the spells', the circles'), object names and articles. It is
+//! combat-mode lines, and (2026-10-25) the spellbook page's spell names, circle name and level
+//! word, each within its cells ([`Entry::cells`]); their name line and values hold no word of
+//! their own. Every other string of the executable is not catalogued: the spells' incantation
+//! syllables (the game's magic words, which stay English), object names and articles. It is
 //! substituted only where its bytes are a catalogued string's, as the lookup is by content: a
 //! string two sites print is catalogued once (magic's not-possible line is the string of the
 //! staff's refusal, the one address 0x1159f8 in both [`crate::combat::seams::PRINTED`] and
@@ -219,8 +225,10 @@ pub struct Entry {
     /// Port-only (2026-10-24): the cells its translation takes at most, for a string drawn at a
     /// fixed cell (a panel's: [`crate::ui::tables::PRINTED`]'s and
     /// [`crate::ui::tables::SHOWN_AT`]'s the English's cells, its bytes with the `%` directives
-    /// as written; a combat-mode name [`crate::ui::tables::MODE_CELLS`]); `None` for one with no
-    /// such place. Two sites of the same bytes keep the smaller.
+    /// as written; a combat-mode name [`crate::ui::tables::MODE_CELLS`]; 2026-10-25, the
+    /// spellbook page's: its level word, [`crate::magic::PAGE_PRINTED`], the English's cells, a
+    /// spell's name [`crate::magic::NAME_CELLS`], a circle's [`crate::magic::CIRCLE_CELLS`]);
+    /// `None` for one with no such place. Two sites of the same bytes keep the smaller.
     pub cells: Option<u16>,
 }
 
@@ -398,7 +406,8 @@ impl Catalogue {
             .chain(crate::actors::npc::PRINTED)
             .chain(crate::actors::walk::PRINTED)
             .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()))
-            .chain(crate::ui::tables::PRINTED);
+            .chain(crate::ui::tables::PRINTED)
+            .chain(crate::magic::PAGE_PRINTED);
         for &at in printed {
             if let Ok(text) = img.cstr(at) {
                 let kind = if has_conversion(&text) {
@@ -406,26 +415,37 @@ impl Catalogue {
                 } else {
                     Kind::Message
                 };
-                // A panel's string is drawn at a fixed cell: the English's cells.
-                let cells = crate::ui::tables::PRINTED
-                    .contains(&at)
-                    .then(|| english_cells(&text));
+                // A panel's string (the spellbook page's level word too) is drawn at a fixed
+                // cell: the English's cells.
+                let cells = (crate::ui::tables::PRINTED.contains(&at)
+                    || crate::magic::PAGE_PRINTED.contains(&at))
+                .then(|| english_cells(&text));
                 c.add_within(kind, text, MIN_BYTES, cells);
             }
         }
         let labels = crate::main_loop::commands::LABELS
             .iter()
             .chain(&SHARED_MESSAGES)
+            .chain(crate::objects::commands::LABELS)
             .chain(crate::inventory::LABELS)
             .chain(crate::magic::LABELS)
             .chain(crate::actors::clock::LABELS)
-            .chain(crate::ui::tables::LABELS);
+            .chain(crate::ui::tables::LABELS)
+            .chain(&crate::magic::NAME_LABELS)
+            .chain(&crate::magic::CIRCLE_LABELS);
         for &ptr in labels {
             if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
-                // A combat-mode name is centred in its line's field.
-                let cells = crate::ui::tables::LABELS
-                    .contains(&ptr)
-                    .then_some(crate::ui::tables::MODE_CELLS);
+                // A combat-mode name is centred in its line's field; a spell's and a circle's
+                // name each fill a field of the spellbook page.
+                let cells = if crate::ui::tables::LABELS.contains(&ptr) {
+                    Some(crate::ui::tables::MODE_CELLS)
+                } else if crate::magic::NAME_LABELS.contains(&ptr) {
+                    Some(crate::magic::NAME_CELLS)
+                } else if crate::magic::CIRCLE_LABELS.contains(&ptr) {
+                    Some(crate::magic::CIRCLE_CELLS)
+                } else {
+                    None
+                };
                 c.add_label(text, cells);
             }
         }
