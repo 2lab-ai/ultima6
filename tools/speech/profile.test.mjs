@@ -18,7 +18,12 @@
 //   terminal (a pty, through Python's pty module where python3 is there), Ctrl-C at the prompt
 //   sends nothing;
 // - nothing the tool prints holds a name, a line, an actor number or a script's item (the numbers
-//   read past the preview's path, whose pid and random part may hold one by chance).
+//   read past the preview's path, whose pid and random part may hold one by chance);
+// - spec 15 Design 4-5: the voice pack /2 (read with each voice's vary, every bad vary refused, a
+//   /1 pack still read with vary 0/0, the ranges' revision unchanged), a line's profile
+//   (lineProfile), the voice derived from a speaker (deriveProfile: the preset families, the
+//   medians by age and sex, the offsets, the spread, vary by manner) and --speakers runs on a /1
+//   and a /2 speaker file the test writes (no request, the pack /2, the coverage's counts).
 //
 //   node --test tools/speech/profile.test.mjs
 import assert from 'node:assert/strict';
@@ -32,15 +37,22 @@ import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { PACK_FORMAT, RANGES_REVISION, readPack } from '../../site/voice/profile.js';
-import { main, PREVIEW, SYSTEM, writePrivate } from './profile.mjs';
+import { STYLES } from '../../site/voice/model.js';
+import {
+  checkedProfile, lineProfile, PACK_FORMAT, PACK_FORMAT_2, PITCH, RANGES_REVISION, readPack, SPEED, VARY,
+} from '../../site/voice/profile.js';
+import * as translate from '../i18n/translate.mjs';
+import {
+  AGE_MEDIANS, deriveProfile, familyOf, LEAD_WEIGHT, MANNER_OFFSETS, MANNER_VARY, main, planOf, PRESET_FAMILIES, PREVIEW,
+  SPEAKER_DEFAULTS, SPEAKERS_MODEL, speakerOutputsOf, speakerPlanOf, SPREAD, STATION_OFFSETS, SYSTEM, traitsOf, writePrivate,
+} from './profile.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'profile.mjs');
 const SENTINEL = 'Zq6VoiceSentinel';
 const LINE = 'Zq6LineSentinel';
 // Distinctive numbers: the actors and items of the fixture, never to be printed.
-const ACTORS = { good: [31337, 31338], again: [31339], bad: [31341], skipped: [31343] };
-const ITEMS = [7001, 7002, 7003, 7004, 7005];
+const ACTORS = { good: [31337, 31338], again: [31339], bad: [31341], skipped: [31343], silent: [31345] };
+const ITEMS = [7001, 7002, 7003, 7004, 7005, 7006];
 
 const text = (t) => [{ kind: 'text', key: ['a', 1, 0], text: t }];
 // A u6.npc-bundle/1 as the page's exporter writes it, with the test's own name and lines.
@@ -561,4 +573,434 @@ test('the CLI on a real terminal (a pty): Ctrl-C at the prompt reaches no server
     await server.close();
     await rm(f.dir, { recursive: true });
   }
+});
+
+// --- spec 15 Design 4-5: the pack /2, a line's profile, the voices from a speaker profile -----
+
+// A made-up voice of a /2 pack (exact binary fractions: the check leaves them as they are).
+const VOICE_2 = { mix: [{ style: 'F3', w: 0.75 }, { style: 'F1', w: 0.25 }], speed: 1.0625, pitch: 0.5, steps: 16, seedSalt: 0, vary: { speed: 0.0625, pitch: 1.25 } };
+const VOICE_1 = { mix: [{ style: 'M4', w: 1 }], speed: 0.9375, pitch: -1.5, steps: 12, seedSalt: 3 };
+const ZERO = { speed: 0, pitch: 0 };
+const pack2 = (profiles) => ({ format: PACK_FORMAT_2, model: 'test-model', revision: RANGES_REVISION, profiles });
+const inRanges = (p) => p.speed >= SPEED.min && p.speed <= SPEED.max && p.pitch >= PITCH.min && p.pitch <= PITCH.max;
+
+test('the voice pack /2: it reads, each voice with its vary; every bad vary refuses the pack by a code that names only the kind; a /1 pack still reads, its voices with vary 0/0, and a /1 voice with a vary is refused; the ranges\' revision is unchanged', () => {
+  const read = readPack(structuredClone(pack2({ 7: VOICE_2, 8: { ...VOICE_1, vary: ZERO } })));
+  assert.ok(read.ok && read.pack.size === 2, 'a /2 pack reads');
+  assert.deepEqual(read.pack.get(7), VOICE_2, 'its voice, its vary, as they are');
+  assert.deepEqual(read.pack.get(8), { ...VOICE_1, vary: ZERO });
+  const one = readPack({ format: PACK_FORMAT, model: 'test-model', revision: RANGES_REVISION, profiles: { 9: VOICE_1 } });
+  assert.ok(one.ok && one.pack.size === 1, 'a /1 pack still reads');
+  assert.deepEqual(one.pack.get(9), { ...VOICE_1, vary: ZERO }, 'its voice with vary 0/0');
+  // The ranges' revision: the value of main 4320314 (VARY is not in it).
+  assert.equal(RANGES_REVISION, 'b6fb2a8d', 'the revision unchanged');
+  const vary = (v) => pack2({ 7: { ...VOICE_2, vary: v } });
+  const refused = [
+    ['format', { ...pack2({ 7: VOICE_2 }), format: 'u6.voice-pack/3' }],
+    ['keys', { format: PACK_FORMAT, model: 'test-model', revision: RANGES_REVISION, profiles: { 7: VOICE_2 } }],
+    ['shape', pack2({ 7: VOICE_1 })],
+    ['shape', vary(null)], ['shape', vary([0, 0])], ['shape', vary(0.1)], ['shape', vary({ speed: 0.1 })], ['shape', vary({ pitch: 0.1 })],
+    ['keys', vary({ speed: 0, pitch: 0, x: 0 })],
+    ['range', vary({ speed: -0.01, pitch: 0 })], ['range', vary({ speed: VARY.speed.max + 0.01, pitch: 0 })],
+    ['range', vary({ speed: 0, pitch: -0.5 })], ['range', vary({ speed: 0, pitch: VARY.pitch.max + 0.01 })],
+    ['range', vary({ speed: NaN, pitch: 0 })], ['range', vary({ speed: 0, pitch: Infinity })],
+    ['range', vary({ speed: '0.1', pitch: 0 })], ['range', vary({ speed: 0, pitch: null })],
+  ];
+  for (const [code, value] of refused) {
+    const r = readPack(value);
+    assert.ok(!r.ok && r.code === code, `refused as ${code}`);
+    assert.deepEqual(Object.keys(r), ['ok', 'code'], 'the code alone');
+  }
+  // checkedProfile keeps a vary, into its range (none: 0/0).
+  assert.deepEqual(checkedProfile({ ...VOICE_1, vary: { speed: 9, pitch: -1 } }).vary, { speed: VARY.speed.max, pitch: 0 });
+  assert.deepEqual(checkedProfile(VOICE_1).vary, ZERO);
+  assert.deepEqual(VARY, { speed: { max: 0.15 }, pitch: { max: 1.5 } });
+});
+
+test('a line\'s profile: deterministic per seed; vary 0/0 gives the voice itself; two lines of a mad voice are said at two speeds; always within the ranges', () => {
+  const mad = deriveProfile({ age: 'adult', sex: 'male', station: 'commoner', manner: 'mad' }, 40);
+  assert.deepEqual(mad.vary, MANNER_VARY.mad);
+  assert.deepEqual(lineProfile(mad, 12345), lineProfile(structuredClone(mad), 12345), 'the same seed: the same profile');
+  const [a, b] = [lineProfile(mad, 0x9e3779b9), lineProfile(mad, 0x12345678)];
+  assert.notEqual(a.speed, b.speed, 'two lines: two speeds');
+  assert.notEqual(a.pitch, b.pitch, 'and two pitches');
+  assert.deepEqual(a.mix, mad.mix, 'the voice\'s presets');
+  assert.ok(Math.abs(a.speed - mad.speed) <= mad.vary.speed && Math.abs(a.pitch - mad.pitch) <= mad.vary.pitch, 'within its vary');
+  const plain = deriveProfile({ age: 'adult', sex: 'male', station: 'commoner', manner: 'plain' }, 40);
+  assert.equal(lineProfile(plain, 0x9e3779b9), plain, 'vary 0/0: the voice itself');
+  assert.equal(lineProfile(VOICE_1, 5), VOICE_1, 'no vary: the voice itself');
+  // Within the ranges, from voices at their edges.
+  const speeds = new Set();
+  for (const edge of [{ speed: SPEED.max, pitch: PITCH.max }, { speed: SPEED.min, pitch: PITCH.min }, { speed: 1, pitch: 0 }]) {
+    const v = checkedProfile({ ...VOICE_2, ...edge, vary: { speed: VARY.speed.max, pitch: VARY.pitch.max } });
+    for (let seed = 0; seed < 2000; seed += 1) {
+      const p = lineProfile(v, (seed * 2654435761) >>> 0);
+      assert.ok(inRanges(p), 'within the ranges');
+      speeds.add(p.speed);
+    }
+  }
+  assert.ok(speeds.size > 1000, 'the lines spread');
+});
+
+const STATIONS = Object.keys(STATION_OFFSETS);
+const MANNERS = Object.keys(MANNER_OFFSETS);
+const AGES = Object.keys(AGE_MEDIANS);
+const SEXES = ['female', 'male'];
+const ACTORS_N = 256;
+
+test('the derivation\'s tables: the enums of the speaker profile, every number as spec 15 Design 4 gives it', { skip: translate.STATIONS ? false : 'the enums wait on unit S1 (u6.speakers/2)' }, () => {
+  assert.deepEqual(STATIONS, translate.STATIONS, 'the stations');
+  assert.deepEqual(MANNERS, translate.MANNERS, 'the manners');
+  assert.deepEqual(Object.keys(MANNER_VARY), translate.MANNERS, 'vary for every manner');
+  assert.deepEqual(AGES, translate.AGES, 'the ages');
+  assert.deepEqual(translate.SEXES, [...SEXES, 'none'], 'the sexes');
+});
+
+test('deriveProfile: each station and sex leads with its family\'s presets (a young speaker by age, an elderly woman likewise), blending another of the voice\'s sex at 0.6-0.8; a plain commoner gives the medians by age and sex within the spread; the offsets by station and manner; the jester faster and higher than a plain speaker of the same age and sex; vary by manner; neighbours differ; every voice within the ranges and a /2 pack of them reads', () => {
+  const leads = (speaker) => new Set(Array.from({ length: ACTORS_N }, (_, n) => deriveProfile(speaker, n).mix[0].style));
+  // The lead presets of each family, all of them used across the actors.
+  for (const sex of SEXES) {
+    for (const station of STATIONS) {
+      const family = PRESET_FAMILIES[sex][station];
+      assert.deepEqual([...leads({ sex, station, manner: 'plain', age: 'adult' })].sort(), [...family].sort(), `${sex} ${station}: its family's leads`);
+    }
+    for (const age of ['child', 'youth']) {
+      for (const station of STATIONS) {
+        assert.deepEqual([...leads({ sex, station, age })].sort(), [...PRESET_FAMILIES[sex].young].sort(), `${sex} ${age} ${station}: the young's`);
+      }
+    }
+  }
+  // The tables, against spec 15 Design 4's literals written out.
+  assert.deepEqual(PRESET_FAMILIES, {
+    male: {
+      young: ['M1'],
+      royalty: ['M2', 'M5'], lord: ['M2', 'M5'], beyond: ['M2', 'M5'],
+      commoner: ['M3', 'M1'],
+      lowborn: ['M4'],
+    },
+    female: {
+      young: ['F2', 'F4'],
+      elder: ['F5', 'F3'],
+      royalty: ['F5', 'F3'], lord: ['F5', 'F3'], beyond: ['F5', 'F3'],
+      commoner: ['F1', 'F4'], lowborn: ['F1', 'F4'],
+    },
+  });
+  assert.deepEqual(LEAD_WEIGHT, { min: 0.6, max: 0.8 });
+  assert.deepEqual(SPREAD, { speed: 0.02, pitch: 0.3 });
+  assert.deepEqual(MANNER_VARY, {
+    plain: { speed: 0, pitch: 0 },
+    jester: { speed: 0.04, pitch: 0.8 },
+    mad: { speed: 0.1, pitch: 1.2 },
+    pompous: { speed: 0, pitch: 0 },
+    drunk: { speed: 0.05, pitch: 0.4 },
+    sly: { speed: 0, pitch: 0 },
+    gruff: { speed: 0, pitch: 0 },
+    timid: { speed: 0, pitch: 0 },
+    pious: { speed: 0, pitch: 0 },
+  });
+  for (const station of STATIONS) {
+    assert.deepEqual([...leads({ sex: 'female', station, age: 'elder' })].sort(), ['F3', 'F5'], `an elderly woman (${station}): F5 or F3`);
+    assert.deepEqual([...leads({ sex: 'male', station, age: 'elder' })].sort(), [...PRESET_FAMILIES.male[station]].sort(), `an elderly man (${station}): by station`);
+  }
+  // `none`, a /1 entry and no entry: the actor number's parity, and the defaults.
+  for (const speaker of [{ sex: 'none' }, { age: 'adult', class: 'commoner', note: '' }, null]) {
+    assert.equal(traitsOf(speaker, 7).sex, 'female');
+    assert.equal(traitsOf(speaker, 8).sex, 'male');
+    assert.deepEqual(familyOf(traitsOf(speaker, 7)), PRESET_FAMILIES.female[SPEAKER_DEFAULTS.station]);
+  }
+  assert.deepEqual(deriveProfile(null, 9), deriveProfile({ sex: 'female', age: 'adult', station: 'commoner', manner: 'plain' }, 9), 'no entry: the defaults');
+  assert.deepEqual(deriveProfile({ age: 'elder', class: 'noble', note: '' }, 10), deriveProfile({ sex: 'male', age: 'elder', station: 'commoner', manner: 'plain' }, 10), 'a /1 entry: its age, the other defaults');
+  // The blend.
+  for (let n = 0; n < ACTORS_N; n += 1) {
+    const p = deriveProfile({ sex: n % 3 === 0 ? 'female' : 'male', station: STATIONS[n % 5], age: AGES[n % 4] }, n);
+    assert.equal(p.mix.length, 2, 'two presets');
+    assert.ok(p.mix[0].w >= LEAD_WEIGHT.min - 1e-12 && p.mix[0].w <= LEAD_WEIGHT.max + 1e-12, 'the lead at 0.6-0.8');
+    assert.ok(p.mix[1].style[0] === p.mix[0].style[0] && p.mix[1].style !== p.mix[0].style, 'another of the voice\'s sex');
+  }
+  // The medians by age and sex: a plain commoner within the spread of them, their mean the median.
+  assert.deepEqual(AGE_MEDIANS, {
+    child: { female: { speed: 1.1, pitch: 2 }, male: { speed: 1.1, pitch: 2 } },
+    youth: { female: { speed: 0.98, pitch: 0.5 }, male: { speed: 1.07, pitch: 0.9 } },
+    adult: { female: { speed: 1, pitch: -0.5 }, male: { speed: 0.98, pitch: -1 } },
+    elder: { female: { speed: 0.945, pitch: -1 }, male: { speed: 0.96, pitch: -1 } },
+  });
+  const eps = 1e-9;
+  for (const age of AGES) {
+    for (const sex of SEXES) {
+      const m = AGE_MEDIANS[age][sex];
+      const ps = Array.from({ length: ACTORS_N }, (_, n) => deriveProfile({ sex, age, station: 'commoner', manner: 'plain' }, n));
+      for (const p of ps) {
+        assert.ok(Math.abs(p.speed - m.speed) <= SPREAD.speed + eps, `${age} ${sex}: the speed within the spread`);
+        const top = Math.min(PITCH.max, m.pitch + SPREAD.pitch);
+        assert.ok(p.pitch >= m.pitch - SPREAD.pitch - eps && p.pitch <= top + eps, `${age} ${sex}: the pitch within the spread (into the range)`);
+      }
+      const mean = (k) => ps.reduce((x, p) => x + p[k], 0) / ps.length;
+      assert.ok(Math.abs(mean('speed') - m.speed) < 0.004, `${age} ${sex}: the mean speed the median`);
+      if (m.pitch + SPREAD.pitch <= PITCH.max) assert.ok(Math.abs(mean('pitch') - m.pitch) < 0.06, `${age} ${sex}: the mean pitch the median`);
+    }
+  }
+  // The offsets: one actor (one spread), each station and manner against a plain commoner.
+  assert.deepEqual(STATION_OFFSETS, {
+    royalty: { speed: -0.05, pitch: -0.5 }, lord: { speed: -0.03, pitch: -0.3 }, commoner: { speed: 0, pitch: 0 },
+    lowborn: { speed: 0.02, pitch: 0 }, beyond: { speed: -0.06, pitch: 0 },
+  });
+  assert.deepEqual(MANNER_OFFSETS, {
+    plain: { speed: 0, pitch: 0 }, jester: { speed: 0.1, pitch: 1 }, mad: { speed: 0.03, pitch: 0 },
+    pompous: { speed: -0.04, pitch: -0.4 }, drunk: { speed: -0.07, pitch: 0 }, sly: { speed: 0.02, pitch: 0 },
+    gruff: { speed: 0.01, pitch: -0.3 }, timid: { speed: -0.02, pitch: 0.4 }, pious: { speed: -0.03, pitch: 0 },
+  });
+  const base = { sex: 'female', age: 'adult', station: 'commoner', manner: 'plain' };
+  for (let n = 0; n < 32; n += 1) {
+    const plain = deriveProfile(base, n);
+    for (const [k, table] of [['station', STATION_OFFSETS], ['manner', MANNER_OFFSETS]]) {
+      for (const [v, off] of Object.entries(table)) {
+        const p = deriveProfile({ ...base, [k]: v }, n);
+        assert.ok(Math.abs(p.speed - plain.speed - off.speed) < 1e-9 && Math.abs(p.pitch - plain.pitch - off.pitch) < 1e-9, `${k} ${v}: its offsets`);
+        if (k === 'manner') assert.deepEqual(p.mix, plain.mix, `${v}: the manner moves the pace and pitch, not the presets`);
+      }
+    }
+  }
+  // The jester: faster and higher than a plain speaker of the same age, sex and station (a child's
+  // plain pitch is at the top of the range already: faster only).
+  for (const age of AGES) {
+    for (const sex of SEXES) {
+      for (const station of STATIONS) {
+        for (let n = 0; n < 64; n += 1) {
+          const plain = deriveProfile({ sex, age, station, manner: 'plain' }, n);
+          const jester = deriveProfile({ sex, age, station, manner: 'jester' }, n);
+          assert.ok(jester.speed > plain.speed, `${age} ${sex} ${station}: the jester faster`);
+          if (age !== 'child') assert.ok(jester.pitch > plain.pitch, `${age} ${sex} ${station}: the jester higher`);
+        }
+      }
+    }
+  }
+  // Vary by manner (MANNER_VARY pinned above).
+  for (const manner of MANNERS) {
+    const v = deriveProfile({ ...base, manner }, 3).vary;
+    assert.deepEqual(v, MANNER_VARY[manner], `${manner}: its vary`);
+    assert.equal(v.speed > 0 && v.pitch > 0, ['jester', 'mad', 'drunk'].includes(manner), `${manner}: varies or not`);
+  }
+  // Neighbours differ; every voice within the ranges, and a /2 pack of them reads.
+  const profiles = {};
+  let actor = 0;
+  for (const sex of SEXES) {
+    for (const age of AGES) {
+      for (const station of STATIONS) {
+        const mixes = new Set();
+        for (let n = 0; n < 64; n += 1) {
+          const speaker = { sex, age, station, manner: MANNERS[n % MANNERS.length] };
+          const [a, b] = [deriveProfile(speaker, n), deriveProfile(speaker, n + 1)];
+          assert.notDeepEqual(a.mix, b.mix, `${sex} ${age} ${station}: neighbours, two mixes`);
+          // Two paces and pitches too, but where the range holds one of them at its edge.
+          const edge = (x, r) => x === r.min || x === r.max;
+          assert.ok(a.speed !== b.speed || edge(a.speed, SPEED), `${sex} ${age} ${station}: neighbours, two paces`);
+          assert.ok(a.pitch !== b.pitch || edge(a.pitch, PITCH), `${sex} ${age} ${station}: neighbours, two pitches`);
+          assert.ok(inRanges(a), 'within the ranges');
+          mixes.add(JSON.stringify(a.mix));
+          if (n < 16) { // a pack holds PACK_MAX voices at most
+            profiles[actor] = a;
+            actor += 1;
+          }
+        }
+        assert.equal(mixes.size, 64, `${sex} ${age} ${station}: no two actors share a mix`);
+      }
+    }
+  }
+  const read = readPack(JSON.parse(JSON.stringify(pack2(profiles))));
+  assert.ok(read.ok && read.pack.size === actor, 'a /2 pack of them reads');
+  assert.ok(STYLES.length === 10);
+  console.log(`  receipt: ${2 * AGES.length * STATIONS.length * 64} derived voices within the ranges, ${actor} of them read as a /2 pack`);
+});
+
+test('speakerOutputsOf (the speaker profile\'s values as tools/i18n/translate.mjs readSpeakers gives them, /2 and /1): each actor its derived voice, the pack /2; the counts by station, manner, sex and age, the means, the varying, the distinct mixes and the scripts not listed', () => {
+  const plan = {
+    scripts: 4,
+    jobs: [
+      { archive: 'a', item: 1, actors: [10, 11] },
+      { archive: 'a', item: 2, actors: [13] },
+      { archive: 'b', item: 3, actors: [14, 10] },
+    ],
+    skipped: [{ archive: 'b', item: 4, actors: [15], reason: 'refused' }],
+  };
+  const lord = { age: 'elder', class: 'noble', note: '', sex: 'male', station: 'lord', manner: 'pompous', nameKo: null };
+  const one = { age: 'youth', class: 'thief', note: '' };
+  const speakers = new Map([['a:1', lord], ['b:3', one], ['b:9', lord]]);
+  const { pack, coverage: c } = speakerOutputsOf(plan, speakers, 'u6.speakers/2');
+  assert.deepEqual(Object.keys(pack), ['format', 'model', 'revision', 'profiles']);
+  assert.ok(pack.format === PACK_FORMAT_2 && pack.model === SPEAKERS_MODEL && pack.revision === RANGES_REVISION);
+  assert.deepEqual(pack.profiles, { 10: deriveProfile(lord, 10), 11: deriveProfile(lord, 11), 13: deriveProfile(null, 13), 14: deriveProfile(one, 14) }, 'each actor its voice (10 from its first script)');
+  assert.ok(readPack(JSON.parse(JSON.stringify(pack))).ok, 'the pack reads');
+  assert.deepEqual(c.scripts, { read: 4, profiled: 3, listed: 2, unlisted: 1, skipped: 1 });
+  assert.deepEqual(c.actors, { inScripts: 6, profiled: 4, inSkipped: 1, repeated: 1, defaulted: { unlisted: 1, unstated: 1 } });
+  assert.deepEqual(c.by.station, { royalty: 0, lord: 2, commoner: 2, lowborn: 0, beyond: 0 });
+  assert.deepEqual(c.by.manner, { plain: 2, jester: 0, mad: 0, pompous: 2, drunk: 0, sly: 0, gruff: 0, timid: 0, pious: 0 });
+  assert.deepEqual(c.by.sex, { female: 1, male: 3 }, '13 by parity female; 14 by parity male');
+  assert.deepEqual(c.by.age, { child: 0, youth: 1, adult: 1, elder: 2 });
+  assert.equal(c.mean.station.royalty, null);
+  assert.ok(Math.abs(c.mean.station.lord.speed - (pack.profiles[10].speed + pack.profiles[11].speed) / 2) < 1e-4);
+  assert.equal(c.varying, 0);
+  assert.equal(c.distinctMixes, 4);
+  assert.deepEqual(c.unlisted, [{ archive: 'a', item: 2, actors: 1 }]);
+  assert.deepEqual(c.skipped, [{ archive: 'b', item: 4, actors: 1, reason: 'refused' }]);
+  assert.equal(c.format, 'u6.voice-coverage/2');
+  assert.equal(c.speakers, 'u6.speakers/2');
+});
+
+// A speaker file the test writes: `entries` ({archive, item, ...} of its format) under `format`.
+const speakerFile = (format, entries) => JSON.stringify({ format, model: 'test-model', speakers: entries });
+// A /1 entry and a /2 entry of the fixture's scripts (made-up classes and notes).
+const v1Entry = (archive, item, age) => ({ archive, item, age, class: 'commoner', note: 'a made-up note' });
+const v2Entry = (archive, item, age, sex, station, manner) => ({ ...v1Entry(archive, item, age), sex, station, manner, name_ko: null });
+
+// Runs main with --speakers on the fixture: the code, the output, the requests (none expected).
+async function speakersRun(f, speakers, extra = []) {
+  const path = join(f.dir, 'speakers.json');
+  await writeFile(path, speakers);
+  const t = fakeTransport();
+  const out = output();
+  const code = await main([f.bundles, '--speakers', path, '--out', f.out, ...extra], { transport: t.send, stdout: out, isTTY: true, stdin: terminal(), signals: new EventEmitter() });
+  return { code, printed: out.text, requests: t.bodies.length };
+}
+
+// The pack and coverage a --speakers run wrote (0600), the notes.json planted before it unchanged.
+async function speakersWritten(f) {
+  for (const name of ['voices.u6vp', 'coverage.json']) assert.equal(await mode(join(f.out, name)), 0o600, `${name} is 0600`);
+  assert.equal(await readFile(join(f.out, 'notes.json'), 'utf8'), 'the notes, untouched', 'notes.json left as it is');
+  assert.ok(!existsSync(join(f.out, 'preview')) && !existsSync(join(f.out, '.lock')), 'no preview; the lock gone');
+  return {
+    pack: JSON.parse(await readFile(join(f.out, 'voices.u6vp'), 'utf8')),
+    coverage: JSON.parse(await readFile(join(f.out, 'coverage.json'), 'utf8')),
+  };
+}
+
+async function speakersFixture() {
+  const f = await fixture();
+  await mkdir(f.out, { recursive: true });
+  await writeFile(join(f.out, 'notes.json'), 'the notes, untouched');
+  return f;
+}
+
+test('--speakers with a /1 speaker file: no request (no route, no preview, no prompt); the pack /2 of every actor of the scripts to profile, each its derived voice (a listed script\'s age, the defaults for the rest), read by readPack; the coverage\'s counts; notes.json left as it is; counts printed only', async () => {
+  const f = await speakersFixture();
+  const r = await speakersRun(f, speakerFile('u6.speakers/1', [v1Entry('a', ITEMS[0], 'elder'), v1Entry('b', ITEMS[2], 'child')]));
+  assert.equal(r.code, 0, 'done');
+  assert.equal(r.requests, 0, 'no request');
+  assert.ok(!/Route|Type yes|first request/.test(r.printed), 'no route, no prompt, no preview');
+  const { pack, coverage: c } = await speakersWritten(f);
+  assert.equal(pack.format, PACK_FORMAT_2);
+  const read = readPack(pack);
+  assert.ok(read.ok && read.pack.size === 4, 'every actor of the scripts to profile');
+  const elder = v1Entry('a', ITEMS[0], 'elder');
+  assert.deepEqual(pack.profiles[ACTORS.good[0]], deriveProfile({ age: elder.age, class: elder.class, note: elder.note }, ACTORS.good[0]));
+  assert.deepEqual(pack.profiles[ACTORS.again[0]], deriveProfile(null, ACTORS.again[0]), 'not listed: the defaults');
+  assert.deepEqual(pack.profiles[ACTORS.bad[0]], deriveProfile({ age: 'child' }, ACTORS.bad[0]));
+  assert.deepEqual(c.scripts, { read: 5, profiled: 3, listed: 2, unlisted: 1, skipped: 2 });
+  assert.deepEqual(c.actors.defaulted, { unlisted: 1, unstated: 3 });
+  assert.deepEqual(c.by.station.commoner, 4);
+  assert.deepEqual(c.by.age, { child: 1, youth: 0, adult: 1, elder: 2 });
+  assert.deepEqual(c.by.sex, { female: 3, male: 1 }, 'by the actors\' parity');
+  assert.equal(c.speakers, 'u6.speakers/1');
+  assert.deepEqual(c.unlisted, [{ archive: 'a', item: ITEMS[1], actors: 1 }]);
+  assert.match(r.printed, /Bundles: 5 scripts read from .* \(\d+ bytes\): 3 to voice \(4 actors\), 2 skipped \(refused 1, no actors 1\)\./);
+  assert.match(r.printed, /Speakers: 2 scripts listed \(u6\.speakers\/1\); of the 3 to voice 2 listed, 1 not \(their 1 actors take the defaults\); 3 actors of listed scripts with no station given\./);
+  assert.match(r.printed, /Voices: 4 actors \(0 repeated\), 4 distinct mixes, 0 whose lines vary\./);
+  assert.match(r.printed, /by station: royalty 0, lord 0, commoner 4, lowborn 0, beyond 0/);
+  assert.match(r.printed, /Wrote .*voices\.u6vp \(\d+ bytes\), .*coverage\.json \(\d+ bytes\)\./);
+  nothingTold(r.printed);
+  await rm(f.dir, { recursive: true });
+});
+
+// translate.mjs readSpeakers reads u6.speakers/2 from unit S1 on (spec 15 Design 1; it exports
+// SPEAKERS_FORMAT_2 with it): before it, a /2 file is refused there, and this test waits.
+const S1_READER = translate.SPEAKERS_FORMAT_2 === 'u6.speakers/2' ? false : 'waits on unit S1 (translate.mjs readSpeakers of u6.speakers/2)';
+
+test('--speakers with a /2 speaker file (unit S1\'s reader): each listed script\'s sex, station and manner give its actors\' voices, a mad one\'s lines vary; the pack reads as /2; the coverage counts by station, manner, sex and age', { skip: S1_READER }, async () => {
+  const f = await speakersFixture();
+  const lord = v2Entry('a', ITEMS[0], 'elder', 'male', 'lord', 'pompous');
+  const mad = v2Entry('b', ITEMS[2], 'adult', 'female', 'lowborn', 'mad');
+  const r = await speakersRun(f, speakerFile('u6.speakers/2', [lord, mad, v2Entry('b', 7099, 'adult', 'none', 'beyond', 'pious')]));
+  assert.equal(r.code, 0, 'done');
+  assert.equal(r.requests, 0, 'no request');
+  const { pack, coverage: c } = await speakersWritten(f);
+  const read = readPack(pack);
+  assert.ok(pack.format === PACK_FORMAT_2 && read.ok && read.pack.size === 4, 'the pack reads as /2');
+  const traits = (e) => ({ age: e.age, sex: e.sex, station: e.station, manner: e.manner });
+  for (const a of ACTORS.good) assert.deepEqual(pack.profiles[a], deriveProfile(traits(lord), a), 'the lord\'s voice');
+  assert.deepEqual(pack.profiles[ACTORS.bad[0]], deriveProfile(traits(mad), ACTORS.bad[0]), 'the madwoman\'s');
+  assert.deepEqual(pack.profiles[ACTORS.bad[0]].vary, MANNER_VARY.mad, 'her lines vary');
+  assert.deepEqual(c.scripts, { read: 5, profiled: 3, listed: 2, unlisted: 1, skipped: 2 });
+  assert.deepEqual(c.by.station, { royalty: 0, lord: 2, commoner: 1, lowborn: 1, beyond: 0 });
+  assert.deepEqual(c.by.manner, { plain: 1, jester: 0, mad: 1, pompous: 2, drunk: 0, sly: 0, gruff: 0, timid: 0, pious: 0 });
+  assert.deepEqual(c.by.sex, { female: 2, male: 2 });
+  assert.deepEqual(c.by.age, { child: 0, youth: 0, adult: 2, elder: 2 });
+  assert.equal(c.varying, 1);
+  assert.deepEqual(c.actors.defaulted, { unlisted: 1, unstated: 0 });
+  assert.equal(c.speakers, 'u6.speakers/2');
+  nothingTold(r.printed);
+  await rm(f.dir, { recursive: true });
+});
+
+test('--speakers refuses with nothing written: a request option with it (no request either), a speakers file that is missing, not JSON or not a speaker profile; the line names the rule only', async () => {
+  const f = await speakersFixture();
+  for (const extra of [['--send'], ['--dry-run'], ['--model', 'x'], ['--llmux', 'http://127.0.0.1:1'], ['--jobs', '1'], ['--timeout', '5']]) {
+    const r = await speakersRun(f, speakerFile('u6.speakers/1', []), extra);
+    assert.equal(r.code, 2, `${extra[0]}: a usage error`);
+    assert.equal(r.requests, 0, `${extra[0]}: no request`);
+    assert.ok(r.printed.includes(`profile: --speakers makes no request: ${extra[0]} does not go with it`), `${extra[0]}: says why`);
+  }
+  const missing = output();
+  assert.equal(await main([f.bundles, '--speakers', join(f.dir, 'none.json'), '--out', f.out], { stdout: missing, isTTY: false, signals: new EventEmitter() }), 2);
+  assert.match(missing.text, /profile: the speakers file cannot be read \(ENOENT\): nothing was written\./);
+  for (const [body, why] of [
+    [`not JSON ${SENTINEL}`, /the speakers file does not read as JSON: nothing was written\./],
+    [JSON.stringify({ format: 'u6.speakers/9', model: 'm', speakers: [] }), /the speakers file is not u6\.speakers\/[12]: nothing was written\./],
+    [speakerFile('u6.speakers/1', [{ ...v1Entry('a', ITEMS[0], 'adult'), age: SENTINEL }]), /the speakers file is not u6\.speakers\/[12].*: nothing was written\./],
+  ]) {
+    const r = await speakersRun(f, body);
+    assert.equal(r.code, 2, 'refused');
+    assert.match(r.printed, why);
+    nothingTold(r.printed);
+  }
+  assert.ok(!existsSync(join(f.out, 'voices.u6vp')) && !existsSync(join(f.out, 'coverage.json')), 'nothing written');
+  assert.equal(await readFile(join(f.out, 'notes.json'), 'utf8'), 'the notes, untouched');
+  await rm(f.dir, { recursive: true });
+});
+
+// A script whose bundle has actors but no name and no text: nothing to send, a voice all the same.
+const silentBundle = () => ({
+  ...bundle('b', ITEMS[5], ACTORS.silent, ''), narration: { look: [] }, speech: { greeting: [] }, turns: [],
+});
+
+test('--speakers voices every script with actors the exporter did not refuse, one with no name and no text too (the model\'s plan still skips it, its printed line as before): its actor in the pack, from the speaker file or the defaults', async () => {
+  const value = [...BUNDLES, silentBundle()];
+  // The model's plan: the silent script skipped as before (nothing to send).
+  const model = planOf(value, 'test-model');
+  assert.deepEqual(model.skipped.map((x) => [x.item, x.reason]), [[ITEMS[3], 'refused'], [ITEMS[4], 'no-actors'], [ITEMS[5], 'no-text']]);
+  assert.ok(!model.jobs.some((j) => j.item === ITEMS[5]), 'no request for it');
+  // The speakers' plan: it is voiced; refused and actorless scripts are still skipped.
+  const voiced = speakerPlanOf(value);
+  assert.deepEqual(voiced.jobs.map((j) => j.item), [ITEMS[0], ITEMS[1], ITEMS[2], ITEMS[5]]);
+  assert.deepEqual(voiced.skipped.map((x) => [x.item, x.reason]), [[ITEMS[3], 'refused'], [ITEMS[4], 'no-actors']]);
+  assert.ok(voiced.jobs.every((j) => Object.keys(j).join() === 'archive,item,actors'), 'no text and no request body');
+  const f = await speakersFixture();
+  await writeFile(f.bundles, JSON.stringify(value));
+  // The model's dry run prints its line as before (no text 1).
+  const dry = output();
+  assert.equal(await main([f.bundles, '--out', join(f.dir, 'model'), '--dry-run'], { stdout: dry, isTTY: false, signals: new EventEmitter() }), 0);
+  assert.match(dry.text, /: 3 to profile \(4 actors\), 3 skipped \(refused 1, no actors 1, no text 1\)\./);
+  // Listed (/1) and not listed: its actor voiced either way.
+  for (const entries of [[v1Entry('b', ITEMS[5], 'elder')], []]) {
+    const r = await speakersRun(f, speakerFile('u6.speakers/1', entries));
+    assert.equal(r.code, 0);
+    assert.equal(r.requests, 0, 'no request');
+    const { pack, coverage: c } = await speakersWritten(f);
+    const a = ACTORS.silent[0];
+    assert.deepEqual(pack.profiles[a], deriveProfile(entries.length > 0 ? { age: 'elder', class: 'commoner', note: 'a made-up note' } : null, a), 'its actor voiced');
+    assert.ok(readPack(pack).ok && readPack(pack).pack.size === 5, 'every actor of the scripts voiced');
+    assert.deepEqual(c.scripts, { read: 6, profiled: 4, listed: entries.length, unlisted: 4 - entries.length, skipped: 2 });
+    assert.match(r.printed, /: 4 to voice \(5 actors\), 2 skipped \(refused 1, no actors 1\)\./);
+    nothingTold(r.printed);
+  }
+  nothingTold(dry.text);
+  await rm(f.dir, { recursive: true });
 });

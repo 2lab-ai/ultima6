@@ -221,7 +221,7 @@ import {
 import { TEXT } from './i18n.js';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
 import { createVoices } from './voice/player.js';
-import { PACK_FORMAT, readPack } from './voice/profile.js';
+import { PACK_FORMAT, PACK_FORMAT_2, readPack } from './voice/profile.js';
 import { RESTRICTIONS } from './voice/terms.js';
 
 const canvas = document.getElementById('screen');
@@ -798,7 +798,7 @@ function attachVoicePack(pack) {
 // *.u6vp (its format is checked when it is loaded: one of another is refused), or a *.json file
 // dropped alone, of at most VOICE_PACK_MAX bytes and outside a savegame folder, that starts as
 // JSON (its first byte that is not JSON whitespace is `{`) and parses to an object whose
-// `format` is the pack's. `{pack, value}`: `value` is the object, when it was read. Only such a
+// `format` is one of the pack's (/1 or /2). `{pack, value}`: `value` is the object, when it was read. Only such a
 // file is read here, so a drop the import refuses unread (over its limit, a save file over the
 // save limit) is still not read.
 async function probeVoicePack(item, alone) {
@@ -811,7 +811,7 @@ async function probeVoicePack(item, alone) {
     const first = bytes.findIndex((b) => !JSON_SPACE.has(b));
     if (first < 0 || bytes[first] !== 0x7b) return { pack: false };
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    return value?.format === PACK_FORMAT ? { pack: true, value } : { pack: false };
+    return [PACK_FORMAT, PACK_FORMAT_2].includes(value?.format) ? { pack: true, value } : { pack: false };
   } catch {
     return { pack: false }; // not one (or not readable: the import reads it and says what failed)
   }

@@ -17,13 +17,15 @@
 //   personality voices, by actor number) gives its actors its profiles instead; setting one, or
 //   none, forgets the profiles kept, so the next line of each speaker takes the pack's.
 // - The seed of an utterance is a hash of its speaker and its text (with its voice's seedSalt),
-//   so a line repeated sounds the same.
+//   so a line repeated sounds the same. A voice with a vary (spec 15 Design 5: a jester, a
+//   madman, a drunk) says each line at a speed and pitch of its own, moved from the voice's by
+//   draws from that hash (profile.js lineProfile): the same line always alike, two lines apart.
 //
 // Rights (spec 01): an utterance's text is the user's game text. It goes to the worker and
 // nowhere else: not to the console, the page's text, its data attributes or an error; so do its
 // speaker, its traits and its profile. What the page learns is states, counts and timings
 // (`stats`; `distinct`: how many voices have spoken this session), and failures as codes.
-import { profileFor } from './profile.js';
+import { lineProfile, profileFor } from './profile.js';
 
 const FADE_S = 0.08; // the fade of a cancelled speech
 const LOUD_UP_TO = 4; // above this speed nothing is synthesized (as the music fades out)
@@ -53,7 +55,9 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
   let worker = null;
   let ready = false;
   let audio = null; // { ctx, output }
-  let queue = []; // utterances waiting: { id, turn, text, lang, seed, profile, at }
+  // Utterances waiting: { id, turn, text, lang, seed, profile (the line's), voice (its
+  // speaker's), at }.
+  let queue = [];
   // The utterance in the worker: { id, gain, sources, live, done, cancelled, started, at }.
   let current = null;
   let playing = []; // utterances with a gain still on the output (current among them)
@@ -62,7 +66,7 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
   let endAt = 0; // when the audio scheduled so far ends (context time)
   const profiles = new Map(); // speaker to its profile, for the session
   let pack = null; // the voice pack's profiles (actor number to profile), or null
-  const heard = new Set(); // the voices spoken (their profiles as JSON)
+  const heard = new Set(); // the voices spoken (their speakers' profiles as JSON, not a line's)
 
   const changed = () => onStats?.();
 
@@ -183,10 +187,11 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
         if (turn >= 0) cancel();
         turn = u.turn;
       }
-      const profile = profileOf(u);
+      const voice = profileOf(u);
+      const line = seedOf(u.speaker, u.text);
       queue.push({
         id: nextId, turn: u.turn, text: u.text, lang: u.lang === 'ko' ? 'ko' : 'en',
-        seed: (seedOf(u.speaker, u.text) ^ profile.seedSalt) >>> 0, profile, at: performance.now(),
+        seed: (line ^ voice.seedSalt) >>> 0, profile: lineProfile(voice, line), voice, at: performance.now(),
       });
       nextId += 1;
     }
@@ -242,7 +247,7 @@ export function createVoices({ workerUrl, speed, onState, onStats }) {
     if (!u.started) {
       u.started = true;
       stats.spoken += 1;
-      heard.add(JSON.stringify(u.profile));
+      heard.add(JSON.stringify(u.voice));
       stats.distinct = heard.size;
       stats.firstMs = Math.round(performance.now() - u.at + (at - ctx.currentTime) * 1000);
     }

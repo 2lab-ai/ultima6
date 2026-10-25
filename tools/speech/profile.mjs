@@ -40,8 +40,22 @@
 // the model's name): never a name, a line, a note, an actor number or a script's (archive,
 // item). An error prints its kind only (a JSON error quotes its input).
 //
+// Voices from the speaker profile (spec 15 Design 4): `--speakers <file>` (tools/i18n/speakers.mjs's
+// u6.speakers/1 or /2, read by tools/i18n/translate.mjs readSpeakers) makes the pack with no model
+// request (so no route, no preview, no consent): each actor of every script with actors that the
+// exporter did not refuse (one with no name and no text too: none is sent) takes the voice
+// `deriveProfile` gives from its script's speaker (sex, age, station, manner) and its actor
+// number. A script the file does not list takes the defaults (adult, commoner, plain, the voice's
+// sex by the actor number's parity), as does what a /1 file does not give (its entries' ages are
+// used). It writes <out>/voices.u6vp as u6.voice-pack/2 (each voice with its vary) and
+// <out>/coverage.json (u6.voice-coverage/2: counts by station, manner, sex and age, the distinct
+// mixes, the scripts not listed), checked by readPack before anything is written, under the
+// same lock and modes; notes.json is left as it is. It prints counts only. Without --speakers
+// (a model's voices) the pack is u6.voice-pack/1, as before.
+//
 //   node tools/speech/profile.mjs <bundles.json> [--send | --dry-run] [--model NAME]
 //        [--llmux URL] [--out DIR] [--jobs N] [--timeout SECONDS]
+//   node tools/speech/profile.mjs <bundles.json> --speakers <speakers.json> [--out DIR]
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -51,7 +65,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STYLES } from '../../site/voice/model.js';
 import {
-  checkedProfile, MAX_MIX, PACK_FORMAT, PACK_MAX, PITCH, RANGES_REVISION, readPack, SPEED, STEPS,
+  checkedProfile, draw, MAX_MIX, PACK_FORMAT, PACK_FORMAT_2, PACK_MAX, PITCH, RANGES_REVISION, readPack,
+  SPEED, STEPS, unit,
 } from '../../site/voice/profile.js';
 
 export const DEFAULTS = {
@@ -70,6 +85,10 @@ const BUNDLE_FORMAT = 'u6.npc-bundle/1';
 const BUNDLES_MAX = 256 << 20; // the most bytes of a bundles file read
 const NOTES_FORMAT = 'u6.voice-notes/1';
 const COVERAGE_FORMAT = 'u6.voice-coverage/1';
+const SPEAKERS_COVERAGE_FORMAT = 'u6.voice-coverage/2'; // the coverage of a --speakers run
+const SPEAKERS_MAX_BYTES = 16 << 20; // the most bytes of a speakers file read
+/// The pack's `model` of a --speakers run: no model made its voices.
+export const SPEAKERS_MODEL = 'speaker-profile';
 export const PREVIEW = /^first-request(-[0-9]+-[0-9a-f]{12})?\.json$/; // a run's preview (and the old fixed name)
 const LOCK = '.lock';
 // The route refuses every request (and any 3xx: it would send the text elsewhere): none more is
@@ -151,15 +170,21 @@ export function bodyOf(model, text) {
   return JSON.stringify({ model, max_tokens: MAX_TOKENS, system: SYSTEM, messages: [{ role: 'user', content: text }] });
 }
 
-/// The bundles of `value` (the parsed file) as the jobs to send, in (archive, item) order, and the
-/// scripts skipped: refused by the exporter, used by no actor, or with no name and no text. Throws
-/// a fixed message (a count only) when it is not a list of bundles.
-export function planOf(value, model) {
+// The bundles of `value` (the parsed file) in (archive, item) order. Throws a fixed message (a
+// count only) when it is not a list of bundles.
+function bundlesOf(value) {
   if (!Array.isArray(value)) throw new InputError('the file is not a list of NPC bundles');
   const bad = value.filter((b) => !plain(b) || b.format !== BUNDLE_FORMAT || !['a', 'b'].includes(b.archive)
     || !Number.isInteger(b.item) || !Array.isArray(b.actors) || !b.actors.every(Number.isInteger)).length;
   if (bad > 0) throw new InputError(`${bad} entries of the file are not ${BUNDLE_FORMAT} bundles`);
-  const sorted = [...value].sort((x, y) => (x.archive === y.archive ? x.item - y.item : x.archive < y.archive ? -1 : 1));
+  return [...value].sort((x, y) => (x.archive === y.archive ? x.item - y.item : x.archive < y.archive ? -1 : 1));
+}
+
+/// The bundles of `value` (the parsed file) as the jobs to send, in (archive, item) order, and the
+/// scripts skipped: refused by the exporter, used by no actor, or with no name and no text. Throws
+/// a fixed message (a count only) when it is not a list of bundles.
+export function planOf(value, model) {
+  const sorted = bundlesOf(value);
   const jobs = [];
   const skipped = [];
   for (const b of sorted) {
@@ -178,6 +203,22 @@ export function planOf(value, model) {
       continue;
     }
     jobs.push({ ...key, actors: b.actors, chars: npc.chars, body: bodyOf(model, npc.text) });
+  }
+  return { scripts: value.length, jobs, skipped };
+}
+
+/// The scripts of `value` (the parsed file) a --speakers run voices, as planOf's plan: every one
+/// with actors that the exporter did not refuse, in (archive, item) order (one with no name and
+/// no text too: no text is sent), and the scripts skipped (refused, or used by no actor). Throws
+/// as planOf.
+export function speakerPlanOf(value) {
+  const jobs = [];
+  const skipped = [];
+  for (const b of bundlesOf(value)) {
+    const key = { archive: b.archive, item: b.item };
+    if (b.refused !== null && b.refused !== undefined) skipped.push({ ...key, actors: b.actors, reason: 'refused' });
+    else if (b.actors.length === 0) skipped.push({ ...key, actors: [], reason: 'no-actors' });
+    else jobs.push({ ...key, actors: b.actors });
   }
   return { scripts: value.length, jobs, skipped };
 }
@@ -430,7 +471,11 @@ export async function sendAll(list, { transport, jobs, timeoutMs, stop, progress
   return { results, counts, halted };
 }
 
-/// The pack, the notes and the coverage receipt of `plan`'s jobs and their `results`.
+// A model's voice as a u6.voice-pack/1 holds it: no vary (every line alike).
+const packed1 = ({ mix, speed, pitch, steps, seedSalt }) => ({ mix, speed, pitch, steps, seedSalt });
+
+/// The pack (u6.voice-pack/1), the notes and the coverage receipt of `plan`'s jobs and their
+/// `results`.
 export function outputsOf(plan, results, model) {
   const profiles = {};
   const notes = [];
@@ -444,7 +489,7 @@ export function outputsOf(plan, results, model) {
     }
     for (const actor of job.actors) {
       if (Object.hasOwn(profiles, actor)) duplicate += 1;
-      else profiles[actor] = r.profile;
+      else profiles[actor] = packed1(r.profile);
     }
     notes.push({ archive: job.archive, item: job.item, actors: job.actors, note: r.note });
   });
@@ -473,20 +518,219 @@ export function outputsOf(plan, results, model) {
   };
 }
 
+// --- voices from the speaker profile (spec 15 Design 4) ------------------------------------------
+
+/// What a speaker that the file does not list, or a field it does not give (a /1 file's sex,
+/// station and manner), takes; the voice's sex then is the actor number's parity (odd female, even
+/// male, as site/voice/profile.js profileFor), as for a speaker of sex `none`.
+export const SPEAKER_DEFAULTS = { age: 'adult', station: 'commoner', manner: 'plain' };
+
+/// The presets a voice leads with, by its sex, then the speaker's age and station (spec 15
+/// Design 4, from the presets measured): a young speaker (a child or a youth) by age whatever the
+/// station, an elderly woman likewise, everyone else by station.
+export const PRESET_FAMILIES = {
+  male: {
+    young: ['M1'],
+    royalty: ['M2', 'M5'], lord: ['M2', 'M5'], beyond: ['M2', 'M5'],
+    commoner: ['M3', 'M1'],
+    lowborn: ['M4'],
+  },
+  female: {
+    young: ['F2', 'F4'],
+    elder: ['F5', 'F3'],
+    royalty: ['F5', 'F3'], lord: ['F5', 'F3'], beyond: ['F5', 'F3'],
+    commoner: ['F1', 'F4'], lowborn: ['F1', 'F4'],
+  },
+};
+/// The lead preset's weight in the blend (the second preset, another of the voice's sex, has the
+/// rest).
+export const LEAD_WEIGHT = { min: 0.6, max: 0.8 };
+/// The speed and pitch (semitones) at each age, by the voice's sex: the medians of the voices of
+/// the model-made pack (spec 15 Measured facts).
+export const AGE_MEDIANS = {
+  child: { female: { speed: 1.1, pitch: 2 }, male: { speed: 1.1, pitch: 2 } },
+  youth: { female: { speed: 0.98, pitch: 0.5 }, male: { speed: 1.07, pitch: 0.9 } },
+  adult: { female: { speed: 1, pitch: -0.5 }, male: { speed: 0.98, pitch: -1 } },
+  elder: { female: { speed: 0.945, pitch: -1 }, male: { speed: 0.96, pitch: -1 } },
+};
+/// The station's offsets of speed and pitch.
+export const STATION_OFFSETS = {
+  royalty: { speed: -0.05, pitch: -0.5 },
+  lord: { speed: -0.03, pitch: -0.3 },
+  commoner: { speed: 0, pitch: 0 },
+  lowborn: { speed: 0.02, pitch: 0 },
+  beyond: { speed: -0.06, pitch: 0 },
+};
+/// The manner's offsets of speed and pitch.
+export const MANNER_OFFSETS = {
+  plain: { speed: 0, pitch: 0 },
+  jester: { speed: 0.1, pitch: 1 },
+  mad: { speed: 0.03, pitch: 0 },
+  pompous: { speed: -0.04, pitch: -0.4 },
+  drunk: { speed: -0.07, pitch: 0 },
+  sly: { speed: 0.02, pitch: 0 },
+  gruff: { speed: 0.01, pitch: -0.3 },
+  timid: { speed: -0.02, pitch: 0.4 },
+  pious: { speed: -0.03, pitch: 0 },
+};
+/// The seeded spread around them, by the actor number: up to this much either way.
+export const SPREAD = { speed: 0.02, pitch: 0.3 };
+/// How far one line may move from the voice (its `vary`), by manner.
+export const MANNER_VARY = {
+  plain: { speed: 0, pitch: 0 },
+  jester: { speed: 0.04, pitch: 0.8 },
+  mad: { speed: 0.1, pitch: 1.2 },
+  pompous: { speed: 0, pitch: 0 },
+  drunk: { speed: 0.05, pitch: 0.4 },
+  sly: { speed: 0, pitch: 0 },
+  gruff: { speed: 0, pitch: 0 },
+  timid: { speed: 0, pitch: 0 },
+  pious: { speed: 0, pitch: 0 },
+};
+
+/// The traits a voice is made from for `actor` (its actor number) of a script whose speaker is
+/// `speaker` (a readSpeakers value, or null for a script not listed): {sex ('female' or 'male'),
+/// age, station, manner, given (whether the file gave the station)}; a field missing or not one
+/// of its values takes SPEAKER_DEFAULTS, a sex other than female or male the actor's parity.
+export function traitsOf(speaker, actor) {
+  const n = Number.isInteger(actor) ? actor : 0;
+  const one = (x, table, fallback) => (typeof x === 'string' && Object.hasOwn(table, x) ? x : fallback);
+  return {
+    sex: speaker?.sex === 'female' || speaker?.sex === 'male' ? speaker.sex : n % 2 !== 0 ? 'female' : 'male',
+    age: one(speaker?.age, AGE_MEDIANS, SPEAKER_DEFAULTS.age),
+    station: one(speaker?.station, STATION_OFFSETS, SPEAKER_DEFAULTS.station),
+    manner: one(speaker?.manner, MANNER_OFFSETS, SPEAKER_DEFAULTS.manner),
+    given: Boolean(speaker) && Object.hasOwn(STATION_OFFSETS, speaker.station ?? ''),
+  };
+}
+
+/// The presets `t` (traitsOf's) leads with: PRESET_FAMILIES by its sex, then its age and station.
+export function familyOf(t) {
+  const of = PRESET_FAMILIES[t.sex];
+  if (t.age === 'child' || t.age === 'youth') return of.young;
+  if (t.age === 'elder' && of.elder) return of.elder;
+  return of[t.station];
+}
+
+/// The voice of actor `actor` whose script's speaker is `speaker` (spec 15 Design 4; `speaker`
+/// as traitsOf takes it): the actor number picks the lead preset within the family and blends
+/// another of the voice's sex under it (the lead's weight LEAD_WEIGHT's), so neighbours differ;
+/// the speed and pitch are the age and sex median, plus the station's offset and the manner's,
+/// plus a spread drawn from the actor number; vary is the manner's; every number into the ranges
+/// (checkedProfile). Pure and deterministic.
+export function deriveProfile(speaker, actor) {
+  const n = Number.isInteger(actor) ? actor : 0;
+  const t = traitsOf(speaker, n);
+  const family = familyOf(t);
+  const lead = family[draw(n, 11) % family.length];
+  const others = STYLES.filter((s) => s[0] === lead[0] && s !== lead);
+  const second = others[draw(n, 12) % others.length];
+  const w = LEAD_WEIGHT.min + (LEAD_WEIGHT.max - LEAD_WEIGHT.min) * unit(draw(n, 13));
+  const spread = (k, size) => size * (2 * unit(draw(n, k)) - 1);
+  const median = AGE_MEDIANS[t.age][t.sex];
+  const station = STATION_OFFSETS[t.station];
+  const manner = MANNER_OFFSETS[t.manner];
+  return checkedProfile({
+    mix: [{ style: lead, w }, { style: second, w: 1 - w }],
+    speed: median.speed + station.speed + manner.speed + spread(14, SPREAD.speed),
+    pitch: median.pitch + station.pitch + manner.pitch + spread(15, SPREAD.pitch),
+    steps: STEPS.max,
+    seedSalt: 0,
+    vary: MANNER_VARY[t.manner],
+  });
+}
+
+const counts = (keys) => Object.fromEntries(keys.map((k) => [k, 0]));
+const round4 = (x) => Math.round(x * 1e4) / 1e4;
+
+/// The pack (u6.voice-pack/2) and the coverage receipt of `plan`'s scripts (speakerPlanOf's: its
+/// jobs are the scripts to voice) from `speakers` (readSpeakers's Map, `${archive}:${item}` to the
+/// speaker; `format` the file's): each actor of each script its derived voice (an actor in two
+/// scripts keeps the first's, counted as repeated); counts by station, manner, sex and age of the
+/// actors voiced, their mean speed and pitch by station and manner, the actors whose lines vary,
+/// the distinct mixes, and the scripts the file does not list (by archive and item, with their
+/// actors' count).
+export function speakerOutputsOf(plan, speakers, format) {
+  const profiles = {};
+  const by = {
+    station: counts(Object.keys(STATION_OFFSETS)), manner: counts(Object.keys(MANNER_OFFSETS)),
+    sex: counts(['female', 'male']), age: counts(Object.keys(AGE_MEDIANS)),
+  };
+  const sums = { station: {}, manner: {} };
+  const unlisted = [];
+  const defaulted = { unlisted: 0, unstated: 0 };
+  let repeated = 0;
+  let varying = 0;
+  let listed = 0;
+  for (const job of plan.jobs) {
+    const speaker = speakers.get(`${job.archive}:${job.item}`) ?? null;
+    if (speaker) listed += 1;
+    else unlisted.push({ archive: job.archive, item: job.item, actors: job.actors.length });
+    for (const actor of job.actors) {
+      if (Object.hasOwn(profiles, actor)) {
+        repeated += 1;
+        continue;
+      }
+      const t = traitsOf(speaker, actor);
+      const p = deriveProfile(speaker, actor);
+      profiles[actor] = p;
+      if (!speaker) defaulted.unlisted += 1;
+      else if (!t.given) defaulted.unstated += 1;
+      for (const k of ['station', 'manner', 'sex', 'age']) by[k][t[k]] += 1;
+      for (const k of ['station', 'manner']) {
+        const sum = (sums[k][t[k]] ??= { n: 0, speed: 0, pitch: 0 });
+        sum.n += 1;
+        sum.speed += p.speed;
+        sum.pitch += p.pitch;
+      }
+      if (p.vary.speed > 0 || p.vary.pitch > 0) varying += 1;
+    }
+  }
+  const mean = (k) => Object.fromEntries(Object.keys(by[k]).map((v) => {
+    const sum = sums[k][v];
+    return [v, sum ? { speed: round4(sum.speed / sum.n), pitch: round4(sum.pitch / sum.n) } : null];
+  }));
+  const actorsOf = (list) => list.reduce((n, x) => n + x.actors.length, 0);
+  const voiced = Object.keys(profiles).length;
+  const coverage = {
+    format: SPEAKERS_COVERAGE_FORMAT,
+    model: SPEAKERS_MODEL,
+    revision: RANGES_REVISION,
+    speakers: format,
+    scripts: { read: plan.scripts, profiled: plan.jobs.length, listed, unlisted: unlisted.length, skipped: plan.skipped.length },
+    actors: {
+      inScripts: actorsOf(plan.jobs) + actorsOf(plan.skipped), profiled: voiced, inSkipped: actorsOf(plan.skipped), repeated,
+      defaulted,
+    },
+    by,
+    mean: { station: mean('station'), manner: mean('manner') },
+    varying,
+    distinctMixes: new Set(Object.values(profiles).map((p) => JSON.stringify(p.mix))).size,
+    unlisted,
+    skipped: plan.skipped.map((x) => ({ archive: x.archive, item: x.item, actors: x.actors.length, reason: x.reason })),
+  };
+  return { pack: { format: PACK_FORMAT_2, model: SPEAKERS_MODEL, revision: RANGES_REVISION, profiles }, coverage };
+}
+
 const USAGE = 'usage: node tools/speech/profile.mjs <bundles.json> [--send | --dry-run] [--model NAME] '
-  + `[--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
+  + `[--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]\n`
+  + '       node tools/speech/profile.mjs <bundles.json> --speakers <speakers.json> [--out DIR]';
+// The options of a model's run, which a --speakers run (no request) does not take.
+const REQUEST_OPTIONS = ['--send', '--dry-run', '--model', '--llmux', '--jobs', '--timeout'];
 
 /// The options of `argv`, or {error}.
 export function parseArgs(argv) {
   const o = { send: false, dryRun: false, model: DEFAULTS.model, llmux: DEFAULTS.llmux, out: DEFAULTS.out,
-    jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, help: false };
+    jobs: DEFAULTS.jobs, timeoutS: DEFAULTS.timeoutS, bundles: null, speakers: null, help: false };
   const value = (i) => (i + 1 < argv.length ? argv[i + 1] : null);
+  const asked = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    if (REQUEST_OPTIONS.includes(a)) asked.push(a);
     if (a === '--send') o.send = true;
     else if (a === '--dry-run') o.dryRun = true;
     else if (a === '--help' || a === '-h') o.help = true;
-    else if (['--model', '--llmux', '--out', '--jobs', '--timeout'].includes(a)) {
+    else if (['--model', '--llmux', '--out', '--jobs', '--timeout', '--speakers'].includes(a)) {
       const v = value(i);
       if (v === null) return { error: `${a} needs a value` };
       i += 1;
@@ -494,6 +738,7 @@ export function parseArgs(argv) {
       else if (a === '--llmux') o.llmux = v;
       else if (a === '--out') o.out = resolve(v);
       else if (a === '--jobs') o.jobs = Number(v);
+      else if (a === '--speakers') o.speakers = resolve(v);
       else o.timeoutS = Number(v);
     } else if (a.startsWith('--')) return { error: `unknown option ${a}` };
     else if (o.bundles === null) o.bundles = resolve(a);
@@ -501,6 +746,7 @@ export function parseArgs(argv) {
   }
   if (o.help) return o;
   if (o.bundles === null) return { error: 'no bundles file named' };
+  if (o.speakers !== null && asked.length > 0) return { error: `--speakers makes no request: ${asked[0]} does not go with it` };
   if (!Number.isInteger(o.jobs) || o.jobs < 1 || o.jobs > JOBS_MAX) return { error: `--jobs is 1 to ${JOBS_MAX}` };
   if (!finite(o.timeoutS) || o.timeoutS <= 0) return { error: '--timeout is a number of seconds above 0' };
   if (!/^[\w.:[\]/-]{1,100}$/.test(o.model)) return { error: '--model is a model name' };
@@ -554,7 +800,7 @@ export async function main(argv, {
   } catch {
     route = null;
   }
-  if (!route || !['http:', 'https:'].includes(route.protocol) || !local(route)) {
+  if (o.speakers === null && (!route || !['http:', 'https:'].includes(route.protocol) || !local(route))) {
     say('profile: --llmux is the address of llmux on this machine (127.0.0.1, localhost or [::1])');
     return 2;
   }
@@ -575,7 +821,7 @@ export async function main(argv, {
       say(`profile: ${err?.code ? `the bundles file cannot be read (${err.code})` : 'the bundles file does not read as JSON'}`);
       return 2;
     }
-    plan = planOf(value, o.model);
+    plan = o.speakers === null ? planOf(value, o.model) : speakerPlanOf(value);
   } catch (err) {
     if (err instanceof InputError) say(`profile: ${err.message}`);
     else say(`profile: ${err?.code ? `the bundles file cannot be read (${err.code})` : `the bundles do not read (${err?.name ?? 'Error'})`}`);
@@ -583,6 +829,12 @@ export async function main(argv, {
   }
   const reasons = (r) => plan.skipped.filter((s) => s.reason === r).length;
   const actors = plan.jobs.reduce((n, j) => n + j.actors.length, 0);
+  if (o.speakers !== null) {
+    say(`Bundles: ${plan.scripts} scripts read from ${o.bundles} (${size} bytes): ${plan.jobs.length} to voice `
+      + `(${actors} actors), ${plan.skipped.length} skipped (refused ${reasons('refused')}, no actors `
+      + `${reasons('no-actors')}).`);
+    return fromSpeakers(o, plan, say);
+  }
   const chars = plan.jobs.reduce((n, j) => n + j.chars, 0);
   say(`Bundles: ${plan.scripts} scripts read from ${o.bundles} (${size} bytes): ${plan.jobs.length} to profile `
     + `(${actors} actors), ${plan.skipped.length} skipped (refused ${reasons('refused')}, no actors `
@@ -706,6 +958,81 @@ async function consentAndSend(o, plan, route, { transport, stdin, stdout, isTTY,
   say('Drop voices.u6vp on the page; notes.json and coverage.json stay here.');
   if (stopper.signal.aborted) return 130;
   return failed > 0 ? 3 : 0;
+}
+
+// A --speakers run (spec 15 Design 4), from the plan on: the speakers file read (at most
+// SPEAKERS_MAX_BYTES, strictly, by tools/i18n/translate.mjs readSpeakers: one that does not read
+// writes nothing), the voices derived, the pack checked by readPack, then voices.u6vp and
+// coverage.json written under `o.out`'s lock. No request, no preview. Prints counts only.
+async function fromSpeakers(o, plan, say) {
+  // translate.mjs imports this module: taken when it is needed, so neither loads half made.
+  const { InputError: SpeakersError, readSpeakers } = await import('../i18n/translate.mjs');
+  let speakers;
+  let format;
+  try {
+    const size = (await stat(o.speakers)).size;
+    if (size > SPEAKERS_MAX_BYTES) {
+      say(`profile: the speakers file is ${size} bytes, more than ${SPEAKERS_MAX_BYTES}: nothing was written.`);
+      return 2;
+    }
+    let value;
+    try {
+      value = JSON.parse(await readFile(o.speakers, 'utf8'));
+    } catch (err) {
+      say(`profile: ${err?.code ? `the speakers file cannot be read (${err.code})` : 'the speakers file does not read as JSON'}: nothing was written.`);
+      return 2;
+    }
+    speakers = readSpeakers(value);
+    format = value.format;
+  } catch (err) {
+    if (err instanceof SpeakersError) say(`profile: ${err.message}: nothing was written.`);
+    else say(`profile: the speakers file cannot be read (${err?.code ?? err?.name ?? 'Error'}): nothing was written.`);
+    return 2;
+  }
+  const { pack, coverage } = speakerOutputsOf(plan, speakers, format);
+  const c = coverage;
+  const list = (k) => Object.entries(c.by[k]).map(([v, n]) => `${v} ${n}`).join(', ');
+  say(`Speakers: ${speakers.size} scripts listed (${format}); of the ${c.scripts.profiled} to voice ${c.scripts.listed} `
+    + `listed, ${c.scripts.unlisted} not (their ${c.actors.defaulted.unlisted} actors take the defaults); `
+    + `${c.actors.defaulted.unstated} actors of listed scripts with no station given.`);
+  say(`Voices: ${c.actors.profiled} actors (${c.actors.repeated} repeated), ${c.distinctMixes} distinct mixes, `
+    + `${c.varying} whose lines vary.`);
+  for (const k of ['station', 'manner', 'sex', 'age']) say(`  by ${k}: ${list(k)}`);
+  const packText = JSON.stringify(pack);
+  const checked = readPack(JSON.parse(packText));
+  if (!checked.ok || checked.pack.size !== Object.keys(pack.profiles).length || checked.pack.size > PACK_MAX) {
+    say(`profile: the pack does not check out (${checked.ok ? 'size' : checked.code}): nothing was written.`);
+    return 2;
+  }
+  if (checked.pack.size === 0) {
+    say('Nothing to profile: nothing was written.');
+    return 1;
+  }
+  let release;
+  try {
+    await privateDir(o.out);
+    release = await holdLock(o.out);
+  } catch (err) {
+    if (err instanceof NotOwnDir) say(`profile: ${err.message}: nothing was written.`);
+    else say(`profile: ${o.out} cannot be used (${err?.code ?? err?.name ?? 'Error'}): nothing was written.`);
+    return 2;
+  }
+  if (!release) {
+    say(`profile: another run of this tool holds ${join(o.out, LOCK)} (remove it if none runs): nothing was written.`);
+    return 2;
+  }
+  try {
+    const written = [];
+    for (const [name, text] of [['voices.u6vp', packText], ['coverage.json', JSON.stringify(coverage, null, 1)]]) {
+      const path = join(o.out, name);
+      written.push(`${path} (${await writePrivate(path, text)} bytes)`);
+    }
+    say(`Wrote ${written.join(', ')}.`);
+    say('Drop voices.u6vp on the page; coverage.json stays here.');
+    return 0;
+  } finally {
+    await release();
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
