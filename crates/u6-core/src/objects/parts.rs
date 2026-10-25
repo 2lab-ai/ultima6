@@ -194,6 +194,108 @@ pub fn move_monster_parts(s: &mut State, slot: Slot, ox: u16, oy: u16, drop: boo
     }
 }
 
+/// The status byte 0x131646 leaves on a dragon part: 0x10bcee makes it 1 plus the temporary bit
+/// 0x20, which 0x131646 then clears.
+const SPAWNED_PART: u8 = 0x01;
+
+/// Port-only repair, not in the original: heals saves from builds before 2026-10-25, whose
+/// dragons left their parts behind once they turned (0x10b922 was stubbed in `face`, the port
+/// of 0x11ba5e, so a turn re-framed the head but not its parts, and 0x10b9ca then found none of
+/// them to move or remove).
+///
+/// `read` are the slots a block read just filled, `z` its level. Only a part as 0x131646 makes
+/// one is touched: type 0x19b, an object slot on the map on level `z`, status exactly
+/// [`SPAWNED_PART`] (the shipped map's own 0x19b objects never carry it). First, for each dragon
+/// head (an actor slot of type 0x19b with a frame below 8, on the map on level `z`), a side
+/// where 0x10b922 finds no part of the head's facing gives such a part standing on that side's
+/// tile with another part frame (an A4-0x6a70 value, bit 0 aside) the frame A4-0x6a70 gives the
+/// side for the facing, bit 0 kept: a dragon that turned under the old build walks on with its
+/// parts. A part some head's 0x10b922 already finds, or one re-framed for an earlier head, is
+/// never taken, so a neighbouring dragon keeps its own. Then each such part that no head's
+/// 0x10b922 finds is removed (0x10c1d6).
+pub(crate) fn repair_dragon_parts(s: &mut State, read: &[Slot], z: u16) {
+    let mask = if z != 0 { 0xff } else { 0x3ff };
+    let parts: Vec<Slot> = read
+        .iter()
+        .copied()
+        .filter(|&c| {
+            let o = &s.objects;
+            c >= ACTOR_SLOTS as Slot
+                && o.kind(c) == 0x19b
+                && o.place(c) == 0
+                && u16::from(o.z(c)) == z
+                && o.status(c) == SPAWNED_PART
+        })
+        .collect();
+    if parts.is_empty() {
+        return;
+    }
+    // 0x10b922 and 0x10c1d6 start their list walks from the window grid, which is stale here:
+    // inside 0x10e1ce it still names the slots the write-back just freed, and after a Restore
+    // it is whatever the game before left (0x10ed44 resets the slots, not the grid). 0x10dea4
+    // rebuilds it only when the window key changes (0x108d10) or from 0x10e4bc, both after the
+    // reads.
+    s.objects.rebuild_grid();
+    let heads: Vec<Slot> = (0..ACTOR_SLOTS as Slot)
+        .filter(|&a| {
+            let o = &s.objects;
+            o.kind(a) == 0x19b && o.tf(a) >> 10 < 8 && o.place(a) == 0 && u16::from(o.z(a)) == z
+        })
+        .collect();
+    let frames: Vec<u16> = (0..16)
+        .map(|i| u16::from(at(&s.objects.defs.part_frame, i)) & 0x3e)
+        .collect();
+    let mut taken = found_by(s, &heads, z);
+    for &h in &heads {
+        let (x, y) = (s.objects.x(h), s.objects.y(h));
+        let facing = (s.objects.tf(h) >> 10) & 6;
+        for d in [0usize, 2, 4, 6] {
+            if find_segment_at(s, x, y, z, d, facing) >= 0 {
+                continue;
+            }
+            let want = frames[usize::from(facing) * 2 + (d >> 1)];
+            let o = &s.objects;
+            let px = x.wrapping_add(o.defs.dx(d) as u16) & mask;
+            let py = y.wrapping_add(o.defs.dy(d) as u16) & mask;
+            let stray = parts.iter().copied().find(|&c| {
+                let f = (o.tf(c) >> 10) & 0x3e;
+                !taken.contains(&c)
+                    && o.x(c) == px
+                    && o.y(c) == py
+                    && f != want
+                    && frames.contains(&f)
+            });
+            if let Some(c) = stray {
+                let t = &mut s.objects.type_frame[c as usize];
+                *t = (*t & 0x3ff) | ((want | ((*t >> 10) & 1)) << 10);
+                taken.push(c);
+            }
+        }
+    }
+    let kept = found_by(s, &heads, z);
+    for c in parts {
+        if !kept.contains(&c) {
+            remove(s, c);
+        }
+    }
+}
+
+/// The parts 0x10b922 finds beside each of `heads` on level `z`, with the head's facing.
+fn found_by(s: &mut State, heads: &[Slot], z: u16) -> Vec<Slot> {
+    let mut found = Vec::new();
+    for &h in heads {
+        let (x, y) = (s.objects.x(h), s.objects.y(h));
+        let facing = (s.objects.tf(h) >> 10) & 6;
+        for d in [0usize, 2, 4, 6] {
+            let p = find_segment_at(s, x, y, z, d, facing);
+            if p >= 0 {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
 /// Original: 0x10b42e (objects: drag a silver serpent's body after its head)
 ///
 /// The head (actor `slot`) has moved from (ox, oy). Its frame becomes its direction of travel.

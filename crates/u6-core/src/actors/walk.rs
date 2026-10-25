@@ -678,8 +678,9 @@ pub fn face(s: &mut State, actor: u16, dir: u16) {
         }
     } else if t == 0x19b && f < 8 {
         let p = s.objects.location[a];
+        let z = party_z(s);
         for k in 0..4u16 {
-            let part = dragon_part(s, p.x, p.y, party_z(s), k * 2, f);
+            let part = dragon_part(s, p.x, p.y, z, k * 2, f);
             if part >= 0 {
                 let i = usize::from((dir & 6) * 2 + k);
                 let fr = s.actors.game.part_frames[i];
@@ -755,11 +756,11 @@ fn steer_ship(s: &mut State, actor: u16, dir: u16, f: u16) {
     set_frame(s, me, hull);
 }
 
-/// [objects] 0x10b922: part `part` (0, 2, 4, 6) of the four-tile creature at (x, y, z) with
-/// head frame `frame`, -1 if none. Stub contract: returns -1, so the parts keep their frames
-/// (only the 0x19b creature's turn reaches it; none in the start area).
-fn dragon_part(_s: &State, _x: u16, _y: u16, _z: u16, _part: u16, _frame: u16) -> i16 {
-    crate::todo_stub!("0x10b922 part of a four-tile creature (fallback: none)", -1)
+/// [objects] 0x10b922: the part of the four-tile creature (0x19b) one tile from (x, y, z) in
+/// direction `part` (0, 2, 4, 6) whose frame is the one the head's facing `frame` gives that
+/// side (A4-0x6a70), -1 if none. [`face`] re-frames it for the new facing.
+fn dragon_part(s: &mut State, x: u16, y: u16, z: u16, part: u16, frame: u16) -> i16 {
+    crate::objects::find_segment_at(s, x, y, z, usize::from(part), frame)
 }
 
 #[cfg(test)]
