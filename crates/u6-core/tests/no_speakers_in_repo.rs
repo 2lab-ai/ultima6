@@ -1,20 +1,23 @@
-//! Spec 12 Design 1 / spec 01 Rights: no speaker file (`u6.speakers/1`, each script's age and
-//! class with its personality note) is committed or sits under `site/`. It is read from the
-//! owner's game (tools/i18n/speakers.mjs makes it from the NPC bundles and the voice notes, for
-//! `translate.mjs --speakers`): it lives only in `~/Games/ultima6/i18n/speakers/`, local, never
-//! hosted. Checked: every blob in the git index (what a commit takes, read with `git cat-file`,
-//! whatever the working tree holds), and every file under `site/` on disk (built output and the
-//! gitignored model parts and packs included). Any error reading them fails the test.
+//! Spec 12 Design 1 / spec 15 Design 1 / spec 01 Rights: no speaker file (`u6.speakers/1`, each
+//! script's age and class with its personality note, or `u6.speakers/2`, which also gives each
+//! script's sex, station and manner and its NPC's own name in Hangul) is committed or sits under
+//! `site/`. It is read from the owner's game (tools/i18n/speakers.mjs makes it from the NPC
+//! bundles and the voice notes, for `translate.mjs --speakers`): it lives only in
+//! `~/Games/ultima6/i18n/speakers/`, local, never hosted. Checked: every blob in the git index
+//! (what a commit takes, read with `git cat-file`, whatever the working tree holds), and every file
+//! under `site/` on disk (built output and the gitignored model parts and packs included). Any
+//! error reading them fails the test.
 //!
-//! A file is caught by its shape, not by a string (the format's name is in source: the tools
+//! A file is caught by its shape, not by a string (the formats' names are in source: the tools
 //! and their tests): JSON whose root object, or an element of its root array, has `format` equal
-//! to the speaker file's, after any JSON whitespace. The walker is the NPC bundles' guard's
-//! (`no_npc_bundle_in_repo.rs`), its symlink rule included (a directory link fails the guard).
+//! to either of the speaker file's two, after any JSON whitespace. The walker is the NPC bundles'
+//! guard's (`no_npc_bundle_in_repo.rs`), its symlink rule included (a directory link fails the
+//! guard).
 //!
 //! A file that starts as JSON but does not parse (malformed, or nested past the parser's depth)
-//! is caught when a string token of it is the format's name, its escapes decoded (`tests/guard`),
-//! since the parse cannot rule out what it holds; and `site/` itself a symbolic link fails the
-//! guard (the walker would follow it).
+//! is caught when a string token of it is either format's name, its escapes decoded
+//! (`tests/guard`), since the parse cannot rule out what it holds; and `site/` itself a symbolic
+//! link fails the guard (the walker would follow it).
 //!
 //! There is no exception: unlike a voice pack (`no_voice_pack_in_repo.rs`), a speaker file under
 //! the deploy's `site/packs/` fails the guard like one anywhere else.
@@ -27,8 +30,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The speaker file's format (tools/i18n/translate.mjs `SPEAKERS_FORMAT`).
-const FORMAT: &str = "u6.speakers/1";
+/// The speaker file's formats (tools/i18n/translate.mjs `SPEAKERS_FORMAT` and
+/// `SPEAKERS_FORMAT_2`).
+const FORMATS: [&str; 2] = ["u6.speakers/1", "u6.speakers/2"];
 
 /// JSON's whitespace (RFC 8259: space, tab, line feed, carriage return).
 fn json_space(b: u8) -> bool {
@@ -43,11 +47,11 @@ fn is_speakers(bytes: &[u8]) -> bool {
     }
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         // JSON that does not parse (malformed, or nested past the parser's depth) may still hold
-        // one: a file with a string token equal to the format, its escapes decoded, fails the
-        // guard too (`guard::holds_string`).
-        return guard::holds_string(bytes, &[FORMAT]);
+        // one: a file with a string token equal to a format, its escapes decoded, fails the guard
+        // too (`guard::holds_string`).
+        return guard::holds_string(bytes, &FORMATS);
     };
-    let one = |v: &serde_json::Value| v["format"].as_str() == Some(FORMAT);
+    let one = |v: &serde_json::Value| v["format"].as_str().is_some_and(|f| FORMATS.contains(&f));
     one(&v) || v.as_array().is_some_and(|a| a.iter().any(one))
 }
 
@@ -168,6 +172,40 @@ fn walk(
 /// A speaker file as the tool writes it (made-up values).
 const SPEAKERS: &str = r#"{"format":"u6.speakers/1","model":"m","coverage":{"scripts":1},"speakers":[{"archive":"x","item":0,"age":"adult","class":"c","note":"n"}]}"#;
 
+/// A speaker file of the second form (spec 15), as the tool writes it now (made-up values, a
+/// made-up Korean name).
+const SPEAKERS_2: &str = r#"{"format":"u6.speakers/2","model":"m","coverage":{"scripts":1},"speakers":[{"archive":"x","item":0,"age":"adult","class":"c","note":"n","sex":"none","station":"commoner","manner":"plain","name_ko":"가나"}]}"#;
+
+/// Spec 15: the second form, which also holds each NPC's own name in Hangul, is caught as the
+/// first is: alone, in an array, after whitespace, too deep to parse, its name escaped, and under
+/// `site/packs/`.
+#[test]
+fn the_shape_check_catches_the_second_form_too() {
+    assert!(is_speakers(SPEAKERS_2.as_bytes()), "the second form");
+    assert!(is_speakers(format!("[1,{SPEAKERS_2}]").as_bytes()));
+    assert!(is_speakers(format!("\n \t\r{SPEAKERS_2}").as_bytes()));
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let unparsed = format!("{}{SPEAKERS_2}{}", "[".repeat(200), "]".repeat(200));
+    assert!(is_speakers(unparsed.as_bytes()), "too deep to parse");
+    let escaped = SPEAKERS_2.replacen("u6.speakers/2", "u6.speakers\\/2", 1);
+    assert!(
+        is_speakers(format!("[{escaped},{deep}]").as_bytes()),
+        "its name escaped, unparsed"
+    );
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-speakers-second");
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    }
+    std::fs::create_dir_all(root.join("site/packs")).expect("the test directory");
+    std::fs::write(root.join("site/packs/speakers.json"), SPEAKERS_2).expect("written");
+    let err = site_check(&root.join("site"), &root).unwrap_err();
+    assert_eq!(
+        err,
+        "speaker files under site/: [\"site/packs/speakers.json\"]"
+    );
+    std::fs::remove_dir_all(&root).expect("the test directory goes");
+}
+
 /// The shape check catches a speaker file and an array holding one, whitespace first or not, and
 /// nothing else of that look.
 #[test]
@@ -175,8 +213,8 @@ fn the_shape_check_catches_the_speaker_file_only() {
     assert!(is_speakers(SPEAKERS.as_bytes()));
     assert!(is_speakers(format!("[1,{SPEAKERS}]").as_bytes()));
     assert!(is_speakers(format!("\n \t\r{SPEAKERS}").as_bytes()));
-    let other = SPEAKERS.replace(FORMAT, "u6.speakers/2");
-    assert!(!is_speakers(other.as_bytes()));
+    let other = SPEAKERS.replace(FORMATS[0], "u6.speakers/3");
+    assert!(!is_speakers(other.as_bytes()), "another format");
     let nested = format!("{{\"inner\":{SPEAKERS}}}");
     assert!(!is_speakers(nested.as_bytes()), "not at the root");
     assert!(!is_speakers(b"{\"format\":1}") && !is_speakers(b"[1,2]") && !is_speakers(b"not json"));
@@ -361,44 +399,46 @@ fn a_file_too_deep_to_parse_that_names_the_format_is_caught() {
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 
-/// A valid speaker file whose format name is spelled with a JSON escape (`\/`, or `\u` for its
-/// first character), first in a root array whose second element is nested past the parser's
-/// depth. The parse fails and the name is not in the file's bytes, yet the guard catches it, by
-/// its shape check and under `site/`, from the string token decoded; a token that only holds the
-/// name inside a longer one is not it.
+/// A valid speaker file (of either form) whose format name is spelled with a JSON escape (`\/`,
+/// or `\u` for its first character), first in a root array whose second element is nested past
+/// the parser's depth. The parse fails and the name is not in the file's bytes, yet the guard
+/// catches it, by its shape check and under `site/`, from the string token decoded; a token that
+/// only holds the name inside a longer one is not it.
 #[test]
 fn an_unparsed_file_that_escapes_the_format_name_is_caught() {
     let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-speakers-escaped");
-    let slash = FORMAT.replace('/', "\\/");
-    let unicode = format!("\\u{:04x}{}", FORMAT.as_bytes()[0], &FORMAT[1..]);
-    for spelled in [slash, unicode] {
-        let escaped = SPEAKERS.replacen(FORMAT, &spelled, 1);
-        let v: serde_json::Value = serde_json::from_str(&escaped).expect("the file parses");
-        assert_eq!(v["format"].as_str(), Some(FORMAT), "its format, decoded");
-        let file = format!("[{escaped},{deep}]");
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&file).is_err(),
-            "past the parser's depth"
-        );
-        assert!(
-            !file.contains(FORMAT),
-            "the name is not in the file's bytes"
-        );
-        assert!(is_speakers(file.as_bytes()), "the shape check catches it");
-        if root.exists() {
-            std::fs::remove_dir_all(&root).expect("the old test directory goes");
+    for (format, speakers) in FORMATS.into_iter().zip([SPEAKERS, SPEAKERS_2]) {
+        let slash = format.replace('/', "\\/");
+        let unicode = format!("\\u{:04x}{}", format.as_bytes()[0], &format[1..]);
+        for spelled in [slash, unicode] {
+            let escaped = speakers.replacen(format, &spelled, 1);
+            let v: serde_json::Value = serde_json::from_str(&escaped).expect("the file parses");
+            assert_eq!(v["format"].as_str(), Some(format), "its format, decoded");
+            let file = format!("[{escaped},{deep}]");
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&file).is_err(),
+                "past the parser's depth"
+            );
+            assert!(
+                !file.contains(format),
+                "the name is not in the file's bytes"
+            );
+            assert!(is_speakers(file.as_bytes()), "the shape check catches it");
+            if root.exists() {
+                std::fs::remove_dir_all(&root).expect("the old test directory goes");
+            }
+            std::fs::create_dir_all(root.join("site")).expect("the test directory");
+            std::fs::write(root.join("site/escaped.json"), &file).expect("written");
+            let err = site_check(&root.join("site"), &root).unwrap_err();
+            assert!(err.ends_with("[\"site/escaped.json\"]"), "and under site/");
         }
-        std::fs::create_dir_all(root.join("site")).expect("the test directory");
-        std::fs::write(root.join("site/escaped.json"), &file).expect("written");
-        let err = site_check(&root.join("site"), &root).unwrap_err();
-        assert!(err.ends_with("[\"site/escaped.json\"]"), "and under site/");
+        let longer = format!("[\"{format}x\",\"x{format}\",{deep}]");
+        assert!(
+            !is_speakers(longer.as_bytes()),
+            "a longer token is not the name"
+        );
     }
-    let longer = format!("[\"{FORMAT}x\",\"x{FORMAT}\",{deep}]");
-    assert!(
-        !is_speakers(longer.as_bytes()),
-        "a longer token is not the name"
-    );
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 

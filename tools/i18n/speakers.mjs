@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// The speaker file (spec 12 Design 1): reads the NPC bundles the page downloads (ultima6-npc-
-// bundles.json, one u6.npc-bundle/1 per conversation script) and the personality notes
-// tools/speech/profile.mjs made for the voices (u6.voice-notes/1), asks a model for each script's
-// age and class from its NPC's name, its description (the look text) and its note, and writes the
-// one file tools/i18n/translate.mjs takes with --speakers, its coverage receipt inside it:
+// The speaker file (spec 12 Design 1; its second form, spec 15 Design 1): reads the NPC bundles
+// the page downloads (ultima6-npc-bundles.json, one u6.npc-bundle/1 per conversation script) and
+// the personality notes tools/speech/profile.mjs made for the voices (u6.voice-notes/1), asks a
+// model for each script's age, class, sex, station and manner and its NPC's own name in Hangul
+// from its NPC's name, its description (the look text), its note and the first lines of its
+// greeting, and writes the one file tools/i18n/translate.mjs takes with --speakers, its coverage
+// receipt inside it:
 //
-//   <out>/speakers.json   u6.speakers/1: {format, model, coverage, speakers: [{archive, item, age,
-//                         class, note}]}, one entry per script, in (archive, item) order;
-//                         `coverage`: the counts, and the scripts an answer gave no age or class
-//                         for by (archive, item) with a fixed reason (translate.mjs reads past it)
+//   <out>/speakers.json   u6.speakers/2: {format, model, coverage, speakers: [{archive, item, age,
+//                         class, note, sex, station, manner, name_ko}]}, one entry per script, in
+//                         (archive, item) order; `coverage`: the counts, and the scripts an
+//                         answer gave a field no value of its form for, by (archive, item), each
+//                         such field with a fixed reason (translate.mjs reads past it)
 //
 // <out> is ~/Games/ultima6/i18n/speakers/ unless --out names another; it and preview/ are made
 // 0700, every file in them 0600; either one that is a symbolic link (or not a directory) is
@@ -18,21 +21,28 @@
 // lines), each with its note when the notes file has one. They go in requests of at most
 // BATCH_SCRIPTS scripts whose text (the JSON of the scripts the request carries) is at most
 // BATCH_CHARS characters, through the same route and model as translate.mjs: a name is cut to
-// NAME_MAX characters, a description to LOOK_MAX and a note to SPEAKER_NOTE_MAX, and a script
-// whose entry, so cut and encoded, is still past SCRIPT_CHARS (its text full of characters JSON
-// escapes) is not sent: it is `adult` and its Pass A class, counted (`oversize`). The answer is
-// JSON only, {"speakers": [{n, age, class}]}; one that is not (or empty, or a failed request) is
-// asked again once. Each script's age must be one of child, youth, adult, elder and its class one
-// of the guide's classes (translate.mjs CLASSES), case and spaces aside: an age that is not one
-// (or missing) is `adult`, a class that is not one is the script's Pass A class (translate.mjs
-// speakerClass), each counted by reason. The file is read back through translate.mjs's own reader
-// (readSpeakers) before it is written; when no answer gave a single age or class nothing is
-// written (a file of guesses only would pass for the model's). The file is staged, then renamed
-// into place: a SIGINT before the rename leaves the one there as it was.
+// NAME_MAX characters, a description to LOOK_MAX, a note to SPEAKER_NOTE_MAX and the greeting (its
+// text as profile.mjs reads it, `clean`ed: the printing escapes an ellipsis, the keyword marks and
+// waits gone) to GREETING_MAX, and a script whose entry, so cut and encoded, is still past
+// SCRIPT_CHARS (its text full of characters JSON escapes) is not sent: it takes every field's
+// default, counted (`oversize`). The answer is JSON only, {"speakers": [{n, age, class, sex,
+// station, manner, name_ko}]}; one that is not (or empty, or a failed request) is asked again
+// once. Each script's age must be one of child, youth, adult, elder, its class one of the guide's
+// classes (translate.mjs CLASSES), its sex one of SEXES, its station one of STATIONS and its
+// manner one of MANNERS, case and spaces aside, and its name_ko null or a name's Korean form (1 to
+// 8 Hangul syllables, one space between two words, ASCII spaces at its ends aside): a field that
+// is not (or missing) takes its default, `adult`, the script's Pass A class (translate.mjs
+// speakerClass), `none`, the station of the script's class (STATION_OF_CLASS: the class its
+// answer gave, else its Pass A class), `plain` or null, each counted by field and reason. The file
+// is read back through translate.mjs's own reader (readSpeakers) before it is written; when no
+// answer gave a single field nothing is written (a file of guesses only would pass for the
+// model's). The file is staged, then renamed into place: a SIGINT before the rename leaves the one
+// there as it was.
 //
 // The upload boundary (spec 08 Rights; tools/speech/profile.mjs's, used as it is): the bundles
-// hold the owner's game text, and a request sends some scripts' names and descriptions, with their
-// notes, to llmux on this machine, then to the model's provider. Before the first request the tool
+// hold the owner's game text, and a request sends some scripts' names, descriptions and the first
+// lines of their greetings, with their notes, to llmux on this machine, then to the model's
+// provider. Before the first request the tool
 // names that route, writes the exact first payload to a file of this run's own,
 // <out>/preview/first-request-<pid>-<random>.json, and prints only its path and size, never its
 // text. It sends only after a typed `yes` on a terminal, or with --send; anything else (another
@@ -43,9 +53,10 @@
 // /v1/messages) with the model's name, an output cap, this tool's instruction and the scripts'
 // text: no other client's prompt or headers.
 //
-// Rights: what this prints is counts (by age and by class), timings, paths and sizes, and the
-// route (the address and the model's name): never a name, a line, a note, a script's (archive,
-// item) or a hash. An error prints its kind only.
+// Rights: what this prints is counts (by age, sex, station and manner, and the fields not answered
+// by reason), timings, paths and sizes, and the route (the address and the model's name): never a
+// name, a Korean name, a line, a note, a script's (archive, item) or a hash. An error prints its
+// kind only.
 //
 //   node tools/i18n/speakers.mjs <bundles.json> --notes <notes.json> [--send | --dry-run]
 //        [--model NAME] [--llmux URL] [--out DIR] [--jobs N] [--timeout SECONDS]
@@ -58,8 +69,8 @@ import {
   NotOwnDir, ask, clean, holdLock, llmuxTransport, local, privateDir, providerOf, sendAll, textOf, writePrivate,
 } from '../speech/profile.mjs';
 import {
-  AGES, CLASSES, DEFAULTS as TRANSLATE, InputError, JOBS_MAX, SPEAKERS_FORMAT, SPEAKER_NOTE_MAX, objectOfAnswer, planOf,
-  readJson, readSpeakers,
+  AGES, CLASSES, DEFAULTS as TRANSLATE, InputError, JOBS_MAX, MANNERS, SEXES, SPEAKERS_FORMAT_2, SPEAKER_NOTE_MAX, STATIONS,
+  nameForm, objectOfAnswer, planOf, readJson, readSpeakers,
 } from './translate.mjs';
 
 export const DEFAULTS = {
@@ -70,11 +81,17 @@ export const DEFAULTS = {
   timeoutS: 300,
 };
 export const MAX_TOKENS = 16000; // the answer's cap (a reasoning model's thinking counts in it)
-export const BATCH_SCRIPTS = 20;
-export const BATCH_CHARS = 8000; // the characters of a request's text: its JSON of the scripts (the user content)
-export const SCRIPT_CHARS = 1200; // the characters of one script's entry in it (its comma included)
+// Spec 15: an entry now also carries up to GREETING_MAX characters of the greeting and is answered
+// with six fields, not two. An entry so cut is at most 80 + 320 + 400 + 400 characters of text and
+// some 60 of JSON around it; SCRIPT_CHARS leaves some 340 more for what JSON escapes (a quote mark
+// of the greeting is two). A batch of BATCH_SCRIPTS such scripts is at most BATCH_CHARS (some 4000
+// tokens in), and its answer some 12 short entries, far under MAX_TOKENS with the model's thinking.
+export const BATCH_SCRIPTS = 12;
+export const BATCH_CHARS = 12000; // the characters of a request's text: its JSON of the scripts (the user content)
+export const SCRIPT_CHARS = 1600; // the characters of one script's entry in it (its comma included)
 export const NAME_MAX = 80; // the characters of a name sent
 export const LOOK_MAX = 320; // the characters of a description sent
+export const GREETING_MAX = 400; // the characters of a greeting's first lines sent
 export const NOTES_FORMAT = 'u6.voice-notes/1';
 const LOCK = '.lock';
 
@@ -98,20 +115,57 @@ const CLASS_HINTS = {
   gargoyle: 'a gargoyle',
 };
 
+// Spec 15 Design 1: what each sex, station and manner is (made up for the instruction, in the
+// enums' order).
+const SEX_HINTS = { female: 'a woman or a girl', male: 'a man or a boy', none: 'a shrine, a statue, a thing' };
+const STATION_HINTS = {
+  royalty: 'the crown',
+  lord: 'the gentle: those who govern, such as lords, mayors and the heads of orders, and the knighted and the learned, such as knights, '
+    + 'court mages, scholars, high clergy and the hero\'s companions',
+  commoner: 'free townsfolk and villagers: farmers, craftsmen, shopkeepers, innkeepers, sailors, bards, town healers, soldiers of the ranks',
+  lowborn: 'beggars, thieves, pirates, drunks, outcasts, ruffians',
+  beyond: 'spirits, shrines, statues, the otherworldly',
+};
+const MANNER_HINTS = {
+  plain: 'nothing marked',
+  jester: 'play, rhyme, puns',
+  mad: 'lurching, broken thought',
+  pompous: 'inflated, self-important',
+  drunk: 'slurred, trailing off',
+  sly: 'flattering, hinting',
+  gruff: 'short, rough',
+  timid: 'hesitant, fearful',
+  pious: 'blessing, intoning',
+};
+// An enum's values for the instruction, one a line, each with its hint; the last ends with `end`.
+const enumLines = (list, hints, end) => list.map((v, i) => `  "${v}"${hints[v] ? ` (${hints[v]})` : ''}${i + 1 < list.length ? ',' : end}`);
+
 /// What the model is told (the same for every request).
 export const SYSTEM = [
   'You read the characters of a role-playing game, Ultima VI, so that their lines can be translated',
-  'into Korean at the speech level of their age and their station. The request is JSON:',
-  '{"characters": [{"n": <number>, "name": "<name>", "description": "<how the game describes them>",',
-  '"note": "<a short note on their personality and manner of speech>"}]} ("note" only where there is',
-  'one). For each character tell its age and its class from what the request says of it, and answer',
-  'with one JSON object and nothing else:',
-  '{"speakers": [{"n": <number>, "age": "<age>", "class": "<class>"}]}',
+  'into Korean at the speech level of their age, their station and their manner. The request is',
+  'JSON: {"characters": [{"n": <number>, "name": "<name>", "description": "<how the game describes',
+  'them>", "note": "<a short note on their personality and manner of speech>", "greeting": "<the',
+  'first lines they say>"}]} ("note" and "greeting" only where there is one). For each character',
+  'tell its age, class, sex, station and manner and its own name in Korean from what the request',
+  'says of it, and answer with one JSON object and nothing else:',
+  '{"speakers": [{"n": <number>, "age": "<age>", "class": "<class>", "sex": "<sex>", "station": "<station>", "manner": "<manner>", "name_ko": "<its name in Hangul>" or null}]}',
   'with exactly one entry for every character asked, its own n:',
   '- age: "child" (a child), "youth" (a young person not yet grown: an apprentice, a squire, a young',
   '  servant), "adult" or "elder" (an old person); "adult" when nothing tells;',
-  '- class, its station: one of',
-  ...Object.keys(CLASSES).map((c, i, all) => `  "${c}"${CLASS_HINTS[c] ? ` (${CLASS_HINTS[c]})` : ''}${i + 1 < all.length ? ',' : '.'}`),
+  '- class, its role: one of',
+  ...enumLines(Object.keys(CLASSES), CLASS_HINTS, ';'),
+  '- sex: one of',
+  ...enumLines(SEXES, SEX_HINTS, ';'),
+  '- station, its rank: one of',
+  ...enumLines(STATIONS, STATION_HINTS, ';'),
+  '  "commoner" when nothing tells;',
+  '- manner, how it speaks: one of',
+  ...enumLines(MANNERS, MANNER_HINTS, ';'),
+  '  "plain" when nothing tells;',
+  '- name_ko: the character\'s own name in Hangul, as Korean writes a foreign name (외래어 표기법),',
+  '  1 to 8 syllables with one space between two words and nothing else; null for a name that is',
+  '  no one\'s own (a guard, a farmer).',
 ].join('\n');
 
 // --- the notes and the bundles -----------------------------------------------------------------
@@ -147,20 +201,23 @@ export function bodyOf(model, batch) {
 }
 
 // What a request says of script `s`, numbered `n`.
-const entryOf = (s, n) => ({ n, name: s.name, description: s.description, ...(s.note ? { note: s.note } : {}) });
+const entryOf = (s, n) => ({
+  n, name: s.name, description: s.description, ...(s.note ? { note: s.note } : {}), ...(s.greeting ? { greeting: s.greeting } : {}),
+});
 // The characters a request's text holds besides its entries.
 const CONTENT_BASE = JSON.stringify({ characters: [] }).length;
 
 /// The scripts of `bundles` (the parsed file) to ask, with `notes` (readNotes's Map): every script
 /// translate.mjs can translate (its planOf), in (archive, item) order (`list`), each {archive,
 /// item, cls (its Pass A class), name (cut to NAME_MAX), description (cut to LOOK_MAX), note ('',
-/// without one; cut to SPEAKER_NOTE_MAX), chars (its entry's characters in a request, its comma
-/// included, its n at the widest)}; one whose chars pass SCRIPT_CHARS is `oversize` and not sent,
-/// the others go in batches of at most BATCH_SCRIPTS scripts whose text (contentOfBatch) is at most
-/// BATCH_CHARS characters, each script with its `batch` (the index) and `n`, each batch with its
-/// `character` entries and its body. `noted`: the scripts with a note; `unused`: the notes of no
-/// script of the bundles. Throws translate.mjs's fixed message when the file is not a list of
-/// bundles.
+/// without one; cut to SPEAKER_NOTE_MAX), greeting (its greeting's text, cleaned as profile.mjs
+/// reads it, '' without one; cut to GREETING_MAX), chars (its entry's characters in a request, its
+/// comma included, its n at the widest)}; one whose chars pass SCRIPT_CHARS is `oversize` and not
+/// sent, the others go in batches of at most BATCH_SCRIPTS scripts whose text (contentOfBatch) is
+/// at most BATCH_CHARS characters, each script with its `batch` (the index) and `n`, each batch
+/// with its `character` entries and its body. `noted`: the scripts with a note; `unused`: the
+/// notes of no script of the bundles. Throws translate.mjs's fixed message when the file is not a
+/// list of bundles.
 export function planOfSpeakers(bundles, notes, model) {
   const { read, scripts } = planOf(bundles, { first: Infinity });
   const known = new Set();
@@ -171,7 +228,8 @@ export function planOfSpeakers(bundles, notes, model) {
     const name = cut(typeof b.name === 'string' ? clean(b.name) : '', NAME_MAX);
     const description = cut(textOf(b.narration?.look), LOOK_MAX);
     const note = cut(notes.get(key) ?? '', SPEAKER_NOTE_MAX);
-    const script = { archive: b.archive, item: b.item, cls: s.cls, name, description, note };
+    const greeting = cut(textOf(b.speech?.greeting), GREETING_MAX);
+    const script = { archive: b.archive, item: b.item, cls: s.cls, name, description, note, greeting };
     const size = JSON.stringify(entryOf(script, BATCH_SCRIPTS)).length + 1;
     return { ...script, chars: size, oversize: size > SCRIPT_CHARS };
   });
@@ -206,31 +264,64 @@ export function planOfSpeakers(bundles, notes, model) {
 
 // --- the answers -------------------------------------------------------------------------------
 
-/// The entries of an answer: {entries: a Map of n to {age, class} as given}, or null when it is not
-/// JSON of the answer's form (a code fence around it allowed) or lists no entry.
+/// The fields of a u6.speakers/2 entry an answer gives (spec 15), in the file's order.
+export const FIELDS = ['age', 'class', 'sex', 'station', 'manner', 'name_ko'];
+
+/// The entries of an answer: {entries: a Map of n to {age, class, sex, station, manner, name_ko} as
+/// given (a field it lacks undefined)}, or null when it is not JSON of the answer's form (a code
+/// fence around it allowed) or lists no entry.
 export function speakersOfAnswer(content) {
   const v = objectOfAnswer(content);
   if (!v || !Array.isArray(v.speakers)) return null;
   const entries = new Map();
   for (const e of v.speakers) {
-    if (plain(e) && Number.isInteger(e.n) && !entries.has(e.n)) entries.set(e.n, { age: e.age, class: e.class });
+    if (plain(e) && Number.isInteger(e.n) && !entries.has(e.n)) entries.set(e.n, Object.fromEntries(FIELDS.map((f) => [f, e[f]])));
   }
   return entries.size > 0 ? { entries } : null;
 }
 
 const word = (x) => (typeof x === 'string' ? x.trim().toLowerCase() : null);
 
-/// A script's age and class from its answer's `entry` (undefined when the answer has none, or when
-/// its request failed: `failed`, that reason), each gated to its enum (case and spaces aside): an
-/// age that is not one is `adult`, a class that is not one `passA`, with the reason
-/// (`ageWhy`/`classWhy`: missing, invalid, or the request's; null for one taken).
+// A name's Korean form as an answer gives it, the ASCII spaces at its ends aside (no other
+// character is trimmed into one, a line terminator included): the form, null for an answer of
+// null, or undefined for one that is neither.
+const nameOf = (x) => {
+  if (x === null) return null;
+  const ko = typeof x === 'string' ? x.replace(/^ +| +$/g, '') : undefined;
+  return nameForm(ko) ? ko : undefined;
+};
+
+/// The station a script takes when its answer gives none, by the class read for it (spec 15
+/// round 3): the crown's, a noble's the lord's, a spirit's beyond, a thief's the lowborn's; any
+/// other class's (STATION_OTHER) the commoner's.
+export const STATION_OF_CLASS = { royalty: 'royalty', noble: 'lord', spirit: 'beyond', thief: 'lowborn' };
+export const STATION_OTHER = 'commoner';
+export const stationOfClass = (cls) => (Object.hasOwn(STATION_OF_CLASS, cls) ? STATION_OF_CLASS[cls] : STATION_OTHER);
+
+/// A script's fields from its answer's `entry` (undefined when the answer has none, or when its
+/// request failed: `failed`, that reason), each gated to its form (an enum's case and spaces
+/// aside): an age that is not one is `adult`, a class `passA`, a sex `none`, a station the one of
+/// the class read for the script (the answer's class, else `passA`: [`stationOfClass`]), a manner
+/// `plain` and a name_ko (null, or a name's Korean form, ASCII spaces at its ends aside) null;
+/// {age, class, sex, station, manner, name_ko} and `why`, each field's reason (missing, invalid,
+/// or the request's; null for one taken). A field the entry lacks is missing.
 export function gated(entry, passA, failed = null) {
-  const age = word(entry?.age);
-  const cls = word(entry?.class);
-  const ageOk = age !== null && AGES.includes(age);
-  const classOk = cls !== null && Object.hasOwn(CLASSES, cls);
-  const why = (ok) => (ok ? null : failed ?? (entry === undefined ? 'missing' : 'invalid'));
-  return { age: ageOk ? age : 'adult', class: classOk ? cls : passA, ageWhy: why(ageOk), classWhy: why(classOk) };
+  const enumOf = (list) => (x) => (list.includes(word(x)) ? word(x) : undefined);
+  const read = {
+    age: enumOf(AGES), class: (x) => (Object.hasOwn(CLASSES, word(x) ?? '') ? word(x) : undefined), sex: enumOf(SEXES),
+    station: enumOf(STATIONS), manner: enumOf(MANNERS), name_ko: nameOf,
+  };
+  const defaults = { age: 'adult', class: passA, sex: 'none', station: null, manner: 'plain', name_ko: null };
+  const out = {};
+  const why = {};
+  for (const f of FIELDS) {
+    // FIELDS lists the class before the station, so the station's default reads the class taken.
+    if (f === 'station') defaults.station = stationOfClass(out.class);
+    const given = entry === undefined || !Object.hasOwn(entry, f) || entry[f] === undefined ? undefined : read[f](entry[f]);
+    out[f] = given === undefined ? defaults[f] : given;
+    why[f] = given !== undefined ? null : failed ?? (entry?.[f] === undefined ? 'missing' : 'invalid');
+  }
+  return { ...out, why };
 }
 
 const byReason = (list) => {
@@ -239,34 +330,38 @@ const byReason = (list) => {
   return { count: list.length, byReason: counts };
 };
 
-/// The speaker file, its coverage receipt inside it (`coverage`), of `plan`'s scripts (its `list`,
-/// in order) and its batches' `results` (sendAll's, with speakersOfAnswer); a script not sent
-/// (`oversize`) is `adult` and its Pass A class, by that reason. `taken`: the scripts an answer
-/// gave an age or a class for.
+/// The speaker file (u6.speakers/2), its coverage receipt inside it (`coverage`), of `plan`'s
+/// scripts (its `list`, in order) and its batches' `results` (sendAll's, with speakersOfAnswer); a
+/// script not sent (`oversize`) takes every field's default, by that reason. `taken`: the scripts
+/// an answer gave a field for; `coverage.fallbacks`, each field's defaults by reason.
 export function outputsOf(plan, results, model) {
   const speakers = [];
   const fallback = [];
-  const ageWhys = [];
-  const classWhys = [];
+  const whys = Object.fromEntries(FIELDS.map((f) => [f, []]));
   let taken = 0;
   for (const s of plan.list) {
     const r = s.oversize ? { ok: false, reason: 'oversize' } : results[s.batch] ?? { ok: false, reason: 'not-sent' };
     const g = r.ok ? gated(r.entries.get(s.n), s.cls) : gated(undefined, s.cls, r.reason);
-    speakers.push({ archive: s.archive, item: s.item, age: g.age, class: g.class, note: s.note });
-    if (g.ageWhy === null || g.classWhy === null) taken += 1;
-    if (g.ageWhy !== null) ageWhys.push(g.ageWhy);
-    if (g.classWhy !== null) classWhys.push(g.classWhy);
-    if (g.ageWhy !== null || g.classWhy !== null) fallback.push({ archive: s.archive, item: s.item, age: g.ageWhy, class: g.classWhy });
+    speakers.push({
+      archive: s.archive, item: s.item, age: g.age, class: g.class, note: s.note, sex: g.sex, station: g.station, manner: g.manner, name_ko: g.name_ko,
+    });
+    if (FIELDS.some((f) => g.why[f] === null)) taken += 1;
+    for (const f of FIELDS) if (g.why[f] !== null) whys[f].push(g.why[f]);
+    if (FIELDS.some((f) => g.why[f] !== null)) fallback.push({ archive: s.archive, item: s.item, ...g.why });
   }
   const count = (key, values) => Object.fromEntries(values.map((v) => [v, speakers.filter((s) => s[key] === v).length]));
   const coverage = {
     scripts: { read: plan.read, listed: plan.scripts, asked: plan.asked, oversize: plan.oversize, noted: plan.noted, taken, notesUnused: plan.unused },
     ages: count('age', AGES),
     classes: count('class', Object.keys(CLASSES)),
-    fallbacks: { age: byReason(ageWhys), class: byReason(classWhys) },
+    sexes: count('sex', SEXES),
+    stations: count('station', STATIONS),
+    manners: count('manner', MANNERS),
+    named: speakers.filter((s) => s.name_ko !== null).length,
+    fallbacks: Object.fromEntries(FIELDS.map((f) => [f, byReason(whys[f])])),
     fallback,
   };
-  return { file: { format: SPEAKERS_FORMAT, model, coverage, speakers }, taken };
+  return { file: { format: SPEAKERS_FORMAT_2, model, coverage, speakers }, taken };
 }
 
 // --- the run -----------------------------------------------------------------------------------
@@ -312,8 +407,8 @@ const tally = (counts) => Object.entries(counts).map(([k, n]) => `${k} ${n}`).jo
 const reasons = (f) => (f.count > 0 ? ` (${Object.entries(f.byReason).sort().map(([r, n]) => `${r} ${n}`).join(', ')})` : '');
 
 /// The tool: returns its exit code (0 done or a dry run, 1 nothing sent, 2 a usage or input
-/// error, 3 written with an age or a class not answered, or nothing written since no answer gave
-/// one, 130 interrupted). `transport` (default: llmux at --llmux), `stdin`, `stdout`, `isTTY`
+/// error, 3 written with a field not answered, or nothing written since no answer gave one, 130
+/// interrupted). `transport` (default: llmux at --llmux), `stdin`, `stdout`, `isTTY`
 /// (whether to ask on stdin), `signals` (SIGINT's emitter) and `onStaged` (awaited once the file
 /// is staged, with the staged file's path) are the tests' to give.
 export async function main(argv, {
@@ -348,7 +443,8 @@ export async function main(argv, {
     const { value, size } = await readJson(o.bundles, 'bundles');
     plan = planOfSpeakers(value, notes, o.model);
     say(`Bundles: ${plan.read} scripts read from ${o.bundles} (${size} bytes): ${plan.asked} to ask (${plan.noted} with a note)`
-      + `${plan.oversize > 0 ? `, ${plan.oversize} too long to send (taken by Pass A, as adults)` : ''}; `
+      + `${plan.oversize > 0 ? `, ${plan.oversize} too long to send (each by Pass A, an adult of its class's station, `
+        + 'sex none, manner plain, no Korean name)' : ''}; `
       + `notes: ${notes.size} read from ${o.notes}, ${plan.unused} for no script of the bundles.`);
   } catch (err) {
     if (err instanceof InputError) say(`speakers: ${err.message}`);
@@ -362,8 +458,9 @@ export async function main(argv, {
 
   // The boundary: the route named, the first payload written, and the owner's go.
   say(`Route: llmux on this machine (${route.origin}), then ${providerOf(o.model)} (model ${o.model}).`);
-  say(`It sends the owner's game text: ${plan.batches.length} requests, each up to ${BATCH_SCRIPTS} scripts' NPC names `
-    + `and descriptions with their notes in up to ${BATCH_CHARS} characters, ${plan.chars} characters in all; up to ${o.jobs} at a time.`);
+  say(`It sends the owner's game text: ${plan.batches.length} requests, each up to ${BATCH_SCRIPTS} scripts' NPC names, `
+    + `descriptions and the first lines of their greetings with their notes in up to ${BATCH_CHARS} characters, ${plan.chars} characters in all; `
+    + `up to ${o.jobs} at a time.`);
   let release;
   try {
     await privateDir(o.out);
@@ -455,12 +552,17 @@ async function sendAndWrite(o, plan, route, stop, { transport, now, say, onStage
   const { file, taken } = outputsOf(plan, sent.results, o.model);
   const { coverage } = file;
   const f = coverage.fallbacks;
-  say(`Speakers: ${plan.scripts} scripts, ${taken} given an age or a class by the answers; ages: ${tally(coverage.ages)}.`);
-  say(`Classes: ${tally(coverage.classes)}.`);
-  if (f.age.count + f.class.count === 0) say('Not answered: none.');
-  else say(`Not answered: age ${f.age.count}${reasons(f.age)} (taken as adult), class ${f.class.count}${reasons(f.class)} (taken by Pass A).`);
+  say(`Speakers: ${plan.scripts} scripts, ${taken} given a field by the answers; ages: ${tally(coverage.ages)}.`);
+  say(`Sexes: ${tally(coverage.sexes)}. Stations: ${tally(coverage.stations)}. Manners: ${tally(coverage.manners)}.`);
+  const missed = FIELDS.reduce((n, x) => n + f[x].count, 0);
+  if (missed === 0) say('Not answered: none.');
+  else {
+    say(`Not answered: age ${f.age.count}${reasons(f.age)} (taken as adult), class ${f.class.count}${reasons(f.class)} (taken by Pass A), `
+      + `sex ${f.sex.count}${reasons(f.sex)} (taken as none), station ${f.station.count}${reasons(f.station)} (taken by its class), `
+      + `manner ${f.manner.count}${reasons(f.manner)} (taken as plain), name_ko ${f.name_ko.count}${reasons(f.name_ko)} (taken as null).`);
+  }
   if (taken === 0) {
-    say('No answer gave an age or a class: nothing was written.');
+    say('No answer gave a field: nothing was written.');
     return 3;
   }
 
@@ -498,7 +600,7 @@ async function sendAndWrite(o, plan, route, stop, { transport, now, say, onStage
   }
   say(`Wrote ${path} (${bytes} bytes; its coverage member holds the counts and the scripts not answered).`);
   say(`Give it to translate.mjs: --speakers ${path}.`);
-  return f.age.count + f.class.count > 0 ? 3 : 0;
+  return missed > 0 ? 3 : 0;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
