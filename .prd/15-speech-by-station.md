@@ -133,9 +133,17 @@ Counts only; the scripts are the owner's and stay out of the repository.
    The pack is `u6.voice-pack/2`: each profile has `vary: {speed, pitch}` (0..0.15, 0..1.5). The page
    reads `/1` (no vary) and `/2`; its other checks and `RANGES_REVISION` are as before.
 5. **The player varies a line** (`site/voice/player.js` `say`): the queued line's speed and pitch
-   are the actor's plus `vary` times two draws in −1..1 from the line's seed (`seedOf(speaker,
-   text)`), into the ranges; the same line always sounds the same, the session keeps each
-   speaker's profile as now.
+   are the actor's moved by two draws `a`, `b` in −1..1 from the line's seed (`seedOf(speaker,
+   text)`): speed + `a` × min(`vary.speed`, the room the range leaves on `a`'s side), and the
+   same for pitch, and toward a side with no room (the actor's own speed or pitch on that end)
+   the line moves the same distance the other way; so the actor's own speed and pitch (its age,
+   sex and station) stay as derived and no line is held at a range's end (a slow or low voice
+   moves less toward that end); the same line always sounds the same, the session keeps each
+   speaker's profile as now. (Measured 2026-10-25 on the owner's pack: centred on the derived
+   base and clamped, one drunk voice's lines sat at the 0.90 floor 41% of the time and the elder
+   mad voice's at the −2 floor 29%; moving the base inward instead lifted that elder above the
+   adults and gave both madmen one pitch, so the base stays and each side scales; a base on an
+   end, common for an elder drunk or a child mad voice, reflects.)
 6. **Deploys.** 19: the tools, the page's `/2` reader and line variation, the new speaker file,
    `voices-<date>.u6vp` (`/2`, every actor) and a pilot pack with about 16 scripts re-translated,
    one or more for each station and each manner present (`translate.mjs --item` takes a list,

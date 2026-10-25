@@ -4665,7 +4665,8 @@ test('voice profiles: deterministic; within the ranges for every object type the
   }
   // A pack's profile wins, checked into the ranges; another actor keeps the default.
   const pack = new Map([[5, { mix: [{ style: 'F2', w: 3 }, { style: 'nope', w: 1 }], speed: 9, pitch: -9, steps: 99, seedSalt: 7 }]]);
-  assert.deepEqual(P.profileFor({ speaker: 5, traits }, pack), { mix: [{ style: 'F2', w: 1 }], speed: 1.15, pitch: -2, steps: 16, seedSalt: 7 }, 'the pack\'s, checked');
+  assert.deepEqual(P.profileFor({ speaker: 5, traits }, pack), { mix: [{ style: 'F2', w: 1 }], speed: 1.15, pitch: -2, steps: 16, seedSalt: 7, vary: { speed: 0, pitch: 0 } }, 'the pack\'s, checked (no vary: 0/0)');
+  assert.deepEqual(P.profileFor({ speaker: 6, traits }).vary, { speed: 0, pitch: 0 }, 'the default: no line varies');
   assert.deepEqual(P.profileFor({ speaker: 6, traits }, pack), P.profileFor({ speaker: 6, traits }), 'not in the pack: the default');
   console.log(`  receipt: ${checked} profiles within the ranges; ${pairs} neighbouring pairs differ`);
 });
@@ -4882,6 +4883,11 @@ const PACK_B = 29474;
 const PACK_C = 29475; // in no pack
 const VOICE_A = { mix: [{ style: 'F4', w: 0.625 }, { style: 'M2', w: 0.375 }], speed: 0.9375, pitch: 1.8125, steps: 12, seedSalt: 2718281 };
 const VOICE_B = { mix: [{ style: 'M5', w: 1 }], speed: 1.125, pitch: -1.6875, steps: 16, seedSalt: 0 };
+// A voice as the page reads it: a /1 pack's with vary 0/0 (spec 15 Design 4).
+const NO_VARY = { speed: 0, pitch: 0 };
+const read1 = (v) => ({ ...v, vary: NO_VARY });
+// A voice of a /2 pack whose lines vary (spec 15 Design 5), the test's own numbers.
+const VOICE_V = { mix: [{ style: 'F3', w: 0.75 }, { style: 'F5', w: 0.25 }], speed: 1.0625, pitch: 0.4375, steps: 16, seedSalt: 1618033, vary: { speed: 0.09375, pitch: 1.125 } };
 
 // A u6.voice-pack/1 of `profiles` (actor to profile) as the tool writes it, `extra` laid over it.
 async function voicePack(profiles, extra = {}) {
@@ -4889,14 +4895,25 @@ async function voicePack(profiles, extra = {}) {
   return { format: P.PACK_FORMAT, model: 'test-model', revision: P.RANGES_REVISION, profiles, ...extra };
 }
 
-test('voice pack check (no page): a pack as the tool writes it reads, its actors\' profiles from it; every other form is refused by a code that names only the kind (format, keys, shape, revision, range)', async () => {
+// A u6.voice-pack/2 likewise (each profile with its vary).
+async function voicePack2(profiles, extra = {}) {
+  const P = await import('../../site/voice/profile.js');
+  return { format: P.PACK_FORMAT_2, model: 'test-model', revision: P.RANGES_REVISION, profiles, ...extra };
+}
+
+test('voice pack check (no page): a pack as the tool writes it reads (/1, its voices with vary 0/0, and /2, each with its vary), its actors\' profiles from it; every other form is refused by a code that names only the kind (format, keys, shape, revision, range), a /2 voice\'s vary among them', async () => {
   const P = await import('../../site/voice/profile.js');
   const good = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
   const read = P.readPack(structuredClone(good));
   assert.ok(read.ok && read.pack.size === 2, 'it reads');
-  assert.deepEqual(read.pack.get(PACK_A), VOICE_A, 'A: its profile, as it is');
+  assert.deepEqual(read.pack.get(PACK_A), read1(VOICE_A), 'A: its profile, as it is, no vary');
   const traits = { type: 0, worktype: 0, alignment: 0 };
-  assert.deepEqual(P.profileFor({ speaker: PACK_B, traits }, read.pack), VOICE_B, 'profileFor: the pack\'s');
+  assert.deepEqual(P.profileFor({ speaker: PACK_B, traits }, read.pack), read1(VOICE_B), 'profileFor: the pack\'s');
+  const good2 = await voicePack2({ [PACK_A]: VOICE_V, [PACK_B]: read1(VOICE_B) });
+  const read2 = P.readPack(structuredClone(good2));
+  assert.ok(read2.ok && read2.pack.size === 2, 'a /2 pack reads');
+  assert.deepEqual(read2.pack.get(PACK_A), VOICE_V, 'A: its profile and its vary, as they are');
+  assert.deepEqual(P.profileFor({ speaker: PACK_B, traits }, read2.pack), read1(VOICE_B), 'B: vary 0/0');
   assert.deepEqual(P.profileFor({ speaker: PACK_C, traits }, read.pack), P.profileFor({ speaker: PACK_C, traits }), 'not in it: the default');
   assert.ok(P.readPack(await voicePack({})).ok, 'an empty pack reads');
   assert.match(P.RANGES_REVISION, /^[0-9a-f]{8}$/, 'the revision: 8 hex digits');
@@ -4906,7 +4923,8 @@ test('voice pack check (no page): a pack as the tool writes it reads, its actors
     return p;
   };
   const refused = [
-    ['format', null], ['format', []], ['format', 'x'], ['format', a((p) => { p.format = 'u6.voice-pack/2'; })],
+    ['format', null], ['format', []], ['format', 'x'], ['format', a((p) => { p.format = 'u6.voice-pack/3'; })],
+    ['shape', a((p) => { p.format = P.PACK_FORMAT_2; })], ['keys', a((p, v) => { v.vary = NO_VARY; })],
     ['keys', a((p) => { p[PACK_SENTINEL] = 1; })], ['keys', a((p, v) => { v[PACK_SENTINEL] = 1; })],
     ['keys', a((p, v) => { v.mix[0][PACK_SENTINEL] = 1; })],
     ['shape', a((p) => { delete p.model; })], ['shape', a((p, v) => { delete v.seedSalt; })],
@@ -4923,6 +4941,19 @@ test('voice pack check (no page): a pack as the tool writes it reads, its actors
     ['range', a((p, v) => { v.mix = ['F1', 'F2', 'F3', 'F5'].map((style) => ({ style, w: 0.25 })); })],
     ['range', a((p) => { for (let n = 0; n <= P.PACK_MAX; n += 1) p.profiles[n] = VOICE_B; })],
   ];
+  // A /2 pack's vary: exactly {speed, pitch}, each finite, 0 to VARY's.
+  const v2 = (vary) => {
+    const p = structuredClone(good2);
+    p.profiles[PACK_A].vary = vary;
+    return p;
+  };
+  refused.push(
+    ['shape', v2(undefined)], ['shape', v2(null)], ['shape', v2([0, 0])], ['shape', v2({ speed: 0 })],
+    ['keys', v2({ ...NO_VARY, [PACK_SENTINEL]: 0 })],
+    ['range', v2({ speed: -0.0625, pitch: 0 })], ['range', v2({ speed: P.VARY.speed.max + 0.0625, pitch: 0 })],
+    ['range', v2({ speed: 0, pitch: -0.5 })], ['range', v2({ speed: 0, pitch: P.VARY.pitch.max + 0.5 })],
+    ['range', v2({ speed: '0', pitch: 0 })],
+  );
   for (const [code, value] of refused) {
     const r = P.readPack(value);
     assert.ok(!r.ok && r.code === code, `refused as ${code}`);
@@ -4933,7 +4964,9 @@ test('voice pack check (no page): a pack as the tool writes it reads, its actors
 
 // Before the page's scripts (and before voiceProbe, which wraps it): a voice Worker that runs no
 // model, answering a load with ready (on the CPU) and each line with done, so the player sends
-// each line with its profile (the probe records it) without the 400 MB model.
+// each line with its profile (the probe records it) without the 400 MB model. While the page's
+// `window.__fakeAudio` is set, one sample of audio goes before each done, so the player counts
+// the line spoken (data-voice-spoken, data-voice-distinct).
 function fakeVoiceWorker() {
   window.Worker = class FakeVoiceWorker extends EventTarget {
     postMessage(m) {
@@ -4943,14 +4976,17 @@ function fakeVoiceWorker() {
         this.onmessage?.(e);
       }, 0);
       if (m?.type === 'load') reply({ type: 'ready', ms: 1, refetched: 0, path: 'cpu' });
-      else if (m?.type === 'speak') reply({ type: 'done', id: m.id });
+      else if (m?.type === 'speak') {
+        if (window.__fakeAudio) reply({ type: 'audio', id: m.id, pcm: new Float32Array(1), sampleRate: 44100, synthMs: 0, audioSec: 1 });
+        reply({ type: 'done', id: m.id });
+      }
     }
 
     terminate() {}
   };
 }
 
-test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors their profiles (the lines sent to the worker carry the pack\'s), the voices kept for the session forgotten; kept under voice-pack: and back after a reload; told by its format under another name; a malformed one, one too large and one with other files are refused with a content-free line and change nothing; storage that refuses it keeps none; Forget voices removes it; the sentinel and the actors never reach the page\'s data, text, storage or console', async (env) => {
+test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors their profiles (the lines sent to the worker carry the pack\'s), the voices kept for the session forgotten; kept under voice-pack: and back after a reload; told by its format under another name (/1 or /2); a /2 pack\'s varying voice says each line at lineProfile\'s speed and pitch (two lines apart, one line again alike); a malformed one, one too large and one with other files are refused with a content-free line and change nothing; storage that refuses it keeps none; Forget voices removes it; the sentinel and the actors never reach the page\'s data, text, storage or console', async (env) => {
   const P = await import('../../site/voice/profile.js');
   const { context, page } = await h.openPage(env);
   await context.addInitScript(fakeVoiceWorker);
@@ -4962,14 +4998,16 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   assert.equal((await voicesOn(page)).state, 'ready', 'voices on (no model)');
   const traits = { type: 0, worktype: 0, alignment: 0 };
   let turn = 0;
-  // The profile the worker is sent for a line of `speaker`, in a turn of its own.
-  async function profileSent(speaker) {
+  // What the worker is sent for `line` of `speaker`, in a turn of its own.
+  async function speakSent(speaker, line = 'A line of the test.') {
     turn += 1;
     const n = await page.evaluate(() => window.__speaks.length);
-    await page.evaluate((u) => window.__speech.push(u), { ...utterance(turn, 'A line of the test.'), speaker, traits });
+    await page.evaluate((u) => window.__speech.push(u), { ...utterance(turn, line), speaker, traits });
     await waitVoice(page, (k) => window.__speaks.length > k, n, 30_000);
-    return page.evaluate(() => window.__speaks.at(-1).profile);
+    return page.evaluate(() => window.__speaks.at(-1));
   }
+  // The profile the worker is sent for a line of `speaker`.
+  const profileSent = async (speaker) => (await speakSent(speaker)).profile;
   const drop = async (name, body) => {
     await h.dropFiles(page, [], [{ name, text: body }]);
     await h.waitSettled(page);
@@ -4984,8 +5022,8 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   const pack = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
   assert.equal(await drop('voices.u6vp', JSON.stringify(pack)), await line('voicePack', 2), 'a count only');
   assert.equal(await shownPack(), '2');
-  assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: the pack\'s voice (the session\'s pin forgotten)');
-  assert.deepEqual(await profileSent(PACK_B), VOICE_B, 'B: the pack\'s voice');
+  assert.deepEqual(await profileSent(PACK_A), read1(VOICE_A), 'A: the pack\'s voice (the session\'s pin forgotten)');
+  assert.deepEqual(await profileSent(PACK_B), read1(VOICE_B), 'B: the pack\'s voice');
   assert.deepEqual(await profileSent(PACK_C), defaultOf(PACK_C), 'C, not in it: the default');
   let kept = await h.keptVoicePacks(page);
   assert.deepEqual(kept.keys, ['voice-pack:voices'], 'kept under its key');
@@ -4999,7 +5037,9 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
     ['voices.u6vp', JSON.stringify(await voicePack({ [PACK_A]: { ...VOICE_A, speed: 2 } })), 'voicePackErrRange'],
     ['voices.u6vp', JSON.stringify(await voicePack({ [PACK_SENTINEL]: VOICE_A })), 'voicePackErrShape'],
     ['voices.u6vp', JSON.stringify({ ...pack, revision: 'ffffffff' === P.RANGES_REVISION ? '00000000' : 'ffffffff' }), 'voicePackErrRevision'],
-    ['voices.u6vp', JSON.stringify({ ...pack, format: 'u6.voice-pack/2' }), 'voicePackErrFormat'],
+    ['voices.u6vp', JSON.stringify({ ...pack, format: 'u6.voice-pack/3' }), 'voicePackErrFormat'],
+    ['voices.u6vp', JSON.stringify({ ...pack, format: P.PACK_FORMAT_2 }), 'voicePackErrShape'],
+    ['voices.u6vp', JSON.stringify(await voicePack2({ [PACK_A]: { ...VOICE_V, vary: { speed: 0.5, pitch: 0 } } })), 'voicePackErrRange'],
     ['voices.u6vp', `not JSON ${PACK_SENTINEL}`, 'voicePackErrJson'],
     ['voices.u6vp', big, 'voicePackErrLarge'],
   ]) {
@@ -5012,19 +5052,56 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   assert.equal((await h.state(page)).state, 'running', 'the game runs on');
   kept = await h.keptVoicePacks(page);
   assert.deepEqual(kept.byKey['voice-pack:voices'], pack, 'the pack kept stays');
-  assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: still the pack\'s');
+  assert.deepEqual(await profileSent(PACK_A), read1(VOICE_A), 'A: still the pack\'s');
 
   // Told by its format, under another name: B's voice for A now.
   const other = await voicePack({ [PACK_A]: VOICE_B });
   assert.equal(await drop('renamed.json', `\n  ${JSON.stringify(other)}`), await line('voicePack', 1), 'another name: by its format');
-  assert.deepEqual(await profileSent(PACK_A), VOICE_B, 'A: the new pack\'s');
+  assert.deepEqual(await profileSent(PACK_A), read1(VOICE_B), 'A: the new pack\'s');
   assert.deepEqual(await profileSent(PACK_B), defaultOf(PACK_B), 'B, not in the new pack: the default');
+
+  // A /2 pack, told by its format under another name too: A's voice varies by line. Each line
+  // reaches the worker at lineProfile's speed and pitch from the line's seed (the speaker's and
+  // the text's: the seed sent, its salt taken out), two lines apart, one line again alike.
+  const varying = await voicePack2({ [PACK_A]: VOICE_V, [PACK_B]: read1(VOICE_B) });
+  assert.equal(await drop('varying.json', JSON.stringify(varying)), await line('voicePack', 2), 'a /2 pack under another name: by its format');
+  assert.equal(await shownPack(), '2');
+  // Spoken (one sample each): the page counts A's voice once, however many profiles its lines
+  // are said in.
+  await page.evaluate(() => { window.__fakeAudio = true; });
+  const heard = await voiceShown(page);
+  const lines = [];
+  for (const text of ['The first line of the test.', 'Another line of the test.', 'A third line of the test.', 'The first line of the test.']) {
+    const sent = await speakSent(PACK_A, text);
+    await waitVoice(page, (n) => Number(document.body.dataset.voiceSpoken) > n, heard.spoken + lines.length, 10_000);
+    const lineSeed = (sent.seed ^ VOICE_V.seedSalt) >>> 0;
+    assert.deepEqual(sent.profile, P.lineProfile(VOICE_V, lineSeed), 'the line\'s profile: lineProfile\'s');
+    assert.deepEqual(sent.profile.mix, VOICE_V.mix, 'its voice\'s presets');
+    assert.ok(Math.abs(sent.profile.speed - VOICE_V.speed) <= VOICE_V.vary.speed && Math.abs(sent.profile.pitch - VOICE_V.pitch) <= VOICE_V.vary.pitch, 'within its vary');
+    lines.push(sent);
+  }
+  await page.evaluate(() => { window.__fakeAudio = false; });
+  assert.ok(lines[0].profile.speed !== lines[1].profile.speed && lines[0].profile.pitch !== lines[1].profile.pitch, 'two lines: two speeds and pitches');
+  assert.equal(new Set(lines.map((l) => JSON.stringify(l.profile))).size, 3, 'three lines\' profiles');
+  assert.deepEqual([lines[3].seed, lines[3].profile], [lines[0].seed, lines[0].profile], 'the same line again: alike');
+  const spoken = await voiceShown(page);
+  console.log(`  receipt: a varying voice's ${spoken.spoken - heard.spoken} lines spoken in ${new Set(lines.map((l) => JSON.stringify(l.profile))).size} profiles: distinct voices +${spoken.distinct - heard.distinct}`);
+  assert.equal(spoken.spoken, heard.spoken + 4, 'four lines spoken');
+  assert.equal(spoken.distinct, heard.distinct + 1, 'one voice more, not one per line\'s profile');
+  assert.deepEqual(await profileSent(PACK_B), read1(VOICE_B), 'B, vary 0/0: its voice as it is');
+  // The same /2 pack as voices.u6vp (as the tool writes it): its varying voice again.
+  assert.equal(await drop('voices.u6vp', JSON.stringify(varying)), await line('voicePack', 2), 'a /2 voices.u6vp');
+  const again = await speakSent(PACK_A, 'Another line of the test.');
+  assert.deepEqual(again.profile, lines[1].profile, 'the line\'s profile as before');
+  assert.deepEqual((await h.keptVoicePacks(page)).byKey['voice-pack:voices'], varying, 'the /2 pack kept');
+  // The /1 pack again, for what follows.
+  assert.equal(await drop('renamed.json', JSON.stringify(other)), await line('voicePack', 1));
 
   // Storage that refuses it: in use for this visit, none kept.
   await page.evaluate(() => window.__fail.add('voicepack-store'));
   assert.equal(await drop('voices.u6vp', JSON.stringify(pack)), await line('voicePackNotKept', 2, await line('voicePackOldGone')));
   assert.deepEqual((await h.keptVoicePacks(page)).keys, [], 'none kept');
-  assert.deepEqual(await profileSent(PACK_B), VOICE_B, 'in use for this visit');
+  assert.deepEqual(await profileSent(PACK_B), read1(VOICE_B), 'in use for this visit');
   await page.evaluate(() => window.__fail.delete('voicepack-store'));
   assert.equal(await drop('voices.u6vp', JSON.stringify(pack)), await line('voicePack', 2));
   const stored = await h.log(page);
@@ -5039,7 +5116,7 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   await waitVoice(page, () => document.body.dataset.voiceGain === '1.00', null, 30_000);
   assert.equal(await shownPack(), '2', 'back after a reload');
   turn = 0;
-  assert.deepEqual(await profileSent(PACK_A), VOICE_A, 'A: the kept pack\'s');
+  assert.deepEqual(await profileSent(PACK_A), read1(VOICE_A), 'A: the kept pack\'s');
 
   // Forget voices: the pack goes with the model, off the player and out of storage.
   await forgetVia(page, '#forget-voices');
@@ -5052,7 +5129,8 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   assert.ok(log.includes('voicepack:load:1') && log.includes('voicepack:forget:end'), 'restored, then forgotten, through the store');
 
   // Nothing of it reaches the page: the sentinel, the actors, the salt, a pack's weights.
-  const sentinels = [PACK_SENTINEL, String(PACK_A), String(PACK_B), String(VOICE_A.seedSalt), String(VOICE_A.pitch), String(VOICE_B.pitch)];
+  const sentinels = [PACK_SENTINEL, String(PACK_A), String(PACK_B), String(VOICE_A.seedSalt), String(VOICE_A.pitch), String(VOICE_B.pitch),
+    String(VOICE_V.seedSalt), String(VOICE_V.vary.speed)];
   const where = await page.evaluate(() => JSON.stringify({
     body: { ...document.body.dataset }, canvas: { ...document.getElementById('screen').dataset },
     text: document.body.innerText, storage: { ...localStorage }, csp: window.__csp,

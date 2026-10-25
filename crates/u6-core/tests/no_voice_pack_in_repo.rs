@@ -1,15 +1,17 @@
 //! Spec 09 Rights / Acceptance 5: no voice pack, and none of the tool's other outputs (the
 //! personality notes, the coverage receipt), is committed or sits under `site/`. They are read
-//! from the owner's game (tools/speech/profile.mjs makes them from the NPC bundles): they live in
-//! `~/Games/ultima6/voice/` and the owner's browser storage, and the pack also on the site
-//! (below). Checked: every blob in the git index (what a commit takes, read with `git cat-file`,
-//! whatever the working tree holds), and every file under `site/` on disk (built output and the
-//! gitignored model parts included). Any error reading them fails the test.
+//! from the owner's game (tools/speech/profile.mjs makes them from the NPC bundles, or from the
+//! speaker profile with `--speakers`, spec 15 Design 4): they live in `~/Games/ultima6/voice/`
+//! and the owner's browser storage, and the pack also on the site (below). Checked: every blob in
+//! the git index (what a commit takes, read with `git cat-file`, whatever the working tree
+//! holds), and every file under `site/` on disk (built output and the gitignored model parts
+//! included). Any error reading them fails the test.
 //!
 //! A file is caught by its shape, not by a string (the formats' names are in source: the tool,
 //! the page): JSON whose root object, or an element of its root array, has `format` equal to one
-//! of the three, after any JSON whitespace. The walker is the NPC bundles' guard's
-//! (`no_npc_bundle_in_repo.rs`).
+//! of the five (the pack's `u6.voice-pack/1` and `/2`, the notes' `u6.voice-notes/1`, the
+//! receipt's `u6.voice-coverage/1` and `/2`), after any JSON whitespace. The walker is the NPC
+//! bundles' guard's (`no_npc_bundle_in_repo.rs`).
 //!
 //! A file that starts as JSON but does not parse (malformed, or nested past the parser's depth)
 //! is caught when a string token of it is a format's name, its escapes decoded (`tests/guard`),
@@ -18,7 +20,7 @@
 //!
 //! The one exception (spec 09 Design 4, the owner's answer of 2026-10-21, "올려서 자동 적용", to
 //! hosting his voice pack like the Korean pack, used with no drop; public since the same day): a
-//! voice pack (a root object of the pack's format; not the notes, the receipt or an array) on disk
+//! voice pack (a root object of either pack format; not the notes, a receipt or an array) on disk
 //! under `site/packs/`, which is gitignored and filled at deploy time, as the Korean pack's guard
 //! allows (`no_locale_pack_in_repo.rs`).
 //! A pack in the index fails wherever it is, and the notes and a coverage receipt fail under
@@ -32,9 +34,18 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The voice pack's format (site/voice/profile.js `PACK_FORMAT`), the notes' and the coverage
-/// receipt's (tools/speech/profile.mjs).
-const FORMATS: [&str; 3] = ["u6.voice-pack/1", "u6.voice-notes/1", "u6.voice-coverage/1"];
+/// The voice pack's formats (site/voice/profile.js `PACK_FORMAT`, `PACK_FORMAT_2`), the notes'
+/// and the coverage receipt's (tools/speech/profile.mjs: a model's run writes the receipt /1, a
+/// `--speakers` run /2).
+const FORMATS: [&str; 5] = [
+    "u6.voice-pack/1",
+    "u6.voice-pack/2",
+    "u6.voice-notes/1",
+    "u6.voice-coverage/1",
+    "u6.voice-coverage/2",
+];
+/// The pack's formats among them.
+const PACK_FORMATS: [&str; 2] = [FORMATS[0], FORMATS[1]];
 
 /// JSON's whitespace (RFC 8259: space, tab, line feed, carriage return).
 fn json_space(b: u8) -> bool {
@@ -57,11 +68,15 @@ fn is_voice_file(bytes: &[u8]) -> bool {
     one(&v) || v.as_array().is_some_and(|a| a.iter().any(one))
 }
 
-/// Whether `bytes` is a voice pack itself: JSON whose root object has the pack's format
-/// (`FORMATS[0]`), not the notes, the receipt, an array or a file that does not parse.
+/// Whether `bytes` is a voice pack itself: JSON whose root object has a pack's format
+/// ([`PACK_FORMATS`]), not the notes, a receipt, an array or a file that does not parse.
 fn is_pack(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .is_ok_and(|v| v.is_object() && v["format"].as_str() == Some(FORMATS[0]))
+    serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|v| {
+        v.is_object()
+            && v["format"]
+                .as_str()
+                .is_some_and(|f| PACK_FORMATS.contains(&f))
+    })
 }
 
 fn repo_root() -> PathBuf {
@@ -192,6 +207,10 @@ fn walk(
 
 /// A pack as the tool writes it (synthetic numbers).
 const PACK: &str = r#"{"format":"u6.voice-pack/1","model":"m","revision":"00000000","profiles":{"1":{"mix":[{"style":"M1","w":1}],"speed":1,"pitch":0,"steps":16,"seedSalt":0}}}"#;
+/// A /2 pack as its `--speakers` run writes it (synthetic numbers, each voice with its vary).
+const PACK_2: &str = r#"{"format":"u6.voice-pack/2","model":"m","revision":"00000000","profiles":{"1":{"mix":[{"style":"M1","w":1}],"speed":1,"pitch":0,"steps":16,"seedSalt":0,"vary":{"speed":0,"pitch":0}}}}"#;
+/// The coverage receipt of a `--speakers` run.
+const COVERAGE_2: &str = r#"{"format":"u6.voice-coverage/2","model":"m","unlisted":[]}"#;
 
 /// The shape check catches a pack, notes, a coverage receipt and arrays of them, whitespace first
 /// or not, and nothing else of that look.
@@ -206,7 +225,13 @@ fn the_shape_check_catches_the_tools_outputs_only() {
     );
     assert!(is_voice_file(format!("[{PACK}]").as_bytes()));
     assert!(is_voice_file(format!("\n \t\r{PACK}").as_bytes()));
-    let other = PACK.replace("u6.voice-pack/1", "u6.voice-pack/2");
+    assert!(
+        is_voice_file(PACK_2.as_bytes()) && is_voice_file(COVERAGE_2.as_bytes()),
+        "a /2 pack and a /2 receipt"
+    );
+    assert!(is_voice_file(format!("[{PACK_2}]").as_bytes()));
+    assert!(is_pack(PACK_2.as_bytes()) && !is_pack(COVERAGE_2.as_bytes()));
+    let other = PACK.replace("u6.voice-pack/1", "u6.voice-pack/3");
     assert!(!is_voice_file(other.as_bytes()));
     assert!(
         !is_voice_file(b"{\"format\":1}")
@@ -252,9 +277,10 @@ fn the_walker_finds_a_voice_pack_after_any_amount_of_whitespace() {
     std::fs::remove_dir_all(&root).expect("the test directory goes");
 }
 
-/// A pack under `site/packs/` on disk is hosted, not found, at any depth (whitespace first or
-/// not); one in a sibling or a nested `packs` directory, or in `site/` itself, is found, and so
-/// are the notes, a coverage receipt and an array holding a pack under `site/packs/`.
+/// A pack (/1 or /2) under `site/packs/` on disk is hosted, not found, at any depth (whitespace
+/// first or not); one in a sibling or a nested `packs` directory, or in `site/` itself, is found,
+/// and so are the notes, a coverage receipt (/1 or /2) and an array holding a pack under
+/// `site/packs/`.
 #[test]
 fn only_a_pack_on_disk_under_site_packs_is_hosted() {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-voice-pack-hosted");
@@ -270,12 +296,15 @@ fn only_a_pack_on_disk_under_site_packs_is_hosted() {
     };
     write("site/packs/voices-1.u6vp", PACK);
     write("site/packs/sub/voices-2.u6vp", &format!("\n {PACK}"));
+    write("site/packs/voices-3.u6vp", PACK_2);
     write("site/packs/notes.json", notes);
     write("site/packs/coverage.json", coverage);
+    write("site/packs/coverage-2.json", COVERAGE_2);
     write("site/packs/array.json", &format!("[{PACK}]"));
     write("site/packs-x/voices.u6vp", PACK);
     write("site/x/packs/voices.u6vp", PACK);
     write("site/voices.u6vp", PACK);
+    write("site/voices-2.u6vp", PACK_2);
     let (mut found, mut links, mut files) = (Vec::new(), Vec::new(), 0);
     walk(
         &root.join("site"),
@@ -285,14 +314,16 @@ fn only_a_pack_on_disk_under_site_packs_is_hosted() {
         &mut files,
     );
     found.sort();
-    assert_eq!(files, 8);
+    assert_eq!(files, 11);
     assert_eq!(
         found,
         [
             "site/packs-x/voices.u6vp",
             "site/packs/array.json",
+            "site/packs/coverage-2.json",
             "site/packs/coverage.json",
             "site/packs/notes.json",
+            "site/voices-2.u6vp",
             "site/voices.u6vp",
             "site/x/packs/voices.u6vp"
         ]

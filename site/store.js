@@ -6,7 +6,7 @@
 // loaded (spec 07 H2) is one record under `hd:pack`, its file's bytes. The NPC bundles an older
 // page made here (spec 09 Design 5) lay under `npc-bundle:`; the page now only removes them
 // (`forgetBundles`). The voice pack (spec 09 Design 4,
-// `u6.voice-pack/1`: the owner's personality voices, by actor number; numbers only) is one
+// `u6.voice-pack/1` or `/2`: the owner's personality voices, by actor number; numbers only) is one
 // record under `voice-pack:` + `voices`, the pack object checked, and the listed file it came from
 // one under `voice-pack:source`, in the pack's own transaction as the Korean pack's source
 // below. The Korean pack (spec 08,
