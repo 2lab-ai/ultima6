@@ -21,13 +21,16 @@
 //   read past the preview's path, whose pid and random part may hold one by chance);
 // - spec 15 Design 4-5: the voice pack /2 (read with each voice's vary, every bad vary refused, a
 //   /1 pack still read with vary 0/0, the ranges' revision unchanged), a line's profile
-//   (lineProfile), the voice derived from a speaker (deriveProfile: the preset families, the
+//   (lineProfile: each side of its motion cut to the room the range leaves, toward a side with
+//   none the other way, the voice's base kept, so no line is held at a range's end), the voice
+//   derived from a speaker (deriveProfile: the preset families, the
 //   medians by age and sex, the offsets, the spread, vary by manner) and --speakers runs on a /1
 //   and a /2 speaker file the test writes (no request, the pack /2, the coverage's counts).
 //
 //   node --test tools/speech/profile.test.mjs
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -39,7 +42,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { STYLES } from '../../site/voice/model.js';
 import {
-  checkedProfile, lineProfile, PACK_FORMAT, PACK_FORMAT_2, PITCH, RANGES_REVISION, readPack, SPEED, VARY,
+  checkedProfile, draw, lineProfile, PACK_FORMAT, PACK_FORMAT_2, PITCH, RANGES_REVISION, readPack, SPEED, unit, VARY,
 } from '../../site/voice/profile.js';
 import * as translate from '../i18n/translate.mjs';
 import {
@@ -640,6 +643,30 @@ test('a line\'s profile: deterministic per seed; vary 0/0 gives the voice itself
     }
   }
   assert.ok(speeds.size > 1000, 'the lines spread');
+  // A worked case: base speed 0.91, vary 0.05. A line drawn at a = -1 (its seed's first draw 0)
+  // goes down by the room there, 0.01, to 0.90; one at a = -0.5 half of it, to 0.905 (not held at
+  // 0.90); one at a = +1 (less 2^-31: the draw's most) up the whole vary, to 0.96. The pitch
+  // (vary 0) stays.
+  const DOWN = 3568425090;
+  const HALF = 4105105844;
+  const UP = 3997851825;
+  assert.ok(draw(DOWN, 1) === 0 && draw(HALF, 1) === 0x40000000 && draw(UP, 1) === 0xffffffff, 'the seeds\' first draws');
+  const slow = checkedProfile({ ...VOICE_2, speed: 0.91, pitch: 0.5, vary: { speed: 0.05, pitch: 0 } });
+  const down = lineProfile(slow, DOWN);
+  const up = lineProfile(slow, UP);
+  assert.ok(Math.abs(down.speed - 0.9) < 1e-12 && down.speed >= SPEED.min, 'a = -1: at 0.90 (the room below, 0.01)');
+  assert.ok(Math.abs(up.speed - 0.96) < 1e-9, 'a = +1: at 0.96 (the whole vary)');
+  assert.ok(Math.abs(lineProfile(slow, HALF).speed - 0.905) < 1e-12, 'a = -0.5: at 0.905 (half the room below)');
+  assert.ok(down.pitch === 0.5 && up.pitch === 0.5, 'vary 0: the pitch stays');
+  assert.equal(slow.speed, 0.91, 'the voice itself unchanged');
+  // A base on the range's end: speed 0.90, vary 0.05. A line drawn down (a = -0.5), where there is
+  // no room, moves the same distance up: 0.925, as one drawn up (a = +0.5) does.
+  const HALF_UP = 4215774887;
+  assert.equal(draw(HALF_UP, 1), 0xc0000000, 'its seed\'s first draw');
+  const floor = checkedProfile({ ...VOICE_2, speed: 0.9, pitch: 0.5, vary: { speed: 0.05, pitch: 0 } });
+  assert.ok(Math.abs(lineProfile(floor, HALF).speed - 0.925) < 1e-12, 'a = -0.5 at the bottom: up to 0.925');
+  assert.ok(Math.abs(lineProfile(floor, HALF_UP).speed - 0.925) < 1e-12, 'a = +0.5: up to 0.925');
+  assert.ok(lineProfile(floor, DOWN).speed > SPEED.min, 'a = -1 at the bottom: off the end');
 });
 
 const STATIONS = Object.keys(STATION_OFFSETS);
@@ -810,6 +837,92 @@ test('deriveProfile: each station and sex leads with its family\'s presets (a yo
   assert.ok(read.ok && read.pack.size === actor, 'a /2 pack of them reads');
   assert.ok(STYLES.length === 10);
   console.log(`  receipt: ${2 * AGES.length * STATIONS.length * 64} derived voices within the ranges, ${actor} of them read as a /2 pack`);
+
+  // The varying voices' lines (site/voice/profile.js lineProfile): every station, varying manner,
+  // age and sex, actors 0 to 999, 200 lines each. A voice's base is the round-2 sum (the median,
+  // the offsets and the spread, into the ranges), untouched by its lines; each line is
+  // base + s * |a| * min(vary, the room on side s), a and b the line's two draws, s a's side or,
+  // where that side has no room, the other; a line is at a range's end only where |a| is 1 and
+  // that side's room is within vary; each voice says its 200 lines at 200 speeds (and pitches),
+  // one whose base is at a range's end ("one-sided") all off that end.
+  const VARYING = MANNERS.filter((m) => MANNER_VARY[m].speed > 0 || MANNER_VARY[m].pitch > 0);
+  assert.deepEqual(VARYING, ['jester', 'mad', 'drunk']);
+  const into = (x, r) => Math.min(r.max, Math.max(r.min, x));
+  // The side a draw `t` moves a line of `base` to (-1 or 1), and the room there.
+  const side = (base, t, r) => (t < 0 ? (base - r.min > 0 ? -1 : 1) : (r.max - base > 0 ? 1 : -1));
+  const room = (base, s, r) => Math.max(0, s < 0 ? base - r.min : r.max - base);
+  const sum = (t, n) => {
+    const m = AGE_MEDIANS[t.age][t.sex];
+    const [st, ma] = [STATION_OFFSETS[t.station], MANNER_OFFSETS[t.manner]];
+    const spread = (k, size) => size * (2 * unit(draw(n, k)) - 1);
+    return { speed: m.speed + st.speed + ma.speed + spread(14, SPREAD.speed), pitch: m.pitch + st.pitch + ma.pitch + spread(15, SPREAD.pitch) };
+  };
+  const counted = { voices: 0, lines: 0, misses: 0, bases: 0, atEnd: 0, heldAtEnd: 0, duplicates: 0, oneSided: 0, onEnd: 0 };
+  for (const station of STATIONS) {
+    for (const manner of VARYING) {
+      const v = MANNER_VARY[manner];
+      for (const age of AGES) {
+        for (const sex of SEXES) {
+          for (let n = 0; n < 1000; n += 1) {
+            const t = { sex, age, station, manner };
+            const p = deriveProfile(t, n);
+            const raw = sum(t, n);
+            if (p.speed !== into(raw.speed, SPEED) || p.pitch !== into(raw.pitch, PITCH)) counted.bases += 1;
+            const before = JSON.stringify(p);
+            const seen = { speed: new Set(), pitch: new Set() };
+            const end = { speed: p.speed === SPEED.min || p.speed === SPEED.max, pitch: p.pitch === PITCH.min || p.pitch === PITCH.max };
+            if (end.speed || end.pitch) counted.oneSided += 1;
+            for (let seed = 0; seed < 200; seed += 1) {
+              const line = (Math.imul(seed + 1, 2654435761) ^ n) >>> 0;
+              const l = lineProfile(p, line);
+              const draws = { speed: 2 * unit(draw(line, 1)) - 1, pitch: 2 * unit(draw(line, 2)) - 1 };
+              for (const [k, r] of [['speed', SPEED], ['pitch', PITCH]]) {
+                const d = draws[k];
+                const s = side(p[k], d, r);
+                const want = Math.min(r.max, Math.max(r.min, p[k] + s * Math.abs(d) * Math.min(v[k], room(p[k], s, r))));
+                if (l[k] !== want) counted.misses += 1;
+                if (l[k] === r.min || l[k] === r.max) {
+                  counted.atEnd += 1;
+                  if (Math.abs(d) !== 1 || room(p[k], s, r) > v[k]) counted.heldAtEnd += 1;
+                  if (end[k] && l[k] === p[k]) counted.onEnd += 1;
+                }
+                seen[k].add(l[k]);
+              }
+              counted.lines += 1;
+            }
+            for (const k of ['speed', 'pitch']) counted.duplicates += 200 - seen[k].size;
+            if (JSON.stringify(p) !== before) counted.bases += 1;
+            counted.voices += 1;
+          }
+        }
+      }
+    }
+  }
+  assert.equal(counted.misses, 0, 'every line: base + s * |a| * min(vary, room on side s)');
+  assert.equal(counted.heldAtEnd, 0, 'a line at a range\'s end only at |a| = 1 with that side\'s room within vary');
+  assert.equal(counted.onEnd, 0, 'a one-sided voice: no line at its end');
+  assert.equal(counted.duplicates, 0, 'each voice: its lines all apart');
+  assert.equal(counted.bases, 0, 'each base the round-2 sum, untouched by its lines');
+  assert.ok(counted.oneSided > 0, 'voices at a range\'s end met too');
+  console.log(`  receipt: ${counted.voices} varying voices (${counted.oneSided} at a range's end), ${counted.lines} lines as the room allows; ${counted.atEnd} line values at a range's end; ${counted.duplicates} duplicates`);
+
+  // A voice whose vary is 0 is as before: the hash of every station, age, sex and still manner,
+  // actors 0 to 255 (the six manners with vary 0), taken on round 2's code.
+  const STILL = ['plain', 'pompous', 'sly', 'gruff', 'timid', 'pious'];
+  assert.deepEqual(STILL, MANNERS.filter((m) => !VARYING.includes(m)));
+  const still = [];
+  for (const station of STATIONS) {
+    for (const age of AGES) {
+      for (const sex of SEXES) {
+        for (const manner of STILL) {
+          for (let n = 0; n < 256; n += 1) still.push(deriveProfile({ sex, age, station, manner }, n));
+        }
+      }
+    }
+  }
+  assert.equal(still.length, 61440);
+  assert.equal(createHash('sha256').update(JSON.stringify(still)).digest('hex'),
+    'a439d8f6f4f9a86f6a3a504bba7a2d3d5287d1830aa20fbea655d2876ae28df9', 'the voices with vary 0 unchanged');
 });
 
 test('speakerOutputsOf (the speaker profile\'s values as tools/i18n/translate.mjs readSpeakers gives them, /2 and /1): each actor its derived voice, the pack /2; the counts by station, manner, sex and age, the means, the varying, the distinct mixes and the scripts not listed', () => {

@@ -118,10 +118,23 @@ export function checkedProfile(p) {
   };
 }
 
+// `base` moved by `t` (-1..1) times `vary` toward t's side, its reach cut to the room the range
+// leaves that side; toward a side with no room (the base on that end) the same distance the other
+// way. Both rooms cannot be 0 (the range is wider than that); the clamp only guards.
+function moved(base, t, vary, range) {
+  const below = Math.max(0, base - range.min);
+  const above = Math.max(0, range.max - base);
+  const s = t < 0 ? (below > 0 ? -1 : 1) : (above > 0 ? 1 : -1); // a side with no room: the other
+  return clamp(base + s * Math.abs(t) * Math.min(vary, s < 0 ? below : above), range.min, range.max);
+}
+
 /// The profile one line is said in (spec 15 Design 5): `profile` (as `checkedProfile` gives it)
-/// itself when its vary is 0/0, else its speed moved by vary.speed times a and its pitch by
-/// vary.pitch times b, a and b two draws in -1..1 from `seed` (the line's: player.js seedOf of
-/// its speaker and text), each into the ranges. The same line always gets the same profile.
+/// itself when its vary is 0/0. Otherwise its speed and pitch are the voice's (the base, its
+/// identity, kept) moved by a and b, two draws in -1..1 from `seed` (the line's: player.js seedOf
+/// of its speaker and text): a line moves up to vary toward its draw's side, as far as that side
+/// has room in the range (speed + a * min(vary.speed, room on a's side), and pitch likewise);
+/// toward a side with none (a base on a range's end) it moves the same distance the other way. So
+/// no line is held at a range's end. The same line always gets the same profile.
 export function lineProfile(profile, seed) {
   const vs = finite(profile?.vary?.speed, 0);
   const vp = finite(profile?.vary?.pitch, 0);
@@ -130,8 +143,8 @@ export function lineProfile(profile, seed) {
   const b = 2 * unit(draw(seed, 2)) - 1;
   return {
     ...profile,
-    speed: clamp(profile.speed + vs * a, SPEED.min, SPEED.max),
-    pitch: clamp(profile.pitch + vp * b, PITCH.min, PITCH.max),
+    speed: moved(profile.speed, a, vs, SPEED),
+    pitch: moved(profile.pitch, b, vp, PITCH),
   };
 }
 
