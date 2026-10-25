@@ -3121,3 +3121,324 @@ fn detects_charge_line_shows_the_packs_spell_name() {
         "the English"
     );
 }
+
+/// Use's sites, each file's list in [`crate::usecmd::PRINTED`]'s order: the test's own copies of
+/// the addresses, pinned to the lists in the test below. The command's checks and the line
+/// formats the handlers share (`dispatch`; the aboard refusal A4-relative), then `food`, `mech`
+/// (the lever's line at [`USE_LEVER`], what it moved at [`USE_NOISE`]), `misc` and `travel`.
+const USE_DISPATCH: [u32; 10] = [
+    0x0012_c9ee,
+    0x0012_c93e,
+    0x0012_cda6,
+    0x0012_cfa0,
+    0x0012_ccfe,
+    0x0012_cee2,
+    0x0012_cfa8,
+    0x0012_cfc0,
+    0x0012_cfd4,
+    crate::image::A4 - 0x744d,
+];
+const USE_FOOD: [u32; 11] = [
+    0x0012_c952,
+    0x0012_c968,
+    0x0012_c994,
+    0x0012_c9c0,
+    0x0012_c9d6,
+    0x0012_c94a,
+    0x0012_cb4a,
+    0x0012_cc7e,
+    0x0012_cf52,
+    0x0012_cf80,
+    0x0012_cf8a,
+];
+const USE_MECH: [u32; 22] = [
+    0x0012_c91c,
+    0x0012_c926,
+    0x0012_c9f2,
+    0x0012_c9fa,
+    0x0012_ca04,
+    0x0012_ca2a,
+    0x0012_ca48,
+    0x0012_ca66,
+    0x0012_ca7e,
+    0x0012_ca96,
+    0x0012_cab4,
+    USE_LEVER,
+    0x0012_cae6,
+    USE_NOISE,
+    0x0012_cb16,
+    0x0012_cb34,
+    0x0012_cd00,
+    0x0012_cd0c,
+    0x0012_cd16,
+    0x0012_cd1c,
+    0x0012_cd2e,
+    0x0012_cd4c,
+];
+const USE_MISC: [u32; 18] = [
+    0x0012_c944,
+    0x0012_c94a,
+    0x0012_c94e,
+    0x0012_cf66,
+    0x0012_cc02,
+    0x0012_cc0c,
+    0x0012_cc1c,
+    0x0012_cc3a,
+    0x0012_cc44,
+    0x0012_cc5a,
+    0x0012_ccae,
+    0x0012_ccbc,
+    0x0012_ccc8,
+    0x0012_ccd8,
+    0x0012_ccf4,
+    0x0012_ccf8,
+    0x0012_ccfe,
+    0x0012_ceee,
+];
+const USE_TRAVEL: [u32; 24] = [
+    0x0012_cd66,
+    0x0012_cd7a,
+    0x0012_cd90,
+    0x0012_cdac,
+    0x0012_cdbe,
+    0x0012_cdee,
+    0x0012_ce14,
+    0x0012_cb62,
+    0x0012_cb80,
+    0x0012_cb9c,
+    0x0012_cbb2,
+    0x0012_cbc4,
+    0x0012_cbcc,
+    0x0012_cbd4,
+    0x0012_ce42,
+    0x0012_ce68,
+    0x0012_ce70,
+    0x0012_ced6,
+    0x0012_cd0c,
+    0x0012_cd16,
+    0x0012_ce8a,
+    0x0012_ceb4,
+    0x0012_cec2,
+    0x0012_cec8,
+];
+/// The lever's own line and the line of what it moved (`usecmd::mech`, 0x12e538).
+const USE_LEVER: u32 = 0x0012_cad2;
+const USE_NOISE: u32 = 0x0012_cb02;
+
+/// Use's sites of no word of their own, each with the test's own text: the line formats (the
+/// string with a newline, led by one, with a mark), the newline, the direction's format, the
+/// wand's two syllable formats, the well's message format and the mark that ends its food line,
+/// and the astrolabe's out-of-range line.
+const USE_NO_WORD: [(u32, &[u8]); 10] = [
+    (0x0012_c9ee, b"%s\n"),
+    (0x0012_c93e, b"\n%s\n"),
+    (0x0012_cda6, b"%s!\n"),
+    (0x0012_ccfe, b"\n"),
+    (0x0012_cd16, b"%s.\n"),
+    (0x0012_c94a, b"%s"),
+    (0x0012_c94e, b" %s"),
+    (0x0012_ccf8, b"%s\n"),
+    (0x0012_ccf4, b"!\n"),
+    (0x0012_cec2, b"--\n"),
+];
+
+/// Use's sites, each once, in the lists' order.
+fn use_sites() -> Vec<u32> {
+    let mut sites = Vec::new();
+    for &at in crate::usecmd::PRINTED.iter().flat_map(|l| l.iter()) {
+        if !sites.contains(&at) {
+            sites.push(at);
+        }
+    }
+    sites
+}
+
+/// The synthetic text at each of [`use_sites`]: [`USE_NO_WORD`]'s at its sites, else a line
+/// (`Zu`, two digits and a newline: where a line is, the next site lies 6 bytes on at least).
+fn use_texts() -> SiteLines {
+    use_sites()
+        .into_iter()
+        .enumerate()
+        .map(|(i, at)| {
+            let text = USE_NO_WORD
+                .iter()
+                .find(|&&(a, _)| a == at)
+                .map_or_else(|| format!("Zu{i:02}\n").into_bytes(), |&(_, t)| t.to_vec());
+            (at, text)
+        })
+        .collect()
+}
+
+/// The text [`use_texts`] puts at `at`.
+fn use_text(at: u32) -> String {
+    let (_, text) = use_texts()
+        .into_iter()
+        .find(|&(a, _)| a == at)
+        .expect("a Use site");
+    String::from_utf8(text).unwrap()
+}
+
+/// A synthetic `game` (one CODE hunk from the image base) holding [`use_texts`], each string
+/// NUL-ended at its site.
+fn use_game() -> Vec<u8> {
+    game_of(&use_texts())
+}
+
+#[test]
+fn uses_own_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
+    // Each file's list in full, as the test's own literals (a constant dropped, added twice or
+    // moved fails here).
+    let sorted = |list: &[u32]| {
+        let mut v = list.to_vec();
+        v.sort_unstable();
+        v
+    };
+    let lists: [(&str, &[u32]); 5] = [
+        ("the checks'", &USE_DISPATCH),
+        ("food's", &USE_FOOD),
+        ("mech's", &USE_MECH),
+        ("misc's", &USE_MISC),
+        ("travel's", &USE_TRAVEL),
+    ];
+    for ((name, want), got) in lists.into_iter().zip(crate::usecmd::PRINTED) {
+        assert_eq!(sorted(got), sorted(want), "{name} list");
+    }
+    let lines = use_texts();
+    assert_eq!(
+        lines.len(),
+        81,
+        "85 sites, the newline, the wand's format, the no-direction word and the direction's \
+         format each in two files' lists"
+    );
+    let cat = Catalogue::from_game(&use_game());
+    for (at, text) in &lines {
+        let want = if USE_NO_WORD.iter().any(|&(a, _)| a == *at) {
+            None
+        } else {
+            Some(Kind::Message)
+        };
+        assert_eq!(cat.of(text).map(|e| e.kind), want, "the string at {at:#x}");
+    }
+    assert_eq!(
+        cat.len(),
+        71,
+        "every line but the ten of no word of their own"
+    );
+    assert!(
+        cat.iter().all(|(_, e)| e.cells.is_none()),
+        "each on a wrapping line of the message window: no cell budget"
+    );
+}
+
+/// The lever's slot and its portcullis marker's in [`lever_world`].
+const LEVER_SLOT: crate::objects::Slot = 0x200;
+const MARKER_SLOT: crate::objects::Slot = 0x201;
+
+/// Party member `Zm` (actor 1) at (100, 100), a lever (type 0x10c, quality 5) north of him and a
+/// portcullis marker (0x12d, frame 2, quality 5) on the level: Use of the lever closes a
+/// portcullis there, so it prints its own line, then the line of what moved.
+fn lever_world() -> State {
+    use u6_formats::position::Position;
+    let mut s = State::empty();
+    s.ui = crate::main_loop::test_support::test_ui();
+    s.map.centre = Position {
+        x: 100,
+        y: 100,
+        z: 0,
+    };
+    s.objects.location[1] = s.map.centre;
+    s.objects.type_frame[1] = 0x17a;
+    let p = &mut s.actors.party;
+    p.size = 1;
+    p.members[0] = 1;
+    p.names = vec!["Zm".into()];
+    s.actors.attrs.status[1] = 0x80;
+    s.actors.objlist_tail = vec![0; 0x82];
+    for (slot, tf, x, y) in [
+        (LEVER_SLOT, 0x10c, 100, 99),
+        (MARKER_SLOT, 0x12d | 2 << 10, 104, 100),
+    ] {
+        let i = slot as usize;
+        s.objects.type_frame[i] = tf;
+        s.objects.location[i] = Position { x, y, z: 0 };
+        s.objects.qq[i] = 0x0500;
+    }
+    crate::main_loop::test_support::link_placed_objects(&mut s);
+    s
+}
+
+/// Use of the lever of [`lever_world`] through its handler (`usecmd::mech::lever`, 0x12e538) in
+/// an engine over [`use_game`], with `pack` installed over its catalogue (or no pack): the
+/// scroll's text as it is (each line break kept, the last line's too) and the counts.
+fn lever_used(pack: Option<Pack>) -> (String, [u32; 2]) {
+    let game = use_game();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let mut s = lever_world();
+    if let Some(p) = pack {
+        install_catalogued(
+            &mut s,
+            &files,
+            Rc::new(p),
+            None,
+            Catalogue::from_game(&game),
+        )
+        .expect("the pack checks");
+    }
+    let mut e = crate::engine::Engine::with_game(s, files, |st, io| async move {
+        crate::usecmd::lever(crate::usecmd::Ux::new(&st, &io), LEVER_SLOT).await;
+    });
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    let s = e.state();
+    assert_eq!(s.objects.tf(LEVER_SLOT) >> 10, 1, "the lever switched");
+    (scroll(&s), s.locale.texts.get())
+}
+
+/// A pack of `forms` (an English string and the pack's text for it, each the test's own).
+fn use_ko(forms: &[(String, &str)]) -> Pack {
+    Pack::new(Language::Korean, "test/1", fingerprint([]), [])
+        .unwrap()
+        .with_strings(forms.iter().map(|(en, ko)| string(en, ko)))
+        .unwrap()
+}
+
+#[test]
+fn the_levers_lines_print_the_packs_forms_and_else_the_english_byte_for_byte() {
+    assert!(
+        USE_MECH.contains(&USE_LEVER) && USE_MECH.contains(&USE_NOISE),
+        "the lever's lines are in mech's list"
+    );
+    let (lever, noise) = (use_text(USE_LEVER), use_text(USE_NOISE));
+    // The scroll untrimmed: each line with its break, the last line's too (a lost or added
+    // break fails here).
+    let english = format!("{lever}{noise}");
+    // The pack's forms of both lines, in order, each looked up and found.
+    assert_eq!(
+        lever_used(Some(use_ko(&[
+            (lever.clone(), "가\n"),
+            (noise.clone(), "나\n")
+        ]))),
+        ("가\n나\n".into(), [2, 0]),
+        "the pack's forms"
+    );
+    // No pack: every byte the English, nothing looked up.
+    assert_eq!(
+        lever_used(None),
+        (english.clone(), [0, 0]),
+        "the English without a pack"
+    );
+    // A pack made before Use's lines were catalogued (a form of the ridden horse's line, which
+    // the checks' list held already, and none of the lever's): it loads, and both lines are the
+    // English, each counted a miss.
+    let horse = use_text(USE_DISPATCH[3]);
+    assert_eq!(
+        lever_used(Some(use_ko(&[(horse, "다\n")]))),
+        (english, [0, 2]),
+        "the English with a pack that lacks them"
+    );
+}

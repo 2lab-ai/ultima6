@@ -4,7 +4,9 @@
 //! **What is catalogued.** The sites the engine knows (each module lists the strings it prints,
 //! next to their addresses): the command loop's prompts and results
 //! ([`crate::main_loop::commands::PRINTED`]), Look, Get, Drop, Move and the keys'
-//! ([`crate::objects::commands::PRINTED`]), Use's ([`crate::usecmd::PRINTED`]), Rest's
+//! ([`crate::objects::commands::PRINTED`]), Use's (its checks' lines; 2026-10-25: and every
+//! handler's own lines and prompts, the lever's, the drawbridge crank's and the rest, each file's
+//! list, each on a wrapping line: no budget ([`crate::usecmd::PRINTED`])), Rest's
 //! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]), combat's
 //! other lines (2026-10-24: a hit's graze, death line, specials and wound report
 //! ([`crate::combat::damage::PRINTED`]), and the refusal of a staff's or a wand's cast
@@ -392,7 +394,7 @@ impl Catalogue {
                     .iter()
                     .flat_map(|s| s.iter()),
             )
-            .chain(crate::usecmd::PRINTED)
+            .chain(crate::usecmd::PRINTED.iter().flat_map(|s| s.iter()))
             .chain(crate::actors::rest::PRINTED)
             .chain(crate::combat::attack::PRINTED)
             .chain(crate::combat::damage::PRINTED)

@@ -21,14 +21,18 @@ const STR_NOT_READIED: u32 = 0x0012_cfd4;
 /// The aboard-ship refusal (the data-hunk string at A4 - 0x744d).
 const STR_ABOARD: u32 = 0x744d;
 
-/// Port-only (spec 08, slice K2): the strings Use passes to `printf` as its format, for the
-/// locale layer's catalogue ([`crate::locale::strings`]); the shared messages it prints through
-/// them are the catalogue's labels ([`crate::locale::strings::SHARED_MESSAGES`]).
+/// Port-only (spec 08, slice K2): the strings the command's checks pass to `printf` as its
+/// format, and the line formats the handlers share, for the locale layer's catalogue
+/// ([`super::PRINTED`]; 2026-10-25: the newline before the aboard refusal too, each handler's
+/// file listing its own lines); the shared messages it prints through them are the catalogue's
+/// labels ([`crate::locale::strings::SHARED_MESSAGES`]). The line formats and the newline hold
+/// no word of their own: the catalogue leaves them out.
 pub(super) const PRINTED: &[u32] = &[
     FMT_LINE,
     FMT_NL_LINE,
     FMT_BANG,
     STR_HORSE,
+    STR_NL,
     STR_NOT_NOW,
     STR_IN_HAND,
     STR_NOT_SOLO,

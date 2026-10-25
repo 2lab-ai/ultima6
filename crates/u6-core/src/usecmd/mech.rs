@@ -34,6 +34,38 @@ const FMT_DIR: u32 = 0x0012_cd16; // format: the string, a full stop, a newline
 const STR_HOLE: u32 = 0x0012_cd1c;
 const STR_FOUNTAIN: u32 = 0x0012_cd2e;
 const STR_NUGGET: u32 = 0x0012_cd4c;
+/// Port-only (spec 08, slice K2; 2026-10-25): the strings these handlers pass to `printf` as its
+/// format, for the locale layer's catalogue ([`super::PRINTED`]): the moonstone's two lines, the
+/// cannon's, the powder keg's two, the drawbridge crank's (no bridge, and its five results), the
+/// lever's and the switch's own lines and the lines of what they did (nothing moved, something
+/// moved, an actor in the way), and the shovel's prompt, its no-direction word and its three
+/// finds, each on a wrapping line of the message window; and
+/// the shovel's direction format, of no word of its own, which the catalogue leaves out (the
+/// direction's name goes through `%s`, a label read for display, [`crate::magic::LABELS`]).
+pub(super) const PRINTED: &[u32] = &[
+    STR_BURIED,
+    STR_CANT_BURY,
+    STR_FIRE,
+    STR_NOT_NOW,
+    STR_POWDER_LIT,
+    STR_NO_BRIDGE,
+    STR_BRIDGE[0],
+    STR_BRIDGE[1],
+    STR_BRIDGE[2],
+    STR_BRIDGE[3],
+    STR_BRIDGE[4],
+    STR_LEVER,
+    STR_STRANGE,
+    STR_NOISE,
+    STR_CANT_CLOSE,
+    STR_SWITCH,
+    STR_DIRECTION,
+    STR_NOWHERE,
+    FMT_DIR,
+    STR_HOLE,
+    STR_FOUNTAIN,
+    STR_NUGGET,
+];
 
 /// Objlist block index of A4-0x7b5a (8 moonstone locations, 3 words each).
 const MOONSTONES: usize = 0x2a;
