@@ -862,11 +862,17 @@ fn a_glyph_carries_the_paper_only_where_it_is_drawn_over_it() {
 }
 
 /// The key wait's symbol ([`crate::ui::text::draw_symbol`]) over the paper names it by the rule
-/// of the fills: its clear pixels of the paper's colour name the paper, its ink pixels the paper
-/// flagged [`FLAG_PAPER_OFF`]; over the spellbook, or without the paper's colours, its pixels
-/// are classic as before. Never a glyph: the HD font mode cannot show it as a character.
+/// of the fills where the paper shows through: its clear pixels of the paper's colour name the
+/// paper; its ink pixels, which that rule flags [`FLAG_PAPER_OFF`] (shown classic), name it a
+/// symbol (spec 11 Design 2 rev 3: [`Kind::Glyph`] of its code, its place in the cell,
+/// [`FLAG_INK`], [`FLAG_PAPER`], [`FLAG_SYMBOL`]; shown classic too), so the HD font mode lists
+/// the cell as a symbol, with its rows, for the platform to draw; over the spellbook, or without
+/// the paper's colours, its pixels are classic as before and nothing is listed. Never a
+/// character of the HD font. One of spec 11 Design 2's receipts.
 #[test]
 fn the_key_wait_symbol_names_the_paper_under_it() {
+    use u6_render::hd::{Compositor, HdGlyph, NoImages, SYMBOL, Scale};
+    use u6_render::{FLAG_SYMBOL, Rgb};
     let paper = crafted_paper();
     let kept = crate::ui::text::Paper::drawn(&colours(), &paper);
     let font = BitFont {
@@ -874,6 +880,9 @@ fn the_key_wait_symbol_names_the_paper_under_it() {
     };
     let w = text_window();
     let mut fb = plane();
+    for (i, c) in fb.palette.iter_mut().enumerate() {
+        *c = Rgb::new(i as u8, 255 - i as u8, 7);
+    }
     blit_bmp(&colours(), &mut fb, &paper, 0, 0, BITMAP_PAPER);
     let book = BitmapSource::Bitmap(BITMAP_SPELLBOOK);
     blit_bitmap(&colours(), &mut fb, (8, 8), &[2; 64], 200, 120, book);
@@ -888,8 +897,9 @@ fn the_key_wait_symbol_names_the_paper_under_it() {
         let (x, y) = (184 + u, 120 + v);
         let want = if ink {
             Src {
-                flags: FLAG_PAPER_OFF,
-                ..picture(Kind::Bitmap, BITMAP_PAPER, (x, y))
+                id: 5,
+                flags: FLAG_INK | FLAG_PAPER | FLAG_SYMBOL,
+                ..picture(Kind::Glyph, 0, (u, v))
             }
         } else {
             picture(Kind::Bitmap, BITMAP_PAPER, (x, y))
@@ -911,6 +921,31 @@ fn the_key_wait_symbol_names_the_paper_under_it() {
             "without the paper's colours"
         );
     }
+    // The HD font mode: the symbol over the paper listed, its rows given; the one over the
+    // spellbook and the one without the paper's colours not.
+    let listed = |fb: &Framebuffer| {
+        let mut c = Compositor::new();
+        c.set_font_mode(true);
+        c.compose(fb, &mut NoImages, Scale::X2);
+        (c.glyphs().to_vec(), c.symbol_rows().to_vec())
+    };
+    let symbol = HdGlyph {
+        x: 184,
+        y: 120,
+        code: SYMBOL + 5,
+        ink: fb.palette[1],
+        paper: fb.palette[2],
+    };
+    assert_eq!(
+        listed(&fb),
+        (vec![symbol], vec![[0x81; 8]]),
+        "over the paper: a symbol"
+    );
+    assert_eq!(
+        listed(&bare),
+        (vec![], vec![]),
+        "without the paper's colours"
+    );
 }
 
 /// The world of the view tests in `s.gfx`, with the clock's hands on the hero's tile and its

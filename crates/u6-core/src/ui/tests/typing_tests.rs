@@ -229,3 +229,92 @@ fn a_key_wait_takes_no_text_and_leaves_none_queued() {
     );
     assert_eq!(e.io().pending_events(), 0);
 }
+
+/// Spec 11 Design 3 (rev 3): the line editor's echo names each cell it draws typed
+/// ([`u6_render::FLAG_TYPED`] on all its pixels: two spaces, a letter typed after Backspace, a
+/// syllable with a pack), the blank Backspace draws is the game's space (no flag), and so is the
+/// cursor's cell when the line ends; the line read is the same. The HD font mode lists the typed
+/// spaces as [`u6_render::hd::TYPED_SPACE`], the typed letter and syllable as their codes, the
+/// blanks as spaces. (The synthetic font's space here is blank, a whole space.)
+#[test]
+fn the_echo_names_its_cells_typed_and_backspace_blanks_as_the_game() {
+    use u6_render::hd::{Compositor, NoImages, Scale, TYPED_SPACE};
+    use u6_render::{FLAG_TYPED, Kind};
+    let bs = key(Key::Backspace);
+    let typed = vec![
+        key(Key::Space),
+        key(Key::Space),
+        key(Key::Char('a')),
+        key(Key::Char('s')),
+        bs,
+        bs,
+        key(Key::Char('a')),
+        text('가'),
+        key(Key::Enter),
+    ];
+    let mut s = typing(true);
+    s.ui.font.as_mut().unwrap().glyphs[0x20] = [0; 8];
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        let (n, line) = keyread::read_words(&st, &io, 16).await;
+        io.present();
+        let mut s = st.borrow_mut();
+        s.converse.ints[0] = n as u16;
+        s.converse.buffers[0] = line;
+    });
+    e.enable_src_plane();
+    e.tick(&typed, 16);
+    for _ in 0..6 {
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    assert_eq!(
+        e.state().converse.buffers[0],
+        "  a가".as_bytes(),
+        "the line read as before"
+    );
+    let fb = e.frame();
+    // Each cell's 64 sources: (kind, code, typed) when all agree.
+    let cell = |col: usize| {
+        let at = |k: usize| fb.src_at(col * 8 + k % 8, 14 * 8 + k / 8).unwrap();
+        let s0 = at(0);
+        let same = (0..64).all(|k| {
+            let s = at(k);
+            s.kind == s0.kind && s.id == s0.id && s.flags & FLAG_TYPED == s0.flags & FLAG_TYPED
+        });
+        same.then_some((s0.kind, s0.id, s0.flags & FLAG_TYPED != 0))
+    };
+    let glyph = |code: u16, typed: bool| Some((Kind::Glyph, code, typed));
+    assert_eq!(cell(22), glyph(0x20, true), "a typed space");
+    assert_eq!(cell(23), glyph(0x20, true), "a typed space");
+    assert_eq!(
+        cell(24),
+        glyph(u16::from(b'a'), true),
+        "a letter typed after Backspace"
+    );
+    assert_eq!(cell(25), glyph(0xac00, true), "a syllable typed");
+    assert_eq!(
+        cell(26),
+        glyph(0x20, false),
+        "Backspace's blank, the cursor's cell at the end"
+    );
+    let mut c = Compositor::new();
+    c.set_font_mode(true);
+    c.compose(fb, &mut NoImages, Scale::X2);
+    let codes: Vec<(u16, u16)> = c
+        .glyphs()
+        .iter()
+        .filter(|g| g.y == 112)
+        .map(|g| (g.x / 8, g.code))
+        .collect();
+    assert_eq!(
+        codes[..5],
+        [
+            (22, TYPED_SPACE),
+            (23, TYPED_SPACE),
+            (24, u16::from(b'a')),
+            (25, 0xac00),
+            (26, 0x20)
+        ],
+        "listed: the typed spaces apart, the letters as they are"
+    );
+}

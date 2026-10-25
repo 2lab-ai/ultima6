@@ -182,3 +182,199 @@ fn set_cursor_clamps_to_the_window_and_starts_the_line_there() {
     assert!(e.finished());
     assert_eq!(&scroll_row(&e, 16)[5..7], "xy");
 }
+
+/// A paper of the screen's size all [`PAPER`] but `other` pixels of colour `c`, its colours
+/// through the identity table (spec 07 HD0, [`text::Paper`]), and the bitmap it is drawn from.
+fn paper(other: &[(usize, usize)], c: u8) -> text::Paper {
+    let mut pixels = vec![PAPER; 320 * 200];
+    for &(x, y) in other {
+        pixels[y * 320 + x] = c;
+    }
+    let bmp = u6_formats::bitmap::Bitmap {
+        width: 320,
+        height: 200,
+        pixels,
+    };
+    let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+    text::Paper::drawn(&identity, &bmp)
+}
+
+/// A frame with the plane and colours distinct per index.
+fn coloured_plane() -> Framebuffer {
+    let mut fb = Framebuffer::new();
+    fb.enable_src();
+    for (i, c) in fb.palette.iter_mut().enumerate() {
+        *c = u6_render::Rgb::new(i as u8, 255 - i as u8, 9);
+    }
+    fb
+}
+
+/// The HD font mode's list of `fb` and its symbols' rows.
+fn listed(fb: &Framebuffer) -> (Vec<u6_render::hd::HdGlyph>, Vec<[u8; 8]>) {
+    let mut c = u6_render::hd::Compositor::new();
+    c.set_font_mode(true);
+    c.compose(fb, &mut u6_render::hd::NoImages, u6_render::hd::Scale::X2);
+    (c.glyphs().to_vec(), c.symbol_rows().to_vec())
+}
+
+/// `fb` as the key wait's symbol named its pixels before spec 11 rev 3: each pixel named a
+/// symbol's ink ([`u6_render::FLAG_SYMBOL`]) named the paper by its rule instead
+/// ([`text::Paper::over`]), the colours as they are.
+fn as_before_rev3(fb: &Framebuffer, paper: &text::Paper) -> Framebuffer {
+    let mut old = fb.clone();
+    for (i, s) in fb.src().unwrap().iter().enumerate() {
+        if s.kind == u6_render::Kind::Glyph && s.flags & u6_render::FLAG_SYMBOL != 0 {
+            let (x, y) = (i % u6_render::WIDTH, i / u6_render::WIDTH);
+            let colour = fb.pixels()[i];
+            old.set_src(x, y, colour, paper.over(x, y, colour));
+        }
+    }
+    old
+}
+
+/// Spec 11 Design 2 (rev 3) on the text path, synthetic: over the paper, two made-up letters and
+/// the key wait's symbol in the next cell ([`text::draw_symbol`]) are listed as three cells, the
+/// third the symbol (its glyph, ink and paper) with its rows; before rev 3 two (the sources the
+/// symbol named then list the letters alone). An ink pixel of the symbol of the paper's own colour
+/// there names the paper as before and is still one of its rows. Without the paper's colours the
+/// symbol is classic and the letters alone are listed. One pixel of the cell written again
+/// classic: not listed. With the HD font off, the HD frame is byte for byte the one of the
+/// sources of before rev 3.
+#[test]
+fn a_symbol_after_two_letters_over_the_paper_is_listed_third() {
+    use u6_render::hd::{HdGlyph, NoImages, SYMBOL, Scale};
+    let font = font();
+    let w = *state().ui.text.win();
+    let fonts = (Some(&font), None);
+    // The symbol's cell (24, 14): ink at columns 5 and 7 (glyph 5's rows); the paper of the ink's
+    // colour under one of them.
+    let edge = (24 * 8 + 5, 14 * 8 + 3);
+    for (what, kept) in [
+        ("the paper", Some(paper(&[], INK))),
+        ("an ink pixel the paper's colour", Some(paper(&[edge], INK))),
+        ("no paper", None),
+    ] {
+        let mut fb = coloured_plane();
+        if let Some(p) = &kept {
+            text::fill_rect(&mut fb, 0, 0, 319, 199, PAPER, Some(p));
+        }
+        text::draw_char(&mut fb, Some(&font), None, &w, u16::from(b'a'), 22, 14);
+        text::draw_char(&mut fb, Some(&font), None, &w, u16::from(b'b'), 23, 14);
+        text::draw_symbol(&mut fb, fonts, &w, 5, (24, 14), kept.as_ref());
+        let letter = |col: u16, code: u8| HdGlyph {
+            x: col * 8,
+            y: 112,
+            code: u16::from(code),
+            ink: fb.palette[usize::from(INK)],
+            paper: fb.palette[usize::from(PAPER)],
+        };
+        let letters = vec![letter(22, b'a'), letter(23, b'b')];
+        let Some(p) = &kept else {
+            assert_eq!(listed(&fb), (letters, vec![]), "{what}: the letters alone");
+            continue;
+        };
+        let symbol = HdGlyph {
+            code: SYMBOL + 5,
+            ..letter(24, 0)
+        };
+        let mut three = letters.clone();
+        three.push(symbol);
+        assert_eq!(
+            listed(&fb),
+            (three, vec![[5; 8]]),
+            "{what}: three cells, the third the symbol"
+        );
+        let old = as_before_rev3(&fb, p);
+        assert_eq!(listed(&old), (letters, vec![]), "{what}: before rev 3, two");
+        for scale in [Scale::X2, Scale::X4] {
+            let (mut a, mut b) = (
+                u6_render::hd::Compositor::new(),
+                u6_render::hd::Compositor::new(),
+            );
+            a.compose(&fb, &mut NoImages, scale);
+            b.compose(&old, &mut NoImages, scale);
+            assert!(
+                a.rgba() == b.rgba(),
+                "{what}, {scale:?}: the HD font off, as before rev 3"
+            );
+        }
+        let mut broken = fb.clone();
+        broken.set(24 * 8 + 1, 14 * 8 + 6, PAPER);
+        assert_eq!(
+            listed(&broken).0.len(),
+            2,
+            "{what}: a pixel written again classic"
+        );
+    }
+}
+
+/// Spec 11 Design 2 (rev 3) through the key waits over the paper: after a line ("ab", no newline)
+/// the line editor's cursor (glyphs 5..=8) is listed as a symbol in the next cell, its rows its
+/// glyph's; at the more prompt of a paged window its mark (glyphs 1..=4) is listed as a symbol.
+/// Both draw through [`text::draw_symbol`].
+#[test]
+fn the_key_waits_list_their_symbols_over_the_paper() {
+    use u6_render::hd::symbol_glyph;
+    let kept = paper(&[], INK);
+    let symbols = |fb: &Framebuffer| -> Vec<(u16, u16, u8, [u8; 8])> {
+        let (list, rows) = listed(fb);
+        let at: Vec<_> = list
+            .iter()
+            .filter_map(|g| symbol_glyph(g.code).map(|s| (g.x, g.y, s)))
+            .collect();
+        assert_eq!(at.len(), rows.len(), "one row set per symbol");
+        at.into_iter()
+            .zip(rows)
+            .map(|((x, y, s), r)| (x, y, s, r))
+            .collect()
+    };
+    let mut s = state();
+    s.ui.paper = Some(kept.clone());
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        let p = st.borrow().ui.paper.clone();
+        io.draw(|fb| text::fill_rect(fb, 0, 0, 319, 199, PAPER, p.as_ref()));
+        printf(&st, &io, b"ab", &[]).await;
+        let _ = keyread::read_line(&st, &io, 8).await;
+    });
+    e.enable_src_plane();
+    for _ in 0..6 {
+        e.tick(&[], 16);
+    }
+    let seen = symbols(e.frame());
+    assert_eq!(seen.len(), 1, "the line editor's cursor listed");
+    let (x, y, glyph, rows) = seen[0];
+    assert_eq!((x, y), (24 * 8, 14 * 8), "after the line");
+    assert!(
+        (5..=8).contains(&glyph) && rows == [glyph; 8],
+        "the cursor's glyph"
+    );
+    // The more prompt of a paged window.
+    let mut s = state();
+    s.ui.paper = Some(kept);
+    s.ui.text.win_mut().flags |= text::PAGED;
+    s.ui.text.more_rows = 10;
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        let p = st.borrow().ui.paper.clone();
+        io.draw(|fb| text::fill_rect(fb, 0, 0, 319, 199, PAPER, p.as_ref()));
+        for i in 0..12u16 {
+            printf(&st, &io, b"p%d\n", &[Arg::Word(i)]).await;
+        }
+        io.present();
+    });
+    e.enable_src_plane();
+    for _ in 0..6 {
+        e.tick(&[], 16);
+    }
+    assert_eq!(
+        e.state().ui.input.cursor_glyph,
+        1,
+        "precondition: at the more prompt"
+    );
+    let seen = symbols(e.frame());
+    assert_eq!(seen.len(), 1, "the more prompt's mark listed");
+    let (_, _, glyph, rows) = seen[0];
+    assert!(
+        (1..=4).contains(&glyph) && rows == [glyph; 8],
+        "the mark's glyph"
+    );
+}

@@ -22,8 +22,12 @@
 //! the space drawn whole, no pixel of it ink, all 64 of one colour. It is filled with its paper
 //! like a listed letter, which leaves its pixels as they were, and nothing is drawn for it: it
 //! tells the platform that the text writer drew a space there, which no other blank cell is, so
-//! a run of text drawn at the font's own width may cross it. Every other cell is composed as
-//! with the mode off.
+//! a run of text drawn at the font's own width may cross it. A whole space the player typed
+//! ([`crate::FLAG_TYPED`], rev 3) is listed as [`TYPED_SPACE`]. A symbol the game drew over the
+//! paper (the key wait's cursor, the more prompt's mark: [`crate::FLAG_SYMBOL`] on its ink
+//! pixels, the paper named under the rest, rev 3) is filled with its paper too and listed as
+//! [`SYMBOL`] plus its glyph, its rows kept ([`Compositor::symbol_rows`]): the platform draws it
+//! after the text it follows. Every other cell is composed as with the mode off.
 //!
 //! An image's HD version (spec 07 "HD image per id"):
 //!
@@ -61,7 +65,10 @@ mod tests;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{BITMAP_PAPER, FLAG_INK, FLAG_PAPER, Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
+use crate::{
+    BITMAP_PAPER, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED, Framebuffer,
+    HEIGHT, Kind, Rgb, Src, WIDTH,
+};
 
 pub use mmpx::{mmpx, mmpx2x};
 
@@ -572,13 +579,31 @@ const HANGUL: std::ops::RangeInclusive<u16> = 0xac00..=0xd7a3;
 /// Spec 11: whether a glyph cell of code `code` is drawn in the HD font ([`Compositor::glyphs`]):
 /// printable ASCII but the space (0x21..=0x7e) and the Hangul syllables. Not the space, the
 /// control codes the game draws as symbols (its key-wait cursor), and the codes past 0x7e of its
-/// font (the runes). A whole space is listed apart from these and not drawn ([`HdGlyph::code`]).
+/// font (the runes). A whole space is listed apart from these and not drawn ([`HdGlyph::code`]),
+/// and so is a symbol drawn over the paper ([`SYMBOL`]).
 pub fn hd_font_code(code: u16) -> bool {
     (0x21..=0x7e).contains(&code) || HANGUL.contains(&code)
 }
 
 /// The space's code: listed when whole, not drawn in the HD font ([`glyph_cell`]).
 const SPACE: u16 = 0x20;
+
+/// Spec 11 Design 2 (rev 3): [`HdGlyph::code`] of a listed symbol is this plus its glyph's code (a
+/// code of the game's font, under 0x100): codes no listed character has (private use).
+pub const SYMBOL: u16 = 0xe000;
+
+/// Spec 11 Design 3 (rev 3): [`HdGlyph::code`] of a whole space the player typed
+/// ([`crate::FLAG_TYPED`]): it never ends a run of text (a private-use code no listed character
+/// has).
+pub const TYPED_SPACE: u16 = 0xe120;
+
+/// Spec 11 rev 3: the glyph of a listed symbol's [`HdGlyph::code`] ([`SYMBOL`]), `None` for any
+/// other code.
+pub fn symbol_glyph(code: u16) -> Option<u8> {
+    (SYMBOL..SYMBOL + 0x100)
+        .contains(&code)
+        .then(|| (code - SYMBOL) as u8)
+}
 
 /// Spec 11: one cell the HD font mode lists ([`Compositor::glyphs`]): a cell it shows in the HD
 /// font, or a whole space.
@@ -589,33 +614,43 @@ pub struct HdGlyph {
     pub y: u16,
     /// Its code: a code drawn in the HD font ([`hd_font_code`]), or 0x20, a space the text
     /// writer drew whole (no pixel of it ink, all of one colour), for which nothing is drawn: a
-    /// run of text may cross it.
+    /// run of text may cross it; [`TYPED_SPACE`], such a space the player typed; [`SYMBOL`] plus
+    /// its glyph, a symbol drawn over the paper ([`Compositor::symbol_rows`]).
     pub code: u16,
     /// The colour of its set pixels and of its clear ones; a space's ink is its paper.
     pub ink: Rgb,
     pub paper: Rgb,
 }
 
-/// A cell listed: its code and its ink and paper indices (a space's ink is its paper).
+/// A cell listed: its code and its ink and paper indices (a space's ink is its paper); a
+/// symbol's rows (bit 7 = leftmost; none for a character or a space).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellGlyph {
     code: u16,
     ink: u8,
     paper: u8,
+    rows: [u8; CELL],
 }
 
 /// Whether cell (col, row) is listed, and as what. Each of its 64 pixels is a [`Kind::Glyph`]
-/// source of one code at version 0, (u, v) its place in the cell, flags [`FLAG_INK`] or none,
-/// its set pixels of one colour and its clear ones of one colour; and either the code is drawn
-/// in the HD font ([`hd_font_code`]) with at least one set pixel and one clear one, or it is the
-/// space ([`SPACE`], not drawn in the HD font, listed on its own) with no set pixel, listed with
-/// its one colour as its ink and its paper.
+/// source of one code at version 0, (u, v) its place in the cell, flags [`FLAG_INK`] or none
+/// (with [`FLAG_PAPER`] where drawn over the paper, and [`FLAG_TYPED`] on all of them or on
+/// none), its set pixels of one colour and its clear ones of one colour; and either the code is
+/// drawn in the HD font ([`hd_font_code`]) with at least one set pixel and one clear one, or it
+/// is the space ([`SPACE`], not drawn in the HD font, listed on its own; [`TYPED_SPACE`] typed)
+/// with no set pixel, listed with its one colour as its ink and its paper. Or it is a symbol
+/// drawn over the paper ([`symbol_cell`]).
 fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<CellGlyph> {
     let (x0, y0) = (col * CELL, row * CELL);
-    let code = plane[y0 * WIDTH + x0].id;
-    if plane[y0 * WIDTH + x0].kind != Kind::Glyph || !(hd_font_code(code) || code == SPACE) {
+    let first = plane[y0 * WIDTH + x0];
+    if first.kind != Kind::Glyph || first.flags & FLAG_SYMBOL != 0 {
+        return symbol_cell(plane, pixels, (x0, y0));
+    }
+    let code = first.id;
+    if !(hd_font_code(code) || code == SPACE) {
         return None;
     }
+    let typed = first.flags & FLAG_TYPED;
     let (mut ink, mut paper) = (None, None);
     for v in 0..CELL {
         for u in 0..CELL {
@@ -627,7 +662,7 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
                 u: u as u16,
                 v: v as u16,
                 kind: Kind::Glyph,
-                flags: s.flags & (FLAG_INK | FLAG_PAPER),
+                flags: s.flags & (FLAG_INK | FLAG_PAPER) | typed,
             };
             if s != at {
                 return None;
@@ -645,9 +680,10 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
     if code == SPACE {
         return match (ink, paper) {
             (None, Some(paper)) => Some(CellGlyph {
-                code,
+                code: if typed != 0 { TYPED_SPACE } else { SPACE },
                 ink: paper,
                 paper,
+                rows: [0; CELL],
             }),
             _ => None,
         };
@@ -656,6 +692,79 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
         code,
         ink: ink?,
         paper: paper?,
+        rows: [0; CELL],
+    })
+}
+
+/// Spec 11 Design 2 (rev 3): whether the cell at screen pixel (x0, y0) is a symbol the game drew
+/// over the paper (`draw_symbol` of the text layer: the key wait's cursor, the more prompt's
+/// mark), and as what. Its ink pixels are [`Kind::Glyph`] sources of one code under 0x100 at
+/// version 0, (u, v) their place in the cell, flags [`FLAG_INK`], [`FLAG_PAPER`] and
+/// [`FLAG_SYMBOL`], all of one colour (its ink); every other pixel names the paper at its own
+/// place (flagged [`FLAG_PAPER_OFF`] or not), of one other colour (its paper), or of the ink's
+/// colour unflagged (an ink pixel the paper's own colour there, which the symbol named the
+/// paper: an ink pixel too). At least one ink pixel and one of the paper. Listed as [`SYMBOL`]
+/// plus its code, with its rows. A cell that does not start with a pixel naming the paper or a
+/// symbol's is none (the cheap test that keeps this off every other cell).
+fn symbol_cell(plane: &[Src], pixels: &[u8], (x0, y0): (usize, usize)) -> Option<CellGlyph> {
+    let names_paper = |s: &Src, x: usize, y: usize| {
+        s.kind == Kind::Bitmap
+            && s.id == BITMAP_PAPER
+            && s.ver == 0
+            && (usize::from(s.u), usize::from(s.v)) == (x, y)
+            && s.flags & !FLAG_PAPER_OFF == 0
+    };
+    let symbol = |s: &Src| s.kind == Kind::Glyph && s.flags & FLAG_SYMBOL != 0;
+    let first = plane[y0 * WIDTH + x0];
+    if !(names_paper(&first, x0, y0) || symbol(&first)) {
+        return None;
+    }
+    let (mut code, mut ink) = (None, None);
+    let mut rows = [0u8; CELL];
+    for (v, row) in rows.iter_mut().enumerate() {
+        for u in 0..CELL {
+            let (x, y) = (x0 + u, y0 + v);
+            let i = y * WIDTH + x;
+            let s = plane[i];
+            if symbol(&s) {
+                let at = Src {
+                    ver: 0,
+                    id: *code.get_or_insert(s.id),
+                    u: u as u16,
+                    v: v as u16,
+                    kind: Kind::Glyph,
+                    flags: FLAG_INK | FLAG_PAPER | FLAG_SYMBOL,
+                };
+                if s != at || *ink.get_or_insert(pixels[i]) != pixels[i] {
+                    return None;
+                }
+                *row |= 0x80 >> u;
+            } else if !names_paper(&s, x, y) {
+                return None;
+            }
+        }
+    }
+    let (glyph, ink) = (u8::try_from(code?).ok()?, ink?);
+    let mut paper = None;
+    for (v, row) in rows.iter_mut().enumerate() {
+        let marked = *row;
+        for u in (0..CELL).filter(|&u| marked & (0x80 >> u) == 0) {
+            let i = (y0 + v) * WIDTH + x0 + u;
+            if pixels[i] == ink {
+                if plane[i].flags != 0 {
+                    return None;
+                }
+                *row |= 0x80 >> u;
+            } else if *paper.get_or_insert(pixels[i]) != pixels[i] {
+                return None;
+            }
+        }
+    }
+    Some(CellGlyph {
+        code: SYMBOL + u16::from(glyph),
+        ink,
+        paper: paper?,
+        rows,
     })
 }
 
@@ -736,6 +845,8 @@ pub struct Compositor {
     cells: Vec<Option<CellGlyph>>,
     /// The cells the last composition showed in the HD font ([`Compositor::glyphs`]).
     glyphs: Vec<HdGlyph>,
+    /// The rows of each symbol among them ([`Compositor::symbol_rows`]).
+    symbol_rows: Vec<[u8; CELL]>,
 }
 
 impl Default for Compositor {
@@ -772,6 +883,7 @@ impl Compositor {
             font_changed: false,
             cells: Vec::new(),
             glyphs: Vec::new(),
+            symbol_rows: Vec::new(),
         }
     }
 
@@ -825,9 +937,9 @@ impl Compositor {
     }
 
     /// Spec 11: the HD font mode on (`hd`) or off (the pixel font). On, each cell of the glyph of
-    /// one code drawn whole whose code is drawn in the HD font ([`hd_font_code`]), and each whole
-    /// space, is filled with its paper colour (the paper's HD block where that is the paper's
-    /// colour) and listed ([`Compositor::glyphs`]); off, glyph pixels are composed as the module
+    /// one code drawn whole whose code is drawn in the HD font ([`hd_font_code`]), each whole
+    /// space and each symbol drawn over the paper (rev 3), is filled with its paper colour (the
+    /// paper's HD block where that is the paper's colour) and listed ([`Compositor::glyphs`]); off, glyph pixels are composed as the module
     /// docs say for every glyph pixel (classic, or the paper's HD block behind a clear pixel
     /// drawn over the paper in its colour), as every composition before the mode did. A change
     /// empties the list at once and makes the next composition write every block, as a change of
@@ -838,6 +950,7 @@ impl Compositor {
             self.font = hd;
             self.font_changed = true;
             self.glyphs.clear();
+            self.symbol_rows.clear();
         }
     }
 
@@ -846,9 +959,9 @@ impl Compositor {
         self.font
     }
 
-    /// The cells the last composition listed, in raster order: those it showed in the HD font and
-    /// the whole spaces, for which nothing is drawn but which a run of text may cross
-    /// ([`HdGlyph::code`]). All of them, the cells it left as they were included (a platform that
+    /// The cells the last composition listed, in raster order: those it showed in the HD font, the
+    /// whole spaces, for which nothing is drawn but which a run of text may cross, and the symbols
+    /// drawn over the paper, which the platform draws ([`HdGlyph::code`]). All of them, the cells it left as they were included (a platform that
     /// copies a rect of the frame draws every listed glyph over it again). Empty with the mode
     /// off, and after a change of the mode until the next composition. A cell enters, leaves or
     /// changes in this list only with every block of it written (a space's too, whose blocks
@@ -857,6 +970,13 @@ impl Compositor {
     /// whole cell.
     pub fn glyphs(&self) -> &[HdGlyph] {
         &self.glyphs
+    }
+
+    /// Spec 11 Design 2 (rev 3): the rows of each symbol [`Compositor::glyphs`] lists ([`SYMBOL`]),
+    /// in its order: its 8 rows of 8 pixels (bit 7 = leftmost), a set bit an ink pixel of the
+    /// cell. The platform draws the symbol from them, its cell being its paper in the frame.
+    pub fn symbol_rows(&self) -> &[[u8; CELL]] {
+        &self.symbol_rows
     }
 
     /// Composes `frame` at `scale` from the images `images` names ([`Compositor::rgba`]).
@@ -1011,6 +1131,14 @@ impl Compositor {
                     paper: frame.palette[usize::from(g.paper)],
                 })
             }));
+        self.symbol_rows.clear();
+        self.symbol_rows.extend(
+            cells
+                .iter()
+                .flatten()
+                .filter(|g| symbol_glyph(g.code).is_some())
+                .map(|g| g.rows),
+        );
         self.hd.shrink();
         if dirty[2] == 0 {
             return false;
