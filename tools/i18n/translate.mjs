@@ -42,8 +42,11 @@
 // coverage.json left as they were.
 //
 // What is chosen: from the bundles, one script, `--item <archive>:<item>` (the archive letter and
-// item the bundle has) or `--name <text>` (the bundle whose NPC name is that, case folded: one
-// match, else a refusal that counts them; the name is never printed), or the first N scripts with
+// item the bundle has; or a list of them joined by commas, `--item a:10,b:3`, those scripts in
+// that order, each once: one listed that is not in the bundles, is refused or has no lines is
+// refused by its position in the list) or `--name <text>` (the bundle whose NPC name is that,
+// case folded: one match, else a refusal that counts them; the name is never printed), or the
+// first N scripts with
 // lines in (archive, item) order, `--first N`; and with `--strings <file>`, every game string,
 // object name, book and string of u it lists, or only the parts `--only` names (strings, look,
 // books, u).
@@ -59,6 +62,11 @@
 // (registerOf). A script the file does not list takes Pass A, `adult` and an empty profile. `--ages a,b` (with `--speakers` only) chooses the
 // scripts of those ages, a script not listed counting as adult: all of them, or with `--first N`
 // the first N of them. Without `--speakers` every request is byte for byte as before.
+// Spec 15, the register by station: `--speakers` reads u6.speakers/2 too (each entry also its
+// `sex`, `station`, `manner` and `name_ko`, readSpeakers); a script such a file lists has its
+// request's NPC also name its `station`, its `manner` and its `address` (the words it calls the
+// hero, addressOf), and its register is the one for that station at that age, its role's colour
+// and its manner's line (registerOf). A u6.speakers/1 file's request is byte for byte spec 12's.
 // One Korean form per name over the scripts: `--names <file>` (u6.names/1, the owner's names
 // table, local: {format, names: [{en, ko}]}, read strictly (readNames): one that does not read,
 // or whose two entries give one form or a form and that form with a particle after it, is
@@ -181,8 +189,8 @@
 // model's name): never a name, a line, a script's (archive, item) or a hash. An error prints its
 // kind only.
 //
-//   node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N
-//        | --ages AGES [--first N]) [--speakers <speakers.json>] [--names <names.json>]
+//   node tools/i18n/translate.mjs [<bundles.json> (--item a:N[,b:M...] | --name TEXT
+//        | --first N | --ages AGES [--first N]) [--speakers <speakers.json>] [--names <names.json>]
 //        [--fresh-keywords] [--regate]]
 //        [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS]
 //        [--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs N]
@@ -268,30 +276,113 @@ export const CLASSES = {
 /// The speakers' ages (spec 12): the age decides the speech level first, then the class.
 export const AGES = ['child', 'youth', 'adult', 'elder'];
 export const SPEAKERS_FORMAT = 'u6.speakers/1';
+/// Spec 15 Design 1: the speaker file's second form, each entry also naming the speaker's sex, its
+/// station, its manner and its own name in Hangul (`name_ko`).
+export const SPEAKERS_FORMAT_2 = 'u6.speakers/2';
+export const SEXES = ['female', 'male', 'none'];
+export const STATIONS = ['royalty', 'lord', 'commoner', 'lowborn', 'beyond'];
+export const MANNERS = ['plain', 'jester', 'mad', 'pompous', 'drunk', 'sly', 'gruff', 'timid', 'pious'];
 export const SPEAKER_NOTE_MAX = 400; // the characters of a speaker's note the reader takes
 const SPEAKERS_MAX = 1 << 16; // the entries of a speaker file
 export const NAMES_FORMAT = 'u6.names/1';
 export const NAME_SYLLABLES = 8; // the Hangul syllables of a name's Korean form, at most
 const NAMES_MAX = 1 << 12; // the entries of a names table
 
+/// Whether `ko` is a name's Korean form (a /2 speaker's `name_ko`): words of Hangul syllables, one
+/// space between two, 1 to NAME_SYLLABLES syllables in all. Every character is read, so nothing
+/// but syllables and single ASCII spaces passes (no line terminator at either end), whatever the
+/// pattern's anchors take.
+export const nameForm = (ko) => typeof ko === 'string' && [...ko].every((c) => c === ' ' || (c >= '가' && c <= '힣'))
+  && /^[가-힣]+( [가-힣]+)*$/.test(ko) && ko.replace(/ /g, '').length <= NAME_SYLLABLES;
+
 // The stations whose young speak 해요체 (an apprentice, a young servant); the young of the others
-// speak a soft 하오체 (a young noble, a squire). Spec 12 Design 3.
+// speak a soft 하오체 (a young noble, a squire). Spec 12 Design 3: by class, for a speaker with no
+// station; spec 15 Design 2: by station (PLAIN_YOUNG).
 const PLAIN_STATIONS = new Set(['merchant', 'commoner', 'thief']);
+const PLAIN_YOUNG = new Set(['commoner', 'lowborn']);
+
+/// Spec 15 Design 2: an adult's and an elder's level by station, and the words each calls the hero
+/// (`elderAddress`, an elder's where it differs). The modern 반말 endings the guide bans for every
+/// other adult and elder are the lowborn's to use, 해요체 (~요) never.
+export const STATION_REGISTERS = {
+  royalty: { adult: '해라체 (~노라, ~하라, ~느니라)', elder: '해라체 (~노라, ~하라, ~느니라)', address: '그대' },
+  lord: { adult: '하오체 (~하오, ~이오, ~시오), formal', elder: '하게체 (~하게, ~하네, ~일세)', address: '그대, 귀공', elderAddress: '그대, 자네' },
+  commoner: {
+    adult: 'a humble 사극 합쇼체 (~습니다, ~습죠, ~굽쇼, ~입니다요)', elder: 'a rural old person\'s turns (~구먼, ~했지, ~하게)',
+    address: '나리, 나으리', elderAddress: '젊은이, 나리',
+  },
+  lowborn: {
+    adult: 'rough low talk: 반말 and 하게체 mixed (~하슈, ~했수, ~다고, ~하라고, 이봐), every modern 반말 ending allowed '
+      + '(~해, ~야, ~지, ~냐, ~거든, ~잖아) but no 해요체 (~요); a beggar begs in a whining 합쇼체 (~줍쇼, ~습죠)',
+    elder: 'rough 반말, every modern 반말 ending allowed (~해, ~야, ~지, ~냐, ~거든, ~잖아) but no 해요체 (~요)',
+    address: '이보쇼, 형씨, 당신 (나리 in mockery)',
+  },
+  beyond: { adult: 'an archaic 해라체 (~로다, ~도다, ~니라)', elder: 'an archaic 해라체 (~로다, ~도다, ~니라)', address: '그대' },
+};
+
+/// The colour a role (the class) gives its station's level, for an adult or an elder (spec 15
+/// Design 2); a class not named here gives none.
+export const ROLE_COLOURS = {
+  merchant: 'as a merchant, the shop\'s formulas (어서 옵쇼, ~하옵니다)',
+  scholar: 'as a scholar, Sino-Korean diction (in Hangul)',
+  clergy: 'as a cleric, Sino-Korean diction (in Hangul)',
+  mage: 'as a mage, Sino-Korean diction (in Hangul)',
+  guard: 'as a guard, clipped',
+  gargoyle: 'as a gargoyle, the guide\'s gargoyle register in place of this level, the station setting only whom it defers to',
+};
+
+/// The line each manner adds to a register with a station (spec 15 Design 2): the diction and the
+/// rhythm inside the level.
+export const MANNER_LINES = {
+  plain: 'manner plain: the level as it is',
+  jester: 'manner jester: Korean rhymes, puns and a sung rhythm of its own, the line\'s sense and every keyword kept '
+    + '(not the English wordplay word for word)',
+  mad: 'manner mad: lurching, in fragments, repetitions, sudden shouts and whispers, talk to oneself; it may break the one-level rule',
+  pompous: 'manner pompous: inflated (에헴, 본관, Sino-Korean titles)',
+  drunk: 'manner drunk: slurs and trails off (~하는 거여…); it may slip out of its level into a slurred 반말',
+  sly: 'manner sly: flatters and hints',
+  gruff: 'manner gruff: short',
+  timid: 'manner timid: hesitates (저, 저기…)',
+  pious: 'manner pious: blesses and intones',
+};
+
+const CHILD_REGISTER = 'a child\'s speech: short sentences in easy native words, none of the archaic adult endings; '
+  + '해요체 (~요, ~어요) to a grown-up, 반말 to another child; the hero never 그대';
+const YOUNG_PLAIN = '해요체 (~요, ~어요), a young person\'s lighter level';
+const YOUNG_SOFT = 'a soft 하오체 (~하오, ~이오), a young person\'s lighter level with fewer archaic endings';
 
 /// The register a request names for a speaker of class `cls` at age `age` (spec 12 Design 3, the
 /// guide's ages): a child's speech whatever its class; a young person's lighter level by station;
-/// the class's level with an old person's turns; an adult's is the class's (CLASSES).
-export function registerOf(cls, age = 'adult') {
-  if (age === 'child') {
-    return 'a child\'s speech: short sentences in easy native words, none of the archaic adult endings; '
-      + '해요체 (~요, ~어요) to a grown-up, 반말 to another child; the hero never 그대';
+/// the class's level with an old person's turns; an adult's is the class's (CLASSES). With a
+/// `station` (spec 15 Design 2, one of STATIONS): a child's and a young person's as before, the
+/// young person's level by that station (`commoner` and `lowborn` 해요체, the others the soft
+/// 하오체); an adult's and an elder's the station's (STATION_REGISTERS), the role's colour after it
+/// (ROLE_COLOURS); then, at every age, the `manner`'s line (MANNER_LINES; `plain`'s for one not
+/// of MANNERS). With no station it is exactly spec 12's.
+export function registerOf(cls, age = 'adult', station = undefined, manner = undefined) {
+  if (station === undefined || station === null) {
+    if (age === 'child') return CHILD_REGISTER;
+    if (age === 'youth') return PLAIN_STATIONS.has(cls) ? YOUNG_PLAIN : YOUNG_SOFT;
+    if (age === 'elder') return `${CLASSES[cls]}, with an old person's turns (~구먼, ~하네, ~일세)`;
+    return CLASSES[cls];
   }
-  if (age === 'youth') {
-    return PLAIN_STATIONS.has(cls) ? '해요체 (~요, ~어요), a young person\'s lighter level'
-      : 'a soft 하오체 (~하오, ~이오), a young person\'s lighter level with fewer archaic endings';
+  let level;
+  if (age === 'child') level = CHILD_REGISTER;
+  else if (age === 'youth') level = PLAIN_YOUNG.has(station) ? YOUNG_PLAIN : YOUNG_SOFT;
+  else {
+    const colour = Object.hasOwn(ROLE_COLOURS, cls) ? ROLE_COLOURS[cls] : null;
+    level = `${STATION_REGISTERS[station][age === 'elder' ? 'elder' : 'adult']}${colour ? `; ${colour}` : ''}`;
   }
-  if (age === 'elder') return `${CLASSES[cls]}, with an old person's turns (~구먼, ~하네, ~일세)`;
-  return CLASSES[cls];
+  return `${level}; ${MANNER_LINES[Object.hasOwn(MANNER_LINES, manner) ? manner : 'plain']}`;
+}
+
+/// The words a speaker of `station` (one of STATIONS) at age `age` calls the hero (spec 15 Design
+/// 2, the station table's; an elder's own where the table gives one), a child's as spec 12 gives
+/// them whatever its station.
+export function addressOf(station, age = 'adult') {
+  if (age === 'child') return '아저씨, 언니, 오빠, 기사님 or 그쪽, never 그대';
+  const s = STATION_REGISTERS[station];
+  return age === 'elder' && s.elderAddress ? s.elderAddress : s.address;
 }
 
 // Pass A: words of a name or description that tell a class, the most telling first.
@@ -1306,17 +1397,25 @@ function lineOf(u) {
 /// `systemOf(style, true)`'s. With none it is K1's to K4's body, byte for byte, for the same style.
 /// With `speaker` (spec 12: a script's {age, profile} from the speaker file, [`planOf`]) the `npc`
 /// also names its `age` and its `profile` (the personality note), and its `register` is the one
-/// for that class at that age ([`registerOf`]); without it (null) the body is as before. With
+/// for that class at that age ([`registerOf`]); without it (null) the body is as before. A
+/// speaker with a `station` (spec 15: one a u6.speakers/2 file lists) also gives the `npc` its
+/// `station`, its `manner` and its `address` (the words it calls the hero, [`addressOf`]), and its
+/// `register` is the one for that station at that age with its role's colour and its manner's
+/// line; one with none (a /1 file's, or a script the file does not list) is spec 12's, byte for
+/// byte. With
 /// `names` (the owner's names table, [`readNames`]'s) the body also lists `names`, the names of
 /// the table `lines` hold ([`namesOf`]), each {en, ko}, when they hold any; without it (null), or
 /// when they hold none, the body is as before.
 export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker = null, names = null) {
+  const station = speaker?.station ?? null;
   const npc = {
     name: typeof bundle.name === 'string' ? bundle.name : '',
     description: textOf(bundle.narration?.look),
     class: cls,
     ...(speaker ? { age: speaker.age, profile: speaker.profile } : {}),
-    register: speaker ? registerOf(cls, speaker.age) : CLASSES[cls],
+    ...(station !== null ? { station, manner: speaker.manner } : {}),
+    register: station !== null ? registerOf(cls, speaker.age, station, speaker.manner) : speaker ? registerOf(cls, speaker.age) : CLASSES[cls],
+    ...(station !== null ? { address: addressOf(station, speaker.age) } : {}),
   };
   const held = names === null ? [] : namesOf(lines, names).map(({ en, ko }) => ({ en, ko }));
   const user = JSON.stringify({
@@ -1542,24 +1641,39 @@ export function keywordsOfAnswer(content) {
 /// writes) as a Map of `<archive>:<item>` to {age, class, note}. Strict: an object of exactly
 /// {format, model, speakers} and, optionally, `coverage` (speakers.mjs's receipt: an object, not
 /// read for the plan), each entry exactly {archive, item, age, class, note}, its archive a or b,
-/// its item 0 to 65535, its age one of AGES, its class one of CLASSES and its note at most
-/// SPEAKER_NOTE_MAX characters, each script once. Anything else throws an InputError with a fixed
-/// message (a count at most).
+/// its item 0 to 65535, its age one of AGES, its class one of CLASSES (each a string: an array
+/// holding one is not) and its note at most SPEAKER_NOTE_MAX characters, each script once.
+/// Anything else throws an InputError with a fixed message (a count at most).
+/// Spec 15 Design 1: it reads u6.speakers/2 too, the same but each entry exactly {archive, item,
+/// age, class, note, sex, station, manner, name_ko}: its sex one of SEXES, its station one of
+/// STATIONS, its manner one of MANNERS (each a string), its `name_ko` null or a name's Korean
+/// form ([`nameForm`]: 1 to NAME_SYLLABLES Hangul syllables, one space between two words); a /2
+/// file's values also give `sex`, `station`, `manner` and `nameKo`. A file of neither format is
+/// refused as not /1.
 export function readSpeakers(value) {
-  const refused = (why) => new InputError(`the speakers file is not ${SPEAKERS_FORMAT}${why ? `: ${why}` : ''}`);
-  if (!exact(value, ['format', 'model', 'speakers'], ['coverage']) || value.format !== SPEAKERS_FORMAT || typeof value.model !== 'string'
+  const second = plain(value) && value.format === SPEAKERS_FORMAT_2;
+  const format = second ? SPEAKERS_FORMAT_2 : SPEAKERS_FORMAT;
+  const refused = (why) => new InputError(`the speakers file is not ${format}${why ? `: ${why}` : ''}`);
+  if (!exact(value, ['format', 'model', 'speakers'], ['coverage']) || value.format !== format || typeof value.model !== 'string'
     || !Array.isArray(value.speakers) || (Object.hasOwn(value, 'coverage') && !plain(value.coverage))) throw refused('');
   if (value.speakers.length > SPEAKERS_MAX) throw refused(`it lists more than ${SPEAKERS_MAX} scripts`);
-  const entry = (s) => exact(s, ['archive', 'item', 'age', 'class', 'note']) && ['a', 'b'].includes(s.archive)
-    && Number.isInteger(s.item) && s.item >= 0 && s.item <= 0xffff && AGES.includes(s.age) && Object.hasOwn(CLASSES, s.class)
-    && typeof s.note === 'string' && [...s.note].length <= SPEAKER_NOTE_MAX;
+  const members = ['archive', 'item', 'age', 'class', 'note', ...(second ? ['sex', 'station', 'manner', 'name_ko'] : [])];
+  // An entry's enums are strings before they are looked up (a one-element array would pass
+  // Object.hasOwn by its key); a /1 entry that reads takes the same values as before.
+  const text = (...xs) => xs.every((x) => typeof x === 'string');
+  const entry = (s) => exact(s, members) && ['a', 'b'].includes(s.archive)
+    && Number.isInteger(s.item) && s.item >= 0 && s.item <= 0xffff && text(s.age, s.class) && AGES.includes(s.age) && Object.hasOwn(CLASSES, s.class)
+    && typeof s.note === 'string' && [...s.note].length <= SPEAKER_NOTE_MAX
+    && (!second || (text(s.sex, s.station, s.manner) && SEXES.includes(s.sex) && STATIONS.includes(s.station) && MANNERS.includes(s.manner)
+      && (s.name_ko === null || nameForm(s.name_ko))));
   const bad = value.speakers.filter((s) => !entry(s)).length;
-  if (bad > 0) throw refused(`${bad} entries are not {archive, item, age, class, note} of its forms`);
+  if (bad > 0) throw refused(`${bad} entries are not {${members.join(', ')}} of its forms`);
   const speakers = new Map();
   let twice = 0;
   for (const s of value.speakers) {
     const key = `${s.archive}:${s.item}`;
     if (speakers.has(key)) twice += 1;
+    else if (second) speakers.set(key, { age: s.age, class: s.class, note: s.note, sex: s.sex, station: s.station, manner: s.manner, nameKo: s.name_ko });
     else speakers.set(key, { age: s.age, class: s.class, note: s.note });
   }
   if (twice > 0) throw refused(`${twice} entries list a script listed before`);
@@ -1600,16 +1714,18 @@ export function readNames(value) {
   return value.names.map(({ en, ko }) => ({ en, ko }));
 }
 
-/// The bundles of `value` (the parsed file) as the scripts to translate: `item` ({archive, item}),
-/// the one bundle whose `name` is `name` (case folded), or the `first` scripts with lines, in
-/// (archive, item) order. Each script's units: its runs, then its table strings (one an op reads
-/// from inside is left English, `inner`); its keys (slice K5b, [`keysOf`]) with the words the
-/// units asked highlight for each (`shown`, [`shownOf`]). Throws a fixed message (a count at most)
-/// when the file is not a list of bundles or the script named has no lines.
+/// The bundles of `value` (the parsed file) as the scripts to translate: `item` ({archive, item},
+/// or a list of them: those scripts, in the list's order), the one bundle whose `name` is `name`
+/// (case folded), or the `first` scripts with lines, in (archive, item) order. Each script's
+/// units: its runs, then its table strings (one an op reads from inside is left English,
+/// `inner`); its keys (slice K5b, [`keysOf`]) with the words the units asked highlight for each
+/// (`shown`, [`shownOf`]). Throws a fixed message (a count, or a listed script's position, at
+/// most) when the file is not a list of bundles or a script named has no lines.
 /// With `speakers` (spec 12: [`readSpeakers`]'s Map) each script's `speaker` is {age, profile,
 /// listed}: a script the file lists takes its age, its note as the profile and its class (unless
 /// `cls`, the owner's --class, gives one for the run); one it does not list Pass A, `adult` and
-/// no note. `ages` (a list of AGES, with `speakers`) keeps only the scripts of those ages, in
+/// no note. A script a u6.speakers/2 file lists also takes its `sex`, `station` and `manner`
+/// (spec 15). `ages` (a list of AGES, with `speakers`) keeps only the scripts of those ages, in
 /// order, all of them, or the `first` of them; without `speakers` every script is as before
 /// (`speaker` null).
 export function planOf(value, { item = null, first = null, name = null, cls = null, speakers = null, ages = null } = {}) {
@@ -1622,8 +1738,13 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
   const listedOf = (b) => speakers?.get(`${b.archive}:${b.item}`) ?? null;
   let chosen;
   if (item) {
-    chosen = usable.filter((b) => b.archive === item.archive && b.item === item.item);
-    if (chosen.length === 0) throw new InputError('the script named is not in the bundles, is refused or has no lines');
+    const items = Array.isArray(item) ? item : [item];
+    chosen = items.flatMap((it, at) => {
+      const of = usable.filter((b) => b.archive === it.archive && b.item === it.item);
+      if (of.length > 0) return of;
+      throw new InputError(items.length === 1 ? 'the script named is not in the bundles, is refused or has no lines'
+        : `the script --item names at position ${at + 1} is not in the bundles, is refused or has no lines`);
+    });
   } else if (name !== null) {
     const want = name.toLowerCase();
     chosen = usable.filter((b) => typeof b.name === 'string' && b.name.toLowerCase() === want);
@@ -1641,7 +1762,10 @@ export function planOf(value, { item = null, first = null, name = null, cls = nu
     const { topics, keys } = keysOf(b);
     const shown = shownOf(units.filter((u) => !u.done), keys);
     const listed = listedOf(b);
-    const speaker = speakers === null ? null : { age: listed?.age ?? 'adult', profile: listed?.note ?? '', listed: listed !== null };
+    const speaker = speakers === null ? null : {
+      age: listed?.age ?? 'adult', profile: listed?.note ?? '', listed: listed !== null,
+      ...(listed !== null && Object.hasOwn(listed, 'station') ? { sex: listed.sex, station: listed.station, manner: listed.manner } : {}),
+    };
     return {
       kind: 'script', bundle: b, cls: cls ?? listed?.class ?? speakerClass(b), units, keys, topics, shown, compatible: compatibleOf(topics), speaker,
     };
@@ -2311,7 +2435,7 @@ export function outputsOf(plan, model, existing = null) {
   };
 }
 
-const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N | --name TEXT | --first N | --ages AGES [--first N]) '
+const USAGE = 'usage: node tools/i18n/translate.mjs [<bundles.json> (--item a:N[,b:M...] | --name TEXT | --first N | --ages AGES [--first N]) '
   + '[--speakers <speakers.json>] [--names <names.json>] [--fresh-keywords] [--regate]] [--strings <strings.json> [--only strings,look,books,u]] [--class CLASS] '
   + `[--send | --dry-run] [--model NAME] [--llmux URL] [--out DIR] [--jobs 1-${JOBS_MAX}] [--timeout SECONDS]`;
 
@@ -2347,9 +2471,12 @@ export function parseArgs(argv) {
       else if (a === '--ages') o.ages = v.split(',');
       else if (a === '--names') o.names = resolve(v);
       else {
-        const m = /^([ab]):([0-9]{1,5})$/.exec(v);
-        if (!m) return { error: '--item is <archive>:<item>, the archive a or b' };
-        o.item = { archive: m[1], item: Number(m[2]) };
+        // One script, or a list of them in the order to send (spec 15): a:10,b:3.
+        const items = v.split(',').map((x) => /^([ab]):([0-9]{1,5})$/.exec(x));
+        if (items.some((m) => !m)) return { error: '--item is <archive>:<item>, or a list of them joined by commas, the archive a or b' };
+        o.item = items.map((m) => ({ archive: m[1], item: Number(m[2]) }));
+        const twice = o.item.findIndex((x, at) => o.item.findIndex((y) => y.archive === x.archive && y.item === x.item) < at);
+        if (twice >= 0) return { error: `--item names a script listed before it, at position ${twice + 1}` };
       }
     } else if (a.startsWith('--')) return { error: `unknown option ${a}` };
     else if (o.bundles === null) o.bundles = resolve(a);

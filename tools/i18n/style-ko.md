@@ -1,39 +1,45 @@
 # Korean register guide (사극체) for Ultima VI's conversations
 
-This guide is spec 08 §7 (its speaker ages, spec 12 Design 3), written for the translator.
-`tools/i18n/translate.mjs` sends it, as it is, with every request. Every example below is made up
-for this guide; none is the game's text.
+This guide is spec 08 §7 (its speaker ages, spec 12 Design 3; its stations and manners, spec 15
+Design 2), written for the translator. `tools/i18n/translate.mjs` sends it, as it is, with every
+request. Every example below is made up for this guide; none is the game's text.
 
 ## The register
 
 - The English is a faux-archaic English: *thou*, *thee*, *art*, *hast*. Those words choose a
   speech level and a form of address; they have no word-for-word Korean. Carry the same feel
   with the archaic Korean speech levels of historical drama (사극체).
-- Address the hero as **그대** unless the line says otherwise or the speaker is a child (see the
+- Address the hero as **그대** unless the line says otherwise, the request's `address` gives the
+  speaker's own words for the hero (by its station, below) or the speaker is a child (see the
   ages below; a title the game fills in, such as `$G`, stays as it is).
 - An `adult` or an `elder` speaker never uses modern endings: no ~요 (해요체), no ~해 / ~야 /
-  ~거든 / ~잖아 (modern 반말). A `child` or a `youth` speaker uses the endings its age gives below.
+  ~지 / ~냐 / ~거든 / ~잖아 (modern 반말). The `lowborn` may use every modern 반말 ending of that
+  list, but not 해요체 (~요); a beggar's whining 합쇼 (~줍쇼, ~습죠) stays. A `drunk` speaker may
+  slip out of its level into a slurred 반말, and an `elder` keeps its old turns (both below). A
+  `child` or a `youth` speaker uses the endings its age gives below.
 - No speaker uses modern loanwords or slang.
-- One speaker keeps one level through the whole conversation.
+- One speaker keeps one level through the whole conversation (the `lowborn`'s one level is its
+  mix of 반말 and 하게체); a `mad` or `drunk` speaker may break it (below).
 
-## Speaker ages: the age decides first, then the class
+## Speaker ages: the age decides first, then the station
 
 The request may name the speaker's `age` (`child`, `youth`, `adult` or `elder`) and a short note
-on its personality and manner of speech (`profile`); its `register` is then the one for its class
-at that age. A request with no `age` is an adult's. Let the note shape the voice (shy, boastful,
-gruff, kind) inside the level its age and class give.
+on its personality and manner of speech (`profile`); its `register` is then the one for its
+station at that age. A request with no `age` is an adult's. Let the note shape the voice (shy,
+boastful, gruff, kind) inside the level its age and station give.
 
 - `child`: a child's speech. Short sentences and easy native words, no Sino-Korean diction and
   none of the archaic adult endings (~노라, ~도다, ~하오, ~이오, ~하게, ~사옵니다). To a grown-up,
   a polite child's 해요체 (~요, ~어요, ~예요); to another child or an animal, 반말. The hero is
-  아저씨, 언니, 오빠, 기사님 or 그쪽 as the line suits, never 그대. Whatever its class, a child
-  speaks as a child.
-- `youth`: a young person's lighter level, by station: an apprentice or a young servant (a young
-  merchant, commoner or thief) 해요체; a young noble, a squire or another young person of high
-  station a soft 하오체. Fewer archaic endings than an adult of the class.
-- `adult`: the class table below, as it is.
-- `elder`: the class's level with an old person's turns (~구먼, ~하네, ~일세), and 하게체 to a
-  younger hero where the station allows.
+  아저씨, 언니, 오빠, 기사님 or 그쪽 as the line suits, never 그대. Whatever its station or class, a
+  child speaks as a child.
+- `youth`: a young person's lighter level, by station: a young `commoner` or `lowborn` (an
+  apprentice, a young servant) 해요체; a young `royalty`, `lord` or `beyond` (a young noble, a
+  squire) a soft 하오체. Fewer archaic endings than an adult of the station.
+- `adult`: the station table below, or with no `station` the class table.
+- `elder`: the station table's elder column below, or with no `station` the class table. Every
+  elder may use the old person's turns ~구먼, ~했지, ~하네, ~일세: they are old turns, not the
+  modern ending.
 
 | Age | Class | Made-up example |
 |---|---|---|
@@ -70,10 +76,69 @@ The speaker's level (its age and class) is for the speaker's own words only.
 | a child's quote, then narration, in one line | "이거 제가 주웠어요!" 아이가 자랑스럽게 덧붙이오. |
 | a companion cutting in on a child | "아이가 겁을 먹은 모양이오," 동료가 말하오. |
 
-## Speaker classes and their endings
+## Speaker stations and their endings
 
-The request names the speaker's class (guessed from the description, or given by the owner or by
-the owner's speaker file). The table is an adult's level; the ages above change it.
+The request may name the speaker's `station`, its `manner` and `address` (the words it calls the
+hero); its `register` then gives the level for that station at that age, the colour of its role
+(its `class`) and its manner. The age decides first for a `child` and a `youth` (above); for an
+`adult` and an `elder` the station decides:
+
+| Station | Who | Adult | Elder | The hero is |
+|---|---|---|---|---|
+| royalty | the crown | 해라체 (~노라, ~하라, ~느니라) | the same | 그대 |
+| lord | the gentle: those who govern, such as lords, mayors and the heads of orders, and the knighted and the learned, such as knights, court mages, scholars, high clergy and the hero's companions | 하오체 (~하오, ~이오, ~시오), formal | 하게체 (~하게, ~하네, ~일세) | 그대, 귀공: the hero as an equal or a guest of honour (an elder lord may say 자네) |
+| commoner | free townsfolk and villagers: farmers, craftsmen, shopkeepers, innkeepers, sailors, bards, town healers, soldiers of the ranks | a humble 사극 합쇼체 (~습니다, ~습죠, ~굽쇼, ~입니다요) | a rural old person's turns (~구먼, ~했지, ~하게) | 나리, 나으리; an elder: 젊은이, 나리 |
+| lowborn | beggars, thieves, pirates, drunks, outcasts, ruffians | rough low talk: 반말 and 하게체 mixed (~하슈, ~했수, ~다고, ~하라고, 이봐), every modern 반말 ending allowed (~해, ~야, ~지, ~냐, ~거든, ~잖아) but no 해요체 (~요); a beggar begs in a whining 합쇼체 (~줍쇼, ~습죠) | rough 반말, every modern 반말 ending allowed (~해, ~야, ~지, ~냐, ~거든, ~잖아) but no 해요체 (~요) | 이보쇼, 형씨, 당신 (나리 in mockery) |
+| beyond | spirits, shrines, statues, the otherworldly | an archaic 해라체 (~로다, ~도다, ~니라) | the same | 그대 |
+
+| Station | Age | Made-up example |
+|---|---|---|
+| royalty | adult, elder | 짐이 그대에게 이 검을 내리노라. 가서 그 땅을 지키라. |
+| lord | adult | 그대가 이 고을의 일을 묻는 것이오? 우선 앉으시오. |
+| lord | elder | 자네, 그 일은 내가 알아보겠네. 너무 염려 말게. |
+| commoner | adult | 나리, 이 길로 곧장 가시면 다리가 나옵니다요. 조심히 가십쇼. |
+| commoner | elder | 허허, 젊은이가 용케도 여기까지 왔구먼. 쉬었다 가게. |
+| lowborn | adult | 이봐 형씨, 공짜로 줄 거 아니면 저리 비키라고. |
+| lowborn | adult, a beggar | 나리, 한 푼만 줍쇼. 사흘을 굶었습죠. |
+| lowborn | elder | 뭘 그리 봐? 늙은이 처음 보냐? |
+| beyond | adult, elder | 그대가 이곳에 이른 것은 오래전에 정해진 일이로다. |
+
+The role colours its station's level, for an adult and an elder:
+
+- a `merchant` keeps the shop's formulas (어서 옵쇼, ~하옵니다) in its station's level:
+  어서 옵쇼, 나리. 오늘 들어온 천이 아주 곱사옵니다.
+- a `scholar`, a `clergy` and a `mage` speak with Sino-Korean diction (in Hangul);
+- a `guard` is clipped: 멈추십쇼. 용건만 말씀하십쇼.
+- a `gargoyle` keeps the gargoyle register of the class table below whatever its station; its
+  station sets only whom it defers to.
+
+The manner shapes the diction and the rhythm inside that level:
+
+- `plain`: the level as it is.
+- `jester`: Korean rhymes, puns and a sung rhythm of its own, the line's sense and every keyword
+  kept (not the English wordplay word for word): 근심은 접고 웃음은 펴십쇼, 나리! 접었다 폈다,
+  부채 같은 인생입죠!
+- `mad`: lurching, in fragments, repetitions, sudden shouts and whispers, talk to oneself; it may
+  break the one-level rule: 옳거니, 옳거니… 아니! 아니다! 쉿, 들리오? 벽이, 저 벽이 웃고 있소.
+- `pompous`: inflated (에헴, 본관, Sino-Korean titles): 에헴, 본관이 이 고을을 맡은 지 어언 십
+  년이오.
+- `drunk`: slurs and trails off, and may slip out of its level into a slurred 반말: 나리… 딱 한
+  잔만 더… 하는 거여… 딸꾹.
+- `sly`: flatters and hints: 나리 같은 분께만 살짝 일러 드립죠. 저 언덕 너머에 좋은 게 있다던뎁쇼…
+- `gruff`: short: 볼일만 말씀하십쇼.
+- `timid`: hesitates (저, 저기…): 저, 저기… 나리, 혹시… 아, 아닙니다요.
+- `pious`: blesses and intones: 나리 가시는 길에 복이 함께하시기를 비옵니다.
+
+The station, the manner and the address are for the speaker's own words; narration stays the
+narrator's (above).
+
+## Speaker classes, for a request with no station
+
+A request with no `station` takes the class table below, as before: the speaker's class (guessed
+from the description, or given by the owner or by the owner's speaker file) gives an adult's
+level. Its ages then read the class: a young merchant, commoner or thief 해요체, any other young
+person a soft 하오체; an elder the class's level with an old person's turns (~구먼, ~하네, ~일세),
+and 하게체 to a younger hero where the class allows.
 
 | Class | Speech level | Made-up example |
 |---|---|---|
@@ -148,6 +213,9 @@ Incantation syllables, runic text and the credits are not translated.
   space, as listed.
 
 ## Made-up examples
+
+These rows show the escapes at the class table's levels; with a `station`, the station table's
+level applies to the same escapes.
 
 | Class | English | Korean |
 |---|---|---|

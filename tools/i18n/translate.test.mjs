@@ -86,10 +86,12 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  AGES, CLASSES, COVERAGE_FORMAT, InputError, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, SPEAKERS_FORMAT, SPEAKER_NOTE_MAX,
-  aliasesOf, bodyOf, braceWords, braceWordsWanted, collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate,
-  glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, namedOf, packBytes, placeholders, planOf,
-  readPack, readSpeakers, registerOf, scriptWordsOf, settledOf, settleKeys, speakerClass, systemOf, tableGate, topicsOf, unitsOf, wordGate,
+  AGES, CLASSES, COVERAGE_FORMAT, InputError, MANNERS, MANNER_LINES, MAX_TOKENS, PACK_FORMAT, PARTICLES, PackReadError, ROLE_COLOURS,
+  SEXES, SPEAKERS_FORMAT, SPEAKERS_FORMAT_2, SPEAKER_NOTE_MAX, STATIONS, STATION_REGISTERS,
+  addressOf, aliasesOf, bodyOf, braceWords, braceWordsWanted, collide, compatibleOf, duplicateMembers, fingerprint, firstBlocksOf, gate,
+  glossaryOf, hash64, hex64, hits, keyHit, keyOf, keysOf, keywordsOf, knownOf, latin1, main, namedOf, packBytes, parseArgs, placeholders,
+  planOf, readPack, readSpeakers, registerOf, scriptWordsOf, settledOf, settleKeys, speakerClass, systemOf, tableGate, topicsOf, unitsOf,
+  wordGate,
 } from './translate.mjs';
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'translate.mjs');
@@ -1904,7 +1906,7 @@ test('spec 12: the speaker file\'s reader takes u6.speakers/1 exactly (each age 
   }
   for (const [what, value, rule] of [
     ['null', null, shape], ['a list', [], shape], ['a string', 'u6.speakers/1', shape],
-    ['another format', { ...file([]), format: 'u6.speakers/2' }, shape],
+    ['another format', { ...file([]), format: 'u6.speakers/3' }, shape],
     ['no model', { format: SPEAKERS_FORMAT, speakers: [] }, shape],
     ['a model not text', file([], { model: 1 }), shape],
     ['a member more', file([], { extra: 1 }), shape],
@@ -2095,15 +2097,367 @@ test('spec 12: --ages and --speakers refused with a fixed message before any req
   await rm(f.dir, { recursive: true });
 });
 
-test('spec 12: the guide by age: the ages section (child, youth, adult, elder, made-up examples), the modern endings banned for adult and elder speakers only, a child never saying 그대; the class table and the rest as before', async () => {
+test('spec 12: the guide by age: the ages section (child, youth, adult, elder, made-up examples), the modern endings banned for adult and elder speakers only (spec 15: but the lowborn), a child never saying 그대; the class table and the rest as before', async () => {
   const guide = await readFile(join(dirname(TOOL), 'style-ko.md'), 'utf8');
   const ages = guide.slice(guide.indexOf('## Speaker ages'), guide.indexOf('## Speaker classes'));
   assert.ok(ages.length > 0 && guide.indexOf('## Speaker ages') < guide.indexOf('## Speaker classes'), 'the ages before the classes');
   for (const a of AGES) assert.ok(ages.includes(`- \`${a}\`:`), `${a}'s rule`);
   assert.ok(ages.includes('never 그대') && ages.includes('아저씨, 우리 고양이 못 봤어요?'), 'the child\'s address and example');
-  assert.ok(guide.includes('An `adult` or an `elder` speaker never uses modern endings') && !guide.includes('Never use modern endings'), 'the ban scoped');
+  assert.ok(guide.replace(/\s+/g, ' ').includes('An `adult` or an `elder` speaker never uses modern endings: no ~요 (해요체), no ~해 / ~야 / ~지 / ~냐 / ~거든 / ~잖아 (modern 반말).')
+    && !guide.includes('Never use modern endings'), 'the ban scoped');
   assert.ok(guide.includes('No speaker uses modern loanwords or slang.'));
   for (const c of Object.keys(CLASSES)) assert.ok(guide.includes(`| ${c} |`), `${c} still in the table`);
+});
+
+test('spec 15: the guide by station: the station table (adult, elder, the hero\'s words) with a made-up example per station and age where it differs, the role colours, a made-up line per manner, the ban lifted for the lowborn only; a request with no station takes the class table, said once; the narrator, the ages\' examples and every section from the lines on byte for byte main\'s', async () => {
+  const guide = await readFile(join(dirname(TOOL), 'style-ko.md'), 'utf8');
+  const at = (h) => guide.indexOf(h);
+  assert.ok(at('## Speaker ages') < at('## The narrator') && at('## The narrator') < at('## Speaker stations') && at('## Speaker stations') < at('## Speaker classes')
+    && at('## Speaker classes') < at('## What each line is'), 'the stations after the narrator, before the class table');
+  const stations = guide.slice(at('## Speaker stations'), at('## Speaker classes'));
+  const tableRows = stations.split('\n').filter((l) => l.startsWith('| '));
+  for (const s of STATIONS) {
+    const row = tableRows.find((l) => l.startsWith(`| ${s} |`) && l.split('|').length === 7);
+    assert.ok(row, `${s}'s row of the station table`);
+    assert.ok(row.includes(STATION_REGISTERS[s].address), `${s}: the hero's words of the tool's`);
+    // An elder's own words, where the tool gives them, each in the row (the commoner's as `an
+    // elder: …`, the lord's 자네 in its note beside 그대).
+    for (const w of STATION_REGISTERS[s].elderAddress?.split(', ') ?? []) assert.ok(row.split('|')[5].includes(w), `${s}: an elder's ${w} in the row`);
+    if (s === 'commoner') assert.ok(row.includes(`an elder: ${STATION_REGISTERS[s].elderAddress}`), 'the commoner elder\'s words');
+    if (s === 'lord') assert.ok(row.includes('(an elder lord may say 자네)'), 'the lord elder\'s 자네');
+    assert.ok(tableRows.some((l) => l.startsWith(`| ${s} |`) && l.split('|').length === 5 && /[가-힣]/.test(l.split('|')[3])), `${s}: a made-up example`);
+  }
+  for (const [s, age] of [['lord', 'adult'], ['lord', 'elder'], ['commoner', 'adult'], ['commoner', 'elder'], ['lowborn', 'adult'], ['lowborn', 'elder']]) {
+    assert.ok(tableRows.some((l) => l.startsWith(`| ${s} | ${age} |`)), `${s} ${age}: its own example`);
+  }
+  assert.ok(stations.includes('어서 옵쇼') && stations.includes('Sino-Korean diction') && stations.includes('a `guard` is clipped')
+    && stations.includes('a `gargoyle` keeps the gargoyle register'), 'the role colours');
+  for (const m of MANNERS) {
+    const line = stations.split('\n- ').find((l) => l.startsWith(`\`${m}\`:`));
+    assert.ok(line, `${m}'s line`);
+    if (m !== 'plain') assert.ok(/[가-힣]/.test(line), `${m}: a made-up line`);
+  }
+  const prose = guide.replace(/\s+/g, ' ');
+  // Round 3: the ban's boundary, the one-level rule, an elder's old turns, the drunk's slip and
+  // the narration after the manners.
+  assert.ok(prose.includes('The `lowborn` may use every modern 반말 ending of that list, but not 해요체 (~요); a beggar\'s whining 합쇼 (~줍쇼, ~습죠) stays.'),
+    'the lowborn\'s 반말');
+  const lowborn = tableRows.find((l) => l.startsWith('| lowborn |') && l.split('|').length === 7).split('|');
+  for (const cell of [lowborn[3], lowborn[4]]) {
+    assert.ok(cell.includes('every modern 반말 ending allowed (~해, ~야, ~지, ~냐, ~거든, ~잖아) but no 해요체 (~요)'), 'the lowborn\'s row, as the tool says it');
+  }
+  assert.ok(lowborn[3].includes('(~줍쇼, ~습죠)'));
+  assert.ok(prose.includes('One speaker keeps one level through the whole conversation (the `lowborn`\'s one level is its mix of 반말 and 하게체); '
+    + 'a `mad` or `drunk` speaker may break it (below).'));
+  const ages = prose.slice(prose.indexOf('## Speaker ages'), prose.indexOf('## The narrator'));
+  assert.ok(ages.includes('- `adult`: the station table below, or with no `station` the class table.'));
+  assert.ok(ages.includes('- `elder`: the station table\'s elder column below, or with no `station` the class table. Every elder may use the old '
+    + 'person\'s turns ~구먼, ~했지, ~하네, ~일세: they are old turns, not the modern ending.'));
+  assert.equal(prose.split('~구먼, ~했지, ~하네, ~일세: they are old turns').length, 2, 'the elder\'s clause once');
+  assert.ok(prose.includes('- `drunk`: slurs and trails off, and may slip out of its level into a slurred 반말:'));
+  assert.ok(prose.includes('- `pious`: blesses and intones: 나리 가시는 길에 복이 함께하시기를 비옵니다. The station, the manner and the address are for the '
+    + 'speaker\'s own words; narration stays the narrator\'s (above). ## Speaker classes'), 'the narration, after the manners');
+  assert.equal(prose.split('A request with no `station` takes the class table').length, 2, 'said once');
+  const hashOf = (text) => hex64(hash64(Buffer.from(text)));
+  assert.equal(hashOf(guide.slice(at('## The narrator'), at('## Speaker stations'))), 'd6ad279a47e8b603', 'the narrator\'s section as main has it');
+  // Round 3: the class table, its made-up examples restored, as main has it (from its header,
+  // `| Class | Speech level |`, to the next heading; a bare `| Class |` is found first inside the
+  // ages' table header).
+  const classes = at('| Class | Speech level | Made-up example |');
+  assert.ok(classes > at('## Speaker classes') && classes < at('## What each line is'), 'the class table in its section');
+  assert.equal(hashOf(guide.slice(classes, at('## What each line is'))), '4b2ef9a3542b49f0', 'the class table and its examples as main has them');
+  assert.equal(hashOf(guide.slice(at('| Age | Class |'), at('## The narrator'))), '91d24997d54782d6', 'the ages\' examples as main has them');
+  // Round 2: one sentence above the made-up examples' rows (which stay main's), so the tail is
+  // pinned again to its new text, and each part of it around the sentence to main's.
+  const examples = '## Made-up examples\n\nThese rows show the escapes at the class table\'s levels; with a `station`, the station table\'s\n'
+    + 'level applies to the same escapes.\n\n| Class | English | Korean |';
+  assert.ok(guide.includes(examples), 'the sentence above the examples\' rows');
+  assert.equal(hashOf(guide.slice(at('## What each line is'), at('## Made-up examples'))), '4d12ad7ef532d239', 'the lines, keywords and escapes as main has them');
+  assert.equal(hashOf(guide.slice(at('| Class | English | Korean |'), at('## Table strings'))), 'de922cab7a117068', 'the examples\' rows as main has them');
+  assert.equal(hashOf(guide.slice(at('## Table strings'))), '9d50be27ab4de090', 'the table strings and on as main has them');
+  assert.equal(hashOf(guide.slice(at('## What each line is'))), '75596871ece80a0b', 'the tail, the sentence added (round 2)');
+  // Round 2: the lord is the gentle, the commoner the free townsfolk (the instruction's words), and
+  // a lord's address.
+  const lord = 'the gentle: those who govern, such as lords, mayors and the heads of orders, and the knighted and the learned, such as knights, '
+    + 'court mages, scholars, high clergy and the hero\'s companions';
+  const commoner = 'free townsfolk and villagers: farmers, craftsmen, shopkeepers, innkeepers, sailors, bards, town healers, soldiers of the ranks';
+  assert.ok(tableRows.some((l) => l.startsWith(`| lord | ${lord} |`) && l.includes('그대, 귀공: the hero as an equal or a guest of honour (an elder lord may say 자네)')));
+  assert.ok(tableRows.some((l) => l.startsWith(`| commoner | ${commoner} |`)));
+  // The ban, line by line: no made-up line of the station table (but the lowborn's and an
+  // elder's), of a role or of a manner (but the drunk's and the madman's) ends a sentence on a
+  // modern ~요 (the humble ~입니다요 aside), ~해, ~야, ~지, ~냐, ~거든 or ~잖아, or holds ~거여.
+  const modern = (sentence) => /(?<!다)요(?=[.!?…,]|$)|(?:해|야|거든|잖아)(?=[.!?…,]|$)|(?:지|냐)(?=[.!?…]|$)|거여/.test(sentence);
+  const sayings = [
+    ...tableRows.filter((l) => l.split('|').length === 5 && /[가-힣]/.test(l.split('|')[3]) && !l.startsWith('| lowborn |') && l.split('|')[2].trim() !== 'elder')
+      .map((l) => l.split('|')[3].trim()),
+    ...stations.slice(stations.indexOf('The role colours')).split('\n- ').map((l) => l.replace(/\s+/g, ' '))
+      .filter((l) => /: [^:]*[가-힣][^:]*$/.test(l) && !l.startsWith('`drunk`') && !l.startsWith('`mad`')).map((l) => l.slice(l.lastIndexOf(': ') + 2)),
+  ];
+  assert.ok(sayings.length >= 12, `${sayings.length} made-up lines read`);
+  for (const line of sayings) for (const sentence of line.split(/(?<=[.!?…])\s+/)) assert.ok(!modern(sentence), `no modern ending: ${sentence}`);
+  for (const caught of ['저 언덕 너머에 좋은 게 있다던데요…', '고기를 많이 잡았지.', '처음 보냐?', '하는 거여… 딸꾹.', '그렇잖아!']) assert.ok(modern(caught), caught);
+  for (const passed of ['있다던뎁쇼…', '나옵니다요.', '가서 그 땅을 지키라.', '인생입죠!']) assert.ok(!modern(passed), passed);
+});
+
+// --- spec 15: the register by station and manner (made-up speakers only) -----------------------
+
+// A u6.speakers/2 listing `entries`, each [archive, item, age, class, note, sex, station, manner,
+// name_ko].
+const speakers2Of = (entries) => ({
+  format: SPEAKERS_FORMAT_2, model: 'test-model',
+  speakers: entries.map(([archive, item, age, cls, note, sex, station, manner, nameKo]) => ({
+    archive, item, age, class: cls, note, sex, station, manner, name_ko: nameKo,
+  })),
+});
+
+// The script of the K5b test (no key), whose bodies main's code (4320314) pinned below.
+const plainBundle = () => ({
+  format: 'u6.npc-bundle/1', archive: 'a', item: 7301, hash: '00000000000d7301', refused: null, actors: [], portraits: [], name: 'Zq8Plain', locale: 'en',
+  narration: { look: [seg('a', 7301, 20, 'a plain test')] },
+  speech: { greeting: [seg('a', 7301, 60, 'Hail, $G. Ask of my @wares.')] },
+  turns: [{ input: { at: 90, kind: 'ask' }, segments: [], topics: [{ at: 0, keywords: ['*'], requires: [], answer: [seg('a', 7301, 100, 'Naught more.')] }] }],
+  traits: [], strings: [{ key: ['a', 7301, 200], table: 200, index: 0, text: 'a cup' }],
+});
+
+test('spec 15: the speaker file\'s reader takes u6.speakers/2 exactly (each sex, station and manner one of its enums, name_ko null or 1 to 8 Hangul syllables with one space between two words) and refuses anything else with a fixed message naming /2, a count at most; a /1 file reads as before, its values {age, class, note} only', () => {
+  const read = readSpeakers(speakers2Of([
+    ['a', 1, 'adult', 'merchant', `${NOTE}a`, 'female', 'commoner', 'sly', null],
+    ['b', 65535, 'elder', 'mage', '', 'male', 'lord', 'pompous', '가나다'],
+    ['a', 2, 'child', 'commoner', '', 'none', 'beyond', 'plain', '가나 다라'],
+    ['a', 3, 'youth', 'thief', '', 'male', 'lowborn', 'jester', '가나다라마바사아'],
+  ]));
+  assert.deepEqual([...read], [
+    ['a:1', { age: 'adult', class: 'merchant', note: `${NOTE}a`, sex: 'female', station: 'commoner', manner: 'sly', nameKo: null }],
+    ['b:65535', { age: 'elder', class: 'mage', note: '', sex: 'male', station: 'lord', manner: 'pompous', nameKo: '가나다' }],
+    ['a:2', { age: 'child', class: 'commoner', note: '', sex: 'none', station: 'beyond', manner: 'plain', nameKo: '가나 다라' }],
+    ['a:3', { age: 'youth', class: 'thief', note: '', sex: 'male', station: 'lowborn', manner: 'jester', nameKo: '가나다라마바사아' }],
+  ]);
+  assert.deepEqual(SEXES, ['female', 'male', 'none']);
+  assert.deepEqual(STATIONS, ['royalty', 'lord', 'commoner', 'lowborn', 'beyond']);
+  assert.deepEqual(MANNERS, ['plain', 'jester', 'mad', 'pompous', 'drunk', 'sly', 'gruff', 'timid', 'pious']);
+  for (const sex of SEXES) for (const station of STATIONS) for (const manner of MANNERS) {
+    assert.equal(readSpeakers(speakers2Of([['a', 1, 'adult', 'guard', '', sex, station, manner, null]])).size, 1, `${sex} ${station} ${manner}`);
+  }
+  // The /1 file of the same scripts: its values as spec 12 reads them, nothing more.
+  const one = readSpeakers(speakersOf([['a', 1, 'adult', 'merchant', `${NOTE}a`], ['b', 65535, 'elder', 'mage', '']]));
+  assert.deepEqual([...one], [['a:1', { age: 'adult', class: 'merchant', note: `${NOTE}a` }], ['b:65535', { age: 'elder', class: 'mage', note: '' }]]);
+  const shape = /^the speakers file is not u6\.speakers\/2$/;
+  const entries = /^the speakers file is not u6\.speakers\/2: 1 entries are not \{archive, item, age, class, note, sex, station, manner, name_ko\} of its forms$/;
+  const good = { archive: 'a', item: 1, age: 'adult', class: 'commoner', note: NOTE, sex: 'male', station: 'lowborn', manner: 'drunk', name_ko: null };
+  const file = (speakers, extra = {}) => ({ format: SPEAKERS_FORMAT_2, model: 'm', speakers, ...extra });
+  assert.equal(readSpeakers(file([good], { coverage: { stations: {} } })).size, 1, 'its coverage receipt passed over');
+  const without = (k) => Object.fromEntries(Object.entries(good).filter(([x]) => x !== k));
+  for (const [what, value, rule] of [
+    ['no model', { format: SPEAKERS_FORMAT_2, speakers: [] }, shape],
+    ['a member more', file([], { extra: 1 }), shape],
+    ['a coverage not an object', file([], { coverage: [] }), shape],
+    ['a sex not of the enum', file([{ ...good, sex: 'other' }]), entries],
+    ['a sex of another case', file([{ ...good, sex: 'Male' }]), entries],
+    ['a station not of the enum', file([{ ...good, station: 'noble' }]), entries],
+    ['a station of the prototype', file([{ ...good, station: '__proto__' }]), entries],
+    ['a manner not of the enum', file([{ ...good, manner: 'merry' }]), entries],
+    ['a manner of null', file([{ ...good, manner: null }]), entries],
+    ['an age not of the enum', file([{ ...good, age: 'teen' }]), entries],
+    ['a class not of the enum', file([{ ...good, class: 'lowborn' }]), entries],
+    ['name_ko of Latin letters', file([{ ...good, name_ko: 'Zed' }]), entries],
+    ['name_ko empty', file([{ ...good, name_ko: '' }]), entries],
+    ['name_ko of 9 syllables', file([{ ...good, name_ko: '가나다라마바사아자' }]), entries],
+    ['name_ko of 9 syllables in two words', file([{ ...good, name_ko: '가나다라 마바사아자' }]), entries],
+    ['name_ko with two spaces', file([{ ...good, name_ko: '가나  다라' }]), entries],
+    ['name_ko with a space before it', file([{ ...good, name_ko: ' 가나' }]), entries],
+    ['name_ko with a space after it', file([{ ...good, name_ko: '가나 ' }]), entries],
+    ['name_ko of a lone jamo', file([{ ...good, name_ko: '가ㄴ' }]), entries],
+    ['name_ko with a particle marker', file([{ ...good, name_ko: '가나{이/가}' }]), entries],
+    ['name_ko not text', file([{ ...good, name_ko: 5 }]), entries],
+    ...[['LF', '\n'], ['CR', '\r'], ['CR LF', '\r\n'], ['U+2028', '\u2028'], ['U+2029', '\u2029']].flatMap(([what, end]) => [
+      [`name_ko with a trailing ${what}`, file([{ ...good, name_ko: `가나${end}` }]), entries],
+      [`name_ko with a leading ${what}`, file([{ ...good, name_ko: `${end}가나` }]), entries],
+      [`name_ko with a ${what} between two words`, file([{ ...good, name_ko: `가나${end}다라` }]), entries],
+    ]),
+    ['name_ko with a tab between two words', file([{ ...good, name_ko: '가나\t다라' }]), entries],
+    ['name_ko with a no-break space between two words', file([{ ...good, name_ko: '가나\u00a0다라' }]), entries],
+    ['name_ko a one-element array', file([{ ...good, name_ko: ['가나'] }]), entries],
+    ...['age', 'class', 'sex', 'station', 'manner'].map((k) => [`${k} a one-element array holding a valid value`, file([{ ...good, [k]: [good[k]] }]), entries]),
+    ['class a one-element array holding another valid class', file([{ ...good, class: ['merchant'] }]), entries],
+    ...['sex', 'station', 'manner', 'name_ko', 'note'].map((k) => [`no ${k}`, file([without(k)]), entries]),
+    ['an entry member more', file([{ ...good, nameKo: null }]), entries],
+    ['a /1 entry in a /2 file', file([{ archive: 'a', item: 1, age: 'adult', class: 'commoner', note: '' }]), entries],
+    ['a script twice', file([good, { ...good, station: 'lord' }]), /^the speakers file is not u6\.speakers\/2: 1 entries list a script listed before$/],
+  ]) {
+    assert.throws(() => readSpeakers(value), (err) => err instanceof InputError && rule.test(err.message) && !err.message.includes(NOTE), what);
+  }
+  // Round 3: a /1 file's enums are strings too; a valid /1 file reads as main read it (the Map's
+  // JSON hashed with main's reader, 4320314, on this same file).
+  const v1 = {
+    format: SPEAKERS_FORMAT, model: 'm', coverage: { scripts: { read: 1 } }, speakers: [
+      { archive: 'a', item: 1, age: 'child', class: 'commoner', note: `${NOTE}a` }, { archive: 'b', item: 65535, age: 'elder', class: 'mage', note: '' },
+      { archive: 'a', item: 2, age: 'youth', class: 'noble', note: 'x'.repeat(SPEAKER_NOTE_MAX) }, { archive: 'b', item: 0, age: 'adult', class: 'gargoyle', note: NOTE },
+    ],
+  };
+  assert.equal(hex64(hash64(Buffer.from(JSON.stringify([...readSpeakers(v1)])))), '91bac30b14758e24', 'a valid /1 file reads as main read it');
+  const entries1 = /^the speakers file is not u6\.speakers\/1: 1 entries are not \{archive, item, age, class, note\} of its forms$/;
+  const one1 = { archive: 'a', item: 1, age: 'adult', class: 'commoner', note: '' };
+  for (const [what, entry] of [['a class a one-element array', { ...one1, class: ['commoner'] }], ['a class a one-element array of another class', { ...one1, class: ['mage'] }],
+    ['an age a one-element array', { ...one1, age: ['adult'] }]]) {
+    assert.throws(() => readSpeakers({ ...speakersOf([]), speakers: [entry] }), (err) => err instanceof InputError && entries1.test(err.message), `/1: ${what}`);
+  }
+  // A /1 file whose entry carries a /2 member is refused as /1, as before.
+  assert.throws(() => readSpeakers({ ...speakersOf([]), speakers: [good] }),
+    (err) => err instanceof InputError && /^the speakers file is not u6\.speakers\/1: 1 entries are not \{archive, item, age, class, note\} of its forms$/.test(err.message));
+});
+
+test('spec 15: the register by station and age, then manner: with no station exactly main\'s (4320314, pinned), any manner aside; a child\'s and a young person\'s as before (the young by station), an adult\'s and an elder\'s the station table\'s with the role\'s colour; the manner\'s line at every station and age; the hero\'s words by station, a child\'s as spec 12', () => {
+  // Main's registers, every class at every age and with none: the table's hash (computed with
+  // main's code before this change).
+  const table = (f) => Object.keys(CLASSES).map((c) => [c, f(c), ...AGES.map((a) => f(c, a))]);
+  assert.equal(hex64(hash64(Buffer.from(JSON.stringify(table((c, a) => registerOf(c, a)))))), '22fbbc9c01402e06', 'main\'s registers');
+  for (const m of [undefined, ...MANNERS]) {
+    assert.deepEqual(table((c, a) => registerOf(c, a, undefined, m)), table((c, a) => registerOf(c, a)), `no station, manner ${m}: as before`);
+    assert.deepEqual(table((c, a) => registerOf(c, a, null, m)), table((c, a) => registerOf(c, a)), `a null station, manner ${m}: as before`);
+  }
+  const level = (station, age) => STATION_REGISTERS[station][age];
+  for (const station of STATIONS) {
+    for (const age of AGES) {
+      for (const manner of MANNERS) {
+        const r = registerOf('commoner', age, station, manner);
+        assert.ok(r.endsWith(`; ${MANNER_LINES[manner]}`), `${station} ${age} ${manner}: the manner's line`);
+        const base = r.slice(0, -`; ${MANNER_LINES[manner]}`.length);
+        if (age === 'child') assert.equal(base, registerOf('commoner', 'child'), `${station}: a child speaks as a child`);
+        else if (age === 'youth') {
+          assert.equal(base, ['commoner', 'lowborn'].includes(station) ? registerOf('commoner', 'youth') : registerOf('noble', 'youth'), `${station}: a young one's`);
+        } else assert.equal(base, level(station, age), `${station} ${age}: the station's level, no colour for a commoner's role`);
+      }
+      const address = addressOf(station, age);
+      if (age === 'child') assert.ok(address.includes('아저씨') && address.includes('never 그대'), `${station}: a child's words for the hero`);
+      else if (age === 'elder' && station === 'commoner') assert.equal(address, '젊은이, 나리', 'a commoner elder\'s words');
+      else if (age === 'elder' && station === 'lord') assert.equal(address, '그대, 자네', 'a lord elder\'s words (round 4)');
+      else assert.equal(address, STATION_REGISTERS[station].address, `${station} ${age}: the station's words`);
+    }
+  }
+  // The station table of spec 15.
+  assert.ok(level('royalty', 'adult').startsWith('해라체') && level('royalty', 'adult').includes('~노라') && level('royalty', 'elder') === level('royalty', 'adult'));
+  assert.ok(level('lord', 'adult').startsWith('하오체') && level('lord', 'adult').includes('formal') && level('lord', 'elder').startsWith('하게체'));
+  assert.ok(level('commoner', 'adult').includes('합쇼체') && level('commoner', 'adult').includes('~굽쇼') && level('commoner', 'elder').includes('~구먼'));
+  assert.ok(level('lowborn', 'adult').includes('반말') && level('lowborn', 'adult').includes('~줍쇼') && level('lowborn', 'elder').includes('반말'));
+  for (const age of ['adult', 'elder']) {
+    assert.ok(level('lowborn', age).includes('every modern 반말 ending allowed (~해, ~야, ~지, ~냐, ~거든, ~잖아) but no 해요체 (~요)'), `the lowborn ${age}'s 반말`);
+    assert.ok(!STATIONS.filter((s) => s !== 'lowborn').some((s) => level(s, age).includes('modern')), `modern 반말 for the lowborn only (${age})`);
+  }
+  assert.ok(level('lowborn', 'adult').includes('(~줍쇼, ~습죠)'), 'a beggar\'s whining 합쇼');
+  assert.ok(MANNER_LINES.drunk.includes('it may slip out of its level into a slurred 반말'), 'the drunk\'s slip');
+  assert.ok(level('beyond', 'adult').includes('~로다') && level('beyond', 'elder') === level('beyond', 'adult'));
+  assert.equal(new Set(['lord', 'commoner', 'lowborn'].map((s) => level(s, 'adult'))).size, 3, 'a lord, a commoner and the lowborn speak apart');
+  assert.deepEqual(STATIONS.map((s) => addressOf(s)), ['그대', '그대, 귀공', '나리, 나으리', '이보쇼, 형씨, 당신 (나리 in mockery)', '그대']);
+  // The role's colour, an adult's and an elder's only.
+  for (const age of ['adult', 'elder']) {
+    for (const [cls, word] of [['merchant', '어서 옵쇼'], ['scholar', 'Sino-Korean'], ['clergy', 'Sino-Korean'], ['mage', 'Sino-Korean'], ['guard', 'clipped'],
+      ['gargoyle', 'gargoyle register']]) {
+      assert.equal(registerOf(cls, age, 'lord', 'plain'), `${level('lord', age)}; ${ROLE_COLOURS[cls]}; ${MANNER_LINES.plain}`, `${cls} ${age}`);
+      assert.ok(ROLE_COLOURS[cls].includes(word), `${cls}'s colour`);
+    }
+    for (const cls of ['royalty', 'noble', 'commoner', 'thief', 'spirit']) {
+      assert.equal(registerOf(cls, age, 'beyond', 'gruff'), `${level('beyond', age)}; ${MANNER_LINES.gruff}`, `${cls}: no colour`);
+    }
+  }
+  for (const cls of Object.keys(CLASSES)) {
+    assert.equal(registerOf(cls, 'child', 'lord', 'timid'), `${registerOf('commoner', 'child')}; ${MANNER_LINES.timid}`, `${cls}: a child's has no colour`);
+    assert.ok(!registerOf(cls, 'youth', 'lord', 'timid').includes('as a '), `${cls}: a young one's has no colour`);
+  }
+  // The manners: one line each; one not of the enum takes plain's.
+  assert.deepEqual(Object.keys(MANNER_LINES), MANNERS);
+  assert.equal(new Set(Object.values(MANNER_LINES)).size, MANNERS.length);
+  assert.ok(MANNER_LINES.jester.includes('rhymes') && MANNER_LINES.jester.includes('puns') && MANNER_LINES.jester.includes('keyword kept'));
+  assert.ok(MANNER_LINES.mad.includes('lurching') && MANNER_LINES.mad.includes('one-level rule'));
+  for (const m of [undefined, null, 'merry', '__proto__']) assert.equal(registerOf('guard', 'adult', 'commoner', m), registerOf('guard', 'adult', 'commoner', 'plain'), `${m}: plain's`);
+});
+
+test('spec 15: --speakers with a /2 file: a script it lists has its request\'s NPC name its station, manner and address, the register for that station at that age with its manner; a /1 file\'s request is byte for byte main\'s (4320314, pinned), a script a /2 file does not list too, and no --speakers as before', async () => {
+  // Main's bodies for the script with a /1 speaker of each age (computed with main's code).
+  const pinned = [['child', 'commoner', 'd275f33ba9e28efe'], ['youth', 'noble', 'dd4c204d9a63c47c'], ['adult', 'merchant', 'd63d5ca5ce41b282'],
+    ['elder', 'mage', '853297934424182e']];
+  for (const [age, cls, hash] of pinned) {
+    const speakers = readSpeakers(speakersOf([['a', 7301, age, cls, NOTE]]));
+    const [s] = planOf([plainBundle()], { item: { archive: 'a', item: 7301 }, speakers }).scripts;
+    assert.deepEqual(s.speaker, { age, profile: NOTE, listed: true }, `${age}: a /1 speaker as before`);
+    const body = bodyOf('gpt-6-astra', systemOf('STYLE'), s.bundle, s.cls, s.units.filter((u) => !u.done), [], s.speaker);
+    assert.equal(hex64(hash64(Buffer.from(body))), hash, `${age}: main's body, byte for byte`);
+    const f = await sfixture([plainBundle()], speakersOf([['a', 7301, age, cls, NOTE]]));
+    const r = await run([f.bundles, '--item', 'a:7301', '--speakers', f.speakers, '--out', f.out, '--dry-run'], null, { style: 'STYLE' });
+    assert.equal(r.code, 0);
+    assert.equal(await readFile(previewPrinted(r.text), 'utf8'), body, `${age}: the preview is that body`);
+    await rm(f.dir, { recursive: true });
+  }
+  const [none] = planOf([plainBundle()], { item: { archive: 'a', item: 7301 } }).scripts;
+  assert.equal(hex64(hash64(Buffer.from(bodyOf('gpt-6-astra', systemOf('STYLE'), none.bundle, none.cls, none.units.filter((u) => !u.done))))),
+    '8dfd9fc326baf037', 'no speakers: main\'s body');
+  // A /2 file: the station, the manner and the hero's words; the speaker carries the sex too.
+  const f = await sfixture([plainBundle()], speakers2Of([['a', 7301, 'adult', 'merchant', NOTE, 'female', 'lowborn', 'sly', '가나다']]));
+  const [s] = planOf([plainBundle()], { item: { archive: 'a', item: 7301 }, speakers: readSpeakers(JSON.parse(await readFile(f.speakers, 'utf8'))) }).scripts;
+  assert.deepEqual(s.speaker, { age: 'adult', profile: NOTE, listed: true, sex: 'female', station: 'lowborn', manner: 'sly' });
+  const r = await run([f.bundles, '--item', 'a:7301', '--speakers', f.speakers, '--out', f.out, '--dry-run'], null, { style: 'STYLE' });
+  assert.equal(r.code, 0);
+  const { npc } = userOf(await readFile(previewPrinted(r.text), 'utf8'));
+  assert.deepEqual(Object.keys(npc), ['name', 'description', 'class', 'age', 'profile', 'station', 'manner', 'register', 'address']);
+  assert.deepEqual(npc, {
+    name: 'Zq8Plain', description: 'a plain test', class: 'merchant', age: 'adult', profile: NOTE, station: 'lowborn', manner: 'sly',
+    register: registerOf('merchant', 'adult', 'lowborn', 'sly'), address: addressOf('lowborn', 'adult'),
+  });
+  assert.ok(npc.register.includes('반말') && npc.register.includes('어서 옵쇼') && npc.register.endsWith(MANNER_LINES.sly));
+  assert.ok(!JSON.stringify(npc).includes('가나다') && !JSON.stringify(npc).includes('female'), 'no name_ko or sex in the request');
+  assert.ok(!r.text.includes(NOTE) && !r.text.includes('가나다'), 'nothing of the file printed');
+  // A child of a /2 file: a child's words for the hero; --class still wins for the run.
+  const g = await sfixture([plainBundle()], speakers2Of([['a', 7301, 'child', 'commoner', '', 'male', 'royalty', 'timid', null]]));
+  const c = await run([g.bundles, '--item', 'a:7301', '--speakers', g.speakers, '--class', 'guard', '--out', g.out, '--dry-run'], null, { style: 'STYLE' });
+  const child = userOf(await readFile(previewPrinted(c.text), 'utf8')).npc;
+  assert.deepEqual([child.class, child.station, child.manner, child.register, child.address],
+    ['guard', 'royalty', 'timid', registerOf('guard', 'child', 'royalty', 'timid'), addressOf('royalty', 'child')]);
+  // A /2 file that does not list the script: the request of a /1 file that does not list it.
+  const h = await sfixture([plainBundle()], speakers2Of([['b', 9, 'elder', 'mage', '', 'male', 'lord', 'mad', null]]));
+  const u = await run([h.bundles, '--item', 'a:7301', '--speakers', h.speakers, '--out', h.out, '--dry-run'], null, { style: 'STYLE' });
+  const e = await sfixture([plainBundle()], speakersOf([]));
+  const v = await run([e.bundles, '--item', 'a:7301', '--speakers', e.speakers, '--out', e.out, '--dry-run'], null, { style: 'STYLE' });
+  assert.equal(await readFile(previewPrinted(u.text), 'utf8'), await readFile(previewPrinted(v.text), 'utf8'), 'not listed: as a /1 file\'s');
+  for (const x of [f, g, h, e]) await rm(x.dir, { recursive: true });
+});
+
+test('spec 15: --item takes a list, a:N,b:M: those scripts in the given order, each once, one alone as before; a listed script not in the bundles, refused or with no lines is refused by its position, never its item; a malformed list or a script twice refused before anything is read', async () => {
+  assert.deepEqual(parseArgs(['x.json', '--item', 'b:3,a:10']).item, [{ archive: 'b', item: 3 }, { archive: 'a', item: 10 }]);
+  assert.deepEqual(parseArgs(['x.json', '--item', 'a:7']).item, [{ archive: 'a', item: 7 }], 'one alone, a list of one');
+  const items = (item) => planOf(BUNDLES, { item }).scripts.map((s) => s.bundle.item);
+  assert.deepEqual(items([{ archive: 'b', item: ITEMS[2] }, { archive: 'a', item: ITEMS[0] }, { archive: 'a', item: ITEMS[1] }]), [ITEMS[2], ITEMS[0], ITEMS[1]]);
+  assert.deepEqual(items({ archive: 'a', item: ITEMS[1] }), [ITEMS[1]], 'the object form as before');
+  for (const [list, at] of [[[{ archive: 'a', item: ITEMS[0] }, { archive: 'b', item: ITEMS[3] }], 2], [[{ archive: 'a', item: 1 }, { archive: 'a', item: ITEMS[0] }], 1]]) {
+    assert.throws(() => planOf(BUNDLES, { item: list }),
+      (err) => err instanceof InputError && err.message === `the script --item names at position ${at} is not in the bundles, is refused or has no lines`);
+  }
+  assert.throws(() => planOf(BUNDLES, { item: [{ archive: 'b', item: ITEMS[3] }] }),
+    (err) => err instanceof InputError && err.message === 'the script named is not in the bundles, is refused or has no lines', 'one alone: as before');
+  const f = await fixture();
+  // Sent in the list's order (one job at a time): the second script first, then the first.
+  const t = fakeTransport();
+  const r = await run([f.bundles, '--item', `a:${ITEMS[1]},a:${ITEMS[0]}`, '--out', f.out, '--send', '--jobs', '1'], t.send);
+  assert.equal(r.code, 0);
+  assert.deepEqual(t.bodies.map((b) => userOf(b).npc.name.replace(SENTINEL, '')), ['Again', 'Good', 'Again'], 'in the list\'s order, the line asked again last');
+  assert.match(r.text, /2 chosen/);
+  nothingTold(r.text);
+  const never = async () => assert.fail('no request');
+  for (const [list, rule] of [
+    [`a:${ITEMS[0]},b:${ITEMS[3]}`, /translate: the script --item names at position 2 is not in the bundles, is refused or has no lines/],
+    [`a:1,a:${ITEMS[0]}`, /translate: the script --item names at position 1 is not in the bundles, is refused or has no lines/],
+    [`a:${ITEMS[0]},a:${ITEMS[1]},a:${ITEMS[0]}`, /translate: --item names a script listed before it, at position 3/],
+    [`a:${ITEMS[0]},`, /--item is <archive>:<item>, or a list of them joined by commas, the archive a or b/],
+    [`,a:${ITEMS[0]}`, /--item is <archive>:<item>, or a list of them joined by commas/],
+    [`a:${ITEMS[0]},c:1`, /--item is <archive>:<item>, or a list of them joined by commas/],
+    [`a:${ITEMS[0]};a:${ITEMS[1]}`, /--item is <archive>:<item>, or a list of them joined by commas/],
+  ]) {
+    const x = await run([f.bundles, '--item', list, '--out', join(f.dir, 'refused'), '--send'], never);
+    assert.equal(x.code, 2, `${list}: refused`);
+    assert.match(x.text, rule, `${list}: says why`);
+    assert.ok(!existsSync(join(f.dir, 'refused')), `${list}: before the output directory`);
+    nothingTold(x.text);
+  }
+  assert.match((await run(['--help'], null)).text, /--item a:N\[,b:M\.\.\.\]/, 'the usage names it');
+  await rm(f.dir, { recursive: true });
 });
 
 // --- the quotes gate and the repair mode, --regate (made-up lines only) -------------------------
