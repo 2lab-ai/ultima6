@@ -3,8 +3,8 @@
 
 use super::defs::at;
 use super::iter::{actor_at, begin_at, next_at, tile_of};
-use super::moves::{SERPENT, VINE, move_to, remove};
-use super::{ACTOR_SLOTS, NONE, Slot};
+use super::moves::{SERPENT, VINE, create_on_map, move_to, remove};
+use super::{ACTOR_SLOTS, NONE, Slot, TEMPORARY};
 use crate::state::{State, Tables};
 
 fn flags1(t: &Tables, tile: u16) -> u8 {
@@ -195,24 +195,38 @@ pub fn move_monster_parts(s: &mut State, slot: Slot, ox: u16, oy: u16, drop: boo
 }
 
 /// The status byte 0x131646 leaves on a dragon part: 0x10bcee makes it 1 plus the temporary bit
-/// 0x20, which 0x131646 then clears.
+/// 0x20, which 0x131646 then clears. [`repair_dragon_parts`] re-frames, re-attaches and removes
+/// only parts that carry exactly this byte.
 const SPAWNED_PART: u8 = 0x01;
 
 /// Port-only repair, not in the original: heals saves from builds before 2026-10-25, whose
 /// dragons left their parts behind once they turned (0x10b922 was stubbed in `face`, the port
 /// of 0x11ba5e, so a turn re-framed the head but not its parts, and 0x10b9ca then found none of
-/// them to move or remove).
+/// them to move or remove). Four shapes: parts whose head was removed after its turn (stranded),
+/// parts on the head's side tiles with the old facing's frames (turned), a head tiles away from
+/// its parts (turned, then walked: each step moved the head alone), and a head with fewer than
+/// four parts (a save written after an earlier build's repair swept the parts no head found).
 ///
-/// `read` are the slots a block read just filled, `z` its level. Only a part as 0x131646 makes
-/// one is touched: type 0x19b, an object slot on the map on level `z`, status exactly
-/// [`SPAWNED_PART`] (the shipped map's own 0x19b objects never carry it). First, for each dragon
-/// head (an actor slot of type 0x19b with a frame below 8, on the map on level `z`), a side
-/// where 0x10b922 finds no part of the head's facing gives such a part standing on that side's
-/// tile with another part frame (an A4-0x6a70 value, bit 0 aside) the frame A4-0x6a70 gives the
-/// side for the facing, bit 0 kept: a dragon that turned under the old build walks on with its
-/// parts. A part some head's 0x10b922 already finds, or one re-framed for an earlier head, is
-/// never taken, so a neighbouring dragon keeps its own. Then each such part that no head's
-/// 0x10b922 finds is removed (0x10c1d6).
+/// `read` are the slots the block reads of one region load filled, `z` their level. Only a part
+/// as 0x131646 makes one is touched: type 0x19b, an object slot on the map on level `z`, status
+/// exactly [`SPAWNED_PART`] (the shipped map's own 0x19b objects never carry it). First, for each
+/// dragon head (an actor slot of type 0x19b with a frame below 8, on the map on level `z`), a
+/// side where 0x10b922 finds no part of the head's facing gives such a part standing on that
+/// side's tile with another part frame (an A4-0x6a70 value, bit 0 aside) the frame A4-0x6a70
+/// gives the side for the facing, bit 0 kept: a dragon that turned under the old build walks on
+/// with its parts. Then each side still empty whose tile lies in a block in slots, head by head,
+/// takes the nearest such part (Chebyshev distance to the head on the level, which wraps as the
+/// side tiles do; ties to the lower slot; a part `move_to` refuses is passed over), moved onto
+/// that side's tile with that frame, bit 0 kept: the side 0x131646's hatch gives the part, with
+/// no check that the head may enter it. A part some head's 0x10b922 already finds, or one
+/// re-framed or re-attached for an earlier head, is never taken, so a neighbouring dragon keeps
+/// its own. Then each such part that no head's 0x10b922 finds is removed (0x10c1d6). Last, each
+/// side still empty whose tile lies in a block in slots gets a part made as 0x131646 makes one
+/// (that frame with the bit 0 of a part the head has, else clear; status 1, the temporary bit
+/// cleared); one 0x10b922 then does not find (a side past the world's edge) is removed again, and
+/// with no free object slot no more are made. A side in a superchunk not in slots only looks
+/// empty (its part is in the block file: a head outside the region, or one at the region's
+/// edge), so it takes or gets none.
 pub(crate) fn repair_dragon_parts(s: &mut State, read: &[Slot], z: u16) {
     let mask = if z != 0 { 0xff } else { 0x3ff };
     let parts: Vec<Slot> = read
@@ -227,7 +241,13 @@ pub(crate) fn repair_dragon_parts(s: &mut State, read: &[Slot], z: u16) {
                 && o.status(c) == SPAWNED_PART
         })
         .collect();
-    if parts.is_empty() {
+    let heads: Vec<Slot> = (0..ACTOR_SLOTS as Slot)
+        .filter(|&a| {
+            let o = &s.objects;
+            o.kind(a) == 0x19b && o.tf(a) >> 10 < 8 && o.place(a) == 0 && u16::from(o.z(a)) == z
+        })
+        .collect();
+    if parts.is_empty() && heads.is_empty() {
         return;
     }
     // 0x10b922 and 0x10c1d6 start their list walks from the window grid, which is stale here:
@@ -236,12 +256,6 @@ pub(crate) fn repair_dragon_parts(s: &mut State, read: &[Slot], z: u16) {
     // rebuilds it only when the window key changes (0x108d10) or from 0x10e4bc, both after the
     // reads.
     s.objects.rebuild_grid();
-    let heads: Vec<Slot> = (0..ACTOR_SLOTS as Slot)
-        .filter(|&a| {
-            let o = &s.objects;
-            o.kind(a) == 0x19b && o.tf(a) >> 10 < 8 && o.place(a) == 0 && u16::from(o.z(a)) == z
-        })
-        .collect();
     let frames: Vec<u16> = (0..16)
         .map(|i| u16::from(at(&s.objects.defs.part_frame, i)) & 0x3e)
         .collect();
@@ -266,9 +280,42 @@ pub(crate) fn repair_dragon_parts(s: &mut State, read: &[Slot], z: u16) {
                     && frames.contains(&f)
             });
             if let Some(c) = stray {
-                let t = &mut s.objects.type_frame[c as usize];
-                *t = (*t & 0x3ff) | ((want | ((*t >> 10) & 1)) << 10);
+                set_part_frame(s, c, want);
                 taken.push(c);
+            }
+        }
+    }
+    let span = mask + 1;
+    let gap = |a: u16, b: u16| {
+        let d = a.wrapping_sub(b) & mask;
+        d.min(span - d)
+    };
+    let mut refused: Vec<Slot> = Vec::new();
+    for &h in &heads {
+        let (x, y) = (s.objects.x(h), s.objects.y(h));
+        let facing = (s.objects.tf(h) >> 10) & 6;
+        for d in [0usize, 2, 4, 6] {
+            let (px, py) = side_tile(s, x, y, d, mask);
+            if !block_loaded(s, px, py, z) || find_segment_at(s, x, y, z, d, facing) >= 0 {
+                continue;
+            }
+            let want = frames[usize::from(facing) * 2 + (d >> 1)];
+            loop {
+                let o = &s.objects;
+                let nearest = parts
+                    .iter()
+                    .copied()
+                    .filter(|c| !taken.contains(c) && !refused.contains(c))
+                    .min_by_key(|&c| (gap(o.x(c), x).max(gap(o.y(c), y)), c));
+                let Some(c) = nearest else {
+                    break;
+                };
+                if move_to(s, c, px, py, z) >= 0 {
+                    set_part_frame(s, c, want);
+                    taken.push(c);
+                    break;
+                }
+                refused.push(c);
             }
         }
     }
@@ -278,6 +325,59 @@ pub(crate) fn repair_dragon_parts(s: &mut State, read: &[Slot], z: u16) {
             remove(s, c);
         }
     }
+    // After the sweep: the parts it judged were all this load's, and its freed slots can be made.
+    'heads: for &h in &heads {
+        let (x, y) = (s.objects.x(h), s.objects.y(h));
+        let facing = (s.objects.tf(h) >> 10) & 6;
+        let mut bit = 0;
+        for d in [0usize, 2, 4, 6] {
+            let p = find_segment_at(s, x, y, z, d, facing);
+            if p >= 0 {
+                bit = (s.objects.tf(p) >> 10) & 1;
+                break;
+            }
+        }
+        for d in [0usize, 2, 4, 6] {
+            let (px, py) = side_tile(s, x, y, d, mask);
+            if !block_loaded(s, px, py, z) || find_segment_at(s, x, y, z, d, facing) >= 0 {
+                continue;
+            }
+            let want = frames[usize::from(facing) * 2 + (d >> 1)];
+            let tf = 0x19b | (want | bit) << 10;
+            let c = create_on_map(&mut s.objects, tf, SPAWNED_PART, 0, px, py, z);
+            if c < 0 {
+                break 'heads;
+            }
+            s.objects.obj_status[c as usize] &= !TEMPORARY;
+            if find_segment_at(s, x, y, z, d, facing) != c {
+                remove(s, c);
+            }
+        }
+    }
+}
+
+/// The tile one step from (x, y) in direction `d`, masked to the level's coordinates.
+fn side_tile(s: &State, x: u16, y: u16, d: usize, mask: u16) -> (u16, u16) {
+    let defs = &s.objects.defs;
+    (
+        x.wrapping_add(defs.dx(d) as u16) & mask,
+        y.wrapping_add(defs.dy(d) as u16) & mask,
+    )
+}
+
+/// Tile (x, y) of level `z` is in slots: always below the surface, else its superchunk is keyed.
+fn block_loaded(s: &State, x: u16, y: u16, z: u16) -> bool {
+    z != 0
+        || s.objects
+            .loaded_surface
+            .contains(&(((y >> 7) * 8 + (x >> 7)) as i16))
+}
+
+/// Gives dragon part `c` the part frame `want` (an A4-0x6a70 value, bit 0 aside), keeping its own
+/// bit 0.
+fn set_part_frame(s: &mut State, c: Slot, want: u16) {
+    let t = &mut s.objects.type_frame[c as usize];
+    *t = (*t & 0x3ff) | ((want | ((*t >> 10) & 1)) << 10);
 }
 
 /// The parts 0x10b922 finds beside each of `heads` on level `z`, with the head's facing.

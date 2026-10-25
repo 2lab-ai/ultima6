@@ -427,7 +427,9 @@ pub fn prune_far(s: &mut State, x: u16, y: u16, z: u16) {
 /// follows the party with [`MARGIN`] tiles of hysteresis at each 128-tile edge (Original 5).
 /// Leaving a dungeon level prunes and writes it back; superchunks no longer wanted are written
 /// back (pruning first); newly wanted ones and a newly entered level are read, and inventory is
-/// re-attached after any read.
+/// re-attached after any read. Port-only: after any read [`super::parts::repair_dragon_parts`]
+/// runs once over the slots all of this call's reads filled, after the last one is keyed in
+/// [`Objects::loaded_surface`], so a dragon's side tiles in any of the four superchunks count.
 pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
     let mut wrote = 0;
     let mut read = 0;
@@ -485,6 +487,7 @@ pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
         }
     }
     if z == 0 {
+        let mut filled = Vec::new();
         for w in want {
             if s.objects.loaded_surface.contains(&w) {
                 continue;
@@ -492,7 +495,7 @@ pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
             let free = s.objects.loaded_surface.iter().position(|&b| b == -1);
             let before = s.objects.free.1;
             load_surface(&mut s.objects, w);
-            repair_read(s, before, z);
+            filled.extend(read_slots(&s.objects, before));
             read += 1;
             match free {
                 Some(i) => s.objects.loaded_surface[i] = w,
@@ -500,10 +503,14 @@ pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
                 None => s.objects.surface_base = w,
             }
         }
+        if read != 0 {
+            super::parts::repair_dragon_parts(s, &filled, z);
+        }
     } else if s.objects.loaded_level != z as i16 {
         let before = s.objects.free.1;
         load_level(&mut s.objects, z as i16);
-        repair_read(s, before, z);
+        let filled = read_slots(&s.objects, before);
+        super::parts::repair_dragon_parts(s, &filled, z);
         read += 1;
     }
     s.objects.loaded_level = z as i16;
@@ -512,13 +519,12 @@ pub fn load_region(s: &mut State, x: u16, y: u16, z: u16) {
     }
 }
 
-/// Port-only: [`super::parts::repair_dragon_parts`] over the slots a block read just filled on
-/// level `z` (the first `before` − free-count entries of [`Objects::rec_slots`]: 0x10db82 takes
-/// one free slot per record, in record order).
-fn repair_read(s: &mut State, before: i16, z: u16) {
-    let n = usize::try_from(before - s.objects.free.1).unwrap_or(0);
-    let read = s.objects.rec_slots[..n.min(MAX_RECORDS)].to_vec();
-    super::parts::repair_dragon_parts(s, &read, z);
+/// Port-only: the slots a block read just filled, for [`super::parts::repair_dragon_parts`] (the
+/// first `before` − free-count entries of [`Objects::rec_slots`]: 0x10db82 takes one free slot
+/// per record, in record order, and fills that table from its start on every read).
+fn read_slots(o: &Objects, before: i16) -> Vec<Slot> {
+    let n = usize::try_from(before - o.free.1).unwrap_or(0);
+    o.rec_slots[..n.min(MAX_RECORDS)].to_vec()
 }
 
 /// Original: 0x10d4e8 (objects: delete every `.tmp` block file whose flag is set)

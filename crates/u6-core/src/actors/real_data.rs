@@ -896,6 +896,122 @@ fn old_turn_reframed(dragon: Dragon) {
     );
 }
 
+/// Port-only repair (D3): a dragon that turned under the old build and then walked on lives on
+/// in a save with its head tiles away from its four parts, since each step's 0x10b9ca found no
+/// part of the new facing to move. When its block is read again the four parts stand beside the
+/// head with its facing, none stays where they were, and they follow its next step. The old turn
+/// made by hand (the head's frame written for the new facing, the parts left as they were), then
+/// two steps that way, which move the head alone as the old build's did.
+#[test]
+fn a_dragon_that_turned_and_walked_is_whole_on_load() {
+    if let Some(d) = dragon() {
+        turned_and_walked_whole(d);
+    }
+}
+
+/// [`a_dragon_that_turned_and_walked_is_whole_on_load`] below the surface: the read is
+/// 0x10e10c's (`load_level`, then the repair).
+#[test]
+fn a_dragon_that_turned_and_walked_is_whole_on_load_below_the_surface() {
+    if let Some(d) = dragon_below() {
+        turned_and_walked_whole(d);
+    }
+}
+
+/// The body of [`a_dragon_that_turned_and_walked_is_whole_on_load`] for `dragon`. The part
+/// slots are read only before the reload (the write-back frees and refills object slots); after
+/// it the parts are counted by the tiles they stood on. The step after the reload goes back the
+/// way the head came, onto a tile [`dragon_where`] found it may enter and it entered: the tile a
+/// third step ahead was never checked. Returns the state after that step.
+fn turned_and_walked_whole(dragon: Dragon) -> State {
+    let Dragon {
+        mut s,
+        head,
+        parts,
+        dir,
+        ..
+    } = dragon;
+    let beside = |s: &mut State| parts_beside(s, head).iter().filter(|&&p| p >= 0).count();
+    let at: Vec<Position> = parts
+        .iter()
+        .map(|&p| s.objects.location[p as usize])
+        .collect();
+    let spawned = parts
+        .iter()
+        .filter(|&&p| s.objects.status(p) == SPAWNED_PART)
+        .count();
+    assert!(
+        spawned == 4,
+        "the new dragon's parts with the spawned part's status {spawned} of 4"
+    );
+    let count = |s: &State| -> usize {
+        at.iter()
+            .map(|&a| dragon_objects_at(s, a, Some(SPAWNED_PART)))
+            .sum()
+    };
+    let w = s.objects.type_frame[usize::from(head)];
+    s.objects.type_frame[usize::from(head)] = (w & 0x3ff) | ((dir & 6) << 10);
+    let walked = [step(&mut s, head, dir, 0), step(&mut s, head, dir, 0)];
+    let walked_beside = beside(&mut s);
+    let stayed = count(&s);
+    assert!(
+        walked == [true, true],
+        "turned and walked (direction {dir}): the two steps moved {walked:?}"
+    );
+    assert!(
+        walked_beside == 0,
+        "turned and walked (direction {dir}): parts found beside the head {walked_beside} of 4"
+    );
+    assert!(
+        stayed == 4,
+        "turned and walked (direction {dir}): spawned parts where they were {stayed} of 4"
+    );
+    reload(&mut s);
+    let after = beside(&mut s);
+    // Spawned parts on the recorded tiles, less those found beside the head (a part the repair
+    // kept may stand on a tile it stood on before, now one of the head's sides).
+    let kept_there = parts_beside(&mut s, head)
+        .iter()
+        .filter(|&&p| p >= 0)
+        .filter(|&&p| {
+            let o = &s.objects;
+            o.status(p) == SPAWNED_PART && at.contains(&o.location[p as usize])
+        })
+        .count();
+    let left = count(&s).saturating_sub(kept_there);
+    let untyped = untyped_in_list(&s);
+    let back = (dir + 4) & 7;
+    let moved = step(&mut s, head, back, 0);
+    let stepped = beside(&mut s);
+    println!(
+        "turned and walked (direction {dir}): steps moved {walked:?}, parts beside the head \
+         {walked_beside} of 4 after them, spawned parts where they were {stayed} of 4; after the \
+         reload parts beside the head {after} of 4, spawned parts left where they were and not \
+         beside it {left}, list entries without a type {untyped}; one more step (direction \
+         {back}) moved {moved}, parts beside the head {stepped} of 4"
+    );
+    assert!(
+        after == 4,
+        "turned and walked (direction {dir}): parts beside the head after the reload {after} of 4"
+    );
+    assert!(
+        left == 0,
+        "turned and walked (direction {dir}): spawned parts left where they were and not beside \
+         the head after the reload {left}"
+    );
+    assert!(
+        untyped == 0,
+        "turned and walked (direction {dir}): list entries without a type after the reload \
+         {untyped}"
+    );
+    assert!(
+        moved && stepped == 4,
+        "turned and walked (direction {dir}): one more step (direction {back}) moved {moved}, \
+         parts beside the head after it {stepped} of 4"
+    );
+    s
+}
+
 /// Port-only repair (D2): the re-frame never takes a part another dragon's 0x10b922 already
 /// finds. Two dragons made by 0x131646 two tiles apart on a row, so the east part of the west
 /// one and the west part of the east one share a tile; each in turn, then both, get the old
@@ -959,4 +1075,492 @@ fn a_neighbouring_dragon_keeps_its_part_when_another_is_reframed() {
             after[1]
         );
     }
+}
+
+/// Port-only repair (D3): a removed dragon's stranded parts are still swept beside a live dragon
+/// that lacks no side, so the re-attach (each side still empty takes the nearest part no head
+/// owns) never reaches them. Two dragons made by 0x131646 two tiles apart on a row, as in
+/// [`a_neighbouring_dragon_keeps_its_part_when_another_is_reframed`]; the west one gets the old
+/// build's turn and is removed by 0x10c1d6, which finds no part to take. After the region's
+/// blocks are written back and read again the east one has its four parts beside it, the shared
+/// tile holds only its part, and no part with the spawned part's status stands on the removed
+/// one's other three tiles.
+#[test]
+fn a_removed_dragon_s_parts_are_swept_beside_a_whole_one() {
+    let Some(Dragon {
+        mut s,
+        head,
+        parts,
+        dir,
+        ..
+    }) = dragon()
+    else {
+        return;
+    };
+    let p = s.objects.location[usize::from(head)];
+    let m = spawn_monster(&mut s, DRAGON, p.x.wrapping_add(2), p.y, u16::from(p.z));
+    assert!(
+        (0..ACTOR_SLOTS as Slot).contains(&m),
+        "the second dragon takes an actor slot"
+    );
+    let live = m as u16;
+    let beside = |s: &mut State, h: u16| parts_beside(s, h).iter().filter(|&&p| p >= 0).count();
+    let shared_at = Position {
+        x: p.x.wrapping_add(1),
+        ..p
+    };
+    let others: Vec<Position> = parts
+        .iter()
+        .map(|&c| s.objects.location[c as usize])
+        .filter(|&a| a != shared_at)
+        .collect();
+    let on_others = |s: &State| -> usize {
+        others
+            .iter()
+            .map(|&a| dragon_objects_at(s, a, Some(SPAWNED_PART)))
+            .sum()
+    };
+    let shared = |s: &State| dragon_objects_at(s, shared_at, Some(SPAWNED_PART));
+    let (a0, b0) = (beside(&mut s, head), beside(&mut s, live));
+    assert!(
+        a0 == 4 && b0 == 4 && others.len() == 3 && shared(&s) == 2,
+        "the two dragons: parts beside them {a0} and {b0} of 4, the removed one's tiles not \
+         shared {}, the shared tile holds {}",
+        others.len(),
+        shared(&s)
+    );
+    let h = head as Slot;
+    let w = s.objects.type_frame[usize::from(head)];
+    s.objects.type_frame[usize::from(head)] = (w & 0x3ff) | ((dir & 6) << 10);
+    remove(&mut s, h);
+    let (stranded, shared_before, live_before) = (on_others(&s), shared(&s), beside(&mut s, live));
+    assert!(
+        s.objects.tf(h) == 0 && stranded == 3 && shared_before == 2 && live_before == 4,
+        "the west dragon removed after its old turn: its parts left on its own tiles {stranded} \
+         of 3, the shared tile holds {shared_before}, parts beside the east one {live_before} of 4"
+    );
+    reload(&mut s);
+    let alive = s.objects.kind(live as Slot) == DRAGON;
+    let (left, shared_after, live_after) = (on_others(&s), shared(&s), beside(&mut s, live));
+    let untyped = untyped_in_list(&s);
+    println!(
+        "a removed dragon beside a whole one (direction {dir}): its parts on its own tiles \
+         {stranded} of 3 before the reload, {left} after; the shared tile holds {shared_before} \
+         before, {shared_after} after; the whole one kept {alive}, parts beside it {live_before} \
+         of 4 before, {live_after} after; list entries without a type {untyped}"
+    );
+    assert!(
+        left == 0 && shared_after == 1,
+        "after the reload: the removed dragon's parts on its own tiles {left}, the shared tile \
+         holds {shared_after}"
+    );
+    assert!(
+        alive && live_after == 4,
+        "after the reload: the whole dragon kept {alive}, parts beside it {live_after} of 4"
+    );
+    assert!(
+        untyped == 0,
+        "list entries without a type after the reload {untyped}"
+    );
+}
+
+/// Spawned dragon parts (0x19b object slots on the map on level `z` with the spawned part's
+/// status) and the tiles they stand on, in slot order.
+fn spawned_parts(s: &State, z: u8) -> Vec<Position> {
+    let o = &s.objects;
+    (ACTOR_SLOTS..crate::objects::OBJECT_SLOTS)
+        .map(|c| c as Slot)
+        .filter(|&c| o.kind(c) == DRAGON && o.place(c) == 0 && o.z(c) == z)
+        .filter(|&c| o.status(c) == SPAWNED_PART)
+        .map(|c| o.location[c as usize])
+        .collect()
+}
+
+/// Port-only repair (D3): a dragon head outside the loaded region takes no part of a walked
+/// dragon. Its side tiles lie in a superchunk not in slots, where 0x10b922 finds nothing only
+/// because the parts are in that block's file. The dragon of [`dragon`] is removed and its actor
+/// slot goes to the far head (the head first in slot order, which the re-attach serves first) on
+/// the centre of the superchunk four columns and four rows from the region's base; its parts are
+/// removed as if in their block file. A dragon made again on the first one's tile then turns and
+/// walks as in [`a_dragon_that_turned_and_walked_is_whole_on_load`] and is whole on load, and the
+/// far head's sides stay empty.
+#[test]
+fn a_far_dragon_takes_no_part_of_a_walked_one() {
+    let Some(Dragon {
+        mut s,
+        files,
+        head,
+        parts,
+        dir,
+    }) = dragon()
+    else {
+        return;
+    };
+    let p = s.objects.location[usize::from(head)];
+    remove(&mut s, head as Slot);
+    let left = parts.iter().filter(|&&c| s.objects.tf(c) != 0).count();
+    assert!(
+        left == 0,
+        "the first dragon removed: parts left {left} of 4"
+    );
+    let base = s.objects.surface_base;
+    assert!(p.z == 0 && base >= 0, "the first dragon is on the surface");
+    let k = (((base & 0x38) + 0x20) & 0x38) + (((base & 7) + 4) & 7);
+    let keyed = |s: &State| s.objects.loaded_surface.contains(&k);
+    assert!(!keyed(&s), "the far superchunk is not in slots");
+    let (fx, fy) = ((k & 7) as u16 * 0x80 + 0x40, (k >> 3) as u16 * 0x80 + 0x40);
+    let far = spawn_monster(&mut s, DRAGON, fx, fy, 0);
+    assert!(
+        (0..ACTOR_SLOTS as Slot).contains(&far),
+        "the far dragon takes an actor slot"
+    );
+    let far = far as u16;
+    let own = parts_beside(&mut s, far);
+    let made = own.iter().filter(|&&c| c >= 0).count();
+    assert!(made == 4, "the far dragon's parts made {made} of 4");
+    for c in own {
+        remove(&mut s, c);
+    }
+    let walked = spawn_monster(&mut s, DRAGON, p.x, p.y, 0);
+    assert!(
+        (0..ACTOR_SLOTS as Slot).contains(&walked),
+        "the walked dragon takes an actor slot"
+    );
+    let walked = walked as u16;
+    assert!(
+        far < walked,
+        "the far head comes first in slot order (slots {far} and {walked})"
+    );
+    let parts = parts_beside(&mut s, walked);
+    let beside = parts.iter().filter(|&&c| c >= 0).count();
+    assert!(
+        beside == 4,
+        "the walked dragon's parts beside it {beside} of 4"
+    );
+    let far_sides: Vec<Position> = SIDES
+        .iter()
+        .map(|&d| Position {
+            x: fx.wrapping_add_signed(DX8[d]),
+            y: fy.wrapping_add_signed(DY8[d]),
+            z: 0,
+        })
+        .collect();
+    let mut s = turned_and_walked_whole(Dragon {
+        s,
+        files,
+        head: walked,
+        parts,
+        dir,
+    });
+    let far_kept = s.objects.kind(far as Slot) == DRAGON;
+    let far_beside = parts_beside(&mut s, far)
+        .iter()
+        .filter(|&&c| c >= 0)
+        .count();
+    let on_far_sides: usize = far_sides
+        .iter()
+        .map(|&a| dragon_objects_at(&s, a, Some(SPAWNED_PART)))
+        .sum();
+    let far_keyed = keyed(&s);
+    println!(
+        "far head (slot {far}) and walked head (slot {walked}): after the reload the far head kept \
+         {far_kept}, its superchunk in slots {far_keyed}, parts beside it {far_beside} of 4, \
+         spawned parts on its side tiles {on_far_sides}"
+    );
+    assert!(
+        far_kept && !far_keyed && far_beside == 0 && on_far_sides == 0,
+        "after the reload: the far head kept {far_kept}, its superchunk in slots {far_keyed}, \
+         parts beside it {far_beside} of 4, spawned parts on its side tiles {on_far_sides}"
+    );
+}
+
+/// Port-only repair (D3): a walked dragon whose head ends on the region's inner superchunk edge,
+/// its sides in two superchunks in slots, is whole on load with no part doubled: the repair runs
+/// once after all four reads, when both are keyed. The dragon of [`dragon`] is removed and the
+/// view goes two tiles west of the inner vertical edge on its row (the same 2 × 2 stays in slots);
+/// a dragon is made two tiles west of the edge on the first row within 16 of that one where it may
+/// stand and step twice east, turns east and walks as in
+/// [`a_dragon_that_turned_and_walked_is_whole_on_load`], so its head ends on the edge's east
+/// column and its west side on the west superchunk. A regression guard: the per-read repair
+/// before reached 4 of 4 here too, since a walked dragon has no part of its own in the later read.
+#[test]
+fn a_walked_dragon_on_a_superchunk_edge_is_whole_on_load() {
+    let Some(Dragon {
+        mut s, files, head, ..
+    }) = dragon()
+    else {
+        return;
+    };
+    let p = s.objects.location[usize::from(head)];
+    remove(&mut s, head as Slot);
+    let base = s.objects.surface_base;
+    assert!(p.z == 0 && base >= 0, "the first dragon is on the surface");
+    let edge = (((base & 7) + 1) & 7) as u16 * 0x80;
+    let x = edge.wrapping_sub(2) & 0x3ff;
+    look_at(&mut s, Position { x, ..p });
+    assert!(
+        s.objects.surface_base == base,
+        "the view two tiles from the edge keeps the region"
+    );
+    let dir = 2u16;
+    let rows = (0..=16i16).flat_map(|k| [k, -k]).skip(1);
+    let found = rows.map(|k| p.y.wrapping_add_signed(k)).find_map(|y| {
+        let mut t = s.clone();
+        let m = spawn_monster(&mut t, DRAGON, x, y, 0);
+        if !(0..ACTOR_SLOTS as Slot).contains(&m) {
+            return None;
+        }
+        let m = m as u16;
+        let free = (0..=2).all(|k| can_move_to(&mut t, m, (x + k) & 0x3ff, y));
+        free.then_some((t, m))
+    });
+    let Some((s, walked)) = found else {
+        panic!("a row within 16 of the view where a dragon may stand and step twice east");
+    };
+    let mut t = s;
+    let parts = parts_beside(&mut t, walked);
+    let beside = parts.iter().filter(|&&c| c >= 0).count();
+    assert!(
+        beside == 4,
+        "the edge dragon's parts beside it {beside} of 4"
+    );
+    let block = |px: u16, py: u16| (((py & 0x3ff) >> 7) * 8 + ((px & 0x3ff) >> 7)) as i16;
+    let y = t.objects.location[usize::from(walked)].y;
+    let (west, east) = (block(edge.wrapping_sub(1), y), block(edge, y));
+    let mut s = turned_and_walked_whole(Dragon {
+        s: t,
+        files,
+        head: walked,
+        parts,
+        dir,
+    });
+    let keyed = [west, east].map(|b| s.objects.loaded_surface.contains(&b));
+    let found: Vec<Position> = parts_beside(&mut s, walked)
+        .iter()
+        .filter(|&&c| c >= 0)
+        .map(|&c| s.objects.location[c as usize])
+        .collect();
+    let all = spawned_parts(&s, 0);
+    let mut tiles = all.clone();
+    tiles.sort_by_key(|a| (a.y, a.x));
+    tiles.dedup();
+    let doubled = all.len() - tiles.len();
+    let elsewhere = all.iter().filter(|a| !found.contains(a)).count();
+    let h = s.objects.location[usize::from(walked)];
+    let sides_across = SIDES
+        .iter()
+        .map(|&d| block(h.x.wrapping_add_signed(DX8[d]), h.y))
+        .filter(|&b| b != block(h.x, h.y))
+        .count();
+    println!(
+        "edge dragon (slot {walked}): both superchunks in slots {keyed:?}, sides in the other \
+         superchunk {sides_across}; spawned parts on the level {}, on a tile with another \
+         {doubled}, not beside the head {elsewhere}, parts beside the head {} of 4",
+        all.len(),
+        found.len()
+    );
+    assert!(
+        keyed == [true, true] && sides_across == 1,
+        "both superchunks in slots {keyed:?}, sides in the other superchunk {sides_across}"
+    );
+    assert!(
+        all.len() == 4 && doubled == 0 && elsewhere == 0 && found.len() == 4,
+        "spawned parts on the level {}, on a tile with another {doubled}, not beside the head \
+         {elsewhere}, parts beside the head {} of 4",
+        all.len(),
+        found.len()
+    );
+}
+
+/// Port-only repair (D3): a save written after the D2 sweep holds a head with fewer than four
+/// parts (the sweep removed those no head found), and the original's live head always has four:
+/// 0x131646 makes them and only 0x10c1d6 with the head takes them. When its block is read again
+/// the missing parts are made beside it as 0x131646 makes them, and reading it twice more makes
+/// no more. The dragon of [`dragon`] takes its turning step (its parts follow), then all its parts
+/// but the one behind it are removed by hand: the shape the D2 sweep left of a dragon that turned
+/// and walked under the old build.
+#[test]
+fn a_dragon_saved_with_one_part_is_whole_on_load() {
+    if let Some(d) = dragon() {
+        missing_parts_made(d, 1);
+    }
+}
+
+/// [`a_dragon_saved_with_one_part_is_whole_on_load`] below the surface (one read, 0x10e10c's).
+#[test]
+fn a_dragon_saved_with_one_part_is_whole_on_load_below_the_surface() {
+    if let Some(d) = dragon_below() {
+        missing_parts_made(d, 1);
+    }
+}
+
+/// [`a_dragon_saved_with_one_part_is_whole_on_load`] with all four parts removed by hand.
+#[test]
+fn a_dragon_saved_with_no_part_is_whole_on_load() {
+    if let Some(d) = dragon() {
+        missing_parts_made(d, 0);
+    }
+}
+
+/// [`a_dragon_saved_with_no_part_is_whole_on_load`] below the surface (one read, 0x10e10c's).
+#[test]
+fn a_dragon_saved_with_no_part_is_whole_on_load_below_the_surface() {
+    if let Some(d) = dragon_below() {
+        missing_parts_made(d, 0);
+    }
+}
+
+/// The body of [`a_dragon_saved_with_one_part_is_whole_on_load`] for `dragon`, keeping `keep`
+/// (0 or 1) of its parts: with 1, the one on the side behind the head. After the reload: the
+/// parts beside the head, the spawned parts on the level (only this dragon makes any here), how
+/// many of those share a tile with another and how many stand anywhere but beside the head; then
+/// one more step the same way ([`dragon_where`] found the tile free) and two more reloads.
+fn missing_parts_made(dragon: Dragon, keep: usize) {
+    let Dragon {
+        mut s, head, dir, ..
+    } = dragon;
+    let z = s.objects.z(head as Slot);
+    let beside = |s: &mut State| parts_beside(s, head).iter().filter(|&&p| p >= 0).count();
+    // Spawned parts on the level, those on a tile with another, those not beside the head.
+    let tally = |s: &mut State| {
+        let found: Vec<Position> = parts_beside(s, head)
+            .iter()
+            .filter(|&&c| c >= 0)
+            .map(|&c| s.objects.location[c as usize])
+            .collect();
+        let all = spawned_parts(s, z);
+        let mut tiles = all.clone();
+        tiles.sort_by_key(|a| (a.y, a.x));
+        tiles.dedup();
+        let elsewhere = all.iter().filter(|a| !found.contains(a)).count();
+        (all.len(), all.len() - tiles.len(), elsewhere)
+    };
+    assert!(
+        step(&mut s, head, dir, 0),
+        "the turning step (direction {dir}) moved"
+    );
+    let whole = beside(&mut s);
+    assert!(
+        whole == 4,
+        "after the turning step: parts beside the head {whole} of 4"
+    );
+    let behind = SIDES
+        .iter()
+        .position(|&d| d == usize::from((dir + 4) & 6))
+        .expect("a side");
+    for (k, c) in parts_beside(&mut s, head).into_iter().enumerate() {
+        if keep == 0 || k != behind {
+            remove(&mut s, c);
+        }
+    }
+    let saved = beside(&mut s);
+    let (saved_on_level, ..) = tally(&mut s);
+    assert!(
+        saved == keep && saved_on_level == keep,
+        "the save's shape: parts beside the head {saved}, spawned parts on the level \
+         {saved_on_level} (kept {keep})"
+    );
+    reload(&mut s);
+    let after = beside(&mut s);
+    let (on_level, doubled, elsewhere) = tally(&mut s);
+    let untyped = untyped_in_list(&s);
+    let moved = step(&mut s, head, dir, 0);
+    let stepped = beside(&mut s);
+    let (stepped_on_level, ..) = tally(&mut s);
+    let mut again = Vec::new();
+    for _ in 0..2 {
+        reload(&mut s);
+        let b = beside(&mut s);
+        let (n, d, e) = tally(&mut s);
+        again.push((b, n, d, e));
+    }
+    println!(
+        "kept {keep} of 4 (direction {dir}): after the reload parts beside the head {after} of 4, \
+         spawned parts on the level {on_level}, on a tile with another {doubled}, not beside the \
+         head {elsewhere}, list entries without a type {untyped}; one more step moved {moved}, \
+         parts beside the head {stepped} of 4, on the level {stepped_on_level}; two more reloads \
+         (beside, on the level, doubled, not beside) {again:?}"
+    );
+    assert!(
+        after == 4 && on_level == 4 && doubled == 0 && elsewhere == 0 && untyped == 0,
+        "kept {keep}: after the reload parts beside the head {after} of 4, spawned parts on the \
+         level {on_level}, on a tile with another {doubled}, not beside the head {elsewhere}, \
+         list entries without a type {untyped}"
+    );
+    assert!(
+        moved && stepped == 4 && stepped_on_level == 4,
+        "kept {keep}: one more step (direction {dir}) moved {moved}, parts beside the head \
+         {stepped} of 4, spawned parts on the level {stepped_on_level}"
+    );
+    assert!(
+        again == [(4, 4, 0, 0), (4, 4, 0, 0)],
+        "kept {keep}: two more reloads (beside, on the level, doubled, not beside) {again:?}"
+    );
+}
+
+/// Port-only repair (D3): a part made for a side 0x10b922 cannot find is removed again, so none
+/// is left behind and none piles up. On the surface at x 0 the west side's tile is x 0x3ff
+/// (0x10bcee masks it), but 0x10b922 adds −1 unmasked and its packed location (0x134e1c) carries
+/// into y, so the part there is found only on a row whose low six bits are all set. A dragon made
+/// by 0x131646 at x 0 on a row that is not one, the view one tile east of it so the region wraps
+/// (the west side's superchunk in slots as well as the head's): three of its parts are found;
+/// after each of three reloads it still has those three, and no spawned part stands anywhere
+/// else.
+#[test]
+fn a_part_past_the_world_edge_is_not_left_on_load() {
+    let Some((mut s, _files)) = start() else {
+        return;
+    };
+    let c = s.map.centre;
+    assert!(c.z == 0, "the start is on the surface");
+    let y = if c.y & 0x3f == 0x3f { c.y - 1 } else { c.y };
+    // One tile from x 0, closer than the margin 0x10e1ce keeps from a superchunk edge, so the
+    // region's base moves west across the world's edge.
+    look_at(&mut s, Position { x: 1, y, z: 0 });
+    let block = |px: u16| ((y >> 7) * 8 + (px >> 7)) as i16;
+    let keyed = |s: &State| [0x3ff, 0].map(|px| s.objects.loaded_surface.contains(&block(px)));
+    println!(
+        "view near x 0: superchunks of x 0x3ff and x 0 in slots {:?}",
+        keyed(&s)
+    );
+    assert!(
+        keyed(&s) == [true, true],
+        "the region wraps: superchunks of x 0x3ff and x 0 in slots {:?}",
+        keyed(&s)
+    );
+    let m = spawn_monster(&mut s, DRAGON, 0, y, 0);
+    assert!(
+        (0..ACTOR_SLOTS as Slot).contains(&m),
+        "the dragon takes an actor slot"
+    );
+    let head = m as u16;
+    let beside = |s: &mut State| parts_beside(s, head).iter().filter(|&&p| p >= 0).count();
+    let not_beside = |s: &mut State| {
+        let found: Vec<Position> = parts_beside(s, head)
+            .iter()
+            .filter(|&&c| c >= 0)
+            .map(|&c| s.objects.location[c as usize])
+            .collect();
+        spawned_parts(s, 0)
+            .iter()
+            .filter(|a| !found.contains(a))
+            .count()
+    };
+    let made = (beside(&mut s), not_beside(&mut s));
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        reload(&mut s);
+        seen.push((beside(&mut s), not_beside(&mut s)));
+    }
+    println!(
+        "dragon at x 0: made (beside, not beside) {made:?}; after each of three reloads {seen:?}"
+    );
+    assert!(
+        made == (3, 1),
+        "the dragon at x 0 as made: parts beside it and spawned parts elsewhere {made:?}"
+    );
+    assert!(
+        seen == [(3, 0), (3, 0), (3, 0)],
+        "after each of three reloads: parts beside it and spawned parts elsewhere {seen:?}"
+    );
 }
