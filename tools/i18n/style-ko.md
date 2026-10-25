@@ -10,16 +10,19 @@ request. Every example below is made up for this guide; none is the game's text.
   speech level and a form of address; they have no word-for-word Korean. Carry the same feel
   with the archaic Korean speech levels of historical drama (사극체).
 - Address the hero as **그대** unless the line says otherwise, the request's `address` gives the
-  speaker's own words for the hero (by its station, below) or the speaker is a child (see the
-  ages below; a title the game fills in, such as `$G`, stays as it is).
+  speaker's own words for the hero (by its station, a gargoyle's by its role, below) or the
+  speaker is a child (see the ages below; a title the game fills in, such as `$G`, stays as it
+  is).
 - An `adult` or an `elder` speaker never uses modern endings: no ~요 (해요체), no ~해 / ~야 /
   ~지 / ~냐 / ~거든 / ~잖아 (modern 반말). The `lowborn` may use every modern 반말 ending of that
   list, but not 해요체 (~요); a beggar's whining 합쇼 (~줍쇼, ~습죠) stays. A `drunk` speaker may
-  slip out of its level into a slurred 반말, and an `elder` keeps its old turns (both below). A
-  `child` or a `youth` speaker uses the endings its age gives below.
+  slip out of its level into a slurred 반말, a `mad` one leaves it for 반말 or a 해라체 shout in a
+  share of its lines, and an `elder` keeps its old turns (all below). A `child` or a `youth`
+  speaker uses the endings its age gives below.
 - No speaker uses modern loanwords or slang.
 - One speaker keeps one level through the whole conversation (the `lowborn`'s one level is its
-  mix of 반말 and 하게체); a `mad` or `drunk` speaker may break it (below).
+  mix of 반말 and 하게체); a `drunk` speaker may break it, a `mad` one breaks it in a share of its
+  lines (below).
 
 ## Speaker ages: the age decides first, then the station
 
@@ -31,8 +34,8 @@ boastful, gruff, kind) inside the level its age and station give.
 - `child`: a child's speech. Short sentences and easy native words, no Sino-Korean diction and
   none of the archaic adult endings (~노라, ~도다, ~하오, ~이오, ~하게, ~사옵니다). To a grown-up,
   a polite child's 해요체 (~요, ~어요, ~예요); to another child or an animal, 반말. The hero is
-  아저씨, 언니, 오빠, 기사님 or 그쪽 as the line suits, never 그대. Whatever its station or class, a
-  child speaks as a child.
+  아저씨, 언니, 오빠, 기사님 or 그쪽 as the line suits, never 그대 (a gargoyle child: 인간 or 아바타,
+  the gargoyle line below). Whatever its station or class, a child speaks as a child.
 - `youth`: a young person's lighter level, by station: a young `commoner` or `lowborn` (an
   apprentice, a young servant) 해요체; a young `royalty`, `lord` or `beyond` (a young noble, a
   squire) a soft 하오체. Fewer archaic endings than an adult of the station.
@@ -109,8 +112,12 @@ The role colours its station's level, for an adult and an elder:
   어서 옵쇼, 나리. 오늘 들어온 천이 아주 곱사옵니다.
 - a `scholar`, a `clergy` and a `mage` speak with Sino-Korean diction (in Hangul);
 - a `guard` is clipped: 멈추십쇼. 용건만 말씀하십쇼.
-- a `gargoyle` keeps the gargoyle register of the class table below whatever its station; its
-  station sets only whom it defers to.
+- a `gargoyle` speaks its station's level, coloured: terse, in short sentences and plain words,
+  an archaic ~로다 or ~도다 now and then where the level allows, no flowery honorific vocabulary;
+  it calls the hero 인간 or 아바타 rather than its station's words (나리, 그대, 귀공 and the
+  rest), the words the request's `address` names for a gargoyle of every station and age, a
+  child's too. A commoner gargoyle's humble 합쇼 stays terse: 인간, 이 문은 닫혔습니다.
+  돌아가십쇼.
 
 The manner shapes the diction and the rhythm inside that level:
 
@@ -118,8 +125,11 @@ The manner shapes the diction and the rhythm inside that level:
 - `jester`: Korean rhymes, puns and a sung rhythm of its own, the line's sense and every keyword
   kept (not the English wordplay word for word): 근심은 접고 웃음은 펴십쇼, 나리! 접었다 폈다,
   부채 같은 인생입죠!
-- `mad`: lurching, in fragments, repetitions, sudden shouts and whispers, talk to oneself; it may
-  break the one-level rule: 옳거니, 옳거니… 아니! 아니다! 쉿, 들리오? 벽이, 저 벽이 웃고 있소.
+- `mad`: lurching, in fragments, repetitions, sudden shouts and whispers, talk to oneself; it
+  breaks the one-level rule in a share of its lines: in a longer conversation, about one
+  sentence in four leaves its level for 반말 or a 해라체 shout, often in the middle of a line,
+  then returns to the level: 쉿, 쉿… 들리오? 벽이, 저 벽이 웃고 있소. 웃잖아, 지금도
+  웃는다고! …아니, 아니오. 앉으시오, 앉으시오.
 - `pompous`: inflated (에헴, 본관, Sino-Korean titles): 에헴, 본관이 이 고을을 맡은 지 어언 십
   년이오.
 - `drunk`: slurs and trails off, and may slip out of its level into a slurred 반말: 나리… 딱 한
@@ -152,7 +162,7 @@ and 하게체 to a younger hero where the class allows.
 | commoner | a low, plain 하오체 | 날이 벌써 저물었소. |
 | thief | 하게체 or 해라체 (~하게, ~이네, ~는가) | 자네, 여기서 무얼 하는가? |
 | spirit | 해라체 with archaic forms (~로다, ~도다, ~니라) | 나는 이곳을 오래 지켰도다. |
-| gargoyle | provisional, until the owner approves it from samples: a terse 하오체 with archaic endings (~이로다, ~하도다) and no honorifics | 너희 땅은 우리 것이로다. |
+| gargoyle | the fallback for a gargoyle with no station (with one, its station's level and the gargoyle colour above): a terse 하오체 with archaic endings (~이로다, ~하도다) and no honorifics | 너희 땅은 우리 것이로다. |
 
 Incantation syllables, runic text and the credits are not translated.
 
