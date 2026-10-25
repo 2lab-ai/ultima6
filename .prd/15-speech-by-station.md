@@ -88,7 +88,7 @@ Counts only; the scripts are the owner's and stay out of the repository.
    | Station | Adult | Elder | The hero is |
    |---|---|---|---|
    | royalty | 해라체 (~노라, ~하라, ~느니라) | the same | 그대 |
-   | lord | 하오체 (~하오, ~이오, ~시오), formal | 하게체 (~하게, ~하네, ~일세) | 그대, 귀공 |
+   | lord | 하오체 (~하오, ~이오, ~시오), formal | 하게체 (~하게, ~하네, ~일세) | 그대, 귀공 (an elder lord: 그대, 자네) |
    | commoner | a humble 사극 합쇼 (~습니다, ~습죠, ~굽쇼, ~입니다요) | a rural old person's turns (~구먼, ~했지, ~하게) | 나리, 나으리 (an elder: 젊은이, 나리) |
    | lowborn | rough low talk: 반말 and 하게 mixed (~하슈, ~했수, ~다고, ~하라고, 이봐); a beggar begs in a whining 합쇼 (~줍쇼) | rough 반말 | 이보쇼, 형씨, 당신 (나리 in mockery) |
    | beyond | archaic 해라체 (~로다, ~도다, ~니라) | the same | 그대 |
