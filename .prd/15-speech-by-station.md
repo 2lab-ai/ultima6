@@ -6,7 +6,7 @@ tags: [ultima6, i18n, korean, npc, voice]
 
 # 15 — Speech and voice by station and manner
 
-Status: draft (2026-10-25). It amends spec 12 (the register by profile) and spec 09 Design 4 (the
+Status: shipped (2026-10-25, deploys 19 and 20: main 4393099 with ko-1025s and voices-1025, then ko-1025t, every script by station and manner; loop rows 19–20). It amends spec 12 (the register by profile) and spec 09 Design 4 (the
 personality voice pack). The engine, the Korean pack format and the speech tap do not change.
 
 The owner, verbatim: "각각의 인물에 대해서 프로파일링해주고 각각의 인물의 말투(항상 하오체쓰는거 X)
