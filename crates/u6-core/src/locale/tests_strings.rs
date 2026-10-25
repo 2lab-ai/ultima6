@@ -3369,7 +3369,7 @@ fn lever_world() -> State {
 
 /// Use of the lever of [`lever_world`] through its handler (`usecmd::mech::lever`, 0x12e538) in
 /// an engine over [`use_game`], with `pack` installed over its catalogue (or no pack): the
-/// scroll's text and the counts.
+/// scroll's text as it is (each line break kept, the last line's too) and the counts.
 fn lever_used(pack: Option<Pack>) -> (String, [u32; 2]) {
     let game = use_game();
     let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
@@ -3396,7 +3396,7 @@ fn lever_used(pack: Option<Pack>) -> (String, [u32; 2]) {
     assert!(e.finished());
     let s = e.state();
     assert_eq!(s.objects.tf(LEVER_SLOT) >> 10, 1, "the lever switched");
-    (scroll(&s).trim_end().to_string(), s.locale.texts.get())
+    (scroll(&s), s.locale.texts.get())
 }
 
 /// A pack of `forms` (an English string and the pack's text for it, each the test's own).
@@ -3414,14 +3414,16 @@ fn the_levers_lines_print_the_packs_forms_and_else_the_english_byte_for_byte() {
         "the lever's lines are in mech's list"
     );
     let (lever, noise) = (use_text(USE_LEVER), use_text(USE_NOISE));
-    let english = format!("{lever}{noise}").trim_end().to_string();
+    // The scroll untrimmed: each line with its break, the last line's too (a lost or added
+    // break fails here).
+    let english = format!("{lever}{noise}");
     // The pack's forms of both lines, in order, each looked up and found.
     assert_eq!(
         lever_used(Some(use_ko(&[
             (lever.clone(), "가\n"),
             (noise.clone(), "나\n")
         ]))),
-        ("가\n나".into(), [2, 0]),
+        ("가\n나\n".into(), [2, 0]),
         "the pack's forms"
     );
     // No pack: every byte the English, nothing looked up.
