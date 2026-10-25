@@ -30,6 +30,35 @@ const FMT_S: u32 = 0x0012_ccf8;
 const STR_NL: u32 = 0x0012_ccfe;
 /// The serpent figure's line when no serpent hatched (0x12ff50 at 0x1301c2).
 const STR_NONE_HATCHED: u32 = 0x0012_ceee;
+/// Port-only (spec 08, slice K2; 2026-10-25): the strings these handlers pass to `printf` as its
+/// format, for the locale layer's catalogue ([`super::PRINTED`]): the wand's lead-in, the
+/// Codex's line, the shrine's mantra prompt and wrong-mantra line, the fishing pole's four
+/// lines, the wishing well's two prompts, its food line and its too-heavy line, and the serpent
+/// figure's line, each on a wrapping line of the message window; and the wand's two syllable
+/// formats, the well's message format, the mark that ends its food line and its newline, of no
+/// word of their own (the last two under three bytes too), which the catalogue leaves out. The
+/// syllables a wand prints go through `%s`: they stay English, as magic's do. The words typed
+/// at the shrine and the well are read against tables the catalogue does not hold.
+pub(super) const PRINTED: &[u32] = &[
+    STR_WITH,
+    FMT_STR,
+    FMT_SP_STR,
+    STR_CODEX,
+    STR_MANTRA,
+    STR_WRONG_MANTRA,
+    STR_CANT_CARRY_FISH,
+    STR_GOT_IT,
+    STR_NO_FISH,
+    STR_NEED_WATER,
+    STR_WISH,
+    STR_WISH_FOR,
+    STR_FOOD,
+    STR_CANT_CARRY,
+    STR_BANG,
+    FMT_S,
+    STR_NL,
+    STR_NONE_HATCHED,
+];
 /// Original: A4-0x660e (8 pointers: the shrine mantras, by virtue)
 const MANTRAS: i32 = -0x660e;
 /// Original: A4-0x65ce (20 pointers: the words the wishing well grants food for)

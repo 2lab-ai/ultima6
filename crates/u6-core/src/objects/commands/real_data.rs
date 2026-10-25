@@ -1160,6 +1160,85 @@ fn the_string_export_of_the_owners_game_holds_the_panels_lines_and_mode_names_wi
     );
 }
 
+/// Spec 08 (slice K2, 2026-10-25): the string export of the owner's files holds Use's own lines,
+/// by the hashes of the strings at its sites (`usecmd::PRINTED`, each file's list): the lever's
+/// line and its three outcomes (0x12cad2, 0x12cae6, 0x12cb02, 0x12cb16), the drawbridge crank's
+/// no-bridge line and its five results (0x12ca2a, 0x12ca48 .. 0x12cab4), and every other site's
+/// string with a word of its own, with no cell budget (each on a wrapping line); and none of the
+/// ten of no word of their own (the three line formats, the newline, the direction's format,
+/// the wand's two syllable formats, the well's message format and the mark that ends its food
+/// line, the astrolabe's out-of-range line). Prints pass/fail and counts only: the export's
+/// strings, each list's sites and how many of them are in it; a failure names the site, never
+/// its text.
+#[test]
+fn the_string_export_of_the_owners_game_holds_uses_own_lines() {
+    use crate::converse::disasm::catalog::hash64;
+    use crate::image::GameImage;
+    let Some(files) = files() else { return };
+    let export = crate::locale::strings::export(&files).quiet();
+    let img = GameImage::parse(files.get("game").quiet()).quiet();
+    let entry = |at: u32| {
+        let h = hash64(&img.cstr(at).quiet());
+        export.strings.iter().find(|e| e.hash == h)
+    };
+    let no_word: [u32; 10] = [
+        0x0012_c9ee,
+        0x0012_c93e,
+        0x0012_cda6,
+        0x0012_ccfe,
+        0x0012_cd16,
+        0x0012_c94a,
+        0x0012_c94e,
+        0x0012_ccf8,
+        0x0012_ccf4,
+        0x0012_cec2,
+    ];
+    let names = ["the checks'", "food's", "mech's", "misc's", "travel's"];
+    for (name, list) in names.into_iter().zip(crate::usecmd::PRINTED) {
+        let mut held = 0;
+        for &at in list {
+            let e = entry(at);
+            if no_word.contains(&at) {
+                assert!(
+                    e.is_none(),
+                    "{name} site {at:#x}, of no word, not in the export"
+                );
+            } else {
+                assert!(e.is_some(), "{name} site {at:#x} in the export");
+                assert!(
+                    e.is_some_and(|e| e.cells.is_none()),
+                    "{name} site {at:#x} with no cell budget"
+                );
+                held += 1;
+            }
+        }
+        eprintln!(
+            "Use's {name} list: {} sites, {held} in the export: pass",
+            list.len()
+        );
+    }
+    let mech = crate::usecmd::PRINTED[2];
+    for (site, at) in [
+        ("LEVER", 0x0012_cad2),
+        ("STRANGE", 0x0012_cae6),
+        ("NOISE", 0x0012_cb02),
+        ("CANT_CLOSE", 0x0012_cb16),
+        ("NO_BRIDGE", 0x0012_ca2a),
+        ("BRIDGE_0", 0x0012_ca48),
+        ("BRIDGE_1", 0x0012_ca66),
+        ("BRIDGE_2", 0x0012_ca7e),
+        ("BRIDGE_3", 0x0012_ca96),
+        ("BRIDGE_4", 0x0012_cab4),
+    ] {
+        assert!(mech.contains(&at), "{site} is in mech's list");
+        assert!(entry(at).is_some(), "{site} in the export");
+    }
+    eprintln!("string export: {} strings", export.strings.len());
+    eprintln!(
+        "string export holds the lever's and the drawbridge crank's lines and every Use line with a word of its own, none of the ten of no word, no cell budget on any: pass"
+    );
+}
+
 /// The keys (type 0x40) of quality `q` the port holds, anywhere (the slot list).
 fn keys_of(s: &State, q: u8) -> Vec<Slot> {
     let o = &s.objects;

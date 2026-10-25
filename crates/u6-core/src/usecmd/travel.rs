@@ -33,6 +33,42 @@ const STR_LONGITUDE: u32 = 0x0012_cec8;
 const STR_DIRECTION: u32 = 0x0012_ced6;
 const STR_NOWHERE: u32 = 0x0012_cd0c;
 const FMT_DIR: u32 = 0x0012_cd16;
+/// Port-only (spec 08, slice K2; 2026-10-25): the strings these handlers pass to `printf` as its
+/// format, for the locale layer's catalogue ([`super::PRINTED`]): the vessels' three refusals
+/// (solo, land only, the deed), the horse's four, the balloon's (each missing part, made,
+/// inflated, no room), the orb's (no knowledge, its target prompt, the red gate), the
+/// telescope's direction prompt and no-direction word, and the astrolabe's instruction line and
+/// its two prompts, each on a wrapping line of the message window; and the telescope's
+/// direction format and the astrolabe's out-of-range line, of no word of their own, which the
+/// catalogue leaves out (the direction's name goes through `%s`, a label read for display,
+/// [`crate::magic::LABELS`]). The numbers typed at the astrolabe are read as numbers, whatever
+/// its prompts say.
+pub(super) const PRINTED: &[u32] = &[
+    STR_NOT_SOLO,
+    STR_ONLY_LAND,
+    STR_DEED,
+    STR_NOT_BOARDABLE,
+    STR_LEADER_9,
+    STR_LEADER_A4,
+    STR_ON_HORSE,
+    STR_NO_BAG,
+    STR_NO_BASKET,
+    STR_NO_CAULDRON,
+    STR_NO_ROPE,
+    STR_DONE_BANG,
+    STR_DONE_INFLATE,
+    STR_NO_ROOM,
+    STR_CANT_FIGURE,
+    STR_WHERE,
+    STR_RED_GATE,
+    STR_DIRECTION,
+    STR_NOWHERE,
+    FMT_DIR,
+    STR_DEGREES,
+    STR_LATITUDE,
+    STR_ZERO,
+    STR_LONGITUDE,
+];
 /// Original: A4-0x65ba / A4-0x65b2 (8 signed bytes each: dx / dy around a vessel)
 const AROUND_DX: i32 = -0x65ba;
 const AROUND_DY: i32 = -0x65b2;

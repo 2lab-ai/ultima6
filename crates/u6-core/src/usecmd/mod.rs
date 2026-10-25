@@ -50,8 +50,20 @@ pub(crate) mod tests_real;
 use std::cell::{RefCell, RefMut};
 
 pub use dispatch::{refused_aboard, use_command};
-/// Port-only (spec 08, slice K2): Use's strings for the locale layer's catalogue.
-pub(crate) const PRINTED: &[u32] = dispatch::PRINTED;
+/// Port-only (spec 08, slice K2; 2026-10-25): the strings Use passes to `printf` as its format,
+/// each file's list next to its addresses, for the locale layer's catalogue
+/// ([`crate::locale::strings`]): the command's checks and the line formats the handlers share
+/// (`dispatch`), and every handler's own lines and prompts (`food`, `mech`, `misc`, `travel`):
+/// the lever's, the drawbridge crank's and the rest. Each prints to the message window, which
+/// wraps: no cell budget. A format of no word of its own and a string under three bytes the
+/// catalogue leaves out: they stay as they are.
+pub(crate) const PRINTED: [&[u32]; 5] = [
+    dispatch::PRINTED,
+    food::PRINTED,
+    mech::PRINTED,
+    misc::PRINTED,
+    travel::PRINTED,
+];
 pub(crate) use mech::{drawbridge, lever};
 
 use crate::engine::Io;

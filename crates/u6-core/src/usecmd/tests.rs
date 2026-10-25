@@ -787,8 +787,8 @@ fn direction_parts() -> Vec<(u32, Vec<u8>)> {
 }
 
 /// Dig, or (`scope`) the telescope A, answered with the up arrow (north) under the `game` of
-/// [`direction_parts`], with a Korean pack of a form for north's name installed (`pack`) or no
-/// pack: the scroll (each cell as its character) and the counts.
+/// [`direction_parts`], with a Korean pack of a form for north's name and each prompt installed
+/// (`pack`) or no pack: the scroll (each cell as its character) and the counts.
 fn direction_line(scope: bool, pack: bool) -> (String, [u32; 2]) {
     use crate::engine::{InputEvent, Key};
     let parts = direction_parts();
@@ -801,7 +801,11 @@ fn direction_line(scope: bool, pack: bool) -> (String, [u32; 2]) {
     link(&mut s);
     tiles(&mut s, 0, 0);
     if pack {
-        crate::locale::strings::install_test_forms(&mut s, &refs, &[(b"Zn0", "북")]);
+        crate::locale::strings::install_test_forms(
+            &mut s,
+            &refs,
+            &[(b"Zn0", "북"), (b"Zq1", "가"), (b"Zq2", "나")],
+        );
     }
     let mut e = Engine::with_game(s, game_with(&refs), move |st, io| async move {
         let ux = Ux::new(&st, &io);
@@ -830,13 +834,17 @@ fn direction_line(scope: bool, pack: bool) -> (String, [u32; 2]) {
 
 #[test]
 fn dig_and_the_telescope_show_the_packs_direction_name_and_without_a_pack_the_english() {
-    // The prompt, then north's name (a label read for display) through the line's format (no
-    // word of its own: as it is); the name the pack's, found there, or the English uncounted.
-    for (what, scope, prompt) in [("dig", false, "Zq1"), ("the telescope", true, "Zq2")] {
+    // The prompt (catalogued since 2026-10-25), then north's name (a label read for display)
+    // through the line's format (no word of its own: as it is); the prompt and the name the
+    // pack's, both found there, or the English uncounted.
+    for (what, scope, prompt, ko) in [
+        ("dig", false, "Zq1", "가"),
+        ("the telescope", true, "Zq2", "나"),
+    ] {
         assert_eq!(
             direction_line(scope, true),
-            (format!("{prompt}북."), [1, 0]),
-            "{what}: the pack's name"
+            (format!("{ko}북."), [2, 0]),
+            "{what}: the pack's prompt and name"
         );
         assert_eq!(
             direction_line(scope, false),

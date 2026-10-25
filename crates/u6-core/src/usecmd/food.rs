@@ -18,6 +18,26 @@ const STR_DRINK: u32 = 0x0012_cc7e;
 const STR_EAT: u32 = 0x0012_cf52;
 const STR_SQUEAK: u32 = 0x0012_cf80;
 const STR_BREEZE: u32 = 0x0012_cf8a;
+/// Port-only (spec 08, slice K2; 2026-10-25): the strings these handlers pass to `printf` as its
+/// format, for the locale layer's catalogue ([`super::PRINTED`]): the buckets' three refusals
+/// (no bucket, too heavy with water, with milk), the churn's and the beehive's, the scroll's,
+/// the drink's, the food's, the mouse's and the fan's lines, each on a wrapping line of the
+/// message window; and the potion's prompt format, of no word of its own, which the catalogue
+/// leaves out (the message it prints goes through `%s`, a label of the shared messages,
+/// [`crate::locale::strings::SHARED_MESSAGES`]).
+pub(super) const PRINTED: &[u32] = &[
+    STR_NEED_BUCKET,
+    STR_WATER_HEAVY,
+    STR_MILK_HEAVY,
+    STR_NEED_MILK,
+    STR_NEED_JAR,
+    FMT_STR,
+    STR_STUDY,
+    STR_DRINK,
+    STR_EAT,
+    STR_SQUEAK,
+    STR_BREEZE,
+];
 
 /// Original: 0x130380 (objects: eat food: one off a stack, or the object goes)
 ///
