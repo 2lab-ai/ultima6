@@ -61,12 +61,14 @@
 // `age` and its `profile` (the note), and its register is the one for that class at that age
 // (registerOf). A script the file does not list takes Pass A, `adult` and an empty profile. `--ages a,b` (with `--speakers` only) chooses the
 // scripts of those ages, a script not listed counting as adult: all of them, or with `--first N`
-// the first N of them. Without `--speakers` every request is byte for byte as before.
+// the first N of them. Without `--speakers` every request is byte for byte as before
+// (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25).
 // Spec 15, the register by station: `--speakers` reads u6.speakers/2 too (each entry also its
 // `sex`, `station`, `manner` and `name_ko`, readSpeakers); a script such a file lists has its
 // request's NPC also name its `station`, its `manner` and its `address` (the words it calls the
 // hero, addressOf), and its register is the one for that station at that age, its role's colour
-// and its manner's line (registerOf). A u6.speakers/1 file's request is byte for byte spec 12's.
+// and its manner's line (registerOf). A u6.speakers/1 file's request is byte for byte spec 12's
+// (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25).
 // One Korean form per name over the scripts: `--names <file>` (u6.names/1, the owner's names
 // table, local: {format, names: [{en, ko}]}, read strictly (readNames): one that does not read,
 // or whose two entries give one form or a form and that form with a particle after it, is
@@ -88,7 +90,8 @@
 // showing the old word fails `keywords` and is sent); it is written only when every line of the
 // script sent that shows it landed (settleSets), else the pack's word and lines stay (a line that
 // landed showing it too: it was checked with the form); the summary counts the keys so set and
-// those so left. Without `--names` every request and output is byte for byte as before.
+// those so left. Without `--names` every request and output is byte for byte as before
+// (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25).
 // The game strings go in requests of at most STRINGS_PER_REQUEST strings and STRING_CHARS
 // characters, the object names in requests of at most LOOK_PER_REQUEST names and LOOK_CHARS
 // characters, the books in requests of at most BOOKS_PER_REQUEST books and BOOK_CHARS characters
@@ -127,7 +130,7 @@
 // refused or missing, and every key of a script whose request fails, keeps its own); the consent
 // text and the coverage (`freshKeywords`) say so. A request of a script with no key is the one of
 // K1 to K4, byte for byte, for the same style guide (which goes in every request, and which K5b
-// changes).
+// changes) (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25).
 // The repair mode, `--regate` (with --item or --first, and a pack in <out>): each chosen script's
 // lines and table strings the pack already has are checked by the gates below, its keys with the
 // words the pack keeps for them (regateOf); one that passes is kept as it is and not sent (the
@@ -270,7 +273,7 @@ export const CLASSES = {
   commoner: 'a low, plain 하오체',
   thief: '하게체 or 해라체',
   spirit: '해라체 with archaic forms (~로다, ~도다, ~니라)',
-  gargoyle: 'the provisional gargoyle register of the guide',
+  gargoyle: 'the gargoyle register of the guide',
 };
 
 /// The speakers' ages (spec 12): the age decides the speech level first, then the class.
@@ -328,8 +331,13 @@ export const ROLE_COLOURS = {
   clergy: 'as a cleric, Sino-Korean diction (in Hangul)',
   mage: 'as a mage, Sino-Korean diction (in Hangul)',
   guard: 'as a guard, clipped',
-  gargoyle: 'as a gargoyle, the guide\'s gargoyle register in place of this level, the station setting only whom it defers to',
+  gargoyle: 'as a gargoyle, terse, in short sentences and plain words, an archaic ~로다 or ~도다 now and then where the level allows, '
+    + 'no flowery honorific vocabulary, the hero 인간 or 아바타 rather than its station\'s words (나리, 그대, 귀공 and the rest)',
 };
+
+/// The words a role calls the hero in place of its station's (spec 15 Design 2, under the owner's
+/// directive 2026-10-25), at every station and age; a class not named here takes its station's.
+export const ROLE_ADDRESSES = { gargoyle: '인간, 아바타' };
 
 /// The line each manner adds to a register with a station (spec 15 Design 2): the diction and the
 /// rhythm inside the level.
@@ -337,7 +345,9 @@ export const MANNER_LINES = {
   plain: 'manner plain: the level as it is',
   jester: 'manner jester: Korean rhymes, puns and a sung rhythm of its own, the line\'s sense and every keyword kept '
     + '(not the English wordplay word for word)',
-  mad: 'manner mad: lurching, in fragments, repetitions, sudden shouts and whispers, talk to oneself; it may break the one-level rule',
+  mad: 'manner mad: lurching, in fragments, repetitions, sudden shouts and whispers, talk to oneself; it breaks the one-level rule '
+    + 'in a share of its lines: in a longer conversation, about one sentence in four leaves its level for 반말 or a 해라체 shout, '
+    + 'often in the middle of a line, then returns to the level',
   pompous: 'manner pompous: inflated (에헴, 본관, Sino-Korean titles)',
   drunk: 'manner drunk: slurs and trails off (~하는 거여…); it may slip out of its level into a slurred 반말',
   sly: 'manner sly: flatters and hints',
@@ -378,8 +388,10 @@ export function registerOf(cls, age = 'adult', station = undefined, manner = und
 
 /// The words a speaker of `station` (one of STATIONS) at age `age` calls the hero (spec 15 Design
 /// 2, the station table's; an elder's own where the table gives one), a child's as spec 12 gives
-/// them whatever its station.
-export function addressOf(station, age = 'adult') {
+/// them whatever its station; a speaker of class `cls` that ROLE_ADDRESSES names (a gargoyle,
+/// 2026-10-25) takes that role's words at every station and age.
+export function addressOf(station, age = 'adult', cls = undefined) {
+  if (Object.hasOwn(ROLE_ADDRESSES, cls)) return ROLE_ADDRESSES[cls];
   if (age === 'child') return '아저씨, 언니, 오빠, 기사님 or 그쪽, never 그대';
   const s = STATION_REGISTERS[station];
   return age === 'elder' && s.elderAddress ? s.elderAddress : s.address;
@@ -1394,15 +1406,17 @@ function lineOf(u) {
 
 /// The request body for `lines` of `bundle` (the exact bytes sent): a Messages call; with
 /// `topics` (slice K5b, [`topicsOf`]) the script's keywords too, and `system` is then
-/// `systemOf(style, true)`'s. With none it is K1's to K4's body, byte for byte, for the same style.
+/// `systemOf(style, true)`'s. With none it is K1's to K4's body, byte for byte, for the same style
+/// (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25).
 /// With `speaker` (spec 12: a script's {age, profile} from the speaker file, [`planOf`]) the `npc`
 /// also names its `age` and its `profile` (the personality note), and its `register` is the one
-/// for that class at that age ([`registerOf`]); without it (null) the body is as before. A
+/// for that class at that age ([`registerOf`]); without it (null) the body is as before
+/// (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25). A
 /// speaker with a `station` (spec 15: one a u6.speakers/2 file lists) also gives the `npc` its
 /// `station`, its `manner` and its `address` (the words it calls the hero, [`addressOf`]), and its
 /// `register` is the one for that station at that age with its role's colour and its manner's
 /// line; one with none (a /1 file's, or a script the file does not list) is spec 12's, byte for
-/// byte. With
+/// byte (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25). With
 /// `names` (the owner's names table, [`readNames`]'s) the body also lists `names`, the names of
 /// the table `lines` hold ([`namesOf`]), each {en, ko}, when they hold any; without it (null), or
 /// when they hold none, the body is as before.
@@ -1415,7 +1429,7 @@ export function bodyOf(model, system, bundle, cls, lines, topics = [], speaker =
     ...(speaker ? { age: speaker.age, profile: speaker.profile } : {}),
     ...(station !== null ? { station, manner: speaker.manner } : {}),
     register: station !== null ? registerOf(cls, speaker.age, station, speaker.manner) : speaker ? registerOf(cls, speaker.age) : CLASSES[cls],
-    ...(station !== null ? { address: addressOf(station, speaker.age) } : {}),
+    ...(station !== null ? { address: addressOf(station, speaker.age, cls) } : {}),
   };
   const held = names === null ? [] : namesOf(lines, names).map(({ en, ko }) => ({ en, ko }));
   const user = JSON.stringify({

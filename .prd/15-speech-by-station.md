@@ -9,6 +9,15 @@ tags: [ultima6, i18n, korean, npc, voice]
 Status: shipped (2026-10-25, deploys 19 and 20: main 4393099 with ko-1025s and voices-1025, then ko-1025t, every script by station and manner; loop rows 19–20). It amends spec 12 (the register by profile) and spec 09 Design 4 (the
 personality voice pack). The engine, the Korean pack format and the speech tap do not change.
 
+Status note (the owner's directive 2026-10-25, their words below: no one speaks 하오체 always, and
+lords, commoners and the lowborn speak apart): a gargoyle speaks its station's level with a
+gargoyle colour, as every other speaker with a station does, so a gargoyle lord, a gargoyle
+commoner and a gargoyle of the crown no longer share one register; the guide's gargoyle register
+is no longer provisional and stays only for a gargoyle with no station. A `mad` speaker leaves its
+level in about one sentence in four (the dispatcher's count of the full run: 13% of one madman's
+sentences off the level, read as too tame). The guide and `translate.mjs` change; the shipped
+packs are as before until a run translates them again.
+
 The owner, verbatim: "각각의 인물에 대해서 프로파일링해주고 각각의 인물의 말투(항상 하오체쓰는거 X)
 영주랑 평민과 하층민이 말투가 달라야하고 이 프로파일링으로 음성 프로파일링도 이걸로 만들어줘. 말투
 속도나 그런것도 남성 여성과 나이든 사람과 어린사람은 지금 어느정도 잘한거 같고 그 광대같은 사람이나
@@ -95,22 +104,32 @@ Counts only; the scripts are the owner's and stay out of the repository.
 
    - The role colours the station's level: a merchant keeps the shop's formulas (어서 옵쇼,
      ~하옵니다); a scholar, a cleric or a mage speaks with Sino-Korean diction; a guard is clipped;
-     a gargoyle keeps the guide's gargoyle register, its station setting only whom it defers to.
+     a gargoyle speaks its station's level, coloured: terse, short sentences and plain words, an
+     archaic ~로다 or ~도다 now and then where the level allows, no flowery honorific vocabulary,
+     the hero 인간 or 아바타 rather than its station's words (나리, 그대, 귀공 and the rest), the
+     words the request's `address` names for a gargoyle of every station and age, a child's too
+     (`addressOf`, `ROLE_ADDRESSES`; under the owner's directive 2026-10-25; the guide's gargoyle
+     register is the fallback for a gargoyle with no station).
    - The modern-ending ban (해요체 ~요; 반말 ~해, ~야, ~지, ~냐, ~거든, ~잖아) holds for every adult
-     and elder except the `lowborn`, who may use its 반말 endings but not 해요체. An elder's old
+     and elder except the `lowborn`, who may use its 반말 endings but not 해요체; a `drunk` speaker
+     may slip out of its level into a slurred 반말, and a `mad` one leaves it for 반말 or a 해라체
+     shout in a share of its lines (the manners below, 2026-10-25). An elder's old
      turns (~구먼, ~했지, ~하네, ~일세) are not the modern ending. No speaker uses modern loanwords
      or slang.
    - The manner shapes diction and rhythm inside that level: a `jester` makes Korean rhymes, puns
      and a sung rhythm of his own (the line's sense and every keyword kept, not the English's
      wordplay word for word); a `mad` speaker lurches (fragments, repetitions, sudden shouts and
-     whispers, talk to himself) and may break the one-level rule; `pompous` inflates (에헴,
+     whispers, talk to himself) and breaks the one-level rule in a share of his lines: in a
+     longer conversation, about one sentence in four leaves his level for 반말 or a 해라체 shout,
+     often in the middle of a line, then returns to it (2026-10-25); `pompous` inflates (에헴,
      본관, Sino-Korean titles); `drunk` slurs and trails (~하는 거여…) and may slip into a slurred
      반말; `sly` flatters and hints;
      `gruff` is short; `timid` hesitates (저, 저기…); `pious` blesses and intones.
    - The narrator is as before: 하오체 or a noun ending, the hero 그대. The station, the manner and
      the address are for the speaker's own words only.
    - The request's `npc` gains `station`, `manner` and `address` (the table's hero words); a
-     request from a `/1` file or without `--speakers` is byte for byte as before.
+     request from a `/1` file or without `--speakers` is byte for byte as before
+     (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25).
 3. **One Korean form per name, for every speaker.** The dispatcher merges each profile's
    `name_ko` into the owner's names table (local; an entry already there wins; a name that is an
    ordinary English word or phrase is left out) before the run, so `--names` holds each NPC's
@@ -154,7 +173,8 @@ Counts only; the scripts are the owner's and stay out of the repository.
 ## Acceptance
 
 1. Tests, synthetic only: the `/2` reader (enums, refusals, `/1` still read); `registerOf` per
-   station × age, `address` in the body, a `/1` or no-speakers request byte for byte as before;
+   station × age, `address` in the body, a `/1` or no-speakers request byte for byte as before
+   (a gargoyle's class line aside: 'provisional' dropped, 2026-10-25);
    `speakers.mjs`'s gate, defaults and counts; the voice derivation (families, offsets, ranges,
    spread, `vary` by manner); the page's `/2` reader and a `/1` pack still read; the player's
    per-line variation (deterministic per line, two lines of a `mad` actor differ, a `plain`
@@ -165,9 +185,12 @@ Counts only; the scripts are the owner's and stay out of the repository.
 3. The pilot and the full pack, measured by the dispatcher's private ending counter: by station,
    the dominant level of the adult scripts differs (lord 하오/하게, commoner 합쇼, lowborn 반말/하게),
    and at most 20% of each station's adult scripts take another station's level. The jester's and
-   the madmen's lines are read privately for play and lurching. No NPC name of the merged table in
-   two Korean forms; capitalised Latin words left only where the English keeps a word of the
-   gargoyles' tongue.
+   the madmen's lines are read privately for play and lurching. From 2026-10-25, for the next run:
+   a gargoyle script's dominant level is its station's (a gargoyle lord's, a gargoyle commoner's
+   and a royal gargoyle's differ) and no gargoyle calls the hero 나리; a longer `mad` script has
+   one sentence in five to one in three off its station's level, each break returning to the
+   level. No NPC name of the merged table in two Korean forms; capitalised Latin words left only
+   where the English keeps a word of the gargoyles' tongue.
 4. The voice pack: counts of distinct mixes, the mean pitch and speed by station and manner, and
    every `jester`, `mad` and `drunk` actor with `vary` above 0.
 5. Live, on the deployed site (a fresh visitor, the zip only, 한글): the new Korean and voice packs
