@@ -1048,3 +1048,46 @@ fn search_joins_the_last_spilled_name_with_and_past_a_fixed_content() {
     assert_eq!(places, [0x08, 0], "the gem spills past the 0x4c");
     assert_eq!(ends, ["<d>"]);
 }
+
+#[test]
+fn a_broken_lock_pick_takes_one_off_its_quantity_byte_only() {
+    // 0x12c0c2, 0x12c236-0x12c25b: a broken pick whose quantity (the low byte of its A4+0x250c
+    // word) is 1 goes; else `subq.b #1` on that byte alone, so a quantity of 0 gives 0xff and
+    // the quality byte above it stays.
+    fn broken_pick(qq: u16) -> Option<u16> {
+        let mut s = world();
+        s.actors.party.members[0] = 1;
+        s.actors.party.size = 1;
+        s.objects.type_frame[1] = 0x19a;
+        s.objects.set_xyz(1, 10, 11, 0);
+        // Status 0x04: dexterity 1 (0x121ff8), a break below (45 - 1) / 2.
+        s.actors.attrs.status[1] = 0x04;
+        crate::main_loop::test_support::link_placed_objects(&mut s);
+        let c = put(&mut s, 0x62, 10, 10);
+        let pick = create_in(&mut s, 0x3f, 0x10, qq, 1);
+        let seed = (0..)
+            .find(|&n| crate::rng::Rng::seeded(n).range(1, 30) < 22)
+            .unwrap();
+        s.rng = crate::rng::Rng::seeded(seed);
+        s.ui.input.selection = c;
+        s.ui.input.target = (10, 10);
+        s.ui.input.targeting = 0;
+        s.ui.input.repeat = true;
+        let mut e =
+            crate::Engine::with_game(s, crate::Files::default(), move |st, io| async move {
+                use_key(&st, &io, pick).await;
+            });
+        for _ in 0..8 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished());
+        let o = &e.state().objects;
+        (o.kind(pick) == 0x3f).then(|| o.qq_of(pick))
+    }
+    assert_eq!(broken_pick(0x0500), Some(0x05ff), "the quality byte stays");
+    assert_eq!(broken_pick(0x0503), Some(0x0502));
+    assert_eq!(broken_pick(0x0501), None, "the last pick goes");
+}

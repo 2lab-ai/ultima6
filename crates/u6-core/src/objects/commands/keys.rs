@@ -63,9 +63,10 @@ pub fn toggle_lit(s: &mut State, obj: Slot) {
 /// nothing message). The target's name. On the map it must be within one tile of the leader
 /// (else the out-of-range message); only doors (0x129..=0x12c) and chests take keys (else the
 /// no-effect message). A lock pick may break (0x12c062 against the leader's dexterity,
-/// 0x121ff8: the broken-key line 0x128866, one of the stack gone). A key whose quality matches
-/// the lock's (not 0), or a pick on a lock of quality 0, locks or unlocks it (0x12bdfa /
-/// 0x12bbc0 with the key flag); otherwise the no-effect message.
+/// 0x121ff8: the broken-key line 0x128866; 0x12c236..0x12c25b: a quantity byte of 1 removes
+/// it, else `subq.b` takes one off that byte alone, the quality byte kept). A key whose
+/// quality matches the lock's (not 0), or a pick on a lock of quality 0, locks or unlocks it
+/// (0x12bdfa / 0x12bbc0 with the key flag); otherwise the no-effect message.
 pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
     let (actor, ktype) = {
         let s = state.borrow();
@@ -116,10 +117,11 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
     if broke {
         print_at(state, io, S_KEY_BROKE, &[]).await;
         let mut s = state.borrow_mut();
-        if s.objects.qq_of(key) & 0xff == 1 {
+        let qq = s.objects.qq_of(key);
+        if qq & 0xff == 1 {
             remove(&mut s, key);
         } else {
-            s.objects.qq[key as usize] = s.objects.qq_of(key).wrapping_sub(1);
+            crate::usecmd::set_quantity(&mut s, key, (qq as u8).wrapping_sub(1));
         }
         if s.ui.panel.mode == 0x92 {
             seams::redraw_inventory(&mut s);
