@@ -1564,3 +1564,32 @@ fn a_part_past_the_world_edge_is_not_left_on_load() {
         "after each of three reloads: parts beside it and spawned parts elsewhere {seen:?}"
     );
 }
+
+/// 0x102f3c on tile 2 (asm 0x1030b2..0x1030e2) for the new game's leader: a readied type-0x1c
+/// child keeps the poison off; the same child carried (status 0x10) does not.
+#[test]
+fn the_leader_with_a_readied_0x1c_is_not_poisoned_on_tile_2() {
+    use crate::objects::{IN_INVENTORY, READIED, WHERE_MASK, create_in, find_child};
+    let Some((mut s, _files)) = start() else {
+        return;
+    };
+    let l = leader(&s);
+    let a = usize::from(l);
+    let held = find_child(&mut s.objects, l as Slot, 0x1c, -1);
+    println!(
+        "leader slot {l}: alive and not poisoned {}, a type-0x1c child before: {}",
+        s.actors.attrs.status[a] & 0x18 == 0,
+        held >= 0
+    );
+    assert!(s.actors.attrs.status[a] & 0x18 == 0, "alive, not poisoned");
+    let child = create_in(&mut s, 0x1c, READIED, 0, l as Slot);
+    assert!(child >= 0, "a free slot");
+    party::tile_effect(&mut s, l, 2);
+    let readied = s.actors.attrs.status[a] & 0x08;
+    let st = &mut s.objects.obj_status[child as usize];
+    *st = *st & !WHERE_MASK | IN_INVENTORY;
+    party::tile_effect(&mut s, l, 2);
+    let carried = s.actors.attrs.status[a] & 0x08;
+    println!("poison bit after tile 2: readied {readied:#04x}, carried {carried:#04x}");
+    assert_eq!((readied, carried), (0, 0x08));
+}

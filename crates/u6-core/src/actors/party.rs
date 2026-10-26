@@ -1,7 +1,7 @@
 //! The party on the move: the player's step (0x11d4ee) and the followers (0x11c910).
 
 use crate::image::A4;
-use crate::objects::ObjectId;
+use crate::objects::{ObjectId, READIED, Slot, find_child, next_child_of_kind};
 use crate::state::State;
 
 use super::leaves;
@@ -434,22 +434,27 @@ fn fall_asleep(s: &mut State, actor: u16) {
     crate::combat::damage::lie_down(s, actor as i16);
 }
 
-/// [objects] 0x10b18c / 0x10b0ba (the first object of type `t` carried by `actor`, then the
-/// next). Stub contract: none carried (inventories are not in the slot tables before
-/// 0x10e1ce), so swamp boots never protect.
-fn readied(_s: &State, _actor: u16, _t: u16) -> bool {
-    crate::todo_stub!("0x10b18c carried object of a type (fallback: none)", false)
+/// 0x102f3c's readied test (asm 0x1030b2..0x1030e2): `actor`'s children of type `t`, any
+/// quality ([objects] 0x10b18c, then 0x10b0ba), until one has both status bits 0x18 set
+/// (`place == READIED`).
+fn readied(s: &mut State, actor: u16, t: u16) -> bool {
+    let o = &mut s.objects;
+    let mut c = find_child(o, actor as Slot, t as i16, -1);
+    while c >= 0 && o.place(c) != READIED {
+        c = next_child_of_kind(o);
+    }
+    c >= 0
 }
 
 /// Original: 0x102f3c (party: what the tile under an actor does to it: swamp, fire, poison
 /// field, web, sleep field)
 ///
 /// Marks the actor (movement flag 0x08) unless dead. By `tile`: swamp (2..5) poisons unless
-/// swamp boots are readied; webs (0x234) paralyse on `random(1, 30)` ≥ strength (not type
+/// a type-0x1c object is readied; webs (0x234) paralyse on `random(1, 30)` ≥ strength (not type
 /// 0x169); poison fields poison (not the protected or immune); fire and other hazards hurt
 /// (1..8 or 1..30, doubled for creatures with flag 0x10, none for the immune or protected);
-/// sleep fields put the unprotected to sleep. Damage, flashes and falling asleep are combat
-/// stub points.
+/// sleep fields put the unprotected to sleep. Damage, flashes and falling asleep go to the
+/// combat ports of 0x1231be, 0x1230ce and 0x1221da.
 pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
     let a = usize::from(actor);
     let me = ObjectId(actor);
@@ -689,5 +694,25 @@ mod tests {
         s.actors.attrs.status[3] |= 0x01;
         tile_effect(&mut s, 3, 0x234);
         assert_eq!(s.actors.attrs.status[3] & 0x02, 0, "protected");
+    }
+
+    /// 0x102f3c, asm 0x1030b2..0x1030e2: on tiles 2..5 the actor's type-0x1c children (0x10b18c
+    /// with quality -1, then 0x10b0ba) are walked until one is readied; only a readied one keeps
+    /// the poison off.
+    #[test]
+    fn a_readied_0x1c_child_keeps_tile_2_from_poisoning() {
+        use crate::objects::{IN_INVENTORY, create_in};
+        let mut s = party();
+        assert!(create_in(&mut s, 0x1c, READIED, 0, 2) >= 0);
+        assert!(create_in(&mut s, 0x1c, IN_INVENTORY, 0, 2) >= 0);
+        assert!(create_in(&mut s, 0x1c, IN_INVENTORY, 0, 3) >= 0);
+        tile_effect(&mut s, 2, 2);
+        assert_eq!(
+            s.actors.attrs.status[2] & 0x08,
+            0,
+            "a readied one after a carried one"
+        );
+        tile_effect(&mut s, 3, 2);
+        assert_eq!(s.actors.attrs.status[3] & 0x08, 0x08, "carried only");
     }
 }
