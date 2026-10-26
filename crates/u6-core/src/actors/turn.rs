@@ -118,9 +118,17 @@ async fn raise_if_dead(state: &RefCell<State>, io: &Io, owed: &mut u32) {
 ///
 /// With the leader index at the party size (a vehicle carries the party) actor 0 is cleaned
 /// up. A dead hero (actor 1) ends in [`darkness`]. In solo mode a leader who cannot act ends
-/// it (0x104094). In party mode a leader who cannot act hands over to the first member who
-/// can; and member 0 takes the lead back from any other member once it can act (in combat the
-/// old leader returns to its combat worktype instead of following).
+/// it (asm 0x1210b0..0x12110c, the call at 0x12110c: 0x104094, [`crate::main_loop::end_solo`],
+/// which needs the polling engine's `Io`; without one solo mode stays). In party mode (the
+/// leader index read again, 0x12111c) a leader who cannot act hands over to the first member
+/// who can; and member 0 takes the lead back from any other member once it can act (in combat
+/// the old leader returns to its combat worktype instead of following).
+///
+/// Port-only: with the hero dead the original never reaches the solo test in solo mode, since
+/// 0x121020 has already raised the party (0x1095bc), whose 0x104094 ended solo mode. The port
+/// defers the raise ([`darkness`]), so here solo mode ends and the hand-over runs with the hero
+/// still dead; the raise's own 0x104094 ([`crate::map::travel::resurrect_party`]) then leaves
+/// the state the original's one call leaves.
 pub fn leader_bookkeeping(s: &mut State) {
     let size = s.actors.party.size;
     if s.actors.party.leader_index > size {
@@ -136,12 +144,12 @@ pub fn leader_bookkeeping(s: &mut State) {
     }
     let li = usize::from(s.actors.party.leader_index);
     if s.actors.solo_member() >= 0 && !healthy(s, member(s, li)) {
-        crate::todo_stub!("0x104094 end solo mode (fallback: stays solo)", ());
+        crate::engine::with_current_io(|io| crate::main_loop::end_solo(s, io));
     }
     if s.actors.solo_member() >= 0 {
         return;
     }
-    let leader = member(s, li);
+    let leader = member(s, usize::from(s.actors.party.leader_index));
     if !healthy(s, leader) {
         for i in 0..s.actors.party.count() {
             let m = member(s, i);
@@ -1454,5 +1462,66 @@ mod tests {
         assert_eq!(s.actors.work.party_centre, (22, 23));
         assert_eq!(s.actors.work.enemy_centre, (22, 20));
         assert_eq!(s.actors.work.enemies, 1);
+    }
+
+    /// [`world`] with members 1.. = actors 2.. at (20 + 10k, 21 + 10k), staying (worktype 0, as
+    /// the solo command leaves them), and member `solo` in solo mode, leading.
+    fn solo_party(members: usize, solo: u8) -> State {
+        let mut s = world(&[]);
+        for k in 1..members {
+            let a = 1 + k;
+            s.actors.party.members[k] = a as u8;
+            s.objects.type_frame[a] = 0x17a;
+            s.objects.location[a] = Position {
+                x: 20 + 10 * k as u16,
+                y: 21 + 10 * k as u16,
+                z: 0,
+            };
+            s.actors.attrs.status[a] = 0x80;
+        }
+        s.actors.worktype[1] = 0;
+        s.actors.party.size = members as u8;
+        let lead = member(&s, usize::from(solo));
+        s.actors.worktype[lead] = 2;
+        s.actors.set_tail(tail::SOLO_MEMBER, solo);
+        s.actors.party.leader_index = solo;
+        s
+    }
+
+    /// [`leader_bookkeeping`] in one engine poll, where 0x104094 has the engine's `Io`.
+    fn bookkeeping_polled(s: State) -> State {
+        let mut e = Engine::with_game(s, Files::default(), |st, _io| async move {
+            leader_bookkeeping(&mut st.borrow_mut());
+        });
+        e.tick(&[], 16);
+        assert!(e.finished());
+        e.state().clone()
+    }
+
+    #[test]
+    fn a_solo_member_who_cannot_act_ends_solo_mode_and_a_member_who_can_leads() {
+        // 0x1210b0..0x12110c: solo, the leader asleep (status 0x04) → 0x104094.
+        let mut s = solo_party(2, 0);
+        s.actors.attrs.status[1] |= 0x04;
+        let s = bookkeeping_polled(s);
+        assert_eq!(s.actors.solo_member(), -1, "party mode again");
+        assert_eq!(s.actors.party.leader_index, 1);
+        assert_eq!((s.actors.worktype[1], s.actors.worktype[2]), (1, 2));
+        assert_eq!(s.actors.work.leader_kept, 1);
+        assert_eq!((s.map.centre.x, s.map.centre.y), (30, 31));
+    }
+
+    #[test]
+    fn the_hand_over_after_solo_mode_starts_from_member_zero() {
+        // 0x12111c reads the leader index again after 0x104094: member 0's, asleep too.
+        let mut s = solo_party(3, 1);
+        s.actors.attrs.status[1] |= 0x04;
+        s.actors.attrs.status[2] |= 0x04;
+        let s = bookkeeping_polled(s);
+        assert_eq!(s.actors.solo_member(), -1, "party mode again");
+        assert_eq!(s.actors.party.leader_index, 2);
+        let wt: Vec<u8> = (1..=3).map(|a| s.actors.worktype[a]).collect();
+        assert_eq!(wt, [1, 1, 2], "one member under the player's hand");
+        assert_eq!((s.map.centre.x, s.map.centre.y), (40, 41));
     }
 }
