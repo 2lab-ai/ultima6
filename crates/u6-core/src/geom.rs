@@ -82,7 +82,8 @@ pub const LEAD: u16 = ((WINDOW - CHUNK_SIZE) / 2) as u16;
 /// Mask of [`view_offset`]. Original 0x1f: `map/region.rs:95-96`.
 pub const VIEW_OFFSET_MASK: u16 = mode::VIEW_OFFSET_MASK;
 /// The inner sight block's window columns: the view and its one-cell ring for every leader cell,
-/// chunk-aligned. Original `8..32`: `map/view.rs:264-268,308-310,387-389`.
+/// chunk-aligned. Original `8..32`: the block `map/view.rs` `update_view` clears, `reveal_view`
+/// lights, `mark_objects` walks and `flood_lights` floods from.
 pub const BLOCK_X: Range<usize> = block(HALF_W);
 /// The inner sight block's window rows, as [`BLOCK_X`]. Original `8..32`, the same sites.
 pub const BLOCK_Y: Range<usize> = block(HALF_H);
@@ -100,14 +101,19 @@ pub const SHOWN: (u16, u16, u16, u16) = {
     (x0, y0, x0 + w - 1, y0 + h - 1)
 };
 /// Entries of the sight flood's ring queue: u8 indices in Original, u16 in Wide. Original 256:
-/// `map/view.rs:84-91`.
+/// the x / y byte arrays A4-0x17f2 / -0x16f2 of `map/view.rs` `Queue`.
 pub const QUEUE_LEN: usize = mode::QUEUE_LEN;
-// A flood queues each cell at most once: the sight flood the view and its ring, a light flood
-// the 15 × 15 cells within 7 of its start (`map/view.rs:128`); the ring's index wraps at a power
-// of two.
+// A flood queues each cell at most once; what must fit is the cells queued at once. The sight
+// flood's are at most the view and its ring, a light flood's the 15 × 15 cells within 7 of its
+// start. The overview's flood (mode 2) reaches the whole window (1600 cells in Original), so only
+// its frontier must fit: in an open window it peaks at 156 of 256 entries in Original and 236 of
+// 1024 in Wide (`map/view.rs` test `the_overview_frontier_in_an_open_window_fits_the_queue`). A
+// frontier past 255, which walls could shape, drops cells in Original (`Flood::enqueue`); Wide's
+// queue holds one up to 1023 (a spec 13 widening, not the original's drop). The ring's index
+// wraps at a power of two.
 const _: () = assert!(
     QUEUE_LEN.is_power_of_two() && (VIEW_W + 2) * (VIEW_H + 2) <= QUEUE_LEN && 15 * 15 <= QUEUE_LEN,
-    "a flood's cells fit the queue"
+    "the sight and light floods' cells fit the queue"
 );
 
 /// Spec 14 Design 1: the frame pixel of the top left of each slot the side panel's views are
