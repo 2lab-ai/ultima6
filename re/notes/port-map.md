@@ -14,7 +14,7 @@ ported > partial > placeholder > stubbed > replaced > planned; `-` = no marker y
 port lacks, a guard inside the port, or a stub that names the wrong address (counted as
 `also named by a stub`); partial and placeholder rows show their stubs the same way.
 
-Totals: functions 599: ported 498 (also named by a stub 1), partial 6, stubbed 2, replaced 84, planned 2, - 7. Milestone 1 (M + S) 406: ported 321, partial 3, stubbed 1, replaced 79, planned 2.
+Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2, replaced 84, planned 2, - 6. Milestone 1 (M + S) 406: ported 322, partial 2, stubbed 1, replaced 79, planned 2.
 
 | address | subsystem | M1 | Rust path | status |
 |---|---|---|---|---|
@@ -445,8 +445,8 @@ Totals: functions 599: ported 498 (also named by a stub 1), partial 6, stubbed 2
 | 0x12a226 | objects | S | `objects/commands/drop.rs::drop_object` | ported |
 | 0x12a7a4 | objects | S | `objects/commands/get.rs::get` | ported |
 | 0x12acc0 | objects |  | `objects/commands/push.rs::push_blocked` | ported |
-| 0x12adc4 | objects |  |  | - |
-| 0x12ae04 | objects | S | `objects/commands/push.rs::push` | partial; stub at `objects/commands/push.rs:117 in push` |
+| 0x12adc4 | objects |  | `objects/list.rs::outer_holder` | ported |
+| 0x12ae04 | objects | S | `objects/commands/push.rs::push` | ported |
 | 0x12ba36 | objects | M | `objects/commands/world.rs::spring_trap` | ported |
 | 0x12bbc0 | objects |  | `objects/commands/world.rs::door` | ported |
 | 0x12bdfa | objects |  | `objects/commands/world.rs::chest` | ported |

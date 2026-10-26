@@ -1378,3 +1378,597 @@ fn every_gatehouse_plant_gives_the_key_that_unlocks_its_door() {
         eprintln!("plant {i}: key given, taken, door unlocked: pass");
     }
 }
+
+fn push_cmd() -> Command {
+    Box::new(|st, io| Box::pin(async move { super::push(&st, &io).await }))
+}
+
+/// The first object the hero carries in his inventory (not readied) that is neither a stack
+/// nor weightless nor a container: found at run time.
+fn plain_carried(s: &State, hero: Slot) -> Slot {
+    (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .find(|&o| {
+            let ob = &s.objects;
+            let k = ob.kind(o);
+            ob.place(o) == crate::objects::IN_INVENTORY
+                && ob.parent(o) == hero
+                && k != 0x4c
+                && crate::objects::stack_kind(ob, k) == 0
+                && !crate::objects::in_type_set_670c(ob, k)
+                && super::seams::weight(s, o) > 0
+        })
+        .expect("a plain object the hero carries")
+}
+
+/// A container type of the 9 at A4-0x670c (0x12899c) that none of Move's container rules
+/// singles out (not the spellbook 0x39, the vortex cube 0x3e, a chest or 0x153).
+fn bag_type(s: &State) -> u16 {
+    *s.objects.defs.type_set_670c[..9]
+        .iter()
+        .find(|&&k| ![0x39, 0x3e, 0x62, 0xba, 0xc0, 0x153].contains(&k))
+        .expect("a container type")
+}
+
+/// Move (0x12ae04) on carried `obj` as a pick from the inventory panel leaves it: the panel
+/// shows `shown` (mode 0x92, member 0, its list cells as its draw 0x1118c6 fills them), the
+/// panel cursor is up and the command loop waits for the target (A4-0x7a32 = 1, command 0x87). `target`: the panel cell it is in (the figure for
+/// `shown` itself), for Tab and Return to pick; else `keys` pick it.
+fn move_carried(
+    mut s: State,
+    files: &Files,
+    obj: Slot,
+    shown: Slot,
+    target: Option<Slot>,
+    keys: &[InputEvent],
+) -> (Engine, Vec<String>) {
+    s.ui.panel.mode = 0x92;
+    s.ui.panel.member = 0;
+    s.ui.panel.container = shown as u16;
+    crate::inventory::recount(&mut s, shown);
+    let listed = listed_children(&mut s, shown);
+    for (k, cell) in s.inventory.cells[..12].iter_mut().enumerate() {
+        *cell = listed.get(k).copied().unwrap_or(0);
+    }
+    let cursor = match target {
+        Some(t) if t == shown => (3, -1),
+        Some(t) => {
+            let k = listed[..listed.len().min(12)]
+                .iter()
+                .position(|&c| c == t)
+                .expect("the target on the shown list's first page") as i8;
+            (3 + k % 4, k / 4)
+        }
+        None => (0, 0),
+    };
+    let input = &mut s.ui.input;
+    input.selection = obj;
+    input.target_pending = 1;
+    input.target_command = 0x87;
+    input.targeting = 2;
+    input.panel_cursor = cursor;
+    run_engine(s, files, keys, push_cmd())
+}
+
+/// The entries the inventory list of `shown` holds, in its order (0x1118c6: the children in
+/// the inventory or a container, not readied).
+fn listed_children(s: &mut State, shown: Slot) -> Vec<Slot> {
+    let mut v = Vec::new();
+    let mut c = crate::objects::first_child(&mut s.objects, shown);
+    while c >= 0 {
+        let p = s.objects.place(c);
+        if p == crate::objects::IN_INVENTORY || p == crate::objects::IN_CONTAINER {
+            v.push(c);
+        }
+        c = crate::objects::next_child(&mut s.objects);
+    }
+    v
+}
+
+const TAB_RETURN: [InputEvent; 2] = [
+    InputEvent::Key(Key::Char('\t')),
+    InputEvent::Key(Key::Enter),
+];
+
+/// The words of the game string at `addr`, in order, among the words of `lines` (the scroll
+/// wraps a line where it likes).
+fn printed(s: &State, lines: &[String], addr: u32) -> bool {
+    let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let want = words(&String::from_utf8_lossy(&super::text::string(s, addr)));
+    !want.is_empty() && words(&lines.join(" ")).contains(&want)
+}
+
+/// The end of a Move that moved (0x12ba24: no target pending, the panel not marked; port-only in
+/// Wide: marked for the three views' redraw, spec 14 Design 2).
+fn ended(s: &State) -> bool {
+    s.ui.input.target_pending == 0 && s.ui.panel.dirty == cfg!(feature = "wide")
+}
+
+/// The leader's movement points.
+fn leader_mp(s: &State) -> u8 {
+    let p = &s.actors.party;
+    s.actors.movement_points[usize::from(p.members[usize::from(p.leader_index)])]
+}
+
+/// Move on a carried object, the target another member (0x12b38a..0x12b5ba): the second
+/// member's digit picks him; he is weighed (0x11121e, his readied and carried weight plus the
+/// object's with its contents, 0x1110f6 + 0x1111ca) against his strength × 20 (0x12b482), the
+/// object goes into his inventory (0x10cda8 with place 0x10, 0x12b594) and the leader spends 5
+/// movement points (0x12b60a).
+#[test]
+fn move_gives_a_carried_object_to_another_member() {
+    let Some(files) = files() else { return };
+    let s0 = with_text(&files);
+    let hero = Slot::from(s0.actors.party.members[0]);
+    let other = Slot::from(s0.actors.party.members[1]);
+    let obj = plain_carried(&s0, hero);
+    let mut probe = s0.clone();
+    let w = super::seams::weight(&probe, obj) + super::seams::contents_weight(&probe, obj);
+    super::seams::sum_inventory(&mut probe, other);
+    let before = probe.inventory.carried_weight;
+    let keys = [InputEvent::Key(Key::Char('2'))];
+    let (e, lines) = move_carried(s0.clone(), &files, obj, hero, None, &keys);
+    print_lines("Move to the second member", &lines);
+    let mut s = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(s.objects.parent(obj) == other, "the second member holds it");
+    assert!(s.objects.place(obj) == crate::objects::IN_INVENTORY);
+    super::seams::sum_inventory(&mut s, other);
+    assert!(
+        s.inventory.carried_weight == before + w,
+        "his weight rose by it"
+    );
+    assert!(leader_mp(&s) == leader_mp(&s0).wrapping_sub(5));
+    assert!(ended(&s), "the end of a Move (0x12ba24)");
+}
+
+/// The same Move to a member whose strength × 20 is below what he would carry: the can't-carry
+/// line (0x128662, 0x12b48a), the shown member's sums redone (0x12b4a2), nothing moves and no
+/// movement points are spent (the return at 0x12b4a6 comes before 0x12b60a).
+#[test]
+fn move_refuses_a_member_who_cannot_carry_it() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    let hero = Slot::from(s0.actors.party.members[0]);
+    let other = Slot::from(s0.actors.party.members[1]);
+    s0.actors.attrs.strength[other as usize] = 0;
+    let obj = plain_carried(&s0, hero);
+    let keys = [InputEvent::Key(Key::Char('2'))];
+    let (e, lines) = move_carried(s0.clone(), &files, obj, hero, None, &keys);
+    print_lines("Move to a member too weak", &lines);
+    let s = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s0, &lines, 0x0012_8662), "the can't-carry line");
+    assert!(s.objects.parent(obj) == hero, "still the hero's");
+    assert!(s.objects.place(obj) == crate::objects::IN_INVENTORY);
+    assert!(leader_mp(&s) == leader_mp(&s0));
+    assert!(s.ui.input.target_pending == 1, "still pending (0x12ba2c)");
+}
+
+/// Move on a carried object, the target a container the same member carries, picked on the
+/// panel (Tab, Return): into it (the into line 0x1287d0, 0x10cda8 with place 0x08, 0x12b9e0);
+/// then, the panel showing that container, the object moved onto the container's figure goes
+/// out of it (the out-of line 0x1287c8) to the container's holder with place 0x08 too
+/// (0x12b8ba..0x12b8e6). Each spends the leader 5 movement points (0x12b914, 0x12b7d0).
+#[test]
+fn move_puts_a_carried_object_into_a_bag_and_takes_it_out() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    let hero = Slot::from(s0.actors.party.members[0]);
+    let obj = plain_carried(&s0, hero);
+    let bag = bag_type(&s0);
+    let bag = crate::objects::create_in(&mut s0, bag, crate::objects::IN_INVENTORY, 0, hero);
+    assert!(bag >= 0, "a bag for the hero");
+    let (e, lines) = move_carried(s0.clone(), &files, obj, hero, Some(bag), &TAB_RETURN);
+    print_lines("Move into the bag", &lines);
+    let s1 = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s0, &lines, 0x0012_87d0), "the into line");
+    assert!(s1.objects.parent(obj) == bag, "in the bag");
+    assert!(s1.objects.place(obj) == crate::objects::IN_CONTAINER);
+    assert!(leader_mp(&s1) == leader_mp(&s0).wrapping_sub(5));
+    assert!(ended(&s1), "the end of a Move (0x12ba24)");
+
+    let (e, lines) = move_carried(s1.clone(), &files, obj, bag, Some(bag), &TAB_RETURN);
+    print_lines("Move out of the bag", &lines);
+    let s2 = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s0, &lines, 0x0012_87c8), "the out-of line");
+    assert!(s2.objects.parent(obj) == hero, "back with the hero");
+    assert!(s2.objects.place(obj) == crate::objects::IN_CONTAINER);
+    assert!(leader_mp(&s2) == leader_mp(&s1).wrapping_sub(5));
+    assert!(ended(&s2), "the end of a Move (0x12ba24)");
+}
+
+/// Move on a carried object that is not a spell (0x3a) onto a spellbook (0x39) the same member
+/// carries: the only-spells line (0x128730, 0x12b6ca..0x12b706); nothing moves and no movement
+/// points are spent. The rule is the target's: a spellbook takes only spells.
+#[test]
+fn move_puts_only_a_spell_into_a_spellbook() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    let hero = Slot::from(s0.actors.party.members[0]);
+    let obj = plain_carried(&s0, hero);
+    assert!(s0.objects.kind(obj) != 0x3a);
+    assert!(crate::objects::in_type_set_670c(&s0.objects, 0x39));
+    let book = crate::objects::create_in(&mut s0, 0x39, crate::objects::IN_INVENTORY, 0, hero);
+    assert!(book >= 0, "a spellbook for the hero");
+    let (e, lines) = move_carried(s0.clone(), &files, obj, hero, Some(book), &TAB_RETURN);
+    print_lines("Move into the spellbook", &lines);
+    let s = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s0, &lines, 0x0012_8730), "the only-spells line");
+    assert!(s.objects.parent(obj) == hero, "still the hero's");
+    assert!(leader_mp(&s) == leader_mp(&s0));
+    assert!(s.ui.input.target_pending == 1, "still pending (0x12ba2c)");
+}
+
+/// The readied and carried weight sums 0x11121e leaves for actor `a`.
+fn sums_of(s: &State, a: Slot) -> (i16, i16) {
+    let mut p = s.clone();
+    super::seams::sum_inventory(&mut p, a);
+    (p.inventory.equip_weight, p.inventory.carried_weight)
+}
+
+/// Move to a member who cannot carry it, the panel paged on twice at the to prompt (`+`: 0x99,
+/// read inside the target key 0x10790a): the sums the refusal redoes are those of the member
+/// the panel shows then (0x12b492 reads A4-0x7a3e again), not the giver's (kept at 0x12b2be
+/// for the yourself test, 0x11236c and the readied slots). The target stays pending (the
+/// return at 0x12b4a6 skips 0x12ba24).
+#[test]
+fn move_refused_redoes_the_sums_of_the_member_the_panel_shows() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    let p = s0.actors.party.members;
+    let (hero, other, third) = (Slot::from(p[0]), Slot::from(p[1]), Slot::from(p[2]));
+    s0.actors.attrs.strength[other as usize] = 0;
+    let obj = plain_carried(&s0, hero);
+    let third_sums = sums_of(&s0, third);
+    assert!(sums_of(&s0, hero) != third_sums, "the giver's sums differ");
+    assert!(
+        sums_of(&s0, other) != third_sums,
+        "the target's sums differ"
+    );
+    let keys = [
+        InputEvent::Key(Key::Char('+')),
+        InputEvent::Key(Key::Char('+')),
+        InputEvent::Key(Key::Char('2')),
+    ];
+    let (e, lines) = move_carried(s0.clone(), &files, obj, hero, None, &keys);
+    print_lines("Move after paging the panel", &lines);
+    let s = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s0, &lines, 0x0012_8662), "the can't-carry line");
+    assert!(
+        s.ui.panel.member == 2,
+        "the panel paged to the third member"
+    );
+    let now = (s.inventory.equip_weight, s.inventory.carried_weight);
+    assert!(now == third_sums, "the third member's sums redone");
+    assert!(s.objects.parent(obj) == hero, "still the hero's");
+    assert!(s.ui.input.target_pending == 1, "still pending");
+}
+
+/// Move to a member who takes it, the panel paged on twice at the to prompt, the panel's view
+/// the stats (0x90: the end of Move redraws no inventory, 0x12ba14): the sums the move leaves
+/// (0x12b5a6 reads A4-0x7a3e again) are those of the member the panel shows then, not the
+/// giver's nor the recipient's. Read from the state the command left, before any recount here.
+#[test]
+fn move_given_redoes_the_sums_of_the_member_the_panel_shows() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let p = s.actors.party.members;
+    let (hero, other, third) = (Slot::from(p[0]), Slot::from(p[1]), Slot::from(p[2]));
+    let obj = plain_carried(&s, hero);
+    let third_sums = sums_of(&s, third);
+    assert!(sums_of(&s, hero) != third_sums, "the giver's sums differ");
+    assert!(
+        sums_of(&s, other) != third_sums,
+        "the recipient's sums differ"
+    );
+    s.ui.panel.mode = 0x90;
+    s.ui.panel.member = 0;
+    s.ui.panel.container = hero as u16;
+    let input = &mut s.ui.input;
+    input.selection = obj;
+    input.target_pending = 1;
+    input.target_command = 0x87;
+    input.targeting = 2;
+    let keys = [
+        InputEvent::Key(Key::Char('+')),
+        InputEvent::Key(Key::Char('+')),
+        InputEvent::Key(Key::Char('2')),
+    ];
+    let (e, lines) = run_engine(s, &files, &keys, push_cmd());
+    print_lines("Move after paging the panel, taken", &lines);
+    let s = e.state().clone();
+    let left = (s.inventory.equip_weight, s.inventory.carried_weight);
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(
+        s.ui.panel.member == 2,
+        "the panel paged to the third member"
+    );
+    assert!(s.objects.parent(obj) == other, "the second member holds it");
+    assert!(
+        sums_of(&s, hero) != third_sums,
+        "the giver's sums still differ"
+    );
+    assert!(
+        sums_of(&s, other) != third_sums,
+        "the recipient's sums still differ"
+    );
+    assert!(left == third_sums, "the third member's sums redone");
+    assert!(ended(&s), "the end of a Move (0x12ba24)");
+}
+
+/// Spec 14 (Wide): Move gives a carried object to another member while the panel's view is
+/// the roster or the stats (0x91, 0x90: the object picked by a press in the inventory view's
+/// slot, which puts the mode back, `ui::panels::end_slot_press`) or the inventory (0x92), or
+/// puts it into a bag the hero carries: the command loop's next 0x103f64 brings the inventory
+/// view up to date, so the cells it keeps for a press in its slot no longer hold the object.
+#[cfg(feature = "wide")]
+#[test]
+fn wide_move_of_a_carried_object_brings_the_inventory_view_up_to_date() {
+    let Some(files) = files() else { return };
+    let mut stale = Vec::new();
+    for mode in [0x91, 0x90, 0x92] {
+        let mut s = with_text(&files);
+        let hero = Slot::from(s.actors.party.members[0]);
+        let other = Slot::from(s.actors.party.members[1]);
+        let obj = plain_carried(&s, hero);
+        s.ui.panel.mode = mode;
+        s.ui.panel.member = 0;
+        s.ui.panel.container = hero as u16;
+        s.ui.panel.dirty = true;
+        let input = &mut s.ui.input;
+        input.selection = obj;
+        input.target_pending = 1;
+        input.target_command = 0x87;
+        input.targeting = 1;
+        let kept = Rc::new(RefCell::new((false, false)));
+        let out = Rc::clone(&kept);
+        let cmd: Command = Box::new(move |st, io| {
+            Box::pin(async move {
+                crate::ui::panels::redraw_panel(&st, &io).await;
+                let before = st.borrow().ui.panel.slots.inventory.cells.contains(&obj);
+                super::push(&st, &io).await;
+                crate::ui::panels::redraw_panel(&st, &io).await;
+                let after = st.borrow().ui.panel.slots.inventory.cells.contains(&obj);
+                *out.borrow_mut() = (before, after);
+            })
+        });
+        let (e, lines) = run_engine(s, &files, &[InputEvent::Key(Key::Char('2'))], cmd);
+        print_lines(&format!("Wide Move in mode {mode:#x}"), &lines);
+        assert!(
+            e.state().objects.parent(obj) == other,
+            "mode {mode:#x}: moved"
+        );
+        let (before, after) = *kept.borrow();
+        assert!(before, "mode {mode:#x}: the inventory view showed it");
+        if after {
+            stale.push(format!("{mode:#x}"));
+        }
+    }
+    // Into a bag the hero carries, picked on the panel (Tab, Return: the inventory mode).
+    let mut s = with_text(&files);
+    let hero = Slot::from(s.actors.party.members[0]);
+    let obj = plain_carried(&s, hero);
+    let bag = bag_type(&s);
+    let bag = crate::objects::create_in(&mut s, bag, crate::objects::IN_INVENTORY, 0, hero);
+    assert!(bag >= 0, "a bag for the hero");
+    s.ui.panel.mode = 0x92;
+    s.ui.panel.member = 0;
+    s.ui.panel.container = hero as u16;
+    s.ui.panel.dirty = true;
+    let k = listed_children(&mut s, hero)
+        .iter()
+        .position(|&c| c == bag)
+        .filter(|&k| k < 12)
+        .expect("the bag on the list's first page") as i8;
+    let input = &mut s.ui.input;
+    input.selection = obj;
+    input.target_pending = 1;
+    input.target_command = 0x87;
+    input.targeting = 2;
+    input.panel_cursor = (3 + k % 4, k / 4);
+    let kept = Rc::new(RefCell::new((false, false)));
+    let out = Rc::clone(&kept);
+    let cmd: Command = Box::new(move |st, io| {
+        Box::pin(async move {
+            crate::ui::panels::redraw_panel(&st, &io).await;
+            let before = st.borrow().ui.panel.slots.inventory.cells.contains(&obj);
+            super::push(&st, &io).await;
+            crate::ui::panels::redraw_panel(&st, &io).await;
+            let after = st.borrow().ui.panel.slots.inventory.cells.contains(&obj);
+            *out.borrow_mut() = (before, after);
+        })
+    });
+    let (e, lines) = run_engine(s, &files, &TAB_RETURN, cmd);
+    print_lines("Wide Move into the bag", &lines);
+    assert!(e.state().objects.parent(obj) == bag, "into the bag: moved");
+    let (before, after) = *kept.borrow();
+    assert!(before, "into the bag: the inventory view showed it");
+    if after {
+        stale.push("into the bag".to_string());
+    }
+    assert!(
+        stale.is_empty(),
+        "the inventory view still shows it in {stale:?}"
+    );
+}
+
+/// The weight test of Move to a member is `ble` (0x12b488): with his strength fixed, a member
+/// whose strength × 20 equals his readied and carried weight plus the object's takes it; with
+/// the object one weight unit heavier he refuses. The object's type weighs what makes the sum
+/// that capacity, or one over it (a state change, the table read by 0x1110f6; he holds nothing
+/// of that type, so his own sums do not move with it).
+#[test]
+fn move_to_a_member_whose_limit_equals_the_new_weight_takes_it() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    let hero = Slot::from(s0.actors.party.members[0]);
+    let other = Slot::from(s0.actors.party.members[1]);
+    let obj = plain_carried(&s0, hero);
+    let kind = s0.objects.kind(obj);
+    assert!(!super::seams::weighed_in_tenths(&s0, kind));
+    let his = (0..crate::objects::OBJECT_SLOTS as Slot)
+        .any(|o| s0.objects.kind(o) == kind && carried_by(&s0, other, o));
+    assert!(!his, "he holds nothing of the object's type");
+    let (equip, carried) = sums_of(&s0, other);
+    let rest = equip + carried + super::seams::contents_weight(&s0, obj);
+    let byte = 20 + (20 - rest.rem_euclid(20)) % 20;
+    let capacity = rest + byte;
+    let strength = capacity / 20;
+    assert!(capacity % 20 == 0 && strength <= 0xff, "a reachable limit");
+    s0.actors.attrs.strength[other as usize] = strength as u8;
+    let keys = [InputEvent::Key(Key::Char('2'))];
+    for (over, takes) in [(0, true), (1, false)] {
+        let mut s = s0.clone();
+        s.tables.tileflags.weight[usize::from(kind)] = (byte + over) as u8;
+        let (equip, carried) = sums_of(&s, other);
+        let total = equip
+            + carried
+            + super::seams::weight(&s, obj)
+            + super::seams::contents_weight(&s, obj);
+        assert!(total == capacity + over, "over by {over}");
+        let (e, lines) = move_carried(s, &files, obj, hero, None, &keys);
+        print_lines(&format!("Move over the limit by {over}"), &lines);
+        let s = e.state().clone();
+        let holder = if takes { other } else { hero };
+        assert!(
+            s.objects.parent(obj) == holder,
+            "over by {over}: takes {takes}"
+        );
+        assert!(
+            printed(&s0, &lines, 0x0012_8662) != takes,
+            "over by {over}: the can't-carry line {}",
+            !takes
+        );
+    }
+}
+
+/// Gold (0x10cef2 kind 4: its quantity is the whole quality / quantity word).
+const GOLD: u16 = 0x58;
+
+/// The direct children of `owner` of `kind`, quality `quality`: (slot, quantity byte or gold
+/// word).
+fn stacks_of(s: &State, owner: Slot, kind: u16, quality: u16) -> Vec<(Slot, u16)> {
+    (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&o| {
+            let ob = &s.objects;
+            ob.place(o) != 0
+                && ob.parent(o) == owner
+                && ob.kind(o) == kind
+                && (kind == GOLD || ob.qq_of(o) >> 8 == quality)
+        })
+        .map(|o| {
+            let q = s.objects.qq_of(o);
+            (o, if kind == GOLD { q } else { q & 0xff })
+        })
+        .collect()
+}
+
+/// The keys that type `n` at the how-many prompt (0x12a106) and end the line.
+fn count_keys(n: &str) -> Vec<InputEvent> {
+    n.chars()
+        .map(|c| InputEvent::Key(Key::Char(c)))
+        .chain([InputEvent::Key(Key::Enter)])
+        .collect()
+}
+
+/// Move on carried stacks (0x10cef2 kinds 2 and 4): part of a quantity stack to another member
+/// (0x10cf7c gives him a stack of the same quality, 0x10d16e takes the part from the holder,
+/// 0x12b51c..0x12b58a); a whole quantity stack into a bag (taken from the stack itself: all of
+/// it, so removed, 0x10c1d6, then given to the bag, 0x12b928..0x12b9d8); part of a gold word
+/// out of the bag to its holder (the word less the part, 0x12b848..0x12b8b2).
+#[test]
+fn move_splits_carried_stacks_by_their_count() {
+    let Some(files) = files() else { return };
+    let mut s0 = with_text(&files);
+    let hero = Slot::from(s0.actors.party.members[0]);
+    let other = Slot::from(s0.actors.party.members[1]);
+    let gold = GOLD;
+    let kind = *s0
+        .objects
+        .defs
+        .stackable
+        .iter()
+        .find(|&&k| k != gold && k != 0x5a && crate::objects::stack_kind(&s0.objects, k) == 2)
+        .expect("a quantity stack type");
+    let (quality, make) = (0x37, crate::objects::create_in);
+    let part = make(
+        &mut s0,
+        kind,
+        crate::objects::IN_INVENTORY,
+        quality << 8 | 10,
+        hero,
+    );
+    assert!(part >= 0);
+    let total = |s: &State, owner| -> u16 {
+        stacks_of(s, owner, kind, quality)
+            .iter()
+            .map(|&(_, n)| n)
+            .sum()
+    };
+    let theirs = total(&s0, other);
+    let mut keys = count_keys("3");
+    keys.push(InputEvent::Key(Key::Char('2')));
+    let (e, lines) = move_carried(s0.clone(), &files, part, hero, None, &keys);
+    print_lines("Move 3 of a stack to the second member", &lines);
+    let s1 = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(
+        s1.objects.qq_of(part) == quality << 8 | 7,
+        "the stack keeps 7"
+    );
+    assert!(s1.objects.parent(part) == hero, "with the hero");
+    assert!(total(&s1, other) == theirs + 3, "he has 3 more");
+    assert!(ended(&s1));
+
+    let mut s1 = s1;
+    let bag = bag_type(&s1);
+    let bag = make(&mut s1, bag, crate::objects::IN_INVENTORY, 0, hero);
+    let whole = make(
+        &mut s1,
+        kind,
+        crate::objects::IN_INVENTORY,
+        quality << 8 | 5,
+        hero,
+    );
+    assert!(bag >= 0 && whole >= 0);
+    let mut keys = count_keys("");
+    keys.extend(TAB_RETURN);
+    let (e, lines) = move_carried(s1.clone(), &files, whole, hero, Some(bag), &keys);
+    print_lines("Move a whole stack into the bag", &lines);
+    let s2 = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s1, &lines, 0x0012_87d0), "the into line");
+    let inside = stacks_of(&s2, bag, kind, quality);
+    assert!(inside.len() == 1 && inside[0].1 == 5, "the bag holds the 5");
+    let left: Vec<Slot> = stacks_of(&s2, hero, kind, quality)
+        .iter()
+        .map(|&(o, _)| o)
+        .collect();
+    assert!(left == [part], "the hero keeps only the first stack");
+    assert!(ended(&s2));
+
+    let mut s2 = s2;
+    let coins = make(&mut s2, gold, crate::objects::IN_CONTAINER, 300, bag);
+    assert!(coins >= 0);
+    let held = total_gold(&s2, hero);
+    let mut keys = count_keys("100");
+    keys.extend(TAB_RETURN);
+    let (e, lines) = move_carried(s2.clone(), &files, coins, bag, Some(bag), &keys);
+    print_lines("Move 100 gold out of the bag", &lines);
+    let s3 = e.state().clone();
+    assert!(e.stub_hits().is_empty(), "no stub");
+    assert!(printed(&s2, &lines, 0x0012_87c8), "the out-of line");
+    assert!(s3.objects.qq_of(coins) == 200, "the bag's gold less 100");
+    assert!(s3.objects.parent(coins) == bag, "still in the bag");
+    assert!(total_gold(&s3, hero) == held + 100, "the hero has 100 more");
+    assert!(ended(&s3));
+}
+
+/// The gold word of `owner`'s direct gold children.
+fn total_gold(s: &State, owner: Slot) -> u16 {
+    stacks_of(s, owner, GOLD, 0).iter().map(|&(_, n)| n).sum()
+}
