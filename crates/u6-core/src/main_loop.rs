@@ -120,8 +120,14 @@ pub enum Program {
 }
 
 /// Queues a `printf` of `fmt` for the loop to print (synchronous callers).
+///
+/// Printf 0x108658 tests the text switch (A4-0x7a4c, `ui.text.on`) when it is called (asm
+/// 0x108660 `tst.w`, 0x108664 `beq.w` to its return at 0x10887e): a line queued with the switch
+/// off is dropped, one queued with it on is printed with it on ([`flush_prints`]).
 pub fn queue_print(s: &mut State, fmt: Vec<u8>, args: Vec<PrintArg>) {
-    s.main.pending_print.push(Pending::Print(fmt, args));
+    if s.ui.text.on {
+        s.main.pending_print.push(Pending::Print(fmt, args));
+    }
 }
 
 /// Runs the queued text-layer calls (0x108658, 0x107dd8, 0x107e00), oldest first.
@@ -138,13 +144,33 @@ pub async fn flush_prints(state: &RefCell<State>, io: &Io) {
             Some(Pending::Cursor(col, row)) => {
                 crate::ui::panels::set_cursor(state, io, col, row).await
             }
-            Some(Pending::Print(fmt, args)) => printf(state, io, &fmt, &print_args(&args)).await,
+            Some(Pending::Print(fmt, args)) => print_queued(state, io, &fmt, &args, false).await,
             Some(Pending::PrintSwallowed(fmt, args)) => {
-                printf_swallowed(state, io, &fmt, &print_args(&args)).await
+                print_queued(state, io, &fmt, &args, true).await
             }
         }
         crate::combat::present::printed_one(&mut state.borrow_mut());
     }
+}
+
+/// Port-only: a queued line, printed with the text switch on as it was when queued (a line
+/// queued with it off never reaches the queue: [`queue_print`],
+/// [`crate::combat::present::say`]; a hit inside text-off code forces it on, 0x1231be), the
+/// switch put back after.
+async fn print_queued(
+    state: &RefCell<State>,
+    io: &Io,
+    fmt: &[u8],
+    args: &[PrintArg],
+    swallowed: bool,
+) {
+    let was = std::mem::replace(&mut state.borrow_mut().ui.text.on, true);
+    if swallowed {
+        printf_swallowed(state, io, fmt, &print_args(args)).await;
+    } else {
+        printf(state, io, fmt, &print_args(args)).await;
+    }
+    state.borrow_mut().ui.text.on = was;
 }
 
 /// The queued arguments as `printf` takes them.
@@ -452,4 +478,198 @@ fn region_steps(s: &mut State) {
         }
     }
     crate::map::view::update_view(s);
+}
+
+#[cfg(test)]
+mod queue_tests {
+    //! The print queue and the text switch A4-0x7a4c (`ui.text.on`), which 0x108658 tests when
+    //! it is called (asm 0x108660 `tst.w -0x7a4c(a4)`, 0x108664 `beq.w` to its return at
+    //! 0x10887e).
+
+    use std::path::Path;
+
+    use super::*;
+    use crate::engine::Engine;
+    use crate::files::Files;
+    use u6_testkit::Quiet;
+
+    const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+    /// A vine root (type 0x16e) and the vine actor its quality's high byte names.
+    const ROOT: usize = 0x200;
+    const VINE: usize = 10;
+
+    /// The user's files (skipped when the archive is absent; reads it, copies nothing).
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn files() -> Option<Files> {
+        if !Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return None;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        let r = u6_intake::intake(vec![u6_intake::InputFile {
+            name: "ultima-vi.zip".into(),
+            data,
+        }]);
+        Some(Files::new(r.files))
+    }
+
+    /// `queue` run on a state with the test text layer inside an engine on `files`, then the
+    /// queue flushed: the state after.
+    fn queue_and_flush(files: Files, setup: fn(&mut State), queue: fn(&mut State)) -> State {
+        run(files, setup, queue, true)
+    }
+
+    /// [`queue_and_flush`] without the flush: the state with what `queue` left queued.
+    fn queued(files: Files, setup: fn(&mut State), queue: fn(&mut State)) -> State {
+        run(files, setup, queue, false)
+    }
+
+    fn run(files: Files, setup: fn(&mut State), queue: fn(&mut State), flush: bool) -> State {
+        let mut s = State::empty();
+        s.ui = test_support::test_ui();
+        setup(&mut s);
+        let mut e = Engine::with_game(s, files, move |st, io| async move {
+            queue(&mut st.borrow_mut());
+            if flush {
+                flush_prints(&st, &io).await;
+            }
+        });
+        for _ in 0..100 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished(), "the flush ends");
+        e.state().clone()
+    }
+
+    #[test]
+    fn a_line_queued_with_the_text_off_is_not_printed() {
+        // The original's line is gone when its call finds the switch off, whatever the switch
+        // is when the port's queue is flushed (0x11db7c turns it on again at 0x11dcaa).
+        let after = queue_and_flush(
+            Files::default(),
+            |_| {},
+            |s| {
+                s.ui.text.on = false;
+                queue_print(s, b"off\n".to_vec(), Vec::new());
+                s.ui.text.on = true;
+                queue_print(s, b"on\n".to_vec(), Vec::new());
+            },
+        );
+        assert_eq!(after.ui.messages, ["on"]);
+        assert!(after.main.pending_print.is_empty());
+    }
+
+    #[test]
+    fn a_line_queued_with_the_text_on_is_printed_when_flushed_with_it_off() {
+        // The original printed it at its call; the flush puts it with the switch on and leaves
+        // the switch as it found it.
+        let after = queue_and_flush(
+            Files::default(),
+            |_| {},
+            |s| {
+                queue_print(s, b"on\n".to_vec(), Vec::new());
+                s.ui.text.on = false;
+            },
+        );
+        assert_eq!(after.ui.messages, ["on"]);
+        assert!(!after.ui.text.on, "the switch as the flush found it");
+    }
+
+    #[test]
+    fn a_hit_reported_with_the_text_off_is_printed() {
+        // 0x1231be forces the switch on while it reports (saved at 0x1231fc, set at 0x123204,
+        // restored at 0x123870): with the switch off around it, its line still shows. Here the
+        // line of a vine root's death (its vine dies), read from the user's `game`.
+        let Some(files) = files() else { return };
+        let after = queue_and_flush(
+            files,
+            |s| {
+                s.objects.type_frame[ROOT] = 0x16e;
+                s.objects.qq[ROOT] = (VINE as u16) << 8;
+                s.actors.attrs.hp[VINE] = 5;
+            },
+            |s| {
+                s.ui.text.on = false;
+                crate::combat::damage::hurt(s, ROOT as i16, 1);
+            },
+        );
+        let shown = after
+            .ui
+            .messages
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        println!("scroll lines with text: {shown}");
+        assert_eq!(after.actors.attrs.hp[VINE], 0, "the vine died");
+        assert!(shown > 0, "the report is printed");
+        assert!(!after.ui.text.on, "the switch as 0x1231be left it");
+    }
+
+    /// Window and cursor calls and two lines, the first queued with the switch off.
+    fn mixed(s: &mut State) {
+        use crate::ui::WindowId;
+        s.ui.text.on = false;
+        let q = &mut s.main.pending_print;
+        q.push(Pending::Window(WindowId::Status));
+        q.push(Pending::Cursor(0, 0));
+        queue_print(s, b"off\n".to_vec(), Vec::new());
+        s.ui.text.on = true;
+        s.main
+            .pending_print
+            .push(Pending::Window(WindowId::Messages));
+        queue_print(s, b"on\n".to_vec(), Vec::new());
+    }
+
+    #[test]
+    fn window_and_cursor_calls_stay_queued_in_order_with_the_text_off() {
+        // 0x107dd8 and 0x107e00 do not test A4-0x7a4c (its only tests are in 0x107e5a, 0x108376
+        // and 0x108658: `tst.w -0x7a4c(a4)` at 0x107e64, 0x108380, 0x108660): only the line
+        // queued with the switch off is gone.
+        use crate::ui::WindowId;
+        let before = queued(Files::default(), |_| {}, mixed);
+        assert_eq!(
+            before.main.pending_print,
+            [
+                Pending::Window(WindowId::Status),
+                Pending::Cursor(0, 0),
+                Pending::Window(WindowId::Messages),
+                Pending::Print(b"on\n".to_vec(), Vec::new()),
+            ]
+        );
+        let after = queue_and_flush(Files::default(), |_| {}, mixed);
+        assert_eq!(after.ui.messages, ["on"]);
+        assert_eq!(after.ui.text.current, WindowId::Messages);
+    }
+
+    /// The vine's combat line (A4-0x755a), said with Attack's newline held.
+    fn say_held(s: &mut State) {
+        crate::combat::present::say(s, crate::image::A4 - 0x755a, Vec::new());
+    }
+
+    #[test]
+    fn a_combat_line_said_with_the_text_off_keeps_the_held_newline() {
+        // 0x107e5a reads and clears A4-0x7a48 (Attack's held newline) only with A4-0x7a4c set
+        // (asm 0x107e64 `tst.w -0x7a4c(a4)`, 0x107e68 `beq.w` to its return; the clear at
+        // 0x107e90), and 0x108658 returns before it (0x108664): a held newline stays held and
+        // nothing is queued.
+        let Some(files) = files() else { return };
+        // With the switch on the line is queued and ends the hold (it is not only newlines).
+        let on = queued(files.clone(), |s| s.combat.swallow = true, say_held);
+        assert_eq!(on.main.pending_print.len(), 1, "queued with the text on");
+        assert!(!on.combat.swallow, "the hold ended with the text on");
+        let off = queued(
+            files,
+            |s| {
+                s.combat.swallow = true;
+                s.ui.text.on = false;
+            },
+            say_held,
+        );
+        assert!(off.main.pending_print.is_empty(), "nothing queued");
+        assert!(off.combat.swallow, "the newline still held");
+        assert!(off.combat.said.is_empty(), "nothing said");
+    }
 }

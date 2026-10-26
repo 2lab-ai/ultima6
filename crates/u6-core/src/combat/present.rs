@@ -1000,7 +1000,9 @@ pub struct Said {
 const SAID_KEPT: usize = 64;
 
 /// [ui] 0x108658 with the string at image address `at` of the user's `game` as the format:
-/// queued for the command loop like the actor code's lines, and kept in `combat.said`.
+/// queued for the command loop like the actor code's lines, and kept in `combat.said`. Nothing
+/// with the text switch off (A4-0x7a4c, `ui.text.on`): 0x108658 returns at 0x108664, and
+/// 0x107e5a reads and clears the held newline only with the switch on (asm 0x107e64..0x107e90).
 ///
 /// While Attack's newline is held (`combat.swallow`) the line's leading newlines are dropped
 /// when it is printed, and the newline stays held while the English is nothing but newlines.
@@ -1008,6 +1010,9 @@ const SAID_KEPT: usize = 64;
 /// ([`crate::main_loop::Pending::PrintSwallowed`]) so the locale layer finds it; the newlines
 /// are dropped from the text it puts ([`crate::ui::printf::printf_swallowed`]).
 pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
+    if !s.ui.text.on {
+        return;
+    }
     let said = &mut s.combat.said;
     if said.len() >= SAID_KEPT {
         said.remove(0);

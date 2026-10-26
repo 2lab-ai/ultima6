@@ -494,10 +494,12 @@ fn object_verdict(
 
 /// Original: 0x11db7c (actors: a door-opening NPC opens / closes the door it stands in)
 ///
-/// Only creatures with flag 0x4000 outside the party. A door (0x129..0x12c) at the actor's
-/// location gets frame `4 × closed + (frame & 3)` and the view flags are recomputed; a
-/// portcullis (0x116 / 0x118) is operated through 0x1301e2 with the text output (A4-0x7a4c,
-/// `ui.text.on`) off around it.
+/// Only creatures with flag 0x4000 outside the party. The objects at the actor's location are
+/// walked on the location cursor (0x10ad1a at asm 0x11dc20, 0x10aaca at 0x11dcb0): a door
+/// (0x129..0x12c) gets frame `4 × closed + (frame & 3)` and the view flags are recomputed; a
+/// portcullis (0x116 / 0x118) is operated through 0x1301e2
+/// ([`crate::objects::toggle_passthrough`]) with the text output (A4-0x7a4c, `ui.text.on`) off
+/// around it (asm 0x11dca0..0x11dcae), and the walk goes on from the cursor as 0x1301e2 left it.
 pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
     let a = usize::from(actor);
     let ci = seams::creature_index(s, s.objects.type_frame[a] & 0x3ff);
@@ -508,7 +510,8 @@ pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
         return;
     }
     let p = s.objects.location[a];
-    for Found { id, .. } in seams::objects_at(s, p.x, p.y, u16::from(p.z)) {
+    let mut o = crate::objects::begin_at(&mut s.objects, &s.tables, p.x, p.y, u16::from(p.z));
+    while let Some(id) = ObjectId::from_slot(o) {
         let t = obj_type(s, id);
         if (0x129..=0x12c).contains(&t) {
             let f = obj_frame(s, id);
@@ -518,17 +521,11 @@ pub fn door_at_actor(s: &mut State, actor: u16, closed: u16) {
         }
         if t == 0x116 || t == 0x118 {
             s.ui.text.on = false;
-            operate_portcullis(s, id);
+            crate::objects::toggle_passthrough(s, id.slot());
             s.ui.text.on = true;
         }
+        o = crate::objects::next_at(&mut s.objects, &s.tables);
     }
-}
-
-/// [objects] 0x1301e2 (Use on a portcullis; its refusal). Stub contract: argument the
-/// portcullis object, no result; the portcullis stays as it is; reached only by door-opening
-/// NPCs standing in a portcullis (not in the start area).
-fn operate_portcullis(_s: &mut State, _id: ObjectId) {
-    crate::todo_stub!("0x1301e2 operate a portcullis (fallback: unchanged)", ())
 }
 
 /// Original: 0x11f0a0 (actors: try one step in direction `dir`, paying the current tile)
@@ -1232,5 +1229,114 @@ pub(crate) mod tests {
         assert!(outside_window(&s, 10));
         s.objects.location[10] = Position { x: 20, y: 20, z: 1 };
         assert!(outside_window(&s, 10));
+    }
+
+    /// The passthrough of the portcullis tests.
+    const PORTCULLIS: usize = 0x200;
+
+    /// NPC 10 (type 0x17a, a creature with flag 0x4000, outside the party) at (20, 20), a
+    /// passthrough 0x116 with `frame` there; `more` placed before the list is linked.
+    fn portcullis_under_npc(frame: u16, more: fn(&mut State)) -> State {
+        let mut s = State::empty();
+        creature_tiles(&mut s);
+        s.map.centre = Position { x: 20, y: 20, z: 0 };
+        s.objects.defs.monster_types = vec![0x17a, 0];
+        s.actors.game = GameTables {
+            creature_flags: vec![0x4000],
+            ..GameTables::default()
+        };
+        s.objects.type_frame[10] = 0x17a;
+        s.objects.location[10] = Position { x: 20, y: 20, z: 0 };
+        s.objects.type_frame[PORTCULLIS] = 0x116 | frame << 10;
+        s.objects.location[PORTCULLIS] = Position { x: 20, y: 20, z: 0 };
+        more(&mut s);
+        link_objects(&mut s);
+        s
+    }
+
+    #[test]
+    fn a_door_opening_npc_operates_a_portcullis_without_a_line() {
+        // 0x11db7c (asm 0x11dc94..0x11dcae): a 0x116 at the actor's cell goes through 0x1301e2
+        // with A4-0x7a4c cleared around it, so the passthrough's line is not printed.
+        let at = |s: &State| s.objects.location[PORTCULLIS];
+        let frame = |s: &State| s.objects.type_frame[PORTCULLIS] >> 10;
+        let silent = |s: &State, case: &str| {
+            assert!(s.main.pending_print.is_empty(), "{case}: no line queued");
+            assert!(s.ui.text.on, "{case}: the text on again");
+        };
+        // Closed: it slides one tile up and opens.
+        let mut s = portcullis_under_npc(0, |_| {});
+        door_at_actor(&mut s, 10, 1);
+        assert_eq!(at(&s), Position { x: 20, y: 19, z: 0 }, "opened");
+        assert_eq!(frame(&s), 2);
+        silent(&s, "opened");
+        // Open: it slides one tile down and closes.
+        let mut s = portcullis_under_npc(2, |_| {});
+        door_at_actor(&mut s, 10, 0);
+        assert_eq!(at(&s), Position { x: 20, y: 21, z: 0 }, "closed");
+        assert_eq!(frame(&s), 0);
+        silent(&s, "closed");
+        // Open with an actor where it closes: refused (the refusal not printed either).
+        let mut s = portcullis_under_npc(2, |s| {
+            s.objects.type_frame[11] = 0x17a;
+            s.objects.location[11] = Position { x: 20, y: 21, z: 0 };
+        });
+        door_at_actor(&mut s, 10, 0);
+        assert_eq!(at(&s), Position { x: 20, y: 20, z: 0 }, "refused");
+        assert_eq!(frame(&s), 2);
+        silent(&s, "refused");
+    }
+
+    #[test]
+    fn after_a_refused_portcullis_the_walk_goes_on_where_0x1301e2_looked() {
+        // 0x1301e2's refusal began the location walk at the cell the passthrough would close
+        // into (0x10ad1a there); 0x11db7c's next 0x10aaca (asm 0x11dcb0) goes on from that
+        // walk, so a door after the actor in that cell takes the actor's door frame.
+        const DOOR: usize = 0x201;
+        let mut s = portcullis_under_npc(2, |s| {
+            s.objects.type_frame[11] = 0x17a;
+            s.objects.location[11] = Position { x: 20, y: 22, z: 0 };
+            s.objects.type_frame[DOOR] = 0x129 | 5 << 10;
+            s.objects.location[DOOR] = Position { x: 20, y: 21, z: 0 };
+        });
+        // A move links the actor in front of the door (0x10c9d2).
+        assert_eq!(crate::objects::move_to(&mut s, 11, 20, 21, 0), 11);
+        let there = crate::objects::objects_at_view(&s, Position { x: 20, y: 21, z: 0 });
+        let order: Vec<usize> = there.iter().map(|(id, _)| id.index()).collect();
+        assert_eq!(order, [11, DOOR], "the fixture: the actor first");
+        door_at_actor(&mut s, 10, 0);
+        assert_eq!(s.objects.location[PORTCULLIS].y, 20, "refused");
+        assert_eq!(s.objects.type_frame[DOOR] >> 10, 1, "4 × 0 + (5 & 3)");
+    }
+
+    #[test]
+    fn after_a_closed_portcullis_the_walk_goes_on_after_the_first_object_where_it_closed() {
+        // 0x1301e2 closing begins the location walk at the cell it closes into (0x10ad1a) and
+        // the move links it in front of that cell's objects (0x10c9d2): 0x11db7c's next
+        // 0x10aaca goes on after the first object there, so a door second in that cell takes
+        // the actor's door frame and the first one is passed over.
+        const FIRST: usize = 0x201;
+        const SECOND: usize = 0x202;
+        let mut s = portcullis_under_npc(2, |s| {
+            for (d, f) in [(FIRST, 6), (SECOND, 5)] {
+                s.objects.type_frame[d] = 0x129 | f << 10;
+                s.objects.location[d] = Position { x: 20, y: 21, z: 0 };
+            }
+        });
+        let there = crate::objects::objects_at_view(&s, Position { x: 20, y: 21, z: 0 });
+        let order: Vec<usize> = there.iter().map(|(id, _)| id.index()).collect();
+        let [first, second] = order[..] else {
+            panic!("the fixture: two doors, {order:?}")
+        };
+        let frame = |s: &State, d: usize| s.objects.type_frame[d] >> 10;
+        let (first_was, second_was) = (frame(&s, first), frame(&s, second));
+        door_at_actor(&mut s, 10, 0);
+        assert_eq!(s.objects.location[PORTCULLIS].y, 21, "closed");
+        assert_eq!(frame(&s, first), first_was, "the first door passed over");
+        assert_eq!(
+            frame(&s, second),
+            second_was & 3,
+            "the second: 4 × 0 + (frame & 3)"
+        );
     }
 }
