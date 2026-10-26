@@ -214,8 +214,17 @@ where
     G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F,
     F: Future<Output = ()> + 'static,
 {
+    run_keys_on(s, Files::default(), game)
+}
+
+/// [`run_keys`] with `files`.
+fn run_keys_on<G, F>(s: State, files: Files, game: G) -> Engine
+where
+    G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F,
+    F: Future<Output = ()> + 'static,
+{
     use crate::engine::{InputEvent, Key};
-    let mut e = Engine::with_game(s, Files::default(), game);
+    let mut e = Engine::with_game(s, files, game);
     for _ in 0..64 {
         if e.finished() {
             break;
@@ -1193,4 +1202,66 @@ fn a_raised_drawbridge_over_a_column_with_no_end_tile_stays_up() {
         t.contains(BRIDGE_LINES[0]) && !t.contains(BRIDGE_LINES[2]),
         "result 0's line: {t:?}"
     );
+}
+
+/// The no-effect line's marker, at [`NO_EFFECT_AT`] (the test's own text).
+const NO_EFFECT: &str = "MARK-NO-EFFECT";
+const NO_EFFECT_AT: u32 = 0x0012_0000;
+
+/// A synthetic `game` whose no-effect message (the pointer at A4-0x6c64) is [`NO_EFFECT`],
+/// printed through the format at `FMT_LINE` ("%s" and a newline: the test's own bytes).
+fn no_effect_game() -> Files {
+    let ptr = NO_EFFECT_AT.to_be_bytes();
+    game_with(&[
+        (super::dispatch::FMT_LINE, b"%s\n"),
+        (crate::image::A4 - super::defs::MSG_NO_EFFECT, &ptr),
+        (NO_EFFECT_AT, NO_EFFECT.as_bytes()),
+    ])
+}
+
+/// Port-only: the potion's party test reads 0 past the 256 status bytes, where the original's
+/// 0x12d5a2 (`btst #7` of A4+0x3d0c + the whole slot) tests a byte of the next tables (see
+/// [`food::potion`]). A frame-1 potion on an object the cross-hair's Return selects (0x105f7c →
+/// 0x1225c0: no actor on the cell): slot 0x201 over a party member 1 with status 0x08 (the
+/// port's old `slot & 0xff` cured it), slot 0x101 with talk flags of actor 1 at 0x88, slot
+/// 0x201 with strength of actor 1 at 0x88 (bit 7 set: the original would clear 0x08 there and
+/// use the potion up). Each gets the no-effect line, the potion stays and every byte is as it
+/// was.
+#[test]
+fn port_only_a_potion_on_an_object_slot_of_0x100_or_above_has_no_effect() {
+    use crate::geom::{HALF_H, HALF_W, VIEW_H, VIEW_W};
+    // (target slot, talk flags of actor 1, strength of actor 1)
+    let cases: [(Slot, u8, u8); 3] = [(B, 0, 0), (0x101, 0x88, 0), (B, 0, 0x88)];
+    for (target, talk, strength) in cases {
+        let mut s = world();
+        s.ui = crate::main_loop::test_support::test_ui();
+        s.actors.attrs.status[1] |= 0x08;
+        s.actors.attrs.talk_flags[1] = talk;
+        s.actors.attrs.strength[1] = strength;
+        put(&mut s, A, (1 << 10) | 0x113, 100, 99);
+        put(&mut s, target, 0x80, 101, 100);
+        link(&mut s);
+        let cells = VIEW_W * VIEW_H;
+        s.objects.draw.cell.resize(cells, 0);
+        s.objects.draw.base.resize(cells, 0);
+        s.objects.draw.cell[HALF_H * VIEW_W + HALF_W + 1] = 1;
+        s.ui.input.targeting = 1;
+        s.ui.input.cursor = (HALF_W as i8 + 1, HALF_H as i8);
+        let attrs = s.actors.attrs.clone();
+        let e = run_keys_on(s, no_effect_game(), |st, io| async move {
+            food::potion(Ux::new(&st, &io), A).await;
+        });
+        let s = e.state();
+        let at = format!("slot {target:#x}");
+        assert_eq!(
+            s.ui.input.selection, target,
+            "{at}: the cross-hair's object"
+        );
+        assert!(
+            scroll_text(&s).contains(NO_EFFECT),
+            "{at}: the no-effect line"
+        );
+        assert_ne!(s.objects.tf(A), 0, "{at}: the potion stays");
+        assert!(s.actors.attrs == attrs, "{at}: every actor byte as it was");
+    }
 }
