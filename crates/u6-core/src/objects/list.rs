@@ -200,6 +200,22 @@ impl Objects {
         NONE
     }
 
+    /// Original: 0x12adc4 (objects: the map object above `slot`: its parent words climbed at
+    /// least once, to the first on the map)
+    ///
+    /// For a carried or contained object, the actor or map container that holds it. Port bound
+    /// (as in [`Self::contained_in`]): the original climbs with no limit (0x12adcc-0x12adfa);
+    /// the port gives -1 after OBJECT_SLOTS steps.
+    pub(crate) fn outer_holder(&self, mut slot: Slot) -> Slot {
+        for _ in 0..OBJECT_SLOTS {
+            slot = self.parent(slot);
+            if self.place(slot) == 0 {
+                return slot;
+            }
+        }
+        NONE
+    }
+
     /// Original: 0x10c970 (objects: last list entry of `slot`'s contents, `slot` if empty)
     ///
     /// Walks the run of contained entries after `slot` and keeps the last one inside it.
