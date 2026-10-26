@@ -14,7 +14,7 @@ ported > partial > placeholder > stubbed > replaced > planned; `-` = no marker y
 port lacks, a guard inside the port, or a stub that names the wrong address (counted as
 `also named by a stub`); partial and placeholder rows show their stubs the same way.
 
-Totals: functions 599: ported 497 (also named by a stub 1), partial 6, stubbed 3, replaced 84, planned 2, - 7. Milestone 1 (M + S) 406: ported 321, partial 3, stubbed 1, replaced 79, planned 2.
+Totals: functions 599: ported 498 (also named by a stub 1), partial 6, stubbed 2, replaced 84, planned 2, - 7. Milestone 1 (M + S) 406: ported 321, partial 3, stubbed 1, replaced 79, planned 2.
 
 | address | subsystem | M1 | Rust path | status |
 |---|---|---|---|---|
@@ -496,7 +496,7 @@ Totals: functions 599: ported 497 (also named by a stub 1), partial 6, stubbed 3
 | 0x12fb0a | objects |  | `usecmd/travel.rs::orb` | ported |
 | 0x12fca2 | objects |  | `usecmd/travel.rs::sextant_travel` | ported |
 | 0x12fdf6 | objects |  | `usecmd/travel.rs::telescope` | ported |
-| 0x12ff50 | objects |  | `usecmd/misc.rs:435 in serpents` | stubbed |
+| 0x12ff50 | objects |  | `usecmd/misc.rs::serpents` | ported |
 | 0x1301e2 | objects | M | `objects/effects.rs::toggle_passthrough` | ported |
 | 0x130380 | objects |  | `usecmd/food.rs::eat` | ported |
 | 0x1303f4 | objects |  | `usecmd/misc.rs::vortex_cube` | ported |

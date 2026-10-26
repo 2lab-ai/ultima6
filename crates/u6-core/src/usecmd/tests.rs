@@ -1265,3 +1265,290 @@ fn port_only_a_potion_on_an_object_slot_of_0x100_or_above_has_no_effect() {
         assert!(s.actors.attrs == attrs, "{at}: every actor byte as it was");
     }
 }
+
+/// The made-up mantra of virtue 3 (the test's own text) and where the test's `game` keeps it.
+const MANTRA_TEXT: u32 = 0x0013_8000;
+const MANTRA: &[u8] = b"Zqv";
+
+/// The shrine of virtue 3 (type 0xf5) at A, north of the leader at (100, 100), and at `stone` a
+/// moonstone (0x49) of frame 3 at B with a force field (0x33) at C on its tile.
+fn mantra_site(stone: (u16, u16)) -> State {
+    let mut s = world();
+    s.ui = crate::main_loop::test_support::test_ui();
+    put(&mut s, A, 0xf5, 100, 99);
+    put(&mut s, B, 0x49 | 3 << 10, stone.0, stone.1);
+    put(&mut s, C, 0x33, stone.0, stone.1);
+    link(&mut s);
+    s
+}
+
+/// Use on the shrine at A, the mantra typed and Return, under a `game` whose mantra table
+/// (A4-0x660e) names [`MANTRA`] for virtue 3; returns the state.
+fn chant(s: State) -> State {
+    use crate::engine::{InputEvent, Key};
+    let slot = crate::image::A4.wrapping_add_signed(misc::MANTRAS + 3 * 4);
+    let game = game_with(&[(slot, &MANTRA_TEXT.to_be_bytes()), (MANTRA_TEXT, MANTRA)]);
+    let mut e = Engine::with_game(s, game, |st, io| async move {
+        misc::mantra(Ux::new(&st, &io), A).await;
+    });
+    let mut typed = MANTRA
+        .iter()
+        .map(|&c| InputEvent::Text(char::from(c)))
+        .chain([InputEvent::Key(Key::Enter)]);
+    for _ in 0..400 {
+        if e.finished() {
+            break;
+        }
+        let input: Vec<InputEvent> = if e.io().pending_events() == 0 {
+            typed.next().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        e.tick(&input, 16);
+    }
+    assert!(e.finished());
+    e.state().clone()
+}
+
+#[test]
+fn the_mantra_frees_a_stone_round_the_leader_not_round_the_shrine() {
+    // 0x12edca..0x12ee5a centre the 3 x 3 on the leader (A4+0x47ec[A4-0x7b7a]), whose own
+    // tile 0x12ee70..0x12ee78 leave out: the shrine's tile (100, 99) is in it, the leader's
+    // (100, 100) and (101, 98), next to the shrine, are not.
+    for (stone, freed) in [((100, 99), true), ((100, 100), false), ((101, 98), false)] {
+        let s = chant(mantra_site(stone));
+        assert_eq!(
+            s.objects.tf(C) == 0,
+            freed,
+            "the field with the stone at {stone:?} goes: {freed}"
+        );
+    }
+}
+
+/// The serpent figure's lines (0x12ff50): the refusal 0x12cee2, none laid 0x12ceee, some laid
+/// 0x12cf00, each with the test's own marker (short enough for the room to the next).
+const SERPENT_LINES: [(u32, &str); 3] = [
+    (0x0012_cee2, "Zs0"),
+    (0x0012_ceee, "Zs1"),
+    (0x0012_cf00, "Zs2"),
+];
+
+/// The party at `at` on open ground (`flags1` 0) or walls (bit 1), with 0x1319b2 kept from
+/// hatching (A4-0x7afb set, its first test): the eggs stay as 0x12ff50 lays them.
+fn serpent_field(flags1: u8, at: (u16, u16)) -> State {
+    let mut s = world();
+    s.ui = crate::main_loop::test_support::test_ui();
+    (s.map.centre.x, s.map.centre.y) = at;
+    (s.objects.location[1].x, s.objects.location[1].y) = at;
+    link(&mut s);
+    tiles(&mut s, 0, flags1);
+    s.map.flag_7afb = 1;
+    s
+}
+
+/// Use on the serpent figure: the state and the scroll.
+fn summon(s: State) -> (State, String) {
+    let parts: Vec<(u32, &[u8])> = SERPENT_LINES
+        .iter()
+        .map(|&(a, m)| (a, m.as_bytes()))
+        .collect();
+    let e = run_on(s, game_with(&parts), |st, io| async move {
+        misc::serpents(Ux::new(&st, &io)).await;
+    });
+    let s = e.state().clone();
+    let t = scroll_text(&s);
+    (s, t)
+}
+
+/// Which of [`SERPENT_LINES`] the scroll holds, each once at most.
+fn serpent_lines(t: &str) -> [bool; 3] {
+    SERPENT_LINES.map(|(_, m)| t.contains(m))
+}
+
+/// The eggs (0x14f) on the map: (x, y, z, status, qq, its contents' (type, status, qq)), sorted.
+type Egg = (u16, u16, u8, u8, u16, Vec<(u16, u8, u16)>);
+fn eggs(s: &State) -> Vec<Egg> {
+    let mut s = s.clone();
+    let mut v = Vec::new();
+    for i in 0x100..crate::objects::OBJECT_SLOTS as Slot {
+        let o = &s.objects;
+        if o.kind(i) != 0x14f || o.place(i) != 0 {
+            continue;
+        }
+        let at = (o.x(i), o.y(i), o.z(i), o.status(i), o.qq_of(i));
+        let mut inside = Vec::new();
+        let mut c = crate::objects::first_child(&mut s.objects, i);
+        while c >= 0 {
+            let o = &s.objects;
+            inside.push((o.tf(c), o.status(c), o.qq_of(c)));
+            c = crate::objects::next_child(&mut s.objects);
+        }
+        v.push((at.0, at.1, at.2, at.3, at.4, inside));
+    }
+    v.sort();
+    v
+}
+
+/// Objects of type 0x19d on the map (the probe 0x12ff50 makes is one).
+fn serpents_on_map(s: &State) -> usize {
+    let o = &s.objects;
+    (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&i| o.kind(i) == 0x19d && o.place(i) == 0)
+        .count()
+}
+
+#[test]
+fn the_serpent_figure_refuses_while_a_silver_serpent_holds_a_slot_from_0xe0() {
+    // 0x12ff5c..0x12ff90: actor slots 0xe0..0x100, type bits only; no draw, nothing made.
+    let mut s = serpent_field(0, (100, 100));
+    s.objects.type_frame[0xe0] = 0x19d | 2 << 10;
+    let rng = s.rng;
+    let (s, t) = summon(s);
+    assert_eq!(
+        serpent_lines(&t),
+        [true, false, false],
+        "the refusal: {t:?}"
+    );
+    assert_eq!(s.rng, rng, "no draw");
+    assert!(eggs(&s).is_empty() && serpents_on_map(&s) == 0);
+}
+
+#[test]
+fn the_serpent_figure_with_no_open_spot_draws_eight_spots_per_egg_and_says_none() {
+    // 0x12ffde..0x13012e: three eggs, each 8 tries of a side 0x151f06(0, 3) and an offset
+    // 0x151f06(0, 10); the probe 0x19d made at 0x12ffd0 goes at 0x1301b8.
+    let s = serpent_field(0x02, (100, 100));
+    let mut rng = s.rng;
+    for _ in 0..3 * 8 {
+        rng.range(0, 3);
+        rng.range(0, 10);
+    }
+    let (s, t) = summon(s);
+    assert_eq!(s.rng, rng, "48 draws");
+    assert_eq!(serpent_lines(&t), [false, true, false], "none laid: {t:?}");
+    assert!(eggs(&s).is_empty());
+    assert_eq!(serpents_on_map(&s), 0, "the probe is gone");
+}
+
+/// The six cells 0x11b1c0 tests round a spot, in the original's order (0x13007e..0x130126).
+const AROUND: [(i16, i16); 6] = [(0, 0), (-1, 0), (0, 1), (-1, 1), (1, 0), (0, -1)];
+
+/// The spot of `side` and offset `d` round `c` (0x130020..0x13007a): (x - 6, y + d - 6),
+/// (x + d - 6, y - 7), (x + 7, y + d - 6) or (x + d - 6, y + 6), in words.
+fn spot_of(c: Position, side: u16, d: u16) -> (u16, u16) {
+    let d = d as i16;
+    let (dx, dy) = match side {
+        0 => (-6, d - 6),
+        1 => (d - 6, -7),
+        2 => (7, d - 6),
+        _ => (d - 6, 6),
+    };
+    (c.x.wrapping_add_signed(dx), c.y.wrapping_add_signed(dy))
+}
+
+/// What 0x12ff50 lays round `c` on level 0 when only the cells `walls` are closed, drawing from
+/// `rng` as the original does: the eggs as [`eggs`] lists them, and the tries each egg took
+/// (9: none laid). The egg 0x14f (status 0x20 from 0x10bcee, quantity 100, quality 4: 0x10bc4c
+/// at 0x130172) holds a 0x19d in a container (status 8, temporary 0x20) of quality 8 and
+/// quantity 0x151f06(4, 8) (0x10be02 at 0x13019a), at the place 0x134e1c packs (a y of -1
+/// spills into the level bits) and 0x10bcee keeps (8 bits a coordinate off the surface).
+fn laid(rng: &mut crate::rng::Rng, c: Position, walls: &[(u16, u16)]) -> (Vec<Egg>, Vec<u32>) {
+    let mut v = Vec::new();
+    let mut tries = Vec::new();
+    for _ in 0..3 {
+        let mut at = None;
+        let mut t = 0;
+        while at.is_none() && t < 8 {
+            t += 1;
+            let side = rng.range(0, 3);
+            let d = rng.range(0, 10);
+            let (x, y) = spot_of(c, side, d);
+            let open = AROUND.iter().all(|&(dx, dy)| {
+                !walls.contains(&(x.wrapping_add_signed(dx), y.wrapping_add_signed(dy)))
+            });
+            if open {
+                at = Some((x, y));
+            }
+        }
+        tries.push(if at.is_some() { t } else { 9 });
+        let Some((x, y)) = at else { continue };
+        let p = crate::objects::pack_xyz(x, y, 0);
+        let m = if p.z != 0 { 0xff } else { 0x3ff };
+        let n = rng.range(4, 8);
+        let inside = vec![(0x19d, 0x28, 0x0800 | n)];
+        v.push((p.x & m, p.y & m, p.z, 0x20, 0x0464, inside));
+    }
+    v.sort();
+    (v, tries)
+}
+
+/// The map cell `at` (in the view window) closed: a tile whose flags1 has bit 1 (impassable).
+fn close(s: &mut State, at: (u16, u16)) {
+    const WALL: u8 = 1;
+    s.tables.tileflags.flags1[usize::from(WALL)] = 0x02;
+    let [ox, oy] = s.map.window_origin;
+    let cell = crate::map::cell(usize::from(at.0 - ox), usize::from(at.1 - oy));
+    s.map.window_tiles[cell] = WALL;
+}
+
+#[test]
+fn the_serpent_figure_lays_three_eggs_of_a_silver_serpent_on_the_view_s_edges() {
+    // Open ground takes each egg's first try. At (6, 6) a spot can lie at -1 (the word 0xffff),
+    // its cells wrapping on either side of it.
+    for at in [(100, 100), (6, 6)] {
+        let s = serpent_field(0, at);
+        let mut rng = s.rng;
+        let (want, tries) = laid(&mut rng, s.map.centre, &[]);
+        assert_eq!(tries, [1, 1, 1]);
+        let (s, t) = summon(s);
+        assert_eq!(eggs(&s), want, "round {at:?}");
+        assert_eq!(s.rng, rng, "two draws per egg and its serpent's quantity");
+        assert_eq!(serpent_lines(&t), [false, false, true], "some laid: {t:?}");
+        assert_eq!(serpents_on_map(&s), 0, "the probe is gone");
+    }
+}
+
+#[test]
+fn the_serpent_figure_takes_a_spot_only_when_each_of_its_six_cells_is_open() {
+    // 0x13007e..0x130126: the probe must be able to stand on (x, y), (x - 1, y), (x, y + 1),
+    // (x - 1, y + 1), (x + 1, y) and (x, y - 1). Any one of them closed under the first spot
+    // drawn sends the first egg to the second (2 tries of 2 draws, then its serpent's quantity).
+    for (k, &(dx, dy)) in AROUND.iter().enumerate() {
+        let mut s = serpent_field(0, (100, 100));
+        let c = s.map.centre;
+        let mut first = s.rng;
+        let side = first.range(0, 3);
+        let d = first.range(0, 10);
+        let (x, y) = spot_of(c, side, d);
+        let wall = (x.wrapping_add_signed(dx), y.wrapping_add_signed(dy));
+        close(&mut s, wall);
+        let mut rng = s.rng;
+        let (want, tries) = laid(&mut rng, c, &[wall]);
+        assert_eq!(tries[0], 2, "cell {k}: the first egg on the second try");
+        let mut five = s.rng;
+        for _ in 0..2 {
+            five.range(0, 3);
+            five.range(0, 10);
+        }
+        five.range(4, 8);
+        let (s, _) = summon(s);
+        let e = eggs(&s);
+        assert_eq!(e, want, "cell {k} ({dx}, {dy}) closed under the first spot");
+        assert!(
+            !e.iter().any(|g| (g.0, g.1) == (x, y)),
+            "cell {k}: no egg on the first spot"
+        );
+        assert_eq!(s.rng, rng, "cell {k}: the draws");
+        let mut after_first = five;
+        for &t in &tries[1..] {
+            for _ in 0..t.min(8) {
+                after_first.range(0, 3);
+                after_first.range(0, 10);
+            }
+            if t <= 8 {
+                after_first.range(4, 8);
+            }
+        }
+        assert_eq!(s.rng, after_first, "cell {k}: 5 draws for the first egg");
+    }
+}
