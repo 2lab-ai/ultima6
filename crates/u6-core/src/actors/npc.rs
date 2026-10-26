@@ -13,9 +13,8 @@ use std::cell::RefCell;
 
 use crate::engine::Io;
 use crate::image::A4;
-use crate::objects::ObjectId;
+use crate::objects::{IN_CONTAINER, ObjectId, Slot};
 use crate::state::State;
-use crate::todo_stub;
 
 use super::clock;
 use super::path::{self, Goal};
@@ -551,8 +550,12 @@ pub(crate) async fn npc_turn_rest(
 ///
 /// Only once the flag bit 7 of actor 5's talk flags is set; otherwise the guard just goes back
 /// to its schedule (0x81). Waits for Y or N. Yes: the party is knocked out, taken to the jail
-/// cell (0xba, 0xe7, 0) and the clock runs in hours to 8 o'clock; the confiscation of
-/// weapons is an objects stub point. No: the guard and every other guard (0x12) turn hostile
+/// cell (0xe7, 0xba, 0) (D0 = x, D1 = y into 0x1092fc, asm 0x11fd8c..0x11fd9a) and the clock
+/// runs in hours to 8 o'clock. Then each member's objects are walked in list order while
+/// contained in it, the next link read first (asm 0x11fdb0..0x11ff20, 0x11fe0e): type 0x3f is
+/// removed (0x10c1d6), type 0x40 of quality 9 goes into the first type 0xb1 at (0xeb, 0xb7, 0)
+/// (0x10cda8, place 8), and after each object the first type 0x12c at (0xe7, 0xb8, 0) is set
+/// to frame 9. Nothing else is taken. No: the guard and every other guard (0x12) turn hostile
 /// (worktype 8, evil alignment).
 pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
     let a = usize::from(actor);
@@ -578,14 +581,32 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
         if s.actors.combat_mode() {
             crate::combat::mode::break_off(&mut s);
         }
-        seams::jail_party(&mut s, 0xba, 0xe7, 0);
+        seams::jail_party(&mut s, 0xe7, 0xba, 0);
         while s.actors.calendar.hour != 8 {
             clock::tick(&mut s, 60);
         }
-        todo_stub!(
-            "0x10c928 confiscate the party's weapons (fallback: kept)",
-            ()
-        );
+        for i in 0..s.actors.party.count() {
+            let member = Slot::from(s.actors.party.members[i]);
+            let mut c = s.objects.next_of(member);
+            while c >= 0 && s.objects.place(c) != 0 && s.objects.contained_in(c, member) {
+                let next = s.objects.next_of(c);
+                if s.objects.kind(c) == 0x3f {
+                    crate::objects::remove(&mut s, c);
+                }
+                if s.objects.kind(c) == 0x40 && s.objects.qq_of(c) >> 8 == 9 {
+                    let holder = crate::objects::object_of_kind_at(&mut s, 0xeb, 0xb7, 0, 0xb1);
+                    if holder >= 0 {
+                        crate::objects::move_into(&mut s, c, holder, IN_CONTAINER);
+                    }
+                }
+                let door = crate::objects::object_of_kind_at(&mut s, 0xe7, 0xb8, 0, 0x12c);
+                if door >= 0 {
+                    let t = &mut s.objects.type_frame[door as usize];
+                    *t = (*t & 0x3ff) + 0x2400;
+                }
+                c = next;
+            }
+        }
         // 0x11ff24..0x11ff2a: dissolve, then the draw lists rebuilt (0x10e81e).
         s.gfx.dissolve = 1;
         crate::objects::build_draw_lists(&mut s);
