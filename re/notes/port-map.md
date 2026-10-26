@@ -14,7 +14,7 @@ ported > partial > placeholder > stubbed > replaced > planned; `-` = no marker y
 port lacks, a guard inside the port, or a stub that names the wrong address (counted as
 `also named by a stub`); partial and placeholder rows show their stubs the same way.
 
-Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4, replaced 84, planned 2, - 7. Milestone 1 (M + S) 406: ported 321 (also named by a stub 5), partial 3, stubbed 1, replaced 79, planned 2.
+Totals: functions 599: ported 497 (also named by a stub 1), partial 6, stubbed 3, replaced 84, planned 2, - 7. Milestone 1 (M + S) 406: ported 321, partial 3, stubbed 1, replaced 79, planned 2.
 
 | address | subsystem | M1 | Rust path | status |
 |---|---|---|---|---|
@@ -88,7 +88,7 @@ Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4
 | 0x10368a | time | M | `actors/clock.rs::tick` | ported |
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
-| 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported; stub at `actors/turn.rs:139 in leader_bookkeeping` |
+| 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
 | 0x104140 | main | M | `main_loop/commands.rs:436 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `inventory/portrait.rs::direction_to` | ported |
@@ -148,7 +148,7 @@ Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4
 | 0x109ab8 | map | M | `map/view.rs::passes` | ported |
 | 0x109b6c | map |  |  | - |
 | 0x109bae | map | M | `map/view.rs::enqueue` | ported |
-| 0x109c12 | map | M | `map/view.rs::flood` | ported; stub at `combat/seams.rs:140 in flood_sight` |
+| 0x109c12 | map | M | `map/view.rs::flood` | ported |
 | 0x109e74 | map | M | `map/view.rs::update_view` | ported |
 | 0x10a4d6 | objects | M | `objects/effects.rs::actor_frame` | ported |
 | 0x10a5b0 | objects | M | `objects/parts.rs::owner_of_part` | ported |
@@ -162,7 +162,7 @@ Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4
 | 0x10af74 | objects | M | `objects/iter.rs::next_in_area` | ported |
 | 0x10b05a | objects | M | `objects/iter.rs::begin_area` | ported |
 | 0x10b0ba | objects | M | `objects/iter.rs::next_child_of_kind` | ported |
-| 0x10b18c | objects | M | `objects/iter.rs::find_child` | ported; stub at `actors/party.rs:441 in readied` |
+| 0x10b18c | objects | M | `objects/iter.rs::find_child` | ported |
 | 0x10b20e | objects | M | `objects/iter.rs::actor_at` | ported |
 | 0x10b2cc | objects | M | `objects/parts.rs::update_vine_frames` | ported |
 | 0x10b42e | objects | M | `objects/parts.rs::move_serpent` | ported |
@@ -176,9 +176,9 @@ Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4
 | 0x10c0c4 | objects | M | `objects/list.rs::unlink_cell` | ported |
 | 0x10c1d6 | objects | M | `objects/moves.rs::remove` | ported |
 | 0x10c49c | objects | M | `objects/blocks.rs::prune_far` | ported |
-| 0x10c6a6 | objects |  | `combat/seams.rs:68 in remains` | stubbed |
+| 0x10c6a6 | objects |  | `combat/seams.rs::remains` | ported |
 | 0x10c810 | objects | M | `objects/moves.rs::actor_from_body` | ported |
-| 0x10c928 | objects | M | `objects/list.rs::contained_in` | ported; stub at `actors/npc.rs:585 in arrest` |
+| 0x10c928 | objects | M | `objects/list.rs::contained_in` | ported |
 | 0x10c970 | objects | M | `objects/list.rs::last_inside` | ported |
 | 0x10c9d2 | objects | M | `objects/moves.rs::move_to` | ported |
 | 0x10cda8 | objects | M | `objects/moves.rs::move_into` | ported |
@@ -308,7 +308,7 @@ Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4
 | 0x11a470 | magic |  | `magic/travel.rs::locate` | ported |
 | 0x11a508 | magic |  | `magic/spells.rs::wind_change` | ported |
 | 0x11a550 | magic |  | `magic/creatures.rs::armageddon` | ported |
-| 0x11a586 | magic |  | `magic/dispatch.rs::dispatch` | ported; stub at `combat/seams.rs:95 in cast_from_item` |
+| 0x11a586 | magic |  | `magic/dispatch.rs::dispatch` | ported; stub at `combat/seams.rs:98 in cast_from_item` |
 | 0x11abd0 | magic |  | `magic/cast.rs::book_cast` | ported |
 | 0x11af10 | magic | S | `magic/cast.rs::cast` | ported |
 | 0x11b1c0 | actors | M | `actors/walk.rs::can_move_to` | ported |
@@ -497,7 +497,7 @@ Totals: functions 599: ported 496 (also named by a stub 6), partial 6, stubbed 4
 | 0x12fca2 | objects |  | `usecmd/travel.rs::sextant_travel` | ported |
 | 0x12fdf6 | objects |  | `usecmd/travel.rs::telescope` | ported |
 | 0x12ff50 | objects |  | `usecmd/misc.rs:435 in serpents` | stubbed |
-| 0x1301e2 | objects | M | `objects/effects.rs::toggle_passthrough` | ported; stub at `actors/walk.rs:531 in operate_portcullis` |
+| 0x1301e2 | objects | M | `objects/effects.rs::toggle_passthrough` | ported |
 | 0x130380 | objects |  | `usecmd/food.rs::eat` | ported |
 | 0x1303f4 | objects |  | `usecmd/misc.rs::vortex_cube` | ported |
 | 0x13051a | objects |  | `usecmd/food.rs::squeak` | ported |

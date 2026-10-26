@@ -81,14 +81,16 @@ impl TileBytes<'_> {
     }
 }
 
-/// What a flood fills in (the third argument word of 0x109c12). The original also has mode 2
-/// (queue every unqueued neighbour); no call site passes it.
+/// What a flood fills in (the third argument word of 0x109c12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FloodMode {
     /// 0: an object light; spreads while `dist <= light + 3`.
     Light = 0,
     /// 1: the leader's sight; marks cells visible, spreads inside the view plus one cell.
     Sight = 1,
+    /// 2: the map overview's sight (0x13410a); marks cells visible, spreads to every unqueued
+    /// neighbour, with no view or distance bound.
+    Overview = 2,
 }
 
 /// The ring queue 0x109bae / 0x109c12 share: x at A4-0x17f2, y at A4-0x16f2 (256 bytes each),
@@ -202,7 +204,13 @@ impl Flood<'_> {
 
     /// `dist[|dx|][|dy|]`. Floods in modes 0 and 1 stay within 7 cells of their start in the
     /// original; past the table the original would read the bytes after it, the port reads
-    /// "too far" (a light flood stops there; spec 13 Design 2).
+    /// "too far" (a light flood stops there; spec 13 Design 2). The overview's flood (mode 2)
+    /// goes past it, and the original reads byte `|dx| * 8 + |dy|` from A4-0x794a (asm
+    /// 0x109cec..0x109d06): with |dy| >= 8 and an index below 64 a later row of the table
+    /// itself; from 64 on the bytes after it, the queue indices A4-0x790a / -0x7909, the walk
+    /// tables, the wall table at A4-0x78f0 and what follows, up to A4-0x787b (index 207 =
+    /// 23 * 8 + 23, the farthest cell from a leader in window cells 16..23). The port adds no
+    /// light there; see [`flood_overview`] for why that light is never read.
     fn dist(&self, dx: i16, dy: i16) -> i16 {
         let (dx, dy) = (
             usize::from(dx.unsigned_abs()),
@@ -215,14 +223,14 @@ impl Flood<'_> {
             .map_or(i16::MAX, |&d| d.into())
     }
 
-    /// The distance a flood in `mode` lights cell (dx, dy) from its start by. A light keeps the
-    /// cell's own distance; the leader's sight lays the table over the view, each axis scaled
-    /// from its half view to the original's 5 (`dx * 5 / HALF_W`, `dy * 5 / HALF_H`, toward
-    /// zero), so daylight and dusk reach the view's edges as they reached the original's (spec
-    /// 13 Decision 8; the identity where the half view is 5).
+    /// The distance a flood in `mode` lights cell (dx, dy) from its start by. A light and the
+    /// overview keep the cell's own distance; the leader's sight lays the table over the view,
+    /// each axis scaled from its half view to the original's 5 (`dx * 5 / HALF_W`,
+    /// `dy * 5 / HALF_H`, toward zero), so daylight and dusk reach the view's edges as they
+    /// reached the original's (spec 13 Decision 8; the identity where the half view is 5).
     fn flood_dist(&self, dx: i16, dy: i16, mode: FloodMode) -> i16 {
         match mode {
-            FloodMode::Light => self.dist(dx, dy),
+            FloodMode::Light | FloodMode::Overview => self.dist(dx, dy),
             FloodMode::Sight => self.dist(sight_axis(dx, HALF[0]), sight_axis(dy, HALF[1])),
         }
     }
@@ -284,9 +292,10 @@ impl Flood<'_> {
     ///
     /// Seeds the start cell, or when it blocks, its east and south neighbours (each if it
     /// passes). Then breadth-first: each dequeued cell gains `clamp(4 - dist + light, 0, 4)`
-    /// light (u8 wrapping add), is marked visible in sight mode, and when it passes queues its
-    /// unqueued neighbours in the walk order of the tables: in sight mode those inside the view
-    /// plus one cell, in light mode those with `dist <= light + 3`.
+    /// light (u8 wrapping add), is marked visible in any mode but light (asm 0x109d48), and when
+    /// it passes queues its unqueued neighbours in the walk order of the tables: in sight mode
+    /// those inside the view plus one cell, in the overview's mode all of them (asm
+    /// 0x109e0e..0x109e20), in light mode those with `dist <= light + 3`.
     fn flood(&mut self, x0: i16, y0: i16, light: i16, mode: FloodMode) {
         if self.passes(x0, y0) {
             self.enqueue(x0, y0);
@@ -306,7 +315,7 @@ impl Flood<'_> {
             let at = cell(x as usize, y as usize);
             let add = (4 - self.flood_dist(x - x0, y - y0, mode) + light).clamp(0, 4);
             self.light[at] = self.light[at].wrapping_add(add as u8);
-            if mode == FloodMode::Sight {
+            if mode != FloodMode::Light {
                 self.flags[at] |= CELL_VISIBLE;
             }
             if !self.passes(x, y) {
@@ -327,6 +336,7 @@ impl Flood<'_> {
                         (vx - 1..=vx + VIEW_W as i16).contains(&nx)
                             && (vy - 1..=vy + VIEW_H as i16).contains(&ny)
                     }
+                    FloodMode::Overview => true,
                     FloodMode::Light => self.dist(nx - x0, ny - y0) <= light + 3,
                 };
                 if go {
@@ -414,6 +424,47 @@ fn reveal_view(m: &mut MapState) {
     for y in BLOCK_Y {
         m.light[block_row(y)].fill(4);
     }
+}
+
+/// The light 0x13410a floods the overview with (asm 0x134160 `moveq #0x28`, pushed at 0x134184).
+const OVERVIEW_LIGHT: i16 = 0x28;
+
+/// 0x109c12 in mode 2 with light 0x28, as the map overview 0x13410a calls it on the grids it has
+/// cleared (asm 0x134172..0x13418e): from window cell (x0, y0) every cell reached through
+/// passing cells is marked seen, its light summed as in the other modes.
+///
+/// The light differs from the original's only where nothing reads it. Every cell outside the
+/// inner block ([`BLOCK_X`] × [`BLOCK_Y`]) is 8 or more from the leader on one axis, past the
+/// distance table ([`Flood::dist`]), so that ring gets no light from the overview in the port
+/// where the original adds some. Unobservable: the overview reads bit 7 only; after the key
+/// [`update_view`] clears the inner block; the view and its one-cell ring lie inside that block
+/// in both builds; and the light's readers, [`view_tile_at`] and 0x10e81e's overlay
+/// (`objects/draw.rs` `overlay_view`), read view cells only.
+///
+/// Port fallback when [`MapState::tables`] is not loaded: every cell seen.
+pub(crate) fn flood_overview(state: &mut State, x0: i16, y0: i16) {
+    let Some(t) = state.map.tables.clone() else {
+        state
+            .map
+            .view_flags
+            .iter_mut()
+            .for_each(|f| *f |= CELL_VISIBLE);
+        return;
+    };
+    let m = &mut state.map;
+    if m.window_tiles.len() != WINDOW_CELLS {
+        m.window_tiles = vec![0; WINDOW_CELLS];
+    }
+    let mut f = Flood {
+        tiles: &m.window_tiles,
+        flags: &mut m.view_flags,
+        light: &mut m.light,
+        view: m.view_offset,
+        t: &t,
+        tf: TileBytes(&state.tables.tileflags),
+        queue: Queue::new(),
+    };
+    f.flood(x0, y0, OVERVIEW_LIGHT, FloodMode::Overview);
 }
 
 /// The window origin on one axis as 0x109e74 takes it, `(c - 16) & 0xfff8` with the port's
@@ -800,5 +851,103 @@ mod tests {
         assert_eq!(view_tile_at(&f, p as i32), DARK);
         f.flags[p] = 0;
         assert_eq!(view_tile_at(&f, p as i32), NOT_VISIBLE);
+    }
+
+    /// The map overview's flood (0x13410a calls 0x109c12 from the leader's cell in mode 2 with
+    /// light 0x28, asm 0x134172..0x13418e; mode 2 marks the cell seen at 0x109d48 and queues
+    /// every unqueued neighbour at 0x109e0e..0x109e20), through the combat seam on cleared grids
+    /// as 0x13410a leaves them: the leader's room, reaching past the view and its ring, and the
+    /// walls that close it are seen; nothing else is, a room walled off from it included. Within
+    /// the distance table each cell's light is `4 - dist + 0x28` clamped to 0..4 (asm
+    /// 0x109d06..0x109d46); the table is raised by 0x26 here so that light covers 0..4.
+    #[test]
+    fn the_overview_sees_the_leader_s_room_and_not_a_walled_off_one() {
+        const WALL: u8 = 1;
+        let centre = u6_formats::position::Position {
+            x: 0x80,
+            y: 0x80,
+            z: 1,
+        };
+        let mut s = crate::map::tests::open_state(centre);
+        s.tables.tileflags.flags2[usize::from(WALL)] = TF2_BOUNDARY;
+        let t = s.map.tables.as_mut().expect("tables");
+        t.dist = std::array::from_fn(|a| std::array::from_fn(|b| a.max(b) as i8 + 0x26));
+        let dist = t.dist;
+        let [vx, vy] = s.map.view_offset;
+        let (lx, ly) = (vx + HALF[0], vy + HALF[1]);
+        let (rx, ry) = (HALF[0] + 2, HALF[1] + 2);
+        let room =
+            |x: i16, y: i16, grow: i16| (x - lx).abs() <= rx + grow && (y - ly).abs() <= ry + grow;
+        let sealed = |x: i16, y: i16| (1..=3).contains(&x) && (1..=3).contains(&y);
+        let w = WINDOW as i16;
+        let cells = || (0..w).flat_map(move |y| (0..w).map(move |x| (x, y)));
+        for (x, y) in cells() {
+            let open = room(x, y, 0) || sealed(x, y);
+            s.map.window_tiles[cell(x as usize, y as usize)] = if open { 0 } else { WALL };
+        }
+        s.map.view_flags.fill(0);
+        s.map.light.fill(0);
+        crate::combat::seams::flood_sight(&mut s, lx, ly);
+        let seen =
+            |x: i16, y: i16| s.map.view_flags[cell(x as usize, y as usize)] & CELL_VISIBLE != 0;
+        assert!(
+            seen(lx + rx, ly) && seen(lx - rx, ly - ry),
+            "past the view's ring"
+        );
+        assert!(!seen(2, 2), "the walled-off room");
+        for (x, y) in cells() {
+            assert_eq!(seen(x, y), room(x, y, 1), "({x}, {y})");
+        }
+        let mut lit = [0; 5];
+        for (x, y) in cells() {
+            let (dx, dy) = ((x - lx).unsigned_abs(), (y - ly).unsigned_abs());
+            let Some(&d) = dist
+                .get(usize::from(dx))
+                .and_then(|r| r.get(usize::from(dy)))
+            else {
+                continue;
+            };
+            let want = (4 - i16::from(d) + 0x28).clamp(0, 4) as u8;
+            assert_eq!(
+                s.map.light[cell(x as usize, y as usize)],
+                want,
+                "({x}, {y})"
+            );
+            lit[usize::from(want)] += 1;
+        }
+        assert!(
+            lit.iter().all(|&n| n > 0),
+            "every light level 0..4: {lit:?}"
+        );
+    }
+
+    /// The overview's flood reaches the whole of an open window, more cells than the queue
+    /// holds; what must fit is the cells queued at once. From every leader cell (window cells
+    /// LEAD..LEAD + 7 on each axis) the queue never fills.
+    #[test]
+    fn the_overview_frontier_in_an_open_window_fits_the_queue() {
+        let centre = u6_formats::position::Position {
+            x: 0x80,
+            y: 0x80,
+            z: 1,
+        };
+        let t = crate::map::tests::open_state(centre).map.tables;
+        let (t, tf) = (t.expect("tables"), flags());
+        let lead = geom::LEAD as i16;
+        let mut peak = 0;
+        for y0 in lead..lead + 8 {
+            for x0 in lead..lead + 8 {
+                let mut g = grids();
+                let mut f = flood(&mut g, &t, &tf);
+                f.flood(x0, y0, OVERVIEW_LIGHT, FloodMode::Overview);
+                assert_eq!(f.queue.seen.dropped, 0, "({x0}, {y0})");
+                assert!(
+                    f.flags.iter().all(|&c| c & CELL_VISIBLE != 0),
+                    "({x0}, {y0})"
+                );
+                peak = peak.max(f.queue.seen.peak);
+            }
+        }
+        println!("overview frontier: peak {peak} of {QUEUE_LEN} entries");
     }
 }

@@ -305,3 +305,75 @@ fn the_party_fights_gargoyles_in_the_throne_room() {
         write_ppm(dir, "final.ppm", e.frame());
     }
 }
+
+/// Stub hits of 0x10c6a6 on this thread outside an engine.
+fn remains_stub_hits() -> u64 {
+    let hits = crate::stub::detached_hits();
+    hits.iter()
+        .filter(|(id, _)| id.starts_with("0x10c6a6"))
+        .map(|(_, n)| n)
+        .sum()
+}
+
+/// The remains (0x10c6a6, asm 0x10c6a6..0x10c80e) of a monster carrying an object and a readied
+/// type-0x4c one (which 0x10cda8 moves only while A4-0x78da is set), on its tile under a type
+/// 0x152 object: one remains object of the monster's type and frame word (quality the
+/// monster, temporary) on the tile, holding both (location 0x08, status bit 0); the 0x152 back
+/// on top of the tile; the monster on level 15; and no stub point reached.
+#[test]
+fn a_dead_monster_leaves_one_remains_object_holding_what_it_carried() {
+    let Some((mut s, _files)) = start() else {
+        return;
+    };
+    let kind = GARGOYLE_TYPES
+        .into_iter()
+        .find(|&k| crate::objects::monster_index(&s.objects, k) >= 0)
+        .expect("a gargoyle creature type");
+    let (x, y) = free_tiles(&mut s, 1)[0];
+    let z = u16::from(s.map.centre.z);
+    let foe = spawn(&mut s, kind, x, y);
+    assert!(foe >= 0, "a monster slot");
+    let carried = [
+        crate::objects::create_in(&mut s, 0x58, crate::objects::IN_INVENTORY, 1, foe),
+        crate::objects::create_in(&mut s, 0x4c, crate::objects::READIED, 1, foe),
+    ];
+    let pool = crate::objects::create_on_map(&mut s.objects, 0x152, 0, 0, x, y, z);
+    assert!(carried.iter().all(|&c| c >= 0) && pool >= 0, "object slots");
+    let tf = s.objects.type_frame[foe as usize];
+    let hits = remains_stub_hits();
+    let body = super::seams::remains(&mut s, foe);
+    assert_eq!(remains_stub_hits() - hits, 0, "no stub point");
+    assert!(body >= 0, "the remains");
+    let o = &mut s.objects;
+    let b = body as usize;
+    assert_eq!((o.type_frame[b], o.qq[b] >> 8), (tf, foe as u16));
+    assert_eq!(o.obj_status[b] & 0x39, 0x21, "on the map, temporary, bit 0");
+    assert_eq!((o.x(body), o.y(body), u16::from(o.z(body))), (x, y, z));
+    let mut inside = Vec::new();
+    let mut c = crate::objects::first_child(o, body);
+    while c >= 0 {
+        inside.push(c);
+        c = crate::objects::next_child(o);
+    }
+    let mut want = carried;
+    want.sort_unstable();
+    inside.sort_unstable();
+    assert_eq!(inside, want, "everything it carried");
+    for c in carried {
+        assert_eq!(
+            o.obj_status[c as usize] & 0x19,
+            0x09,
+            "in a container, bit 0"
+        );
+    }
+    assert_eq!(o.z(foe), 0xf, "the monster on level 15");
+    assert_eq!(o.allow_type_4c, 0);
+    let first = crate::objects::begin_at(o, &s.tables, x, y, z);
+    let second = crate::objects::next_at(o, &s.tables);
+    assert_eq!(
+        (first, second),
+        (pool, body),
+        "the 0x152 on top, the remains next"
+    );
+    println!("remains holds {} objects", inside.len());
+}

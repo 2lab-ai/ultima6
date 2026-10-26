@@ -1,7 +1,9 @@
-//! Calls from the combat code into functions other modules own. Ported owners are called
-//! directly (integration M2: objects 0x10e596, 0x12f8fe; the pointer merge: graphics 0x15265a,
-//! 0x152800, 0x152876, 0x1521f4); the others are the narrowest signature the combat code needs,
-//! a `todo_stub!` with its contract and an explicit fallback. Proposed owner in brackets.
+//! Calls from the combat code into functions other modules own, the owner in brackets. Most
+//! forward to the ported owner (objects 0x10e596, 0x12f8fe; graphics 0x15265a, 0x152800,
+//! 0x152876, 0x1521f4; magic 0x1165d2; sound 0x110878, 0x110912 and the song word A4-0x779a;
+//! map 0x109c12's overview flood). The remains 0x10c6a6 are ported here from the assembly with
+//! the ported object calls. One is still a `todo_stub!` with its contract and an explicit
+//! fallback: the cast from a staff or wand, 0x11a586.
 
 use crate::engine::with_current_io;
 use crate::objects::{self, Slot};
@@ -29,12 +31,16 @@ pub(crate) fn sprite_draw(s: &mut State, slot: u16, x: u16, y: u16) {
     with_current_io(|io| io.draw_back(|back| crate::gfx::sprite::draw(gfx, back, slot, x, y)));
 }
 
-/// [objects] 0x10c6a6(actor): the remains of a dead actor: a map object of its type + frame
-/// (status | 1, quality = the actor, temporary only for monsters) on its tile with everything
-/// it carried moved inside; a pool of type 0x152 under it is moved to the top; the actor goes
-/// to level 15. Returns the remains, -1 when no slot is free. Fallback: that behaviour, written
-/// from 0x10c6a6's assembly with the ported object calls (0x10ad1a, 0x10bcee, 0x10ae52,
-/// 0x10cda8, 0x10c9d2).
+/// Original: 0x10c6a6 (objects: the remains of a dead actor)
+///
+/// A map object of its type + frame word (status | 1, quality = the actor, temporary only for
+/// monsters) on its tile with everything it carried moved inside (0x10cda8 with 8, then status
+/// bit 0) while A4-0x78da allows type 0x4c; a pool of type 0x152 first at the tile is moved to
+/// the top; the actor goes to level 15. Returns the remains, -1 when no slot is free (asm
+/// 0x10c6a6..0x10c80e). With nothing at the tile the original tests the type word of slot -1
+/// (D4 = -1, asm 0x10c7c0..0x10c7d6: the last two location bytes of slot 0xbff) and on a 0x152
+/// calls 0x10c9d2 with -1, which returns -1 at its first test (asm 0x10c9e2..0x10c9e8) and the
+/// caller drops; the port skips the test.
 pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
     let a = actor as usize;
     if actor < 0 || s.objects.type_frame[a] == 0 {
@@ -65,10 +71,7 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
         objects::move_to(s, actor, x, y, 0xf);
     }
     s.objects.allow_type_4c = 0;
-    todo_stub!(
-        "0x10c6a6 make an actor's remains (fallback: ported behaviour)",
-        body
-    )
+    body
 }
 
 /// The magic hunk's refusal line (PC-relative 0x1159f8), shown for a cast the port cannot run.
@@ -133,14 +136,9 @@ pub(crate) fn current_song(s: &State) -> u16 {
 }
 
 /// [map] 0x109c12(x0, y0, 0x28, 2): flood the sight from window cell (x0, y0) into the cell
-/// flags (bit 7 = seen). `map/view.rs` ports 0x109c12 for its modes 0 (light) and 1 (sight)
-/// only; the overview's mode 2 is not ported. Fallback: every cell seen.
-pub(crate) fn flood_sight(s: &mut State, _x0: i16, _y0: i16) {
-    s.map.view_flags.iter_mut().for_each(|f| *f |= 0x80);
-    todo_stub!(
-        "0x109c12 flood the sight for the overview (fallback: all seen)",
-        ()
-    )
+/// flags (bit 7 = seen), to every cell it reaches: [`crate::map::view::flood_overview`].
+pub(crate) fn flood_sight(s: &mut State, x0: i16, y0: i16) {
+    crate::map::view::flood_overview(s, x0, y0);
 }
 
 /// [graphics] 0x1521f4(x0, y0, x1, y1): fill the rectangle with the plot colour, into the back
