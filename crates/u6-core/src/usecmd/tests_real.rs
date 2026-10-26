@@ -435,31 +435,128 @@ fn anywhere(files: &Files, kind: u16) -> Option<(u16, u16, u8)> {
     (0..=5u8).find_map(|z| records(&s, kind, 0, 0, z).first().map(|r| (r.0, r.1, z)))
 }
 
-/// The serpent figure (0x139) reaches the unported 0x12ff50; its fallback prints the game's own
-/// line that nothing happened (0x12ceee) instead of ending silently.
+/// Which of `sites` (strings read from the user's `game` at run time) is among `lines`: its
+/// index, -1 for none. Compared with the white space taken out (the scroll wraps a long line);
+/// the longest that matches, should one line hold another.
+fn shown_line(e: &Engine, lines: &[String], sites: &[u32]) -> i32 {
+    let bare = |t: &str| t.split_whitespace().collect::<String>();
+    let shown = bare(&lines.join(" "));
+    sites
+        .iter()
+        .map(|&a| {
+            let text = crate::main_loop::game_string(e.io(), a);
+            bare(
+                &text
+                    .iter()
+                    .map(|&b| crate::ui::wide::latin_char(u16::from(b)))
+                    .collect::<String>(),
+            )
+        })
+        .enumerate()
+        .filter(|(_, t)| !t.is_empty() && shown.contains(t.as_str()))
+        .max_by_key(|(_, t)| t.len())
+        .map_or(-1, |(i, _)| i as i32)
+}
+
+/// The eggs (0x14f) on the map holding a silver serpent (0x19d): their slots.
+fn serpent_eggs(s: &State) -> Vec<Slot> {
+    let mut s = s.clone();
+    let mut v = Vec::new();
+    for i in 0x100..crate::objects::OBJECT_SLOTS as Slot {
+        if s.objects.kind(i) != 0x14f || s.objects.place(i) != 0 {
+            continue;
+        }
+        let mut c = crate::objects::first_child(&mut s.objects, i);
+        while c >= 0 {
+            if s.objects.kind(c) == 0x19d {
+                v.push(i);
+                break;
+            }
+            c = crate::objects::next_child(&mut s.objects);
+        }
+    }
+    v
+}
+
+/// The serpent figure (0x139, 0x12ff50) where the world has it. Use refuses (0x12cee2) and
+/// makes nothing while a silver serpent (0x19d) holds one of actor slots 0xe0..0x100; else it
+/// lays up to three eggs of a silver serpent round the view, its line 0x12cf00 when it laid one
+/// (the count at 0x1301aa), else 0x12ceee; each egg laid hatches (0x1319b2 marks it 0x40 and
+/// 0x02) and a silver serpent comes out. A silver serpent out before the first Use (the world's
+/// own) is taken away and Use made again, so the laying runs on the world's ground; one out
+/// makes the next Use refuse. Prints the line indices and counts only.
 #[test]
-fn unported_serpent_figure_prints_a_line() {
+fn the_serpent_figure_hatches_silver_serpents_and_refuses_while_one_is_out() {
     let Some(files) = files() else { return };
-    let (kind, stub, name) = (0x139, "0x12ff50", "10-serpent-figure");
+    let (kind, name) = (0x139, "10-serpent-figure");
     let Some((x, y, z)) = anywhere(&files, kind) else {
         eprintln!("[{name}] no {kind:#x} in the world");
         return;
+    };
+    let out = |s: &State| -> Vec<Slot> {
+        (0xe0..0x100)
+            .filter(|&a| s.objects.kind(a) == 0x19d)
+            .collect()
     };
     let mut s = start(&files);
     goto(&mut s, x, y + 1, z);
     let obj = slot_at(&mut s, x, y, z, kind);
     assert!(obj >= 0, "no {kind:#x} where the records put it");
-    let n = lines_of(&s).len();
-    let e = use_on(s, &files, obj, (x as i16, y as i16), &[]);
-    let out = report(&e, name, n);
-    assert!(
-        e.stub_hits().keys().any(|k| k.starts_with(stub)),
-        "[{name}] reaches the stub {stub}"
-    );
-    assert!(
-        out.len() >= 2,
-        "[{name}] the name, then the fallback's line"
-    );
+    let cell = (x as i16, y as i16);
+    let lines = [0x0012_cee2, 0x0012_ceee, 0x0012_cf00];
+    let used = |s: State, tag: &str| {
+        let before = out(&s).len();
+        let eggs0 = serpent_eggs(&s);
+        let n = lines_of(&s).len();
+        let e = use_on(s, &files, obj, cell, &[]);
+        let line = shown_line(&e, &report(&e, tag, n), &lines);
+        assert!(
+            !e.stub_hits().keys().any(|k| k.starts_with("0x12ff50")),
+            "[{tag}] 0x12ff50 is ported"
+        );
+        let s = e.state().clone();
+        let after = out(&s).len();
+        let new: Vec<Slot> = serpent_eggs(&s)
+            .into_iter()
+            .filter(|g| !eggs0.contains(g))
+            .collect();
+        eprintln!(
+            "[{tag}] {before} out before, {} eggs laid, line {line}, {after} out after",
+            new.len()
+        );
+        let want = match (before, new.len()) {
+            (0, 0) => 1,
+            (0, _) => 2,
+            _ => 0,
+        };
+        assert_eq!(line, want, "[{tag}] the line");
+        if before > 0 {
+            assert!(new.is_empty() && after == before, "[{tag}] none made");
+        }
+        if !new.is_empty() {
+            assert!(
+                new.iter().all(|&g| s.objects.status(g) & 0x42 == 0x42),
+                "[{tag}] each egg laid hatched"
+            );
+            assert!(after > before, "[{tag}] a silver serpent came out");
+        }
+        (s, after)
+    };
+    let world_s = !out(&s).is_empty();
+    let (mut s, mut n) = used(s, name);
+    if world_s {
+        for a in out(&s) {
+            crate::objects::remove(&mut s, a);
+        }
+        assert!(
+            out(&s).is_empty(),
+            "[{name}] the serpents out are taken away"
+        );
+        (s, n) = used(s, &format!("{name}-cleared"));
+    }
+    if n > 0 {
+        used(s, &format!("{name}-again"));
+    }
 }
 
 /// The drawbridge pieces (0x10d) on the surface in the object slots: (x, y, frame), sorted;
@@ -475,27 +572,10 @@ fn bridge_pieces(s: &State, quality: Option<u16>) -> Vec<(u16, u16, u16)> {
     v
 }
 
-/// Which of 0x12e3f6's lines ([`super::mech::STR_BRIDGE`], read from the user's `game` at run
-/// time) is among `lines`: its result 0..4, -1 for none. Compared with the white space taken
-/// out (the scroll wraps a long line); the longest that matches, should one line hold another.
+/// Which of 0x12e3f6's lines ([`super::mech::STR_BRIDGE`]) is among `lines`: its result 0..4,
+/// -1 for none ([`shown_line`]).
 fn bridge_line(e: &Engine, lines: &[String]) -> i32 {
-    let bare = |t: &str| t.split_whitespace().collect::<String>();
-    let shown = bare(&lines.join(" "));
-    super::mech::STR_BRIDGE
-        .iter()
-        .map(|&a| {
-            let text = crate::main_loop::game_string(e.io(), a);
-            bare(
-                &text
-                    .iter()
-                    .map(|&b| crate::ui::wide::latin_char(u16::from(b)))
-                    .collect::<String>(),
-            )
-        })
-        .enumerate()
-        .filter(|(_, t)| !t.is_empty() && shown.contains(t.as_str()))
-        .max_by_key(|(_, t)| t.len())
-        .map_or(-1, |(i, _)| i as i32)
+    shown_line(e, lines, &super::mech::STR_BRIDGE)
 }
 
 /// Every drawbridge crank (0x120) on the surface, each from a new game: Use lowers the bridge of

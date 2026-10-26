@@ -3,12 +3,11 @@
 //! the fishing pole 0x12ef7a, the serpent figure 0x12ff50.
 
 use super::defs::{self, MSG_DONE, MSG_FAILED, MSG_NO_EFFECT};
-use super::dispatch::FMT_NL_LINE;
+use super::dispatch::{FMT_NL_LINE, STR_NOT_NOW};
 use super::{Ux, seams};
 use crate::geom::RULE_HALF;
-use crate::objects::{Slot, object_of_kind_at};
+use crate::objects::{IN_CONTAINER, Slot, object_of_kind_at};
 use crate::state::State;
-use crate::todo_stub;
 use crate::ui::printf::Arg;
 
 const STR_WITH: u32 = 0x0012_c944;
@@ -28,17 +27,19 @@ const STR_CANT_CARRY: u32 = 0x0012_ccd8;
 const STR_BANG: u32 = 0x0012_ccf4;
 const FMT_S: u32 = 0x0012_ccf8;
 const STR_NL: u32 = 0x0012_ccfe;
-/// The serpent figure's line when no serpent hatched (0x12ff50 at 0x1301c2).
+/// The serpent figure's lines (0x12ff50): no egg laid (at 0x1301c2), eggs laid (at 0x1301ce).
 const STR_NONE_HATCHED: u32 = 0x0012_ceee;
+const STR_HATCHED: u32 = 0x0012_cf00;
 /// Port-only (spec 08, slice K2; 2026-10-25): the strings these handlers pass to `printf` as its
 /// format, for the locale layer's catalogue ([`super::PRINTED`]): the wand's lead-in, the
 /// Codex's line, the shrine's mantra prompt and wrong-mantra line, the fishing pole's four
 /// lines, the wishing well's two prompts, its food line and its too-heavy line, and the serpent
-/// figure's line, each on a wrapping line of the message window; and the wand's two syllable
-/// formats, the well's message format, the mark that ends its food line and its newline, of no
-/// word of their own (the last two under three bytes too), which the catalogue leaves out. The
-/// syllables a wand prints go through `%s`: they stay English, as magic's do. The words typed
-/// at the shrine and the well are read against tables the catalogue does not hold.
+/// figure's three lines (its refusal is the checks' too), each on a wrapping line of the
+/// message window; and the wand's two syllable formats, the well's message format, the mark
+/// that ends its food line and its newline, of no word of their own (the last two under three
+/// bytes too), which the catalogue leaves out. The syllables a wand prints go through `%s`:
+/// they stay English, as magic's do. The words typed at the shrine and the well are read
+/// against tables the catalogue does not hold.
 pub(super) const PRINTED: &[u32] = &[
     STR_WITH,
     FMT_STR,
@@ -57,10 +58,12 @@ pub(super) const PRINTED: &[u32] = &[
     STR_BANG,
     FMT_S,
     STR_NL,
+    STR_NOT_NOW,
     STR_NONE_HATCHED,
+    STR_HATCHED,
 ];
 /// Original: A4-0x660e (8 pointers: the shrine mantras, by virtue)
-const MANTRAS: i32 = -0x660e;
+pub(super) const MANTRAS: i32 = -0x660e;
 /// Original: A4-0x65ce (20 pointers: the words the wishing well grants food for)
 const WISHES: i32 = -0x65ce;
 
@@ -274,10 +277,11 @@ fn matches(word: &[u8], line: &[u8]) -> bool {
 /// Original: 0x12ed4a (objects: chant the mantra at a shrine)
 ///
 /// The mantra prompt (0x12cc02) and a line; it must be the mantra of this shrine (0xf2 +
-/// virtue; else the line 0x12cc0c). Then on each tile around the shrine a moonstone (0x49) of
-/// the shrine's virtue frees it: the force field 0x33 there goes and the eggs of wisps and
-/// daemons around are removed (0x12eca6); the done message with magic's flash 0x115b7c, else
-/// the no-effect message.
+/// virtue; else the line 0x12cc0c). Then on each tile around the party leader (A4+0x47ec
+/// [A4-0x7b7a], asm 0x12edca..0x12ee5a; the shrine is used for its type only) a moonstone
+/// (0x49) of the shrine's virtue frees it: the force field 0x33 there goes and the eggs of
+/// wisps and daemons around are removed (0x12eca6); the done message with magic's flash
+/// 0x115b7c, else the no-effect message.
 pub async fn mantra(ux: Ux<'_>, shrine: Slot) {
     let virtue = ux.s().objects.kind(shrine).wrapping_sub(0xf2);
     ux.print(STR_MANTRA, &[]).await;
@@ -291,7 +295,8 @@ pub async fn mantra(ux: Ux<'_>, shrine: Slot) {
     }
     let freed = {
         let mut s = ux.s();
-        let (sx, sy) = (s.objects.x(shrine), s.objects.y(shrine));
+        let l = Slot::from(super::leader(&s));
+        let (sx, sy) = (s.objects.x(l), s.objects.y(l));
         let z = u16::from(s.map.centre.z);
         let mut freed = false;
         for i in 0..3u16 {
@@ -424,14 +429,94 @@ pub async fn fish(ux: Ux<'_>) {
     }
 }
 
-/// Stub of 0x12ff50 (objects: the serpent figure summons silver serpents)
+/// Original: 0x12ff50 (objects: the serpent figure lays the eggs of silver serpents)
 ///
-/// Stub contract: the refusal line 0x12cee2 while a silver serpent (0x19d) is among the
-/// temporary actors; else up to three eggs of serpents hatch around the party (RNG offsets,
-/// 0x11b1c0 checks, 0x10bc4c / 0x10be02, 0x1319b2) and the line 0x12cf00 (some hatched) or
-/// 0x12ceee (none). Fallback: nothing hatches, no RNG draw, and the game's own line for that
-/// outcome (0x12ceee) is printed. Not on the Use receipt paths.
+/// A silver serpent (0x19d) in one of actor slots 0xe0..0x100 (asm 0x12ff5c..0x12ff90): the
+/// line 0x12cee2 and nothing else. Else a probe 0x19d is made at (0, 0) on the party's level
+/// (0x10bc4c at 0x12ffd0) and up to three eggs laid (0x12ffde..0x1301ae). Each takes at most
+/// 8 tries of a side 0x151f06(0, 3) and an offset d 0x151f06(0, 10) round the centre: (x − 6,
+/// y + d − 6), (x + d − 6, y − 7), (x + 7, y + d − 6) or (x + d − 6, y + 6) (0x130020..0x13007a).
+/// The first spot where the probe may stand (0x11b1c0) at (x, y), (x − 1, y), (x, y + 1),
+/// (x − 1, y + 1), (x + 1, y) and (x, y − 1) takes an egg 0x14f of quantity 100 and quality 4
+/// (0x10bc4c at 0x130172) holding a 0x19d of quality 8 and quantity 0x151f06(4, 8) (0x10be02
+/// at 0x13019a), and the egg hatches (0x1319b2). The probe goes (0x10c1d6 at 0x1301b8); the
+/// line 0x12cf00 when an egg was laid, else 0x12ceee.
+///
+/// With the object pool full (0x10bc4c: -1) the original passes the -1 on; the port does not.
+/// No probe: the port finds no spot, where the original tests slot -1 (0x11b1c0 reads the word
+/// before the type table, 0x137986, the location bytes 0x135585..0x135587 and the actor byte
+/// A4+0x3d0b), so its spots, draws and line depend on those bytes; nor does the port clear
+/// A4-0x6a96, which each 0x11b1c0 call clears first (0x11b1d2). No egg: the port draws its
+/// serpent's quantity and counts it, as the original does (the add at 0x1301aa is
+/// unconditional), but makes no contents (0x10be02 finds the pool as full: 0x10a79a) and
+/// hatches nothing; the original's 0x1319b2(-1), unless A4-0x7afb is set or the hour test on
+/// the byte A4+0x250a fails, draws 0x151f06(1, 100) once while bit 0x40 of the byte before the
+/// status table (A4+0x190b) is clear, walks what 0x10ae52 finds in slot -1 should that draw not
+/// exceed the byte A4+0x250b, and sets 0x42 in A4+0x190b. The count, and so the line, match
+/// when the probe was made.
 pub async fn serpents(ux: Ux<'_>) {
-    todo_stub!("0x12ff50 summon silver serpents", ());
-    ux.print(STR_NONE_HATCHED, &[]).await;
+    let line = {
+        let mut s = ux.s();
+        let out = (0xe0..0x100).any(|a: Slot| {
+            let tf = s.objects.tf(a);
+            tf != 0 && tf & 0x3ff == 0x19d
+        });
+        if out {
+            STR_NOT_NOW
+        } else {
+            let c = s.map.centre;
+            let z = u16::from(c.z);
+            let new = |s: &mut State, x: u16, y: u16, tf: u16, qq: u16| {
+                let [b0, b1, b2] = crate::objects::pack_xyz(x, y, z).to_packed();
+                let ([t0, t1], [q0, q1]) = (tf.to_be_bytes(), qq.to_be_bytes());
+                crate::objects::create_from_record(s, [0, b0, b1, b2, t0, t1, q0, q1])
+            };
+            let probe = new(&mut s, 0, 0, 0x19d, 1);
+            let mut laid = 0;
+            for _ in 0..3 {
+                let mut spot = None;
+                for _ in 0..8 {
+                    let side = s.rng.range(0, 3);
+                    let d = s.rng.range(0, 10);
+                    let at = |dx: i16, dy: i16| {
+                        (c.x.wrapping_add_signed(dx), c.y.wrapping_add_signed(dy))
+                    };
+                    let d = d as i16;
+                    let (x, y) = match side {
+                        0 => at(-6, d - 6),
+                        1 => at(d - 6, -7),
+                        2 => at(7, d - 6),
+                        _ => at(d - 6, 6),
+                    };
+                    let around = [(0, 0), (-1, 0), (0, 1), (-1, 1), (1, 0), (0, -1)]
+                        .map(|(dx, dy)| (x.wrapping_add_signed(dx), y.wrapping_add_signed(dy)));
+                    if probe >= 0
+                        && around.into_iter().all(|(x, y)| {
+                            crate::actors::walk::can_move_to(&mut s, probe as u16, x, y)
+                        })
+                    {
+                        spot = Some((x, y));
+                        break;
+                    }
+                }
+                let Some((x, y)) = spot else {
+                    continue;
+                };
+                let egg = new(&mut s, x, y, 0x14f, 0x0464);
+                let n = s.rng.range(4, 8);
+                if egg >= 0 {
+                    crate::objects::create_in(&mut s, 0x19d, IN_CONTAINER, 0x0800 | n, egg);
+                    crate::objects::hatch_egg(&mut s, egg);
+                }
+                laid += 1;
+            }
+            crate::objects::remove(&mut s, probe);
+            if laid == 0 {
+                STR_NONE_HATCHED
+            } else {
+                STR_HATCHED
+            }
+        }
+    };
+    ux.print(line, &[]).await;
 }

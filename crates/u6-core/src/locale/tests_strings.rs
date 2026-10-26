@@ -3175,7 +3175,7 @@ const USE_MECH: [u32; 22] = [
     0x0012_cd2e,
     0x0012_cd4c,
 ];
-const USE_MISC: [u32; 18] = [
+const USE_MISC: [u32; 20] = [
     0x0012_c944,
     0x0012_c94a,
     0x0012_c94e,
@@ -3193,7 +3193,9 @@ const USE_MISC: [u32; 18] = [
     0x0012_ccf4,
     0x0012_ccf8,
     0x0012_ccfe,
+    0x0012_cee2,
     0x0012_ceee,
+    0x0012_cf00,
 ];
 const USE_TRAVEL: [u32; 24] = [
     0x0012_cd66,
@@ -3306,9 +3308,9 @@ fn uses_own_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
     let lines = use_texts();
     assert_eq!(
         lines.len(),
-        81,
-        "85 sites, the newline, the wand's format, the no-direction word and the direction's \
-         format each in two files' lists"
+        82,
+        "87 sites, the newline, the wand's format, the no-direction word, the direction's \
+         format and the not-now line each in two files' lists"
     );
     let cat = Catalogue::from_game(&use_game());
     for (at, text) in &lines {
@@ -3321,7 +3323,7 @@ fn uses_own_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
     }
     assert_eq!(
         cat.len(),
-        71,
+        72,
         "every line but the ten of no word of their own"
     );
     assert!(
