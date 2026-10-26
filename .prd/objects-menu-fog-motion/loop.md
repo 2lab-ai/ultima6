@@ -25,7 +25,7 @@ original under emulation: `tools/oracle`. Research notes that are not specs: `~/
 | T1 | 4 | 19 | draft `19-turn-model.md` | How a turn runs now (AS-IS, `file:line`), how the original designed it, how Ultima VII, Nuvie and modern turn-based games do it, what makes ours feel old, options with a recommendation |
 | W1 | 5 | 20 | `motion.md` | Step intervals by actor and speed (measured), how Ultima VII and Exult and modern games interpolate, slide length, smooth scroll, compositor budget, speed multiplier and Max |
 
-Results: O1, O2, O3, M1, S1 and T1 written (2026-10-27; T1's draft landed as `19-turn-model.md`); W1 running. The dispatcher re-read the claims the round 2
+Results: all seven written (2026-10-27): T1's draft landed as `19-turn-model.md`, W1's design as `20-smooth-motion.md`. The dispatcher re-read the claims the round 2
 briefs rest on (port side by `file:line`; the mantra centre from the bytes at 0x12edca..0x12ee54; the arrest's x and y
 from the bytes at 0x11fd8c and decompile 0x1092fc).
 
@@ -53,5 +53,5 @@ deploys.
 | B12 | 1a | (later) | staff and wand casts, monsters included (row 5) | B2, B4 merged |
 | P1 | 1c | (later) | Korean lines for B10's new catalogue entries, on top of the live pack | B10 merged; message the row-25 session |
 | M2 | 2 | (later) | the right-press menu from M1 | B6, B7 merged (predicates read those handlers) |
-| W2 | 5 | (later) | smooth motion from W1 | C1 merged (same render files) |
+| W2 | 5 | (later) | spec 20: scene, presenter, early picture on a clone | C1, B2, K1 merged (gfx, walk.rs, engine.rs) |
 | E1 | 1a | (round 3) | the `end` program (O1 row 10): decompile, port, launcher state 2 | — |
