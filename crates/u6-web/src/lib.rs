@@ -506,6 +506,9 @@ pub struct Game {
     pointer_version: u64,
     /// Voices on ([`Game::set_voices`]): the engine's speech tap keeps what NPCs say.
     voices: bool,
+    /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
+    /// repeats were queued as, so its release takes back those ([`Game::key_up`]).
+    held: Vec<(String, Key)>,
 }
 
 impl Default for Game {
@@ -547,6 +550,7 @@ impl Game {
             pointer_rgba: Vec::new(),
             pointer_version: 0,
             voices: false,
+            held: Vec::new(),
         };
         game.redraw();
         game
@@ -1233,18 +1237,46 @@ impl Game {
         self.engine.as_ref().map_or(0, Engine::keys_owned)
     }
 
-    /// Queues a key press. Returns true when it is a game key (the caller should then
-    /// `preventDefault` so arrows do not scroll the page and Ctrl-S / Ctrl-R do not save or
-    /// reload the page).
+    /// Queues a key press: the first of a key held down (a DOM `keydown` whose `repeat` is
+    /// false). Returns true when it is a game key (the caller should then `preventDefault` so
+    /// arrows do not scroll the page and Ctrl-S / Ctrl-R do not save or reload the page).
     pub fn key_down(&mut self, code: &str, key: &str, ctrl: bool) -> bool {
-        match key_from_dom(code, key, ctrl) {
-            Some(k) => {
-                if self.engine.is_some() {
-                    self.pending.push(InputEvent::Key(k));
-                }
-                true
+        self.key_event(InputEvent::Key, code, key, ctrl)
+    }
+
+    /// Spec 19 O1b: queues a press the browser's auto-repeat sent (a `keydown` whose `repeat`
+    /// is true), as [`Game::key_down`] does a press; the key's release ([`Game::key_up`]) takes
+    /// it back while it waits at a key wait that drains.
+    pub fn key_repeat(&mut self, code: &str, key: &str, ctrl: bool) -> bool {
+        self.key_event(InputEvent::Repeat, code, key, ctrl)
+    }
+
+    /// Spec 19 O1b: the physical key `code` (a `keyup`'s) let go: one release per engine key
+    /// its presses and repeats were queued as ([`Game::key_down`], [`Game::key_repeat`]),
+    /// whatever the modifiers are now (Ctrl let go before S still releases Ctrl-S). Outside the
+    /// line editor a release takes the key's queued repeats back, so a held key walks no
+    /// further than the prompt it was let go at. Whether `code` was held.
+    pub fn key_up(&mut self, code: &str) -> bool {
+        let (pending, running) = (&mut self.pending, self.engine.is_some());
+        let before = self.held.len();
+        self.held.retain(|(held, k)| {
+            if held != code {
+                return true;
             }
-            None => false,
+            if running {
+                pending.push(InputEvent::Release(*k));
+            }
+            false
+        });
+        self.held.len() != before
+    }
+
+    /// Spec 19 O1b: every held key let go ([`Game::key_up`]), for when the page can no longer
+    /// see their releases (the window lost the focus or the page was hidden).
+    pub fn release_keys(&mut self) {
+        let codes: Vec<String> = self.held.iter().map(|(code, _)| code.clone()).collect();
+        for code in codes {
+            self.key_up(&code);
         }
     }
 
@@ -1474,13 +1506,39 @@ impl Game {
         }
     }
 
+    /// Queues `event` of the engine key the DOM key maps to ([`key_from_dom`]) while a game
+    /// runs, noting it as held by `code`; whether it is a game key.
+    fn key_event(
+        &mut self,
+        event: fn(Key) -> InputEvent,
+        code: &str,
+        key: &str,
+        ctrl: bool,
+    ) -> bool {
+        match key_from_dom(code, key, ctrl) {
+            Some(k) => {
+                if self.engine.is_some() {
+                    self.pending.push(event(k));
+                    if !self.held.iter().any(|(c, h)| c == code && *h == k) {
+                        self.held.push((code.to_string(), k));
+                    }
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// A pointer button is down as the input handler has it: the last pointer event queued
     /// since the previous step (newer than the engine's), else the engine's handler pointer
     /// ([`u6_core::Io::handler_pointer`]). False before a start.
     fn pointer_held(&self) -> bool {
         let queued = self.pending.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { buttons, .. } => Some(buttons),
-            InputEvent::Key(_) | InputEvent::Text(_) => None,
+            InputEvent::Key(_)
+            | InputEvent::Repeat(_)
+            | InputEvent::Release(_)
+            | InputEvent::Text(_) => None,
         });
         let buttons = queued.or_else(|| {
             self.engine
@@ -1772,6 +1830,59 @@ mod tests {
         game.step(16);
         game.present();
         assert!(!game.started());
+    }
+
+    /// Spec 19 O1b: a release goes by the physical key. Ctrl-S held into its repeats, Ctrl let
+    /// go first (S's next repeat is a plain `s`), then S: both of S's keys are released, and in
+    /// `game` with its key waits draining the queue is left with the presses only. A key whose
+    /// release the page cannot see is let go by `release_keys`.
+    #[test]
+    fn a_release_takes_back_the_repeats_of_its_physical_key_whatever_the_modifiers() {
+        let (ctrl_s, s) = (Key::Char('\u{13}'), Key::Char('s'));
+        let mut state = u6_core::State::empty();
+        state.main.program = u6_core::main_loop::Program::Game;
+        state.ui.input.drain = true;
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(
+            state,
+            Files::default(),
+            |_, io| async move {
+                io.sleep(u32::MAX).await;
+            },
+        ));
+        assert!(game.key_down("KeyS", "s", true));
+        assert!(game.key_repeat("KeyS", "s", true));
+        assert!(game.key_repeat("KeyS", "s", true));
+        assert!(game.key_repeat("KeyS", "s", false));
+        assert!(game.key_down("ArrowUp", "ArrowUp", false));
+        assert!(game.key_up("KeyS"));
+        assert_eq!(
+            game.pending[5..],
+            [InputEvent::Release(ctrl_s), InputEvent::Release(s)],
+            "one release per key S gave"
+        );
+        assert!(!game.key_up("KeyS"), "released once");
+        game.step(20);
+        let engine = game.engine.as_ref().quiet();
+        assert_eq!(
+            engine.io().pending_events(),
+            2,
+            "the presses of Ctrl-S and the arrow are left"
+        );
+        assert!(game.key_repeat("ArrowUp", "ArrowUp", false));
+        game.release_keys();
+        assert_eq!(
+            game.pending,
+            [InputEvent::Repeat(Key::Up), InputEvent::Release(Key::Up)]
+        );
+        assert!(game.held.is_empty());
+        game.step(20);
+        let engine = game.engine.as_ref().quiet();
+        assert_eq!(
+            engine.io().pending_events(),
+            2,
+            "the arrow's repeat taken back"
+        );
     }
 
     /// Spec 08 Design 4 (slice K5a): committed text reaches the engine one character per event,

@@ -15,6 +15,7 @@ use crate::{Engine, Files, InputEvent, Io, Key, State};
 
 mod actor_windows;
 mod escaped_tests;
+mod held_key;
 mod input_tests;
 mod panel_tests;
 mod pointer_real;
@@ -136,6 +137,38 @@ where
     let events: Vec<InputEvent> = keys.iter().map(|&k| InputEvent::Key(k)).collect();
     e.tick(&events, 16);
     for _ in 1..ticks {
+        if e.finished() {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    e
+}
+
+/// As [`run`], with `keys` queued one per take: a key, then idle ticks until the game took it
+/// (the queue empty) or finished, at most `ticks`, and a key still queued then fails the test;
+/// then idle ticks until it finishes, at most `ticks`. A key wait drains what waits at its take
+/// (0x134e7c with A4-0x7a46 set keeps the last code), so keys queued together would be one.
+pub(super) fn run_each<G, F>(s: State, keys: &[Key], ticks: usize, game: G) -> Engine
+where
+    G: FnOnce(Rc<RefCell<State>>, Rc<Io>) -> F,
+    F: Future<Output = ()> + 'static,
+{
+    let mut e = Engine::with_game(s, Files::default(), game);
+    for &k in keys {
+        e.tick(&[InputEvent::Key(k)], 16);
+        for _ in 1..ticks {
+            if e.finished() || e.io().pending_events() == 0 {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(
+            e.finished() || e.io().pending_events() == 0,
+            "{k:?} not taken in {ticks} ticks"
+        );
+    }
+    for _ in 0..ticks {
         if e.finished() {
             break;
         }

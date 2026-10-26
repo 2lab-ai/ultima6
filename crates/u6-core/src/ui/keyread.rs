@@ -36,9 +36,17 @@ enum Text {
 ///
 /// The port reads the engine queue: a key at its front is consumed and mapped through the raw
 /// map 0x151d00; anything else gives 0 (a pointer event in front is the event wait's to take,
-/// [`crate::engine::Io::take_pointer`]). The drain is not applied: the engine contract (spec
-/// 03 §1) consumes input in order, and the platform delivers presses only (no key-up codes
-/// that the drain would otherwise skip past).
+/// [`crate::engine::Io::take_pointer`]). The drain is the original's (0x134e84..0x134e98 takes
+/// until the ring is empty, the last code kept): the idle poll hands the flag over
+/// (0x105d06..0x105d0e loads A4-0x7a46 into D0 before the take), whose word is 1 in the image
+/// (0x153caa) and clear only while the line editor reads (0x107cd6, set back at 0x107d5a). So
+/// with the flag set the take is the newest key press queued, every other press dropped
+/// ([`crate::engine::Io::take_newest_key`]): a held key, whose auto-repeat keeps adding
+/// presses, gives one command a poll. The original's ring also holds each release, as a 0
+/// (0x151c32), so there a key let go before the poll leaves a 0 last and its press is lost;
+/// here (spec 19 O1b) a release takes back only the key's queued repeats
+/// ([`crate::engine::InputEvent::Release`]): the held key stops at its release, and a tap
+/// during a turn still runs once. Without the flag (the line editor) keys are taken in order.
 ///
 /// Port (spec 08 Design 4, slice K5a): a character of text at the front is taken as `text`
 /// says: printable ASCII as the press of its key (through the map, as typed), a Hangul syllable
@@ -50,6 +58,12 @@ async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
         if text == Text::Dropped {
             if !io.key_ready() {
                 return Polled::None;
+            }
+            if state.borrow().ui.input.drain {
+                match io.take_newest_key() {
+                    Some(key) => break key,
+                    None => return Polled::None,
+                }
             }
             break io.next_key().await;
         }
