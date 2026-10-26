@@ -32,6 +32,9 @@ Decisions taken here (reversible; the owner vetoes on review):
 
   Debug-only paths (the debug teleport, 0x104140) are out of scope and named as such. The ending (0x133d1e /
   0x13513a) is in scope: it is the last object handler, the vortex cube's.
+- **Item 1c's upload authority** is the owner's own words above, "빼먹은 번역있으면 모두 확인하고 추가": the lines
+  found missing are sent to the model for translation, as the item 3 run of `hd-layout-font-register/ssot.md` was.
+  Nothing it makes enters the repository.
 - **"배포" is production** (`https://ultima6.2lab.ai`), once per item as soon as its receipt is green, as in
   `hd-layout-font-register/ssot.md`. A pack build goes on top of the live pack (ko-1026a at the time of writing),
   after a message to the session that holds `hd-layout-font-register` row 25.
@@ -44,7 +47,7 @@ Decisions taken here (reversible; the owner vetoes on review):
   any reason (sight line or darkness), shows its last seen ground and still objects in dark greyscale. Actors are
   not shown there.
 - **Item 4's deliverable is the spec.** "리서치하고 … 자세히 기술해줘" asks for research and a written
-  description, so `19-turn-model.md` ends with options and a recommendation. Item 5 is the part that changes the
-  game's feel now.
+  description, so `19-turn-model.md` ends with options and a recommendation. The owner's words read as a complaint, so the
+  cheapest step of that recommendation is built in round 2 beside item 5, and the deploy report names it.
 - **Item 5 is presentation only.** The engine stays tile-based and on the original's timing. A slide between two
   cells lasts a share of the step's own interval, scales with the speed setting and collapses at Max.

@@ -13,7 +13,7 @@ Status: planned (2026-10-27). Item 1 of `objects-menu-fog-motion/ssot.md`; findi
 
 - `port-map.md` reports 3 stubbed game functions. `tools/rea/port_map.py` ranks ported above stubbed (`:40`) and records a `todo_stub!` only under its own address (`:112`). A stub whose address is ported elsewhere therefore disappears from the map. The game code holds such stale seams:
   - `actors/walk.rs:531`: the portcullis (0x1301e2, ported as `objects/effects.rs::toggle_passthrough`);
-  - `actors/party.rs:441`: a carried object of a type (0x10b18c, ported as `objects/iter.rs::find_child`), so swamp boots never protect;
+  - `actors/party.rs:441`: a carried object of a type (0x10b18c, ported as `objects/iter.rs::find_child`), which by the stub's own comment means swamp boots never protect (the code's claim; O1 traces the callers);
   - `actors/turn.rs:139`: the end of solo mode (0x104094, ported as `main_loop/main_hunk.rs::end_solo`);
   - `combat/seams.rs:95`: a staff or wand cast (0x11a586, ported as `magic/dispatch.rs::dispatch`, but async).
 - Stubs whose routines are not ported:
