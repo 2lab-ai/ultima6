@@ -182,6 +182,24 @@ pub async fn honey(ux: Ux<'_>) {
 /// at A4-0x7dbd), 5 protects (status 0x01), 6 makes invisible (object status 0x02), 7 x-ray
 /// (0x119200). Only party members take effect; the potion goes and the roster / stats panel
 /// is marked for a redraw.
+///
+/// The party test, 0x12d5a2, is `btst #7` of A4+0x3d0c + the whole selected slot. The
+/// cross-hair can select an object (0x105f7c → 0x1225c0, no actor on the cell), and a slot of
+/// 0x100 or above then tests a byte of the tables after the status: talk flags A4+0x3e0c for
+/// 0x100..0x1ff, strength for 0x200..0x2ff, movement points for 0x600..0x6ff, experience bytes
+/// for 0x700..0x8ff, hit points 0x900..0x9ff. Bit 7 of the talk flags, movement points,
+/// experience and hit points is live in play (talk flags set by the conversation ops 0xa4 /
+/// 0xa5, negative movement points, experience low bytes, hit points from 128). With it set the
+/// original runs the frame's arm on that slot and uses the potion up: frames 0 and 1 clear, 3,
+/// 4 and 5 set a status bit in the aliased byte, frame 0 also sets the object's type from past
+/// the base-type table, frame 2 heals past the actor tables, frame 6 makes the object invisible
+/// (object status 0x02), frame 7 is the X-ray.
+///
+/// Port-only: past the 256 status bytes the party test reads 0, so an object slot gets the
+/// no-effect line and the potion stays. The port already bounds this read in the move check
+/// 0x11b1c0 (`crate::actors::walk`), [`crate::actors::leaves::can_see`] and
+/// [`crate::magic::heal`], and the original bounds the same status read itself in 0x1225c0
+/// (`< 0x100` before its `& 0x10`).
 pub async fn potion(ux: Ux<'_>, obj: Slot) {
     ux.say(FMT_STR, MSG_ON_WHOM).await;
     {
@@ -205,8 +223,8 @@ pub async fn potion(ux: Ux<'_>, obj: Slot) {
     }
     ux.name(who).await;
     ux.put(b'\n').await;
-    let a = (who as usize) & 0xff;
-    if ux.s().actors.attrs.status[a] & 0x80 == 0 {
+    let a = who as usize;
+    if ux.s().actors.attrs.status.get(a).copied().unwrap_or(0) & 0x80 == 0 {
         ux.say(FMT_LINE, MSG_NO_EFFECT).await;
         return;
     }
