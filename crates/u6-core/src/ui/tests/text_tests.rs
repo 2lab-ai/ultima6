@@ -378,3 +378,118 @@ fn the_key_waits_list_their_symbols_over_the_paper() {
         "the mark's glyph"
     );
 }
+
+/// The paper bitmap of `paper(other, c)` as the compositor's image of the paper (spec 07 HD0:
+/// [`u6_render::BITMAP_PAPER`]), drawn through the identity table.
+struct PaperImage(Vec<u8>);
+
+impl u6_render::hd::Images for PaperImage {
+    fn image(&mut self, kind: u6_render::Kind, id: u16) -> Option<u6_render::hd::Image<'_>> {
+        (kind == u6_render::Kind::Bitmap && id == u6_render::BITMAP_PAPER).then(|| {
+            u6_render::hd::Image {
+                ver: 0,
+                width: 320,
+                height: 200,
+                pixels: &self.0,
+                transparent: None,
+            }
+        })
+    }
+}
+
+/// Spec 11 Design 2 (rev 3), the old cell of a symbol over a paper of more than one colour (the
+/// key wait's symbol after two letters, the HD font mode on, the paper's HD image at 2×): one ink
+/// pixel of the symbol where the paper's own colour is the ink's (named the paper, unflagged) and
+/// one where it is another (named a symbol) are both in the symbol's rows; and every pixel of the
+/// cell is composed as the same frame with no symbol drawn there, the paper alone.
+///
+///
+/// The ink pixel of the paper's colour names the paper unflagged (as before rev 3, so the HD
+/// font off is unchanged); in the listed cell the paper's HD block shows only where the paper's
+/// colour is the cell's paper colour, else the cell's flat paper (K12 review round 2: before it
+/// the paper's own block, the ink's colour, showed there).
+#[test]
+fn a_symbols_old_cell_over_a_paper_of_two_colours_is_the_paper_alone() {
+    use u6_render::hd::{Compositor, Scale, symbol_glyph};
+    let font = font();
+    let w = *state().ui.text.win();
+    let (x0, y0) = (24 * 8, 14 * 8);
+    // Glyph 5's ink is at columns 5 and 7: on row 3 the paper is the ink's colour under column 5
+    // and another under column 7, and under a clear pixel another again.
+    let same = (x0 + 5, y0 + 3);
+    let other = (x0 + 7, y0 + 3);
+    let clear = (x0 + 2, y0 + 1);
+    let mut pixels = vec![PAPER; 320 * 200];
+    pixels[same.1 * 320 + same.0] = INK;
+    pixels[other.1 * 320 + other.0] = ALERT;
+    pixels[clear.1 * 320 + clear.0] = ALERT;
+    let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+    let bmp = u6_formats::bitmap::Bitmap {
+        width: 320,
+        height: 200,
+        pixels: pixels.clone(),
+    };
+    let kept = text::Paper::drawn(&identity, &bmp);
+    let frame = |symbol: bool| {
+        let mut fb = coloured_plane();
+        crate::gfx::blit::blit_bmp(&identity, &mut fb, &bmp, 0, 0, u6_render::BITMAP_PAPER);
+        text::fill_rect(&mut fb, 0, 0, 319, 199, PAPER, Some(&kept));
+        text::draw_char(&mut fb, Some(&font), None, &w, u16::from(b'a'), 22, 14);
+        text::draw_char(&mut fb, Some(&font), None, &w, u16::from(b'b'), 23, 14);
+        if symbol {
+            text::draw_symbol(&mut fb, (Some(&font), None), &w, 5, (24, 14), Some(&kept));
+        }
+        fb
+    };
+    let (with, without) = (frame(true), frame(false));
+    let src = |(x, y): (usize, usize)| with.src_at(x, y).unwrap();
+    assert_eq!(
+        src(same),
+        text::Paper::src(same.0, same.1),
+        "precondition: the ink pixel of the paper's colour names the paper"
+    );
+    assert_eq!(
+        src(other).kind,
+        u6_render::Kind::Glyph,
+        "precondition: the other ink pixel names the symbol"
+    );
+    let compose = |fb: &Framebuffer| {
+        let mut c = Compositor::new();
+        c.set_font_mode(true);
+        c.compose(fb, &mut PaperImage(pixels.clone()), Scale::X2);
+        c
+    };
+    let (a, b) = (compose(&with), compose(&without));
+    let symbols: Vec<_> = a
+        .glyphs()
+        .iter()
+        .filter(|g| symbol_glyph(g.code).is_some())
+        .collect();
+    assert_eq!(symbols.len(), 1, "the symbol listed");
+    let rows = a.symbol_rows()[0];
+    for (what, (x, y)) in [
+        ("the ink pixel of the paper's colour", same),
+        ("the other ink pixel", other),
+    ] {
+        assert!(
+            rows[y - y0] & (0x80 >> (x - x0)) != 0,
+            "(a) {what} in the symbol's rows"
+        );
+    }
+    let block = |c: &Compositor, (x, y): (usize, usize)| -> Vec<u32> {
+        let ow = u6_render::WIDTH * 2;
+        (0..4)
+            .map(|k| c.rgba()[(y * 2 + k / 2) * ow + x * 2 + k % 2])
+            .collect()
+    };
+    let differ: Vec<(usize, usize)> = (0..64)
+        .map(|k| (x0 + k % 8, y0 + k / 8))
+        .filter(|&p| block(&a, p) != block(&b, p))
+        .collect();
+    assert_eq!(
+        differ,
+        [],
+        "(b) every pixel of the cell composed as the paper alone (left: those not; the ink pixel \
+         of the paper's colour is {same:?}, the other {other:?})"
+    );
+}

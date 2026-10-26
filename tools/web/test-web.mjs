@@ -7780,20 +7780,25 @@ const fontIs = (page, font) => page.waitForFunction((f) => document.body.dataset
 // cells before it; when a run of the same cells stands before it, after its last cell or after
 // the spaces that follow it, it is that run's `caret` ({ x, code: its glyph, ink, spaces: the
 // spaces between, typed or not }), else it is one of `runs.symbols` ({ x, y, code, ink }), drawn
-// at its own cell. Also every `fillText` on the game's canvas is kept in `window.__fills` while
-// that is an array, and every `fillRect` on it (a whole repaint's background: `paint` with no
-// dirty rect) is counted in `window.__wholePaints`.
+// at its own cell. With `rows` (Game.hd_symbol_rows, read with `list`) each symbol also has its
+// 8 rows (`rows`, bit 7 leftmost), else null. Also every `fillText` on the game's canvas is kept in
+// `window.__fills` while that is an array, and every `fillRect` on it (a whole repaint's
+// background: `paint` with no dirty rect) is counted in `window.__wholePaints`.
 function fontRunsHook() {
-  window.__fontRunsOf = (list, [fx, fy, fw, fh]) => {
+  window.__fontRunsOf = (list, [fx, fy, fw, fh], rows = null) => {
     const runs = [];
     runs.symbols = [];
     let chain = null;
+    let symbols = 0; // the symbols of the whole list so far: their rows' place in `rows`
     const close = () => {
       if (chain?.run) runs.push(chain.run);
       if (chain) chain.run = null;
     };
     for (let i = 0; i < list.length; i += 5) {
       const [x, y, code, ink, paper] = [list[i], list[i + 1], list[i + 2], list[i + 3], list[i + 4]];
+      const symbol = code >= 0x10000 && code !== 0x20020;
+      const own = symbol && rows && rows.length >= 8 * symbols + 8 ? rows.slice(8 * symbols, 8 * symbols + 8) : null;
+      if (symbol) symbols += 1;
       if (x + 8 <= fx || y + 8 <= fy || x >= fx + fw || y >= fy + fh) continue;
       if (!chain || chain.y !== y || chain.next !== x || chain.paper !== paper) {
         close();
@@ -7806,10 +7811,10 @@ function fontRunsHook() {
         if (chain.spaces === 2) close();
         continue;
       }
-      if (code >= 0x10000) {
+      if (symbol) {
         const glyph = code & 0xffff;
-        if (chain.last) chain.last.caret = { x, code: glyph, ink, spaces: chain.gap };
-        else runs.symbols.push({ x, y, code: glyph, ink });
+        if (chain.last) chain.last.caret = { x, code: glyph, ink, spaces: chain.gap, rows: own };
+        else runs.symbols.push({ x, y, code: glyph, ink, rows: own });
         close();
         chain = null;
         continue;
@@ -7843,10 +7848,11 @@ function fontRunsHook() {
   // The test's own measure of where a run of `__fontRunsOf` (in the classic rect `from` that the
   // canvas rect `to` shows) is drawn (Design 3) and its caret (Design 2 rev 3): its span, its text,
   // the narrowing `k`, the pen; its ink's left and right ends and the pen's end (`inkStart`,
-  // `inkEnd`, `penEnd`), a space's advance as drawn (`space`); with a caret, the caret's box
-  // (`caret`): its cell's 8 x 8 game pixels from the pen's end and the advances of the spaces
-  // between, each edge on the nearest whole canvas pixel. And `__symbolBox`: a symbol's own cell
-  // there, its edges likewise.
+  // `inkEnd`, `penEnd`), a space's advance as drawn (`space`); with a caret, where its cell's left
+  // edge belongs (`caretLeft`: the pen's end after the run's text and the spaces between, their
+  // advances measured here) and the caret's box (`caret`): its cell's 8 x 8 game pixels from there,
+  // each edge on the nearest whole canvas pixel. And `__symbolBox`: a symbol's own cell there,
+  // its edges likewise.
   window.__runGeometry = (run, from, to) => {
     const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
     const ch = 8 * sy;
@@ -7869,14 +7875,46 @@ function fontRunsHook() {
       inkEnd: pen + m.actualBoundingBoxRight * k,
       penEnd: pen + m.width * k,
       space: mc.measureText(' ').width * k,
+      caretLeft: null,
       caret: null,
     };
     if (run.caret) {
       const left = pen + mc.measureText(text + ' '.repeat(run.caret.spaces)).width * k;
       const [l, t] = [Math.round(left), Math.round(span[1])];
+      out.caretLeft = left;
       out.caret = [l, t, Math.round(left + 8 * sx) - l, Math.round(span[1] + ch) - t];
     }
     return out;
+  };
+  // Where the page drew a symbol (`mark`: its rows and its ink) on the canvas pixels `d` (RGBA, of
+  // width `cw`), read from the pixels alone: the first cell's left edge from `x0` to `x1` (canvas
+  // px) at which, on the cell rows from `top`, the centre of each of its set pixels' blocks
+  // (sx x sy canvas px each) is its ink (within 8 a channel); then its ink's observed left edge,
+  // the first column of its leftmost set pixel's block that is its ink, walking left from that
+  // block's centre (at most one block). `{ edge, lead }`, `lead` the canvas px of the glyph's own
+  // blank columns left of its ink; null when no place shows it.
+  window.__symbolEdge = (d, cw, mark, [x0, x1], top, sx, sy) => {
+    const rows = mark?.rows;
+    if (!rows) return null;
+    const cols = rows.reduce((m, r) => m | r, 0);
+    if (cols === 0) return null;
+    const u0 = Math.clz32(cols) - 24;
+    const v0 = rows.findIndex((r) => r & (0x80 >> u0));
+    const [r, g, b] = [(mark.ink >> 16) & 255, (mark.ink >> 8) & 255, mark.ink & 255];
+    const ink = (x, y) => {
+      const j = (y * cw + x) * 4;
+      return Math.max(Math.abs(d[j] - r), Math.abs(d[j + 1] - g), Math.abs(d[j + 2] - b)) <= 8;
+    };
+    const set = [];
+    for (let v = 0; v < 8; v += 1) for (let u = 0; u < 8; u += 1) if (rows[v] & (0x80 >> u)) set.push([u, v]);
+    for (let left = Math.floor(x0); left <= Math.ceil(x1); left += 1) {
+      if (!set.every(([u, v]) => ink(Math.floor(left + (u + 0.5) * sx), Math.floor(top + (v + 0.5) * sy)))) continue;
+      const y = Math.floor(top + (v0 + 0.5) * sy);
+      let x = Math.floor(left + (u0 + 0.5) * sx);
+      for (let n = 0; n < Math.ceil(sx) && ink(x - 1, y); n += 1) x -= 1;
+      return { edge: x, lead: u0 * sx };
+    }
+    return null;
   };
   window.__symbolBox = (cell, from, to) => {
     const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
@@ -7919,8 +7957,9 @@ function fontRunsHook() {
 // differs from the canvas `fontPixelShot` kept (the pixel font's). A listed symbol's box (Design 2
 // rev 3: a run's caret at its pen's end and the spaces' advances, `__runGeometry`; a symbol after
 // no run at its own cell, `__symbolBox`) is left out of the runs' ink and of `off`: `carets` and
-// `symbols` count them, `caretsInked` and `symbolsInked` those whose box shows a pixel of their
-// ink. The canvas, the spans and the symbols' boxes are kept in the page (`window.__fontSeen`)
+// `symbols` count them, `caretsPlaced` and `symbolsPlaced` those whose ink's observed left edge on
+// the canvas (`__symbolEdge`) is where it belongs, its glyph's blank columns on, within a canvas
+// pixel. The canvas, the spans and the symbols' boxes are kept in the page (`window.__fontSeen`)
 // for `fontAgain`. The pointer's place is left out (`pointerAreaHook`). Counts only.
 const FONT_TOL = 2;
 const fontRuns = async (page) => (await pointerAreaHook(page), page.evaluate((tol) => {
@@ -7943,6 +7982,7 @@ const fontRuns = async (page) => (await pointerAreaHook(page), page.evaluate((to
   const f = ctx.getImageData(0, 0, c.width, c.height).data;
   const shot = window.__pixelShot;
   const list = g.hd_glyphs();
+  const rows = g.hd_symbol_rows?.() ?? null;
   const inked = (j) => d[j] !== f[j] || d[j + 1] !== f[j + 1] || d[j + 2] !== f[j + 2] || d[j + 3] !== f[j + 3];
   const near = (j, v) => Math.max(Math.abs(d[j] - ((v >> 16) & 255)), Math.abs(d[j + 1] - ((v >> 8) & 255)), Math.abs(d[j + 2] - (v & 255))) <= 48;
   const out = {};
@@ -7958,27 +7998,34 @@ const fontRuns = async (page) => (await pointerAreaHook(page), page.evaluate((to
     const r = {
       off: 0, offCompared: 0, runs: 0, cells: 0, hangul: 0, ascii: 0, inked: 0, fits: 0, whole: 0,
       latin: 0, syllabic: 0, tall: 0, upright: 0, after: 0, afterFits: 0, twoInk: 0, bothInks: 0, placed: 0, unlike: 0,
-      carets: 0, caretsInked: 0, symbols: 0, symbolsInked: 0,
+      carets: 0, caretsPlaced: 0, symbols: 0, symbolsPlaced: 0,
     };
     const mask = new Uint8Array(c.width * c.height);
     // The symbols' boxes (a caret after its run, a symbol alone at its own cell): kept out of the
-    // runs' ink and of `off`, each to show its ink there (Design 2 rev 3).
+    // runs' ink and of `off`; each placed where its ink's observed left edge (`__symbolEdge`, read
+    // from the canvas from the run's first cell to the symbol's own cell's right edge) is where it
+    // belongs, the glyph's own blank columns on, within a canvas pixel (Design 2 rev 3).
     const held = new Uint8Array(c.width * c.height);
-    const runs = window.__fontRunsOf(list, from);
+    const runs = window.__fontRunsOf(list, from, rows);
     const boxes = [
-      ...runs.filter((run) => run.caret).map((run) => [window.__runGeometry(run, from, to).caret, run.caret.ink, 'carets']),
-      ...runs.symbols.map((s) => [window.__symbolBox(s, from, to), s.ink, 'symbols']),
+      ...runs.filter((run) => run.caret).map((run) => {
+        const geo = window.__runGeometry(run, from, to);
+        const reach = [geo.span[0], to[0] + (run.caret.x + 8 - from[0]) * sx];
+        return [geo.caret, run.caret, geo.caretLeft, geo.span[1], reach, 'carets'];
+      }),
+      ...runs.symbols.map((m) => {
+        const box = window.__symbolBox(m, from, to);
+        const [left, top] = [to[0] + (m.x - from[0]) * sx, to[1] + (m.y - from[1]) * sy];
+        return [box, m, left, top, [left - 8 * sx, left + 8 * sx], 'symbols'];
+      }),
     ];
-    for (const [[bx, by, bw, bh], v, kind] of boxes) {
-      let shows = false;
+    for (const [[bx, by, bw, bh], m, left, top, reach, kind] of boxes) {
       for (let y = Math.max(by, to[1]); y < Math.min(by + bh, to[1] + to[3]); y += 1) {
-        for (let x = Math.max(bx, to[0]); x < Math.min(bx + bw, to[0] + to[2]); x += 1) {
-          held[y * c.width + x] = 1;
-          if (!window.__inPointer(pointer, x, y) && near((y * c.width + x) * 4, v)) shows = true;
-        }
+        for (let x = Math.max(bx, to[0]); x < Math.min(bx + bw, to[0] + to[2]); x += 1) held[y * c.width + x] = 1;
       }
+      const seen = window.__symbolEdge(d, c.width, m, reach, top, sx, sy);
       r[kind] += 1;
-      r[`${kind}Inked`] += shows ? 1 : 0;
+      r[`${kind}Placed`] += seen && Math.abs(seen.edge - (left + seen.lead)) <= 1 ? 1 : 0;
     }
     for (const run of runs) {
       const [x0, x1] = [run.cells[0].x, run.cells.at(-1).x + 8];
@@ -8244,7 +8291,7 @@ test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 
   // again and their runs drawn again: each span as it was outside the caret's box, and nothing of
   // the scroll outside the spans and the box changed.
   const atPrompt = await fontRuns(page);
-  assert.ok(atPrompt.messages.carets === 1 && atPrompt.messages.caretsInked === 1, 'the cursor drawn as the caret of the prompt\'s run, in its ink');
+  assert.ok(atPrompt.messages.carets === 1 && atPrompt.messages.caretsPlaced === 1, 'the cursor drawn as the caret of the prompt\'s run, in its ink, where the prompt\'s text ends');
   let turned = 0;
   for (let k = 0; k < 12; k += 1) {
     await h.runFrames(page, 10);
@@ -8889,16 +8936,19 @@ const replyMark = (page, where) => page.evaluate((w) => {
 // that holds the prompt's last letter: whether the cursor's symbol is listed as its caret
 // (`caret`) and the spaces between (`spaces`); whether the made-up word's letters follow that
 // letter after two spaces in the same run (`joined`), those two listed as typed (`typed`); a
-// space's advance as drawn (`space`); `gap`, the canvas pixels from the ink's end of the text up
-// to the prompt's last letter (the test's measure, `__runGeometry`) to the first pixel right of
-// it on the row that is ink: a pixel the page drew (the canvas not the x4 frame's composition
-// there) or near the run's ink (the cursor in the x4 frame before rev 3); `wordGap`, the pixels
-// from the pen's end after that letter to that first pixel, less the first typed letter's left
-// side bearing as drawn; `lead`, the canvas pixels of the listed symbol's blank columns at its
-// left (its glyph's own; none known before rev 3); whether the cursor's own cell is the paper
-// alone (`ownPaper`: no pixel
+// space's advance as drawn, measured here (`space`). What the canvas shows, read from its pixels:
+// `edge`, the caret's ink's observed left edge (`__symbolEdge`, searched from the run's first cell
+// to the cursor's own cell's right edge; null when the cursor is not listed or not found), and
+// `want`, where it belongs (the pen's end after the run's text and the spaces between, the
+// glyph's own blank columns on: `lead`); `gap`, from the prompt's ink end (the test's measure,
+// held to the canvas by `fontRuns`' `fits`) to that edge (before rev 3, to the first pixel right
+// of the prompt that is ink: a pixel the page drew, or near the run's ink in the x4 frame);
+// `wordInk`, the made-up word's first observed ink (the first column right of the prompt's ink
+// end and FONT_TOL with a pixel the page drew or near the ink), and `wordWant`, where its first
+// letter's ink belongs (the pen's end after the prompt and the two spaces, less that letter's
+// own left side bearing), and `promptEnd`, the pen's end after the prompt; whether the cursor's own cell is the paper alone (`ownPaper`: no pixel
 // near its ink in the x4 frame there, and the canvas there outside the caret's box the
-// composition's); with a caret, whether its box shows its ink (`caretInk`) and its place (`box`).
+// composition's).
 const replySeen = async (page, where, row = null) => (await pointerAreaHook(page), page.evaluate(([w, wanted, word, tol]) => {
   const L = globalThis.__u6Layout;
   const g = globalThis.__shownGame;
@@ -8911,15 +8961,14 @@ const replySeen = async (page, where, row = null) => (await pointerAreaHook(page
   const y = wanted ?? window.__reply.row;
   const last = window.__reply.last;
   const list = g.hd_glyphs();
-  const runs = window.__fontRunsOf(list, from);
+  const runs = window.__fontRunsOf(list, from, g.hd_symbol_rows?.() ?? null);
   const run = runs.find((r) => r.y === y && r.cells.some((k) => k.x === last && k.code !== 0x20));
   if (!run) return { found: false };
   const geo = window.__runGeometry(run, from, to);
   const at = run.cells.findIndex((k) => k.x === last);
   const mc = window.__measure;
-  const head = geo.text.slice(0, at + 1);
-  const inkEnd = geo.pen + mc.measureText(head).actualBoundingBoxRight * geo.k;
-  const penEnd = geo.pen + mc.measureText(head).width * geo.k;
+  const inkEnd = geo.pen + mc.measureText(geo.text.slice(0, at + 1)).actualBoundingBoxRight * geo.k;
+  const promptEnd = geo.pen + mc.measureText(geo.text.slice(0, at + 1)).width * geo.k;
   const ink = run.cells[at].ink;
   const near = (j, v) => Math.max(Math.abs(d[j] - ((v >> 16) & 255)), Math.abs(d[j + 1] - ((v >> 8) & 255)), Math.abs(d[j + 2] - (v & 255))) <= 48;
   const drawn = (j) => d[j] !== f[j] || d[j + 1] !== f[j + 1] || d[j + 2] !== f[j + 2];
@@ -8943,23 +8992,15 @@ const replySeen = async (page, where, row = null) => (await pointerAreaHook(page
   };
   const letter = run.cells.find((k) => k.x === last + 24);
   const joined = Boolean(letter) && letter.code === word.charCodeAt(0);
-  const lsb = -mc.measureText(word[0]).actualBoundingBoxLeft * geo.k;
-  // The cursor's own cell: the listed symbol's, else (before rev 3) the cell after the prompt;
-  // its glyph's blank columns at the left (`lead`, canvas px: none known before rev 3).
+  const wordWant = geo.pen + (mc.measureText(geo.text.slice(0, at + 3)).width - mc.measureText(word[0]).actualBoundingBoxLeft) * geo.k;
+  // The cursor's own cell: the listed symbol's on the row, else (before rev 3) the cell after the
+  // prompt.
   let own = null;
-  let lead = 0;
-  const rows = g.hd_symbol_rows?.() ?? new Uint8Array(0);
-  for (let i = 0, n = 0; i < list.length; i += 5) {
-    if (list[i + 2] < 0x10000 || list[i + 2] === 0x20020) continue;
-    if (list[i + 1] === y) {
-      own = { x: list[i], y };
-      const cols = rows.subarray(8 * n, 8 * n + 8).reduce((m, r) => m | r, 0);
-      lead = cols === 0 ? 0 : Math.clz32(cols) - 24;
-    }
-    n += 1;
+  for (let i = 0; i < list.length; i += 5) {
+    if (list[i + 1] === y && list[i + 2] >= 0x10000 && list[i + 2] !== 0x20020) own = { x: list[i], y };
   }
-  lead *= sx;
   const cell = window.__symbolBox(own ?? { x: last + 8, y }, from, to);
+  const seen = run.caret ? window.__symbolEdge(d, c.width, run.caret, [geo.span[0], cell[0] + cell[2]], geo.span[1], sx, sy) : null;
   const inBox = (b, x, yy) => b && x >= b[0] && x < b[0] + b[2] && yy >= b[1] && yy < b[1] + b[3];
   const box = geo.caret;
   const x4 = g.hd_frame_rgba();
@@ -8984,17 +9025,7 @@ const replySeen = async (page, where, row = null) => (await pointerAreaHook(page
       }
     }
   }
-  let caretInk = false;
-  if (box) {
-    for (let yy = box[1]; yy < box[1] + box[3] && !caretInk; yy += 1) {
-      for (let x = box[0]; x < box[0] + box[2]; x += 1) {
-        if (!window.__inPointer(pointer, x, yy) && near((yy * c.width + x) * 4, run.caret.ink)) {
-          caretInk = true;
-          break;
-        }
-      }
-    }
-  }
+  const lead = seen ? seen.lead : 0;
   return {
     found: true,
     caret: Boolean(run.caret),
@@ -9002,11 +9033,14 @@ const replySeen = async (page, where, row = null) => (await pointerAreaHook(page
     joined,
     typed: typedAt(last + 8) && typedAt(last + 16),
     space: geo.space,
-    gap: first - inkEnd,
+    edge: seen ? seen.edge : null,
+    want: run.caret ? geo.caretLeft + lead : null,
     lead,
-    wordGap: first - penEnd - lsb,
+    gap: (seen ? seen.edge : first) - inkEnd,
+    wordInk: first,
+    wordWant,
+    promptEnd,
     ownPaper,
-    caretInk,
     box,
   };
 }, [where, row, CARET_WORD, FONT_TOL]));
@@ -9119,15 +9153,19 @@ async function caretFlow(page, what, letterbox) {
   const mark = await replyMark(page, 'messages');
   assert.ok(mark.found, `${what}: precondition: the reply prompt listed in the message scroll`);
   await keepShot(page, 'messages', `${what}-prompt`);
+  // The caret's observed ink edge where it belongs (`replySeen`: the pen's end after the run's
+  // text and the spaces between, the glyph's own blank columns on): within a canvas pixel either
+  // way (the page puts each block's edge on the nearest whole pixel).
+  const placed = (r) => r.found && r.edge !== null && r.edge >= r.want - 1 && r.edge <= r.want + 1;
   const prompt = async (where, label) => {
     const r = await replySeen(page, where);
     check(r.found && r.caret, `${label}: the cursor listed as the prompt's caret`);
+    check(placed(r), `${label}: the caret's observed ink edge at the prompt's pen end (its glyph's blank columns on), within a pixel`);
     check(r.found && r.gap - r.lead <= ((r.spaces ?? 0) + 1) * r.space + FONT_TOL, `${label}: the caret's ink from within one space advance (and the spaces between) of the prompt's ink end, its glyph's blank columns aside`);
     check(r.found && r.ownPaper, `${label}: the cursor's own cell the paper alone`);
-    check(r.found && r.caretInk, `${label}: the caret's box shows its ink`);
     if (where !== 'whole') {
       const runs = (await fontRuns(page))[where];
-      check(runs.carets === 1 && runs.off === 0 && runs.fits === runs.runs, `${label}: the scroll's other pixels the composition's, every run where the font puts it`);
+      check(runs.carets === 1 && runs.caretsPlaced === 1 && runs.off === 0 && runs.fits === runs.runs, `${label}: the scroll's other pixels the composition's, every run where the font puts it`);
     }
   };
   await prompt('messages', '(i) the regions');
@@ -9141,24 +9179,32 @@ async function caretFlow(page, what, letterbox) {
     const r = await replySeen(page, where);
     check(r.found && r.joined, `${label}: the prompt and the word typed after two spaces one run`);
     check(r.found && r.typed, `${label}: the two spaces listed as typed`);
-    check(r.found && r.wordGap <= 2 * r.space + FONT_TOL, `${label}: the word's ink at most two space advances after the prompt's last letter`);
+    check(r.found && r.wordInk >= r.wordWant - FONT_TOL && r.wordInk <= r.wordWant + FONT_TOL, `${label}: the word's observed first ink where the pen's end after the prompt and two space advances puts it (within the font's fringe)`);
+    check(r.found && r.wordInk - r.promptEnd <= 2 * r.space + FONT_TOL, `${label}: the word's first ink at most two space advances after the prompt's pen end`);
+    return r;
   };
-  await typed('messages', '(ii) the regions');
+  const right = await typed('messages', '(ii) the regions');
+  check(placed(right), 'the caret after the word: its observed ink edge at the word\'s pen end, within a pixel');
   if (letterbox) await letterboxed(page, () => typed('whole', '(ii) the letterbox'));
-  // Two spaces typed after the word: the caret after them, two space advances on.
+  // Spaces typed after the word, then Backspace over one: the caret's observed edge where the pen's
+  // end and the spaces put it, moved on by one measured space advance per space (within a pixel:
+  // each edge is on the nearest whole pixel). The cursor turns between the reads: each edge is
+  // taken less its glyph's own blank columns (the cell's left edge as drawn).
   const caretAfter = async (spaces, label) => {
     const r = await replySeen(page, 'messages');
     const runs = (await fontRuns(page)).messages;
     check(r.found && r.caret && r.spaces === spaces, `${label}: the caret after ${spaces} typed space(s)`);
-    check(r.found && r.caretInk && runs.carets === 1 && runs.caretsInked === 1, `${label}: its ink in its box`);
-    check(runs.off === 0 && runs.fits === runs.runs, `${label}: the scroll's other pixels the composition's, every run where the font puts it`);
-    return r.box;
+    check(placed(r), `${label}: its observed ink edge where the pen's end and the spaces put it, within a pixel`);
+    check(runs.carets === 1 && runs.caretsPlaced === 1 && runs.off === 0 && runs.fits === runs.runs, `${label}: the scroll's other pixels the composition's, every run where the font puts it`);
+    return r;
   };
+  const moved = (a, b, n, label) => check(a.edge !== null && b.edge !== null && Math.abs((b.edge - b.lead) - (a.edge - a.lead) - n * a.space) <= 1, `${label}: the caret's observed edge moved by ${n} measured space advance(s), within a pixel`);
   await typeKeys(page, ['Space', 'Space']);
   const two = await caretAfter(2, 'trailing typed spaces');
+  moved(right, two, 2, 'trailing typed spaces');
   await typeKeys(page, ['Backspace']);
   const one = await caretAfter(1, 'Backspace over a typed space');
-  check(Boolean(two && one) && one[0] < two[0], 'Backspace over a typed space: the caret nearer the word');
+  moved(two, one, -1, 'Backspace over a typed space');
   // Letters to the window's end: the echo wraps to the next row's first cell (the scroll moves
   // the line up when it was the last row).
   const left = await page.evaluate(() => {
@@ -9178,10 +9224,10 @@ async function caretFlow(page, what, letterbox) {
   }, [left.first, row]);
   check(wrapped.alone === 1, 'the echo wrapped: the cursor at the next row\'s first cell, drawn alone there');
   const after = (await fontRuns(page)).messages;
-  check(after.symbols === 1 && after.symbolsInked === 1 && after.off === 0, 'the cursor alone at its own cell, in its ink; the scroll\'s other pixels the composition\'s');
+  check(after.symbols === 1 && after.symbolsPlaced === 1 && after.off === 0, 'the cursor alone at its own cell, its observed ink edge there; the scroll\'s other pixels the composition\'s');
   const line = wrapped.y === row ? row - 8 : row;
-  const moved = await replySeen(page, 'messages', line);
-  check(moved.found && moved.joined && moved.typed, 'after the wrap (and a scroll) the typed line still one run');
+  const up = await replySeen(page, 'messages', line);
+  check(up.found && up.joined && up.typed, 'after the wrap (and a scroll) the typed line still one run');
   // (iii) Return: the conversation answers and ends; the typed line, moved up, keeps its form.
   await typeKeys(page, ['Enter']);
   assert.ok(await framesUntil(page, () => document.getElementById('screen').dataset.prompt === '1', 200), `${what}: precondition: the conversation ended, the prompt back`);
@@ -9241,6 +9287,113 @@ test('Wide layout (spec 11 rev 3): at the reply prompt of the test\'s conversati
   assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
   assert.equal(errors.length, 0, 'no page error');
   console.log('  receipt: Wide and its letterbox: the cursor the prompt\'s caret within a space of its ink, its cell the paper; two typed spaces and a word one run, the word two spaces on; the caret after typed spaces and back after Backspace; the wrap\'s cursor alone at its cell; the typed line joined after the scroll: pass');
+}, { needs: h.haveHfes });
+
+// The test's own greeting with a key wait inside it (`*`: the game flushes the line and waits for a
+// key with the more prompt's mark, glyphs 1..4, right after the text).
+const ARROW_GREET = '"Hail, friend!*At last."';
+
+// The page with the test's conversation (koFixture with ARROW_GREET in place of the user's,
+// English) talked to up to the wait inside the greeting, on the virtual display, the pointer in
+// the map; whether the more prompt's mark is listed in the message scroll.
+async function atMoreMark(context, page, env) {
+  await context.addInitScript(fontRunsHook);
+  await context.addInitScript(composedHook);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  await fontIs(page, 'hd');
+  const { archive } = await koFixture(0x63, { greeting: ARROW_GREET, greetingKo: FONT_GREET_KO });
+  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await fontIs(page, 'hd');
+  await h.virtualDisplay(page, 60);
+  const map = await page.evaluate(() => {
+    const [x, y, w, hh] = globalThis.__u6Layout.regions.find((r) => r.name === 'map').from;
+    return [x + Math.floor(w / 2), y + Math.floor(hh / 2)];
+  });
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await typeKeys(page, ['t']);
+  await page.focus('#screen');
+  await page.keyboard.press('2');
+  return framesUntil(page, () => {
+    const L = globalThis.__u6Layout;
+    const { from } = L.regions.find((r) => r.name === 'messages');
+    const runs = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from);
+    return runs.some((r) => r.caret && r.caret.code >= 1 && r.caret.code <= 4) || runs.symbols.some((m) => m.code >= 1 && m.code <= 4);
+  }, 200);
+}
+
+// Page script: the more prompt's mark in the message scroll as the canvas shows it: listed as the
+// caret of the run before it (`caret`), its observed ink edge (`__symbolEdge`, searched from the
+// run's first cell to the mark's own cell's right edge) and where it belongs (`want`: the pen's end
+// after the run's text and the spaces between, the glyph's own blank columns on), and the run's
+// last letter's cell (`last`).
+const moreMarkSeen = (page) => page.evaluate(() => {
+  const L = globalThis.__u6Layout;
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  const { from, to } = L.regions.find((r) => r.name === 'messages');
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const runs = window.__fontRunsOf(g.hd_glyphs(), from, g.hd_symbol_rows?.() ?? null);
+  const run = runs.find((r) => r.caret && r.caret.code >= 1 && r.caret.code <= 4);
+  if (!run) return { caret: false };
+  const geo = window.__runGeometry(run, from, to);
+  const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
+  const own = window.__symbolBox({ x: run.caret.x, y: run.y }, from, to);
+  const seen = window.__symbolEdge(d, c.width, run.caret, [geo.span[0], own[0] + own[2]], geo.span[1], sx, sy);
+  return {
+    caret: true,
+    adjacent: run.caret.x === run.cells.at(-1).x + 8 * (run.caret.spaces + 1),
+    edge: seen ? seen.edge : null,
+    want: seen ? geo.caretLeft + seen.lead : null,
+    own: own[0],
+  };
+});
+
+// Spec 11 rev 3 on the more prompt's mark (`what`: the layout's label): at the wait inside the
+// test's greeting the mark is listed as the caret of the greeting's run, its observed ink edge at
+// the run's pen end (the glyph's blank columns on) within a canvas pixel, left of its own cell; the
+// scroll's other pixels the composition's; a key ends the wait.
+async function moreMarkFlow(page, what) {
+  const r = await moreMarkSeen(page);
+  const misses = [];
+  const check = (ok, label) => {
+    if (!ok) misses.push(`${what}: ${label}`);
+  };
+  check(r.caret && r.adjacent, 'the more prompt\'s mark listed as the caret of the run it follows');
+  check(r.caret && r.edge !== null && r.edge >= r.want - 1 && r.edge <= r.want + 1, 'its observed ink edge at the run\'s pen end (its glyph\'s blank columns on), within a pixel');
+  check(r.caret && r.edge !== null && r.edge < r.own, 'drawn left of its own cell');
+  const runs = (await fontRuns(page)).messages;
+  check(runs.carets === 1 && runs.caretsPlaced === 1 && runs.off === 0 && runs.fits === runs.runs, 'the scroll\'s other pixels the composition\'s, every run where the font puts it');
+  await typeKeys(page, ['Space']);
+  return misses;
+}
+
+test('HD font (spec 11 rev 3, the more prompt\'s mark, the HD layout): at a key wait inside the test\'s greeting (the user\'s disks) the more prompt\'s mark is drawn as the caret of the text it follows, its observed ink edge at the text\'s pen end within a canvas pixel; no page error', async (env) => {
+  const errors = [];
+  const { context, page } = await h.openPage(env, { layout: 'hd' });
+  page.on('pageerror', () => errors.push(1));
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const listed = await atMoreMark(context, page, env);
+  const misses = listed ? await moreMarkFlow(page, 'HD layout') : ['HD layout: the more prompt\'s mark listed in the message scroll'];
+  assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
+  assert.equal(errors.length, 0, 'no page error');
+  console.log('  receipt: the HD layout: the more prompt\'s mark the caret of its text, its ink edge at the pen end within a pixel: pass');
+}, { needs: h.haveHfes });
+
+test('Wide layout (spec 11 rev 3, the more prompt\'s mark): at a key wait inside the test\'s greeting in the message scroll\'s window (the user\'s disks) the more prompt\'s mark is drawn as the caret of the text it follows, its observed ink edge at the text\'s pen end within a canvas pixel; no page error', async (env) => {
+  const errors = [];
+  const { context, page } = await h.openWide(env, { width: 1920, height: 1080 });
+  page.on('pageerror', () => errors.push(1));
+  const listed = await atMoreMark(context, page, env);
+  const misses = listed ? await moreMarkFlow(page, 'Wide') : ['Wide: the more prompt\'s mark listed in the message scroll'];
+  assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
+  assert.equal(errors.length, 0, 'no page error');
+  console.log('  receipt: Wide: the more prompt\'s mark the caret of its text, its ink edge at the pen end within a pixel: pass');
 }, { needs: h.haveHfes });
 
 test('Original layout (spec 11 rev 3): with the HD font chosen and HD on, at the reply prompt of the test\'s conversation with two spaces and a made-up word typed, nothing is listed and the canvas is the HD frame exactly (the page draws nothing over it but the pointer), the same frame before and after the font chosen again (pixel, then HD); no page error', async (env) => {

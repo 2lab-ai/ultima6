@@ -1063,6 +1063,19 @@ impl Compositor {
                     if cur.token != NONE && src.ver == cur.ver && u < cur.width && v < cur.height {
                         shown = Some(cur);
                     }
+                    // Spec 11 Design 2 (rev 3): a listed cell's pixel naming the paper (a listed
+                    // symbol's: its clear pixels, and an ink pixel the paper's own colour there)
+                    // shows the paper's HD block only where the paper's colour there is the
+                    // cell's paper colour, as a glyph pixel's of a listed cell does; else it is
+                    // flat, so the ink's place shows the cell's paper, not the paper's own speck.
+                    if glyph.is_some()
+                        && src.kind == Kind::Bitmap
+                        && src.id == BITMAP_PAPER
+                        && shown
+                            .is_some_and(|r| res.hd.entry(r.slot).input[v * r.width + u] != flat)
+                    {
+                        shown = None;
+                    }
                 } else if src.kind == Kind::Glyph
                     && src.flags & FLAG_PAPER != 0
                     && (glyph.is_some() || src.flags & FLAG_INK == 0)
