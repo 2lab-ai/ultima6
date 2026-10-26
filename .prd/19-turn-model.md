@@ -130,7 +130,7 @@ Each changes input or presentation only. "Receipts" are the fidelity checks of s
 ### O2 — Show the step at once
 
 - **What changes.** After `player_step` (`walk.rs:76-88`), refresh and present the window before the step's waits, instead of at the first pick's refresh (`turn.rs:617-620`). The waits keep their sum, so the prompt comes at the same engine time (castle 620–640 ms); only the first picture moves from 540 ms to the key's own frame.
-- **Fidelity.** Pace and rules unchanged; the key-to-prompt receipts unchanged. One picture changes order: an NPC that moved in the same first pick appears one refresh later than the leader instead of with it.
+- **Fidelity.** As first written (a refresh in the real `State`) this is not pure: `update_view` draws from the game RNG when object type 0x188 first enters the view (`objects/draw.rs:265-269`), so the draw would move before the first pick. The pure form builds the early scene on a clone of `State` and hands it to the presenter only (spec 20 Design 4); then pace, rules, RNG and the key-to-prompt receipts are unchanged.
 - **Cost.** Small. It is also what item 5 needs: a slide can only use the interval if the step is shown when the interval starts.
 
 ### O3 — A turn-speed factor for the original's drawing waits only
@@ -183,6 +183,8 @@ What spec 20 (unit W1) must take from this:
 5. **The held cadence.** With O1 a held key steps once a turn, the original's cadence (the castle's 640/860 ms; the mouse's 660 ms sampler is the same pace there). Nuvie walks at most every 125 ms on foot; a faster held walk is a pace change, so it would belong to O3, not O1.
 
 ## Tensions
+
+- O2's purity (2026-10-27, dispatcher): T1 drafted O2 as a refresh in the real `State` and called it pure; W1 rejected that form, because of the RNG draw in the view build (`objects/draw.rs:265-269`). Settled by spec 20 Design 4: the early scene is built on a clone and never touches the live state. That clone's cost is measured before the form is kept.
 
 - `engine.rs:577-582` and `keyread.rs:34-41` say the drain was left out because the platform sends presses only, "no key-up codes that the drain would otherwise skip past", and that the port gives about twice the original's type-ahead for tapped keys. The image says the drain keeps the last code, a release's 0 included (`0x151c32`, `0x105d06`, `0x134e7c`, word `0x153caa`): the original has no type-ahead for a tap during a turn, and one step a turn for a held key. Not resolved here; O1 decides, and open question 1 tests it.
 - The castle step: README and spec 06 say 31 PAL frames in the port; the probe measures 31–32 for a step without a clock minute and 43 with one, median 32.0 over 21 moving steps (every second step carries the minute here). The start fight: README 301; the probe 326 median over 3 seeds against the receipt's 9 `[추정: seed set]`.
