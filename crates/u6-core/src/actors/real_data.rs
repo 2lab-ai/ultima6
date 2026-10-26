@@ -1593,3 +1593,134 @@ fn the_leader_with_a_readied_0x1c_is_not_poisoned_on_tile_2() {
     println!("poison bit after tile 2: readied {readied:#04x}, carried {carried:#04x}");
     assert_eq!((readied, carried), (0, 0x08));
 }
+
+/// Every object `member` carries at any depth (0x10c928 over the object table; a removed
+/// object's slot keeps its location and status, only its type word is 0).
+fn carried(s: &State, member: Slot) -> Vec<Slot> {
+    (0..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&c| s.objects.tf(c) != 0 && s.objects.contained_in(c, member))
+        .collect()
+}
+
+/// 0x11fd20 answered Y, in the town of the cell: the party goes to (0xe7, 0xba, 0) (D0 = 0xe7,
+/// D1 = 0xba into 0x1092fc, asm 0x11fd8c..0x11fd9a); then each member's type-0x3f objects are
+/// removed, its type-0x40 objects of quality 9 go into the first type 0xb1 at (0xeb, 0xb7, 0),
+/// and the first type 0x12c at (0xe7, 0xb8, 0) gets frame 9 (asm 0x11fdb0..0x11ff20). Taken
+/// objects are given to the first and the last member. A type 0x40 of another quality and
+/// everything else the members carry stay, each in its slot with its type and quality words.
+#[test]
+fn an_arrest_jails_at_the_cell_and_takes_types_3f_and_40_of_quality_9() {
+    let Some((mut s, files)) = start() else {
+        return;
+    };
+    crate::map::travel::teleport(&mut s, 0xe7, 0xc2, 0, 0);
+    let door = crate::objects::object_of_kind_at(&mut s, 0xe7, 0xb8, 0, 0x12c);
+    assert!(
+        door >= 0,
+        "a type 0x12c at (0xe7, 0xb8, 0) once the town is loaded"
+    );
+    println!(
+        "type 0x12c at (0xe7, 0xb8, 0): frame {} as shipped",
+        s.objects.frame(crate::objects::ObjectId(door as u16))
+    );
+    s.objects.type_frame[door as usize] &= 0x3ff;
+    s.actors.attrs.talk_flags[5] |= 0x80;
+    let members: Vec<Slot> = s.actors.party.active().map(|m| m.0 as Slot).collect();
+    // The arrest only sets the arresting actor's worktype: any actor outside the party.
+    let guard = (1..ACTOR_SLOTS as Slot)
+        .find(|&a| s.objects.kind(a) != 0 && !members.contains(&a))
+        .quiet() as u16;
+    let (m0, last) = (members[0], members[members.len() - 1]);
+    let add = |s: &mut State, owner: Slot, tf: u16, qq: u16| {
+        let c = crate::objects::create_in(s, tf, crate::objects::IN_INVENTORY, qq, owner);
+        assert!(c >= 0, "a free slot for the carried object");
+        s.objects.obj_status[c as usize] &= !crate::objects::TEMPORARY;
+        c
+    };
+    let taken = |s: &State, c: Slot| {
+        let k = s.objects.kind(c);
+        k == 0x3f || (k == 0x40 && s.objects.qq_of(c) >> 8 == 9)
+    };
+    let shipped: Vec<(usize, usize)> = members
+        .iter()
+        .map(|&m| {
+            let c = carried(&s, m);
+            (c.len(), c.iter().filter(|&&c| taken(&s, c)).count())
+        })
+        .collect();
+    println!(
+        "members {}: carried (all, of 0x3f / 0x40 q9) {shipped:?}",
+        members.len()
+    );
+    add(&mut s, m0, 0x3f, 1);
+    let q9 = add(&mut s, m0, 0x40, 9 << 8 | 1);
+    let q8 = add(&mut s, m0, 0x40, 8 << 8 | 1);
+    add(&mut s, last, 0x3f, 1);
+    let pinned: Vec<Vec<(Slot, u16, u16)>> = members
+        .iter()
+        .map(|&m| {
+            carried(&s, m)
+                .into_iter()
+                .filter(|&c| !taken(&s, c))
+                .map(|c| (c, s.objects.tf(c), s.objects.qq_of(c)))
+                .collect()
+        })
+        .collect();
+    let kept: Vec<usize> = pinned.iter().map(Vec::len).collect();
+
+    let mut engine = Engine::with_game(s, files, move |st, io| async move {
+        super::npc::arrest(&st, &io, guard).await;
+    });
+    for _ in 0..2000 {
+        if engine.finished() {
+            break;
+        }
+        engine.tick(&[crate::InputEvent::Key(crate::Key::Char('y'))], 16);
+    }
+    assert!(engine.finished(), "the arrest returned");
+    let mut s = engine.state().clone();
+    let c = s.map.centre;
+    let holder = crate::objects::object_of_kind_at(&mut s, 0xeb, 0xb7, 0, 0xb1);
+    let door = crate::objects::object_of_kind_at(&mut s, 0xe7, 0xb8, 0, 0x12c);
+    let got = (
+        (c.x, c.y, c.z),
+        members
+            .iter()
+            .map(|&m| carried(&s, m).len())
+            .collect::<Vec<_>>(),
+        members
+            .iter()
+            .map(|&m| carried(&s, m).iter().filter(|&&c| taken(&s, c)).count())
+            .collect::<Vec<_>>(),
+        members
+            .iter()
+            .zip(&pinned)
+            .map(|(&m, p)| {
+                p.iter()
+                    .filter(|&&(c, tf, qq)| {
+                        s.objects.contained_in(c, m)
+                            && s.objects.tf(c) == tf
+                            && s.objects.qq_of(c) == qq
+                    })
+                    .count()
+            })
+            .collect::<Vec<_>>(),
+        holder >= 0 && s.objects.parent(q9) == holder && s.objects.place(q9) == 0x08,
+        s.objects.contained_in(q8, m0),
+        (door >= 0).then(|| s.objects.frame(crate::objects::ObjectId(door as u16))),
+    );
+    println!(
+        "after: centre, carried per member, of 0x3f / 0x40 q9, of the pinned unchanged, the q9 \
+         0x40 in the 0xb1, the q8 0x40 kept, the 0x12c's frame {got:?}"
+    );
+    let want = (
+        (0xe7, 0xba, 0),
+        kept.clone(),
+        vec![0; members.len()],
+        kept,
+        true,
+        true,
+        Some(9),
+    );
+    assert_eq!(got, want);
+}
