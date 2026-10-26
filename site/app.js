@@ -83,10 +83,13 @@
 // game's text is its paper in the ×4 frame and listed (Game.hd_glyphs, whole spaces too), and
 // after the regions are copied the page draws the listed characters in the font over their
 // cells' places on the canvas in runs (a row's neighbouring cells, one space joining words, two
-// or more ending the run): each run one line from its first cell's left edge, at 0.85 of the
-// cell's height there, at the font's natural width (narrowed to its cells should it be wider),
-// each character in its own ink. Until the font is loaded, with the pixel font chosen, with
-// Original or with HD off, the game's own pixel font shows, as before.
+// or more ending the run, a space the player typed never): each run one line from its first
+// cell's left edge, at 0.85 of the cell's height there, at the font's natural width (narrowed to
+// its cells should it be wider), each character in its own ink. The game's symbols (the key
+// wait's cursor, the more prompt's mark) are listed too, their cells the paper, with their
+// pixels (Game.hd_symbol_rows): one after a run is drawn as its caret, where the run's text and
+// the spaces after it end; one after no run at its own cell. Until the font is loaded, with the
+// pixel font chosen, with Original or with HD off, the game's own pixel font shows, as before.
 //
 // The pointer over the HD frame (spec 11 Design 7): the HD frame is composed without the game's
 // pointer sprite (the original's is a hardware sprite above the screen), so its blocks and its
@@ -1765,7 +1768,7 @@ function paintPointer(ctx, from, to, clip) {
 // cells changes, so a part copied alone could keep pixels of the run before.
 function paint(view, dirty) {
   const ctx = canvas.getContext('2d');
-  const glyphs = game.hd_font() ? game.hd_glyphs() : [];
+  const glyphs = game.hd_font() ? listedGlyphs() : [];
   if (view === WHOLE_VIEW) {
     if (!dirty) {
       ctx.fillStyle = LAYOUT_FILL;
@@ -2335,7 +2338,7 @@ function paintWide(view, dirty) {
   const ctx = canvas.getContext('2d');
   const s = wideSrcScale;
   const smooth = s > 1;
-  const glyphs = drawnHd && game.hd_font() ? game.hd_glyphs() : [];
+  const glyphs = drawnHd && game.hd_font() ? listedGlyphs() : [];
   if (view === WHOLE_VIEW) {
     ctx.fillStyle = LAYOUT_FILL;
     ctx.fillRect(0, 0, WIDE_W, WIDE_H);
@@ -2506,6 +2509,8 @@ const FONT_KEY = 'u6.font'; // localStorage: 'pixel' when the viewer chose the p
 const FONT_FAMILY = 'U6 Gowun Batang'; // index.html's @font-face: site/fonts/gowun-batang.woff2
 const GLYPH_CELL = 8; // a character's cell, in game pixels
 const GLYPH_SPACE = 0x20; // a listed space: no ink, it joins the words beside it (Design 3)
+const GLYPH_SYMBOL = 0x10000; // | its glyph: a listed symbol, drawn from its rows (Design 2 rev 3)
+const GLYPH_TYPED = 0x20000; // | 0x20: a listed space the player typed, never ending a run (rev 3)
 const FONT_EM = 0.85; // the font's size: of the height the cell has on the canvas
 // A run's ink keeps this far inside its cells at either end, in canvas pixels (it starts this far
 // in, and a run is narrowed to its cells less this either side): the rasteriser's anti-aliased
@@ -2526,6 +2531,7 @@ let fontChoice = storedFont();
 let fontFile = 'none'; // the font file: none (not asked for yet), loading, loaded, failed
 let fontDrawn = false; // the game's text is drawn in the HD font (as `applyHd` set it last)
 let paintedGlyphs = []; // the cells the last `paint` drew (Game.hd_glyphs then)
+let symbolRows = new Uint8Array(0); // the listed symbols' pixels (Game.hd_symbol_rows) with them
 // How far below its cell's centre a character's baseline lies, in ems of the font (once loaded:
 // half a syllable's ink height less its depth, so the syllables are centred in their cells and
 // ASCII stands on the same baseline, where the font puts it beside them).
@@ -2575,41 +2581,91 @@ function listedIn(glyphs, from) {
   return false;
 }
 
+// The game's listed cells now (Game.hd_glyphs), the symbols' pixels with them (`symbolRows`).
+function listedGlyphs() {
+  const glyphs = game.hd_glyphs();
+  symbolRows = glyphs.length > 0 ? game.hd_symbol_rows() : new Uint8Array(0);
+  return glyphs;
+}
+
 // The runs of `glyphs` (Game.hd_glyphs: x, y, code, ink and paper per cell, in raster order)
 // whose cells lie in the classic rect `from` (Design 3): listed cells of one row, each the next
 // one's left neighbour, of one paper; one listed space joins the cells either side of it, two or
-// more end the run, and so does a cell not listed; a run's spaces at either end are left out.
-// Each run: its row `y` and its cells [x, code, ink] left to right (a space's ink null: it goes
-// with the text it stands in).
+// more end the run (a space the player typed, GLYPH_TYPED, joins them whatever the spaces beside
+// it: rev 3), and so does a cell not listed; a run's spaces at either end are left out. Each run:
+// its row `y` and its cells [x, code, ink] left to right (a space's ink null: it goes with the
+// text it stands in). A listed symbol (GLYPH_SYMBOL: Design 2 rev 3) ends the cells before it:
+// after a run of them (directly, or after the spaces that follow it) it is that run's `caret`,
+// else one of the returned list's `symbols`; each { x, y, ink, rows (its 8 rows from
+// `symbolRows`, bit 7 leftmost), spaces (those between it and the run) }.
 function glyphRuns(glyphs, from) {
   const runs = [];
-  // The run being read: its row and paper, its cells, the spaces after its last cell, where its
-  // next cell would be.
-  let run = null;
+  runs.symbols = [];
+  // The cells being read: their row and paper, where the next would be, the spaces since the
+  // last character (the game's `spaces`, all of them `gap`), the run open (null after two of the
+  // game's spaces) and the last run of them.
+  let chain = null;
+  let symbols = 0; // the symbols of the whole list so far: their rows' place in `symbolRows`
   const end = () => {
-    if (run && run.cells.length > 0) runs.push({ y: run.y, cells: run.cells });
-    run = null;
+    if (chain?.run) runs.push(chain.run);
+    if (chain) chain.run = null;
   };
   for (let i = 0; i < glyphs.length; i += 5) {
     const [x, y, code, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
+    const symbol = code >= GLYPH_SYMBOL && code < GLYPH_TYPED;
+    const at = symbol ? 8 * symbols : 0;
+    if (symbol) symbols += 1;
     if (!overlap([x, y, GLYPH_CELL, GLYPH_CELL], from)) continue;
-    if (run && (y !== run.y || x !== run.next || paper !== run.paper)) end();
-    if (code === GLYPH_SPACE) {
-      if (run) {
-        run.spaces += 1;
-        run.next = x + GLYPH_CELL;
-        if (run.spaces > 1) end();
-      }
+    if (!chain || y !== chain.y || x !== chain.next || paper !== chain.paper) {
+      end();
+      chain = { y, paper, next: x, spaces: 0, gap: 0, run: null, last: null };
+    }
+    chain.next = x + GLYPH_CELL;
+    if (code === GLYPH_SPACE || code === (GLYPH_TYPED | GLYPH_SPACE)) {
+      chain.gap += 1;
+      if (code === GLYPH_SPACE) chain.spaces += 1;
+      if (chain.spaces > 1) end();
       continue;
     }
-    run ??= { y, paper, cells: [], spaces: 0, next: x };
-    if (run.spaces === 1) run.cells.push([x - GLYPH_CELL, GLYPH_SPACE, null]);
-    run.spaces = 0;
-    run.cells.push([x, code, ink]);
-    run.next = x + GLYPH_CELL;
+    if (symbol) {
+      const rows = symbolRows.length >= at + 8 ? symbolRows.subarray(at, at + 8) : null;
+      const mark = { x, y, ink, rows, spaces: chain.gap };
+      if (chain.last) chain.last.caret = mark;
+      else runs.symbols.push(mark);
+      end();
+      chain = null;
+      continue;
+    }
+    if (!chain.run) {
+      chain.run = { y, cells: [], caret: null };
+      chain.last = chain.run;
+    } else {
+      for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push([x - k * GLYPH_CELL, GLYPH_SPACE, null]);
+    }
+    chain.spaces = 0;
+    chain.gap = 0;
+    chain.run.cells.push([x, code, ink]);
   }
   end();
   return runs;
+}
+
+// A listed symbol's pixels (`rows`: 8 rows, bit 7 leftmost) in its ink, its cell's top left at
+// canvas (x, y), each game pixel sx × sy canvas pixels with its edges on the nearest whole canvas
+// pixel (sharp, as the pixel font's blocks): one path, filled once.
+function paintSymbol(ctx, { rows, ink }, x, y, sx, sy) {
+  if (!rows) return;
+  ctx.beginPath();
+  for (let v = 0; v < GLYPH_CELL; v += 1) {
+    for (let u = 0; u < GLYPH_CELL; u += 1) {
+      if ((rows[v] & (0x80 >> u)) === 0) continue;
+      const [x0, x1] = [Math.round(x + u * sx), Math.round(x + (u + 1) * sx)];
+      const [y0, y1] = [Math.round(y + v * sy), Math.round(y + (v + 1) * sy)];
+      ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    }
+  }
+  ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
+  ctx.fill();
 }
 
 // The runs of `glyphs` (`glyphRuns`) in the classic rect `from` that the canvas rect `to` shows,
@@ -2619,32 +2675,39 @@ function glyphRuns(glyphs, from) {
 // the baseline `glyphDrop` puts, at the font's natural width without kerning, or narrowed to its
 // cells' width less the inset at each end when wider (horizontally only: the ink stays within its
 // cells); each character in its own ink, the parts of one ink drawn one after another, each where
-// the text before it ends. A run is drawn only over pixels copied again just before (a region
-// copied whole while it has characters: `paint`), so never twice over itself (its anti-aliased
-// edges would thicken).
+// the text before it ends. A run's caret (Design 2 rev 3) is drawn after it: its cell's left edge
+// where the run's text and the spaces after it end (their advances in the font, narrowed as the
+// run is), on the run's row; a symbol after no run at its own cell (`paintSymbol`). A run is
+// drawn only over pixels copied again just before (a region copied whole while it has
+// characters: `paint`), so never twice over itself (its anti-aliased edges would thicken).
 function paintGlyphs(ctx, glyphs, from, to, copied) {
   const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
   const h = GLYPH_CELL * sy;
   const size = FONT_EM * h;
   let ready = false;
-  for (const { y, cells } of glyphRuns(glyphs, from)) {
+  const prepare = () => {
+    if (ready) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(...copied);
+    ctx.clip();
+    ctx.font = `${size}px "${FONT_FAMILY}"`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    // No kerning (Design 3): a run's width is its characters' advances, so a part drawn on its
+    // own stands where the whole text would put it.
+    ctx.fontKerning = 'none';
+    ready = true;
+  };
+  const runs = glyphRuns(glyphs, from);
+  for (const { y, cells, caret } of runs) {
     const left = to[0] + (cells[0][0] - from[0]) * sx;
     const top = to[1] + (y - from[1]) * sy;
     const span = (cells.at(-1)[0] + GLYPH_CELL - cells[0][0]) * sx;
-    if (!overlap([left, top, span, h], copied)) continue;
-    if (!ready) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(...copied);
-      ctx.clip();
-      ctx.font = `${size}px "${FONT_FAMILY}"`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'alphabetic';
-      // No kerning (Design 3): a run's width is its characters' advances, so a part drawn on its
-      // own stands where the whole text would put it.
-      ctx.fontKerning = 'none';
-      ready = true;
-    }
+    // A caret stands within the cells up to its own.
+    const reach = caret ? (caret.x + GLYPH_CELL - cells[0][0]) * sx : span;
+    if (!overlap([left, top, reach, h], copied)) continue;
+    prepare();
     // Every code is under 0x10000: one character of the string per cell. The pen starts
     // GLYPH_INSET inside the span, and further right as far as the first character's ink reaches
     // left of the pen, and the run is narrowed when its width (or its ink's) is wider than the
@@ -2655,7 +2718,8 @@ function paintGlyphs(ctx, glyphs, from, to, copied) {
     const natural = Math.max(m.width, lead + m.actualBoundingBoxRight);
     const room = span - 2 * GLYPH_INSET;
     const k = natural > room ? room / natural : 1;
-    ctx.setTransform(k, 0, 0, 1, left + GLYPH_INSET + lead * k, top + h / 2 + glyphDrop * size);
+    const pen = left + GLYPH_INSET + lead * k;
+    ctx.setTransform(k, 0, 0, 1, pen, top + h / 2 + glyphDrop * size);
     for (let a = 0; a < cells.length;) {
       const ink = cells[a][2];
       let b = a + 1;
@@ -2664,6 +2728,18 @@ function paintGlyphs(ctx, glyphs, from, to, copied) {
       ctx.fillText(text.slice(a, b), a === 0 ? 0 : ctx.measureText(text.slice(0, a)).width, 0);
       a = b;
     }
+    if (caret) {
+      const at = pen + ctx.measureText(text + ' '.repeat(caret.spaces)).width * k;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      paintSymbol(ctx, caret, at, top, sx, sy);
+    }
+  }
+  for (const symbol of runs.symbols) {
+    const [left, top] = [to[0] + (symbol.x - from[0]) * sx, to[1] + (symbol.y - from[1]) * sy];
+    if (!overlap([left, top, GLYPH_CELL * sx, h], copied)) continue;
+    prepare();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    paintSymbol(ctx, symbol, left, top, sx, sy);
   }
   if (ready) ctx.restore();
 }

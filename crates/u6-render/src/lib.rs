@@ -64,7 +64,8 @@ pub enum Kind {
     Bitmap = 3,
     /// Spec 11: a pixel of an 8 × 8 character cell; [`Src::id`] is the cell's code (a code of the
     /// game's font, or a Hangul syllable's code point), (u, v) the pixel's place in the cell,
-    /// [`FLAG_INK`] on its set pixels, [`FLAG_PAPER`] on those drawn over the paper. No image:
+    /// [`FLAG_INK`] on its set pixels, [`FLAG_PAPER`] on those drawn over the paper,
+    /// [`FLAG_TYPED`] on a typed cell's, [`FLAG_SYMBOL`] on a symbol's ink pixels. No image:
     /// shown classic (a clear pixel drawn over the paper in the paper's colour at its place shows
     /// the HD paper there, [`hd`]), or by the HD font mode ([`hd::Compositor::set_font_mode`]) as
     /// a listed glyph.
@@ -94,6 +95,16 @@ pub const FLAG_PAPER: u8 = 8;
 /// as every flagged pixel; named the paper so that a scroll that moves it onto the paper of its
 /// colour names the paper there again.
 pub const FLAG_PAPER_OFF: u8 = 16;
+/// Spec 11 Design 2 (rev 3) [`Src::flags`] of a [`Kind::Glyph`] pixel, with [`FLAG_INK`] and
+/// [`FLAG_PAPER`]: an ink pixel of a glyph the game draws as a symbol over the paper (the key
+/// wait's cursor, the more prompt's mark), [`Src::id`] that glyph's code. Shown classic, as the
+/// ink pixel of a cell the HD font mode does not list; the mode lists the cell as a symbol
+/// ([`hd::SYMBOL`]).
+pub const FLAG_SYMBOL: u8 = 32;
+/// Spec 11 Design 3 (rev 3) [`Src::flags`] of a [`Kind::Glyph`] pixel: of a cell the line editor
+/// echoed (a character the player typed), on each pixel of the cell. Shown as without it; the HD
+/// font mode lists a whole space typed apart from the game's own ([`hd::TYPED_SPACE`]).
+pub const FLAG_TYPED: u8 = 64;
 
 /// [`Src::id`] of portrait `item` of the archive `portrait.<letter>` (the pair the portrait
 /// loader computes): the letter's byte in the high byte, the item in the low one. `None` for
@@ -129,7 +140,8 @@ pub struct Src {
     pub kind: Kind,
     /// [`FLAG_OVERLAY`], [`FLAG_OUTLINE`]: the blit changed the image's colour here;
     /// [`FLAG_INK`]: a glyph's set pixel; [`FLAG_PAPER`]: a glyph's pixel over the paper;
-    /// [`FLAG_PAPER_OFF`]: the paper's pixel of another colour than the paper's.
+    /// [`FLAG_PAPER_OFF`]: the paper's pixel of another colour than the paper's;
+    /// [`FLAG_SYMBOL`]: a symbol's ink pixel; [`FLAG_TYPED`]: a typed cell's pixel.
     pub flags: u8,
 }
 

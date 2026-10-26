@@ -79,7 +79,7 @@ use u6_core::saveload::{MemStore, OBJLIST_FILE, attach, block_file, changed_sinc
 use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
-use u6_render::hd::Scale;
+use u6_render::hd::{self, Scale};
 use wasm_bindgen::prelude::*;
 
 /// The dropped files together, as copied into wasm: a file read whole counts its size; a zip
@@ -335,6 +335,22 @@ pub fn max_save_file_bytes() -> f64 {
 #[wasm_bindgen]
 pub fn max_save_bytes() -> f64 {
     MAX_SAVE_BYTES as f64
+}
+
+/// Spec 11 Design 2 (rev 3), [`Game::hd_glyphs`]: the code of a listed symbol is this | its glyph.
+const SYMBOL: u32 = 0x1_0000;
+/// Spec 11 Design 3 (rev 3), [`Game::hd_glyphs`]: the code of a space the player typed is this |
+/// 0x20.
+const TYPED: u32 = 0x2_0000;
+
+/// A listed cell's code as [`Game::hd_glyphs`] gives it, from the compositor's
+/// ([`u6_render::hd::HdGlyph::code`]): a symbol's and a typed space's in their own ranges
+/// ([`SYMBOL`], [`TYPED`]), every other as it is.
+fn listed_code(code: u16) -> u32 {
+    match code {
+        hd::TYPED_SPACE => TYPED | 0x20,
+        c => hd::symbol_glyph(c).map_or(u32::from(c), |g| SYMBOL | u32::from(g)),
+    }
 }
 
 /// [`u6_core::pacer::STEP_MS`] for the page: the `ms` of every [`Game::step`].
@@ -945,16 +961,20 @@ impl Game {
         self.hd.font()
     }
 
-    /// Spec 11: every cell the HD frame shows in the HD font, and every whole space, of its last
-    /// composition (the whole list, not what changed: the page that copies a rect of the HD frame
-    /// draws every listed glyph over it again), 5 words per cell in raster order: the cell's x
-    /// and y in frame pixels (multiples of 8, of the [`Game::width`] × [`Game::height`] frame),
-    /// its code (printable ASCII but the space, or a Hangul syllable's code point, drawn in the
-    /// HD font; or 0x20, a space the text writer drew whole, for which nothing is drawn but which
-    /// a run of text may cross, its ink equal to its paper), its ink and its paper as 0xRRGGBB.
-    /// Empty while HD or the HD font is off. The list changes only with every block of the cells
-    /// it adds, drops or changes written, so with [`Game::frame_version`] moved and those cells
-    /// in the rect of [`Game::hd_take_dirty`].
+    /// Spec 11: every cell the HD frame shows in the HD font, every whole space, and every symbol
+    /// drawn over the paper, of its last composition (the whole list, not what changed: the page
+    /// that copies a rect of the HD frame draws every listed glyph over it again), 5 words per
+    /// cell in raster order: the cell's x and y in frame pixels (multiples of 8, of the
+    /// [`Game::width`] × [`Game::height`] frame), its code, its ink and its paper as 0xRRGGBB.
+    /// The code: printable ASCII but the space, or a Hangul syllable's code point, drawn in the
+    /// HD font; 0x20, a space the text writer drew whole, for which nothing is drawn but which a
+    /// run of text may cross, its ink equal to its paper; rev 3, [`TYPED`] | 0x20, such a space
+    /// the player typed (a run goes on across it whatever the spaces beside it); [`SYMBOL`] | its
+    /// glyph (a code of the game's font), a symbol the game drew over the paper (the key wait's
+    /// cursor, the more prompt's mark), its cell the paper in the HD frame and its pixels in
+    /// [`Game::hd_symbol_rows`]. Empty while HD or the HD font is off. The list changes only
+    /// with every block of the cells it adds, drops or changes written, so with
+    /// [`Game::frame_version`] moved and those cells in the rect of [`Game::hd_take_dirty`].
     pub fn hd_glyphs(&self) -> Vec<u32> {
         let rgb = |c: u6_core::Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
         self.hd
@@ -964,11 +984,27 @@ impl Game {
                 [
                     u32::from(g.x),
                     u32::from(g.y),
-                    u32::from(g.code),
+                    listed_code(g.code),
                     rgb(g.ink),
                     rgb(g.paper),
                 ]
             })
+            .collect()
+    }
+
+    /// Spec 11 Design 2 (rev 3): the pixels of each symbol [`Game::hd_glyphs`] lists ([`SYMBOL`]),
+    /// in its order, 8 bytes each: its rows of 8 pixels, bit 7 the leftmost, a set bit a pixel of
+    /// its ink. Empty when the list holds none.
+    pub fn hd_symbol_rows(&self) -> Vec<u8> {
+        if self.hd.glyphs().is_empty() {
+            return Vec::new();
+        }
+        self.hd
+            .compositor()
+            .symbol_rows()
+            .iter()
+            .flatten()
+            .copied()
             .collect()
     }
 
@@ -3623,6 +3659,81 @@ mod tests {
             vec![24, 16, 0x7a, ink3, paper],
             "HD on again"
         );
+    }
+
+    /// An engine on screen with the plane that draws, over a paper of colour 4 named in place
+    /// (spec 07 HD0), in ink 3: a letter at cell (2, 2), a space the player typed at (3, 2) and
+    /// the key wait's symbol of glyph 5 at (4, 2) (spec 11 rev 3; a synthetic font: glyph `c` =
+    /// eight rows of the byte `c`, the space blank).
+    fn symbol_engine() -> Engine {
+        let mut engine = Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_, io| async move {
+                use u6_core::ui::text::{self, Paper, TextWindow};
+                let mut font = u6_formats::font::BitFont {
+                    glyphs: (0..=255u8).map(|c| [c; 8]).collect(),
+                };
+                font.glyphs[0x20] = [0; 8];
+                let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+                let paper = Paper::drawn(
+                    &identity,
+                    &u6_formats::bitmap::Bitmap {
+                        width: 320,
+                        height: 200,
+                        pixels: vec![4; 320 * 200],
+                    },
+                );
+                let w = TextWindow::new(0, 0, 39, 24, 3, 4, 0);
+                let fonts = (Some(&font), None);
+                io.draw(|fb| {
+                    for (i, c) in fb.palette.iter_mut().enumerate() {
+                        let v = i as u8;
+                        *c = u6_core::Rgb::new(v.wrapping_mul(40), 255 - v, v.wrapping_mul(7));
+                    }
+                    text::fill_rect(fb, 0, 0, 319, 199, 4, Some(&paper));
+                    text::draw_char(fb, fonts.0, None, &w, 0x41, 2, 2);
+                    text::draw_typed(fb, fonts, &w, 0x20, (3, 2));
+                    text::draw_symbol(fb, fonts, &w, 5, (4, 2), Some(&paper));
+                });
+                io.present();
+                loop {
+                    io.vblank().await;
+                }
+            },
+        );
+        engine.enable_src_plane();
+        engine
+    }
+
+    /// Spec 11 rev 3 in the platform: the list's code of a space the player typed is 0x20000 |
+    /// 0x20 and of a symbol 0x10000 | its glyph, a letter's as before; the symbol's rows follow in
+    /// [`Game::hd_symbol_rows`]; both empty with the HD font off.
+    #[test]
+    fn the_hd_glyphs_give_a_typed_space_and_a_symbol_in_their_ranges() {
+        let mut game = Game::new();
+        game.put_on_screen(symbol_engine());
+        game.step(20);
+        game.present();
+        game.set_hd(true, 2);
+        game.set_hd_font(true);
+        let e = game.engine.as_ref().unwrap();
+        let rgb = |i: usize| {
+            let c = e.frame().palette[i];
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        };
+        let (ink, paper) = (rgb(3), rgb(4));
+        assert_eq!(
+            game.hd_glyphs(),
+            vec![
+                16, 16, 0x41, ink, paper, 24, 16, 0x2_0020, paper, paper, 32, 16, 0x1_0005, ink,
+                paper
+            ],
+            "the letter, the typed space, the symbol"
+        );
+        assert_eq!(game.hd_symbol_rows(), vec![5; 8], "the symbol's rows");
+        game.set_hd_font(false);
+        assert!(game.hd_glyphs().is_empty() && game.hd_symbol_rows().is_empty());
     }
 
     /// The pointer shape of [`pointer_engine`]: three rows, values `(c + r) % 4` in the first

@@ -229,3 +229,188 @@ fn a_key_wait_takes_no_text_and_leaves_none_queued() {
     );
     assert_eq!(e.io().pending_events(), 0);
 }
+
+/// Spec 11 Design 3 (rev 3), through the line editor: its echo names each cell it draws typed
+/// ([`u6_render::FLAG_TYPED`] on all its pixels: two spaces, a letter typed after Backspace, a
+/// syllable with a pack); the cursor's cell erased when the line ends is the game's space (no
+/// flag); the line read is the same. The HD font mode lists the typed spaces as
+/// [`u6_render::hd::TYPED_SPACE`], the typed letter and syllable as their codes, the erased cell
+/// as a space. (The synthetic font's space here is blank, a whole space.) Backspace's own blank
+/// is never in a frame the line editor shows (the cursor is drawn there at once):
+/// [`backspace_blanks_a_typed_cell_as_the_games_space`] reads it where it is drawn.
+#[test]
+fn the_line_editors_echo_names_its_cells_typed() {
+    use u6_render::hd::{Compositor, NoImages, Scale, TYPED_SPACE};
+    use u6_render::{FLAG_TYPED, Kind};
+    let bs = key(Key::Backspace);
+    let typed = vec![
+        key(Key::Space),
+        key(Key::Space),
+        key(Key::Char('a')),
+        key(Key::Char('s')),
+        bs,
+        bs,
+        key(Key::Char('a')),
+        text('가'),
+        key(Key::Enter),
+    ];
+    let mut s = typing(true);
+    s.ui.font.as_mut().unwrap().glyphs[0x20] = [0; 8];
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        let (n, line) = keyread::read_words(&st, &io, 16).await;
+        io.present();
+        let mut s = st.borrow_mut();
+        s.converse.ints[0] = n as u16;
+        s.converse.buffers[0] = line;
+    });
+    e.enable_src_plane();
+    e.tick(&typed, 16);
+    for _ in 0..6 {
+        e.tick(&[], 16);
+    }
+    assert!(e.finished());
+    assert_eq!(
+        e.state().converse.buffers[0],
+        "  a가".as_bytes(),
+        "the line read as before"
+    );
+    let fb = e.frame();
+    // Each cell's 64 sources: (kind, code, typed) when all agree.
+    let cell = |col: usize| {
+        let at = |k: usize| fb.src_at(col * 8 + k % 8, 14 * 8 + k / 8).unwrap();
+        let s0 = at(0);
+        let same = (0..64).all(|k| {
+            let s = at(k);
+            s.kind == s0.kind && s.id == s0.id && s.flags & FLAG_TYPED == s0.flags & FLAG_TYPED
+        });
+        same.then_some((s0.kind, s0.id, s0.flags & FLAG_TYPED != 0))
+    };
+    let glyph = |code: u16, typed: bool| Some((Kind::Glyph, code, typed));
+    assert_eq!(cell(22), glyph(0x20, true), "a typed space");
+    assert_eq!(cell(23), glyph(0x20, true), "a typed space");
+    assert_eq!(
+        cell(24),
+        glyph(u16::from(b'a'), true),
+        "a letter typed after Backspace"
+    );
+    assert_eq!(cell(25), glyph(0xac00, true), "a syllable typed");
+    assert_eq!(
+        cell(26),
+        glyph(0x20, false),
+        "the cursor's cell erased at the line's end"
+    );
+    let mut c = Compositor::new();
+    c.set_font_mode(true);
+    c.compose(fb, &mut NoImages, Scale::X2);
+    let codes: Vec<(u16, u16)> = c
+        .glyphs()
+        .iter()
+        .filter(|g| g.y == 112)
+        .map(|g| (g.x / 8, g.code))
+        .collect();
+    assert_eq!(
+        codes[..5],
+        [
+            (22, TYPED_SPACE),
+            (23, TYPED_SPACE),
+            (24, u16::from(b'a')),
+            (25, 0xac00),
+            (26, 0x20)
+        ],
+        "listed: the typed spaces apart, the letters as they are"
+    );
+}
+
+/// Spec 11 Design 3 (rev 3): the blank Backspace draws ([`keyread::echo`] of 8) is the game's own
+/// space, every one of its 64 sources a whole space's with no [`u6_render::FLAG_TYPED`] (and
+/// [`u6_render::FLAG_PAPER`] over the paper, as any glyph's), read right after the echo, before
+/// anything else draws there: over a typed space, over a typed letter, and back across the
+/// row's end (the echo wrapped, Backspace blanks the last cell of the row above). Each cell was
+/// typed, all 64 sources flagged, just before. With no paper and over the paper.
+#[test]
+fn backspace_blanks_a_typed_cell_as_the_games_space() {
+    use std::cell::RefCell;
+    use u6_render::{FLAG_INK, FLAG_PAPER, FLAG_TYPED, Kind, Src};
+    type Shot = (&'static str, (u16, u16), Vec<Src>);
+    for paper in [false, true] {
+        let mut s = typing(false);
+        s.ui.font.as_mut().unwrap().glyphs[0x20] = [0; 8];
+        if paper {
+            let bmp = u6_formats::bitmap::Bitmap {
+                width: 320,
+                height: 200,
+                pixels: vec![PAPER; 320 * 200],
+            };
+            let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+            s.ui.paper = Some(text::Paper::drawn(&identity, &bmp));
+        }
+        let shots: Rc<RefCell<Vec<Shot>>> = Rc::default();
+        let kept = Rc::clone(&shots);
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            let shot = |what: &'static str, (col, row): (u16, u16)| {
+                let at = (usize::from(col) * 8, usize::from(row) * 8);
+                let srcs = io.draw(|fb| {
+                    (0..64)
+                        .map(|k| fb.src_at(at.0 + k % 8, at.1 + k / 8).unwrap())
+                        .collect()
+                });
+                kept.borrow_mut().push((what, (col, row), srcs));
+            };
+            {
+                let p = st.borrow().ui.paper.clone();
+                io.draw(|fb| text::fill_rect(fb, 0, 0, 319, 199, PAPER, p.as_ref()));
+            }
+            let echo = |c: u16| keyread::echo(&mut st.borrow_mut(), &io, c);
+            echo(0x20);
+            shot("a typed space", (22, 14));
+            echo(8);
+            shot("Backspace over a typed space", (22, 14));
+            echo(u16::from(b'a'));
+            shot("a typed letter", (22, 14));
+            echo(8);
+            shot("Backspace over a typed letter", (22, 14));
+            // The row's last cell: the echo wraps to the next row; Backspace comes back across.
+            st.borrow_mut().ui.text.win_mut().col = 16;
+            echo(u16::from(b'a'));
+            shot("a typed letter at the row's end", (38, 14));
+            assert_eq!(
+                st.borrow().ui.text.win().row,
+                1,
+                "precondition: the echo wrapped"
+            );
+            echo(8);
+            shot("Backspace back across the row's end", (38, 14));
+            io.present();
+        });
+        e.enable_src_plane();
+        e.tick(&[], 16);
+        assert!(e.finished());
+        let shots = shots.borrow();
+        assert_eq!(shots.len(), 6);
+        let on = if paper { FLAG_PAPER } else { 0 };
+        for (i, (what, at, srcs)) in shots.iter().enumerate() {
+            let typed = i % 2 == 0;
+            let (code, rows) = match (typed, i) {
+                (true, 0) => (0x20, [0u8; 8]),
+                (true, _) => (u16::from(b'a'), [b'a'; 8]),
+                (false, _) => (0x20, [0u8; 8]),
+            };
+            for (k, s) in srcs.iter().enumerate() {
+                let (u, v) = (k % 8, k / 8);
+                let ink = rows[v] & (0x80 >> u) != 0;
+                let want = Src {
+                    ver: 0,
+                    id: code,
+                    u: u as u16,
+                    v: v as u16,
+                    kind: Kind::Glyph,
+                    flags: if ink { FLAG_INK } else { 0 } | on | if typed { FLAG_TYPED } else { 0 },
+                };
+                assert_eq!(
+                    *s, want,
+                    "paper {paper}: {what} at {at:?}, pixel ({u}, {v})"
+                );
+            }
+        }
+    }
+}

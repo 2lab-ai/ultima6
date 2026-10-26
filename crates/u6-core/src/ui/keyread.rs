@@ -79,7 +79,9 @@ async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
 /// erases it again within one call. The port presents and awaits the next display generation
 /// between drawing and erasing: that is the guaranteed yield of every key wait.
 ///
-/// Port (spec 11): the cursor is drawn as a symbol ([`text::draw_symbol`]).
+/// Port (spec 11): the cursor is drawn as a symbol ([`text::draw_symbol`]; over the paper it names
+/// itself one, Design 2 rev 3, and the HD font mode lists it for the platform to draw after the
+/// text it follows).
 pub async fn idle_poll(state: &RefCell<State>, io: &Io) -> u16 {
     match idle_wait(state, io, Text::Dropped).await {
         Polled::Code(code) => code,
@@ -171,6 +173,11 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
 ///
 /// Port (spec 08 Design 4, slice K5a): `c` is a cell's code, a byte of the game's font or a
 /// Hangul syllable (U+AC00..=U+D7A3) the wide path draws from the Hangul table, one cell.
+///
+/// Port (spec 11 Design 3, rev 3): the cell drawn for a character names it typed
+/// ([`text::draw_typed`]), so the HD font mode tells a space the player typed from the game's
+/// own; the blank Backspace draws is a space as the game's (the line editor takes the same
+/// characters as before).
 pub fn echo(s: &mut State, io: &Io, c: u16) {
     let ui = &mut s.ui;
     // Port-side: the scroll transcript shows the typed line as the screen does.
@@ -201,7 +208,7 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
         let w = *win;
         io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
     } else {
-        io.draw(|fb| text::draw_char(fb, font, hangul, &w, c, col, row));
+        io.draw(|fb| text::draw_typed(fb, (font, hangul), &w, c, (col, row)));
         let win = ui.text.win_mut();
         win.col = win.col.wrapping_add(1);
         if win.col >= win.width {

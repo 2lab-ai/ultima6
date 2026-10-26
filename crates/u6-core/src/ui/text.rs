@@ -12,7 +12,8 @@ use std::rc::Rc;
 use u6_formats::bitmap::Bitmap;
 use u6_formats::font::{BitFont, HangulFont};
 use u6_render::{
-    BITMAP_PAPER, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, Framebuffer, HEIGHT, Kind, Src, WIDTH,
+    BITMAP_PAPER, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED, Framebuffer,
+    HEIGHT, Kind, Src, WIDTH,
 };
 
 /// Window flag (byte 8) bit: wrap at word boundaries.
@@ -125,18 +126,18 @@ impl WindowId {
 /// Port (spec 11): each pixel's source names the glyph ([`draw_rows`]).
 pub fn draw_glyph(fb: &mut Framebuffer, font: &BitFont, x: usize, y: usize, c: u8, fg: u8, bg: u8) {
     let code = Some(u16::from(c));
-    draw_rows(fb, x, y, &font.glyphs[usize::from(c)], code, (fg, bg));
+    draw_rows(fb, x, y, &font.glyphs[usize::from(c)], code, (fg, bg), 0);
 }
 
 /// The pixels of one 8 × 8 cell from its row bytes (bit 7 = leftmost), as [`draw_glyph`] draws
 /// them: `x` rounded down to a byte, set pixels `fg`, clear ones `bg`, colours 0..15.
 ///
 /// Port (spec 11): with a `code`, each pixel's source is the glyph of that code ([`Kind::Glyph`],
-/// (u, v) its place in the cell, [`FLAG_INK`] on the set pixels), so the HD font mode can show
-/// the cell's character in an HD font; without one the pixels are classic. The colours are those
-/// of either. Port (spec 07 HD0): a glyph's pixel drawn over the paper ([`Src::on_paper`]: the
-/// pixel it replaces names the paper or is a glyph's over it) carries [`FLAG_PAPER`], so the HD
-/// paper can show behind the text there and nowhere else.
+/// (u, v) its place in the cell, [`FLAG_INK`] on the set pixels, and `flags` on every pixel), so
+/// the HD font mode can show the cell's character in an HD font; without one the pixels are
+/// classic. The colours are those of either. Port (spec 07 HD0): a glyph's pixel drawn over the
+/// paper ([`Src::on_paper`]: the pixel it replaces names the paper or is a glyph's over it)
+/// carries [`FLAG_PAPER`], so the HD paper can show behind the text there and nowhere else.
 fn draw_rows(
     fb: &mut Framebuffer,
     x: usize,
@@ -144,6 +145,7 @@ fn draw_rows(
     rows: &[u8; 8],
     code: Option<u16>,
     (fg, bg): (u8, u8),
+    flags: u8,
 ) {
     let x = x & !7;
     for (dy, &row) in rows.iter().enumerate() {
@@ -161,7 +163,8 @@ fn draw_rows(
                         v: dy as u16,
                         kind: Kind::Glyph,
                         flags: if set { FLAG_INK } else { 0 }
-                            | if on_paper { FLAG_PAPER } else { 0 },
+                            | if on_paper { FLAG_PAPER } else { 0 }
+                            | flags,
                     };
                     fb.set_src(x + dx, y + dy, colour, src);
                 }
@@ -189,17 +192,41 @@ pub fn draw_char(
     col: u16,
     row: u16,
 ) {
-    draw_cell(fb, (font, hangul), w, c, (col, row), true);
+    draw_cell(fb, (font, hangul), w, c, (col, row), Some(0));
+}
+
+/// Port-only (spec 11 Design 3, rev 3): [`draw_char`] for the line editor's echo of a character
+/// the player typed (`keyread::echo`): each pixel of a glyph drawn also carries [`FLAG_TYPED`], so
+/// the HD font mode can tell a space typed from the game's own (a run of text goes on across
+/// the first, not across two of the second). The colours are [`draw_char`]'s.
+pub fn draw_typed(
+    fb: &mut Framebuffer,
+    fonts: (Option<&BitFont>, Option<&HangulFont>),
+    w: &TextWindow,
+    c: u16,
+    (col, row): (u16, u16),
+) {
+    draw_cell(fb, fonts, w, c, (col, row), Some(FLAG_TYPED));
 }
 
 /// Port-only (spec 11): [`draw_char`] for a glyph the game draws as a symbol, not a letter (the
-/// key wait's cursor): the same pixels, none of them named the glyph, so the HD font mode never
-/// shows it as a character of the HD font, whatever its code.
+/// key wait's cursor, the more prompt's mark): the same pixels, none of them named the glyph as a
+/// character, so the HD font mode never shows it as a character of the HD font, whatever its
+/// code.
 ///
 /// Port (spec 07 HD0): with `paper` ([`Paper`]), each pixel drawn over the paper
 /// ([`Src::on_paper`]) names the paper by the rule of the fills ([`Paper::over`]): the paper
 /// where the pixel's colour is the paper's there, else the paper flagged [`FLAG_PAPER_OFF`]; the
 /// others, and all of them without `paper` or without a source plane, are classic.
+///
+/// Port (spec 11 Design 2, rev 3): over the paper, a glyph of the game's font names itself as a
+/// symbol on its ink pixels instead: [`Kind::Glyph`] of its code, (u, v) the pixel's place in the
+/// cell, [`FLAG_INK`], [`FLAG_PAPER`] and [`FLAG_SYMBOL`]. Those are the pixels the paper's rule
+/// flags (or leaves classic, where the paper drew nothing): shown classic either way, so the
+/// frame with the HD font off is the same; an ink pixel of the paper's own colour there keeps
+/// naming the paper, as do the clear pixels. The HD font mode lists the cell as a symbol, and the
+/// platform draws it after the text it follows. Not over the paper, or without `paper`, nothing
+/// is named a symbol.
 pub fn draw_symbol(
     fb: &mut Framebuffer,
     fonts: (Option<&BitFont>, Option<&HangulFont>),
@@ -214,26 +241,45 @@ pub fn draw_symbol(
         let (x, y) = at(k);
         fb.src_at(x, y).is_some_and(|s| s.on_paper())
     });
-    draw_cell(fb, fonts, w, c, (col, row), false);
+    draw_cell(fb, fonts, w, c, (col, row), None);
     let Some(p) = paper.filter(|_| fonts.0.is_some()) else {
         return;
     };
+    // The symbol's rows: a glyph of the game's font (the codes the game draws as symbols).
+    let rows = u8::try_from(c)
+        .ok()
+        .and_then(|b| fonts.0.map(|f| f.glyphs[usize::from(b)]));
     for (k, _) in under.iter().enumerate().filter(|(_, on)| **on) {
         let (x, y) = at(k);
         if let Some(colour) = fb.get(x, y) {
-            fb.set_src(x, y, colour, p.over(x, y, colour));
+            let named = p.over(x, y, colour);
+            let ink = rows.is_some_and(|r| r[k / CELL] & (0x80 >> (k % CELL)) != 0);
+            let src = if ink && named != Paper::src(x, y) {
+                Src {
+                    ver: 0,
+                    id: c,
+                    u: (k % CELL) as u16,
+                    v: (k / CELL) as u16,
+                    kind: Kind::Glyph,
+                    flags: FLAG_INK | FLAG_PAPER | FLAG_SYMBOL,
+                }
+            } else {
+                named
+            };
+            fb.set_src(x, y, colour, src);
         }
     }
 }
 
-/// [`draw_char`] (`named`: its glyph's pixels name it) and [`draw_symbol`].
+/// [`draw_char`] (`named`: its glyph's pixels name it, with these flags; [`draw_typed`]) and
+/// [`draw_symbol`] (`None`).
 fn draw_cell(
     fb: &mut Framebuffer,
     (font, hangul): (Option<&BitFont>, Option<&HangulFont>),
     w: &TextWindow,
     c: u16,
     (col, row): (u16, u16),
-    named: bool,
+    named: Option<u8>,
 ) {
     let Some(font) = font else { return };
     let (x, y) = (usize::from(col) * CELL, usize::from(row) * CELL);
@@ -241,8 +287,9 @@ fn draw_cell(
         Ok(b) => Some(&font.glyphs[usize::from(b)]),
         Err(_) => hangul.and_then(|h| h.glyph(u32::from(c))),
     };
-    let code = (named && rows.is_some()).then_some(c);
-    draw_rows(fb, x, y, rows.unwrap_or(&[0; 8]), code, (w.fg, w.bg));
+    let code = (named.is_some() && rows.is_some()).then_some(c);
+    let flags = named.unwrap_or(0);
+    draw_rows(fb, x, y, rows.unwrap_or(&[0; 8]), code, (w.fg, w.bg), flags);
 }
 
 /// Fills the inclusive pixel rectangle with `colour`: 0x152176 selects the colour, 0x1521f4
