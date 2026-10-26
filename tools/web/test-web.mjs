@@ -9291,7 +9291,7 @@ test('Wide layout (spec 11 rev 3): at the reply prompt of the test\'s conversati
 
 // The test's own greeting with a key wait inside it (`*`: the game flushes the line and waits for a
 // key with the more prompt's mark, glyphs 1..4, right after the text).
-const ARROW_GREET = '"Hail, friend!*At last."';
+const ARROW_GREET = '"Zq9 qux!*Abc xyz."';
 
 // The page with the test's conversation (koFixture with ARROW_GREET in place of the user's,
 // English) talked to up to the wait inside the greeting, on the virtual display, the pointer in
