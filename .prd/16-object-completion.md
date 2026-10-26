@@ -1,4 +1,3 @@
---
 ---
 title: ultima6 — 16 object completion (stubs, stale seams, wrong ports, untranslated lines)
 type: spec
@@ -7,7 +6,7 @@ tags: [ultima6, objects, port, i18n]
 
 # 16 — Object completion
 
-Status: planned (2026-10-27). Item 1 of `objects-menu-fog-motion/ssot.md`; findings from round 1 units O1, O2 and O3 (`objects-menu-fog-motion/loop.md`).
+Status: in progress (2026-10-27). Item 1 of `objects-menu-fog-motion/ssot.md`; findings from round 1 units O1, O2 and O3 (`objects-menu-fog-motion/loop.md`).
 
 ## Measured facts (main 88eb5b0)
 
