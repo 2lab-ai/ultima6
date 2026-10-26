@@ -67,12 +67,27 @@ fn bridge_sends_control_characters_with_control_held() {
     assert_eq!(q, Qualifiers::default(), "control released again");
 }
 
-/// Reads one command key and stores it in `vars[0]`.
+/// Reads one command key and stores it in `vars[0]`, `keys` given one per take ([`run_each`]).
 fn read_one(s: State, keys: &[Key]) -> Engine {
-    run(s, keys, 8, |st, io| async move {
+    run_each(s, keys, 8, |st, io| async move {
         let k = wait::read_key(&st, &io).await;
         st.borrow_mut().converse.ints[0] = k;
     })
+}
+
+/// [`run_each`] fails when the game leaves a key queued past the budget (a game that reads
+/// none), rather than queue the next behind it, where a drained take would drop it.
+#[test]
+#[should_panic(expected = "not taken in 8 ticks")]
+fn keys_one_per_take_fail_when_a_key_is_not_taken() {
+    run_each(
+        state(),
+        &[Key::Char('a'), Key::Char('s')],
+        8,
+        |_st, io| async move {
+            io.sleep(u32::MAX).await;
+        },
+    );
 }
 
 #[test]
@@ -175,7 +190,7 @@ fn the_cross_hair_moved_nine_cells_east_stops_at_the_rule_half() {
     s.ui.tables.keymap[0x14] = [0x74, 0x54, 0x14, 0];
     let mut keys = vec![Key::Right; 9];
     keys.push(Key::Char('t'));
-    let e = run(s, &keys, 40, |st, io| async move {
+    let e = run_each(s, &keys, 40, |st, io| async move {
         let k = wait::read_key(&st, &io).await;
         st.borrow_mut().converse.ints[0] = k;
     });

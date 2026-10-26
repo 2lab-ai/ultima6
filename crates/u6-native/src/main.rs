@@ -40,7 +40,9 @@
 //! buttons B held (bit 0 left, bit 1 right); `click:X:Y` (or `click:X:Y:B`) is a press there
 //! and its release in the same tick; `wait:N` idles N ticks. `--png-every N:prefix` also writes the frame every
 //! N ticks. The RNG seed defaults to 0 headless (reproducible) and to the wall clock in the
-//! window (as the original seeds from `time()`). In the window the mouse is the pointer.
+//! window (as the original seeds from `time()`). In the window the mouse is the pointer, a key
+//! held repeats as repeats and its release takes back those still queued (spec 19 O1b); the
+//! `--keys` are presses alone.
 //! Headless, `U6_WINDOW_CACHE=off` renders the map window at every refresh, without the cache
 //! that leaves out a render that would change nothing (spec 06 O2): the equivalence runs
 //! compare the frames of both.
@@ -419,6 +421,47 @@ fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// Spec 19 O1b: per window key held, each game key its presses and repeats were queued as, so
+/// its release takes back those whatever the modifiers are then (Ctrl let go before S still
+/// releases Ctrl-S).
+#[derive(Debug, Default)]
+struct HeldKeys(Vec<(minifb::Key, Key)>);
+
+impl HeldKeys {
+    /// The event of a press of `key` routed to the game as `k` (`repeat`: minifb's own repeat).
+    fn press(&mut self, key: minifb::Key, k: Key, repeat: bool) -> InputEvent {
+        if !self.0.contains(&(key, k)) {
+            self.0.push((key, k));
+        }
+        if repeat {
+            InputEvent::Repeat(k)
+        } else {
+            InputEvent::Key(k)
+        }
+    }
+
+    /// The releases of the game keys window key `key` gave.
+    fn release(&mut self, key: minifb::Key) -> Vec<InputEvent> {
+        let mut out = Vec::new();
+        self.0.retain(|&(held, k)| {
+            if held != key {
+                return true;
+            }
+            out.push(InputEvent::Release(k));
+            false
+        });
+        out
+    }
+
+    /// The releases of every key held (the window lost the focus: their releases may not come).
+    fn release_all(&mut self) -> Vec<InputEvent> {
+        self.0
+            .drain(..)
+            .map(|(_, k)| InputEvent::Release(k))
+            .collect()
+    }
+}
+
 /// What a window key does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Route {
@@ -507,17 +550,27 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     let mut last = Instant::now();
     let mut mouse = None;
     let mut pending: Vec<InputEvent> = Vec::new();
+    let mut held = HeldKeys::default();
     while window.is_open() {
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
         let mut speed = pacer.speed();
         for key in window.get_keys_pressed(KeyRepeat::Yes) {
+            // Spec 19 O1b: a press minifb's own repeat sent (the key held past its delay) goes
+            // as a repeat, which the key's release takes back.
+            let repeat = !window.is_key_pressed(key, KeyRepeat::No);
             match route(key, ctrl) {
-                Some(Route::Game(k)) => pending.push(InputEvent::Key(k)),
+                Some(Route::Game(k)) => pending.push(held.press(key, k, repeat)),
                 Some(Route::Faster) => speed = pace::faster(speed),
                 Some(Route::Slower) => speed = pace::slower(speed),
                 None => {}
             }
+        }
+        for key in window.get_keys_released() {
+            pending.extend(held.release(key));
+        }
+        if !window.is_active() {
+            pending.extend(held.release_all());
         }
         if speed != pacer.speed() {
             pacer.set_speed(speed);
@@ -679,6 +732,42 @@ mod tests {
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args(list.iter().map(|s| s.to_string()))
+    }
+
+    /// Spec 19 O1b: Ctrl-S held into its repeats, Ctrl let go first (S's next repeat routes as
+    /// a plain `s`), then S: both of S's game keys are released, the arrow's not.
+    #[test]
+    fn a_release_goes_by_the_window_key_whatever_the_modifiers() {
+        use minifb::Key as K;
+        let mut held = HeldKeys::default();
+        let (ctrl_s, s) = (Key::Char('\u{13}'), Key::Char('s'));
+        let route_game = |key, ctrl| match route(key, ctrl) {
+            Some(Route::Game(k)) => k,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(route_game(K::S, true), ctrl_s);
+        let presses = [
+            held.press(K::S, route_game(K::S, true), false),
+            held.press(K::S, route_game(K::S, true), true),
+            held.press(K::S, route_game(K::S, false), true),
+            held.press(K::Up, route_game(K::Up, false), false),
+        ];
+        assert_eq!(
+            presses,
+            [
+                InputEvent::Key(ctrl_s),
+                InputEvent::Repeat(ctrl_s),
+                InputEvent::Repeat(s),
+                InputEvent::Key(Key::Up)
+            ]
+        );
+        assert_eq!(
+            held.release(K::S),
+            [InputEvent::Release(ctrl_s), InputEvent::Release(s)]
+        );
+        assert!(held.release(K::S).is_empty(), "released once");
+        assert_eq!(held.release_all(), [InputEvent::Release(Key::Up)]);
+        assert!(held.release_all().is_empty());
     }
 
     #[test]

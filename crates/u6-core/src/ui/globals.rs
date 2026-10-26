@@ -19,9 +19,11 @@ pub struct InputState {
     pub cursor_glyph: u16,
     /// Original: A4-0x3078 (idle-cursor frame counter)
     pub cursor_frame: u8,
-    /// Original: A4-0x7a46 (key poll drains the queue and keeps the last code). The engine queue
-    /// replaces this policy (spec 03 §1: input is consumed in order); the flag is kept and
-    /// written as the original writes it.
+    /// Original: A4-0x7a46 (the key poll drains the ring and keeps the last code: 0x105c8e hands
+    /// it to 0x134e7c; 1 in the image, clear while the line editor reads). Read by the poll
+    /// ([`crate::ui::keyread`]). Port (spec 19 O1b): the engine reads it too, where a release
+    /// takes back its key's queued repeats only while it is set
+    /// ([`crate::engine::InputEvent::Release`]).
     pub drain: bool,
     /// Original: A4-0x7a57 (inside the line editor 0x107cba: return ends the line)
     pub line_input: bool,

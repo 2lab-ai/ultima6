@@ -49,8 +49,28 @@ pub enum Key {
 /// One input event, queued by the platform and consumed in order by the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InputEvent {
-    /// A key press (auto-repeat arrives as further presses).
+    /// A key press: the first of a key held down, or any press of a platform that does not tell
+    /// its auto-repeat apart (headless scripts).
     Key(Key),
+    /// Port (spec 19 O1b): a press the platform's auto-repeat sent for a key still held, read as
+    /// a press ([`Io::next_key`]) unless the key's [`InputEvent::Release`] took it back first.
+    Repeat(Key),
+    /// Port (spec 19 O1b): the key let go (platforms send it for each key a held physical key
+    /// gave, whatever the modifiers are at the release). It is never queued and takes no slot of
+    /// the ring ([`KEY_RING`]): where the engine queues the input ([`Engine::tick`]), while
+    /// `game`'s key waits drain (A4-0x7a46 set, [`crate::ui::globals::InputState::drain`]: every
+    /// wait but the line editor's) it takes the key's queued [`InputEvent::Repeat`]s out of the
+    /// queue, so a held key stops at its release, and leaves the presses: a tap during a turn
+    /// still runs once. In the line editor and in `u` (whose queue routine u 0x113ed0 skips a
+    /// release's 0, so its ring at u's A4+0x2d56 never holds one) it takes nothing.
+    ///
+    /// Spec 19 O1 puts the cancel at the poll; it is done where the input is queued instead, so a
+    /// release never waits in the queue: [`Io::pending_events`] stays the count of what the game
+    /// has to take, which the prompt checks read (a host's at-prompt, the headless runner's busy
+    /// test), and the pointer's in-order takes ([`Io::take_pointer`]) meet no release in front.
+    /// The cost: repeats released while the flag is set are gone before a line editor opened
+    /// later could read them (the original's editor would read them, its ring holding each).
+    Release(Key),
     /// The pointer (mouse) at frame pixel (x, y), 0..[`u6_render::WIDTH`] ×
     /// 0..[`u6_render::HEIGHT`] (320 × 200 in Original; in Wide the map beside the UI too; the
     /// platform scales from its window; values outside are clamped), with `buttons` held: bit 0
@@ -195,7 +215,10 @@ impl Io {
         let events = self.events.borrow();
         let last = events.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
-            InputEvent::Key(_) | InputEvent::Text(_) => None,
+            InputEvent::Key(_)
+            | InputEvent::Repeat(_)
+            | InputEvent::Release(_)
+            | InputEvent::Text(_) => None,
         });
         last.unwrap_or(self.pointer.get())
     }
@@ -239,7 +262,31 @@ impl Io {
         while matches!(events.front(), Some(InputEvent::Text(_))) {
             events.pop_front();
         }
-        matches!(events.front(), Some(InputEvent::Key(_)))
+        matches!(
+            events.front(),
+            Some(InputEvent::Key(_) | InputEvent::Repeat(_))
+        )
+    }
+
+    /// Replaces: 0x134e7c (take a game code; here its drain with the flag set: the loop at
+    /// 0x134e84..0x134e98 takes until the ring is empty and keeps the last code)
+    ///
+    /// Port (spec 19 O1b): the take of a key wait that drains (A4-0x7a46 set,
+    /// [`crate::ui::keyread`]): every key press queued (presses and repeats) is taken and the
+    /// newest is the one given. Text goes with them (a reader of keys takes none); pointer
+    /// events keep their places (the original's pointer is no code of the ring). None when no
+    /// key press is queued.
+    pub fn take_newest_key(&self) -> Option<Key> {
+        let mut newest = None;
+        self.events.borrow_mut().retain(|e| match *e {
+            InputEvent::Key(k) | InputEvent::Repeat(k) => {
+                newest = Some(k);
+                false
+            }
+            InputEvent::Text(_) | InputEvent::Release(_) => false,
+            InputEvent::Pointer { .. } => true,
+        });
+        newest
     }
 
     /// Port-only (spec 08 Design 4, slice K5a): as [`Io::next_key`] for the line editor, which
@@ -253,7 +300,7 @@ impl Io {
     pub fn typed_ready(&self) -> bool {
         matches!(
             self.events.borrow().front(),
-            Some(InputEvent::Key(_) | InputEvent::Text(_))
+            Some(InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Text(_))
         )
     }
 
@@ -485,11 +532,11 @@ impl Future for NextKey<'_> {
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(InputEvent::Key(key)) => return Poll::Ready(key),
+                Some(InputEvent::Key(key) | InputEvent::Repeat(key)) => return Poll::Ready(key),
                 Some(InputEvent::Pointer { x, y, buttons }) => {
                     self.io.pointer.set(Pointer::apply(x, y, buttons));
                 }
-                Some(InputEvent::Text(_)) => {}
+                Some(InputEvent::Text(_) | InputEvent::Release(_)) => {}
                 None => return Poll::Pending,
             }
         }
@@ -507,11 +554,14 @@ impl Future for NextTyped<'_> {
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(InputEvent::Key(key)) => return Poll::Ready(Typed::Key(key)),
+                Some(InputEvent::Key(key) | InputEvent::Repeat(key)) => {
+                    return Poll::Ready(Typed::Key(key));
+                }
                 Some(InputEvent::Text(c)) => return Poll::Ready(Typed::Text(c)),
                 Some(InputEvent::Pointer { x, y, buttons }) => {
                     self.io.pointer.set(Pointer::apply(x, y, buttons));
                 }
+                Some(InputEvent::Release(_)) => {}
                 None => return Poll::Pending,
             }
         }
@@ -576,11 +626,18 @@ impl From<LoadError> for BootError {
 }
 
 /// Keys the input handler's ring holds (0x14f0ac: 50 slots at A4+0x64f6, one kept free so a
-/// full ring differs from an empty one); a key that finds it full is dropped. The port counts
-/// presses ([`Key`] is one press): exact for auto-repeat, which sends presses only, but about
-/// twice the original's type-ahead for keys tapped one by one, whose releases take a slot of
-/// the ring there too.
-const KEY_RING: usize = 49;
+/// full ring differs from an empty one; it tests nothing else); a key that finds it full is
+/// dropped. The port counts presses and repeats ([`InputEvent::Key`], [`InputEvent::Repeat`]).
+/// The original's handler 0x151b08 pushes every key event, a release too: 0x151d00 maps a
+/// release (codes from 0x80) to 0, except for an Alt release that ends a number typed on the
+/// keypad, which gives that number ([`crate::ui::input::map_raw`]), and the push at
+/// 0x151c32..0x151c3c does not test it, so there a released key takes two slots and here one
+/// ([`InputEvent::Release`] takes none). Only the line editor reads the ring in order
+/// (A4-0x7a46 clear: 0x107cd6 clears it, 0x107d5a sets it back); every other key wait empties
+/// it at its take and keeps the last code (0x105d06..0x105d0e hands the flag to 0x134e7c, whose
+/// loop at 0x134e84..0x134e98 takes until the ring is empty), so there the room only bounds
+/// what one take drops.
+pub(crate) const KEY_RING: usize = 49;
 
 /// Port-only (spec 08 Design 4, slice K5a): the characters of text ([`InputEvent::Text`]) the
 /// queue holds at most, counted apart from the keys of [`KEY_RING`] (text takes no slot of the
@@ -693,7 +750,8 @@ impl Engine {
     }
 
     /// One host tick: queue `input` (keys past the handler's ring, [`KEY_RING`], and text past
-    /// [`TEXT_RING`] are dropped), advance the clock by `elapsed_ms`, poll the game once (also
+    /// [`TEXT_RING`] are dropped; a release is applied, [`InputEvent::Release`]), advance the
+    /// clock by `elapsed_ms`, poll the game once (also
     /// while it waits; never after it finished), bump the display generation, publish the front
     /// buffer if the game presented, then the vertical-blank work of the display (the pointer
     /// sprite, at the handler's position, over the published frame,
@@ -709,12 +767,24 @@ impl Engine {
                     .count()
             };
             let (mut keys, mut texts) = (count(false), count(true));
+            let cancel = {
+                let s = self.state.borrow();
+                s.main.program == main_loop::Program::Game && s.ui.input.drain
+            };
             for &e in input {
                 let (held, room) = match e {
-                    InputEvent::Key(_) => (&mut keys, KEY_RING),
+                    InputEvent::Key(_) | InputEvent::Repeat(_) => (&mut keys, KEY_RING),
                     InputEvent::Text(_) => (&mut texts, TEXT_RING),
                     InputEvent::Pointer { .. } => {
                         events.push_back(e);
+                        continue;
+                    }
+                    InputEvent::Release(k) => {
+                        if cancel {
+                            let before = events.len();
+                            events.retain(|q| *q != InputEvent::Repeat(k));
+                            keys -= before - events.len();
+                        }
                         continue;
                     }
                 };
@@ -1070,8 +1140,8 @@ mod tests {
     fn keys_beyond_the_handlers_ring_are_dropped() {
         // 0x14f0ac puts a key in the 50-slot ring at A4+0x64f6 only when the next slot is not
         // the reader's (A4-0x35cd / -0x35ce): 49 wait at most, one past them is lost. The port
-        // counts presses (a release takes a slot there too: auto-repeat is exact, taps get
-        // about twice the room). Pointer events are no keys.
+        // counts presses and repeats (a release takes a slot there too, none here). Pointer
+        // events are no keys.
         let mut e = idle_engine();
         let keys: Vec<InputEvent> = (0..60).map(|_| key('a')).collect();
         e.tick(&keys, 16);
@@ -1101,6 +1171,63 @@ mod tests {
             "the key past a full ring is lost"
         );
         assert_eq!(queued.len(), 50, "the pointer event is kept");
+    }
+
+    #[test]
+    fn a_release_takes_back_its_keys_queued_repeats_while_game_drains() {
+        // Spec 19 O1b: in `game` with the drain flag A4-0x7a46 set, a release takes the key's
+        // queued repeats out, their room with them, and leaves its press and the other keys;
+        // with the flag clear (the line editor) and in `u` it takes nothing. It is never queued.
+        use main_loop::Program;
+        let engine = |program, drain| {
+            let mut s = State::empty();
+            s.main.program = program;
+            s.ui.input.drain = drain;
+            Engine::with_game(s, Files::default(), |_state, io| async move {
+                io.sleep(u32::MAX).await;
+            })
+        };
+        let (a, b) = (Key::Char('a'), Key::Char('b'));
+        let (press, repeat) = (InputEvent::Key, InputEvent::Repeat);
+        let input = [
+            press(a),
+            repeat(a),
+            repeat(b),
+            repeat(a),
+            InputEvent::Release(a),
+            repeat(a),
+        ];
+        let all = vec![press(a), repeat(a), repeat(b), repeat(a), repeat(a)];
+        for (program, drain, want) in [
+            (Program::Game, true, vec![press(a), repeat(b), repeat(a)]),
+            (Program::Game, false, all.clone()),
+            (Program::U, true, all),
+        ] {
+            let mut e = engine(program, drain);
+            e.tick(&input, 16);
+            let queued: Vec<InputEvent> = e.io.events.borrow().iter().copied().collect();
+            assert_eq!(queued, want, "{program:?}, drain {drain}");
+        }
+        // The press taken, its repeats queued, the release, then a new press of the same key
+        // and its release before the next take: the new press is all that is left.
+        let mut e = engine(Program::Game, true);
+        let up = InputEvent::Release;
+        e.tick(&[repeat(a), repeat(a), up(a), press(a), up(a)], 16);
+        let queued: Vec<InputEvent> = e.io.events.borrow().iter().copied().collect();
+        assert_eq!(queued, [press(a)], "the new press survives its release");
+        // The room comes back within the tick: a full ring of repeats, their release, a full
+        // ring of presses, all in one input.
+        let mut e = engine(Program::Game, true);
+        let mut input = vec![repeat(a); KEY_RING];
+        input.push(up(a));
+        input.extend([press(b); KEY_RING]);
+        e.tick(&input, 16);
+        let queued: Vec<InputEvent> = e.io.events.borrow().iter().copied().collect();
+        assert_eq!(
+            queued,
+            [press(b); KEY_RING],
+            "the released repeats' room taken again"
+        );
     }
 
     #[test]
