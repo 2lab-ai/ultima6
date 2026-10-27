@@ -6,7 +6,7 @@ tags: [ultima6, render, hd]
 
 # 18 — Remembered sight
 
-Status: shipped (2026-10-27, deploy 27); the owner's follow-up (kept off screen, fading by game days) is unit C2 (branch `feat/sight-fade`). Item 3 of `objects-menu-fog-motion/ssot.md`. Round-1 findings come from unit S1; the first build is unit C1 (branch `feat/remembered-sight`). This document describes the implemented contract. It is not a future target.
+Status: shipped (2026-10-27, deploy 27); the owner's follow-up (kept off screen, fading by game days, unit C2) shipped 2026-10-28 in deploy 31 (main 234fc39). Saving the memory with the savegame is unit C3. Item 3 of `objects-menu-fog-motion/ssot.md`. Round-1 findings come from unit S1; the first build is unit C1 (branch `feat/remembered-sight`). This document describes the implemented contract. It is not a future target.
 
 Owner's words (item 3, verbatim): "보이다가 시야에서 안보이면 지금 안보이는 부분이 그냥 사라지는데, 회색 표시로 전환해줘. (움직이는건 안보이고 안보이게 됐을때의 모습으로 b/w 어둡게 표시하도록 개선. (화면 밖으로 나가면 당연히 렌더링에서 제거."
 
