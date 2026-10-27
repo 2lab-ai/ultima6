@@ -86,6 +86,7 @@ pub mod path;
 pub mod rest;
 pub mod seams;
 pub mod tables;
+pub mod travel;
 pub mod turn;
 pub mod walk;
 mod work;

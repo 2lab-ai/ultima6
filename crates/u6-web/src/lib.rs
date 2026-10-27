@@ -855,6 +855,22 @@ impl Game {
         true
     }
 
+    /// Port (spec 21): the travel of a right press's "move here": the party walks to map cell
+    /// (x, y) on its level, one step a command prompt entered as its direction key, from the next
+    /// [`Game::step`] on ([`u6_core::engine::Engine::travel_to`]). Any key or a button press after
+    /// it stops the walk. False (nothing started) before a start or when the cell is refused
+    /// ([`u6_core::actors::travel::reachable`]).
+    pub fn travel_to(&mut self, x: u16, y: u16) -> bool {
+        self.engine
+            .as_mut()
+            .is_some_and(|e| e.travel_to((x, y)).is_ok())
+    }
+
+    /// Port (spec 21): a travel walks ([`Game::travel_to`]).
+    pub fn travel_active(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| e.travel_active())
+    }
+
     /// The leader's map position (x, y, z), or empty before a start.
     pub fn leader_position(&self) -> Vec<u16> {
         self.engine.as_ref().map_or_else(Vec::new, |e| {
@@ -4802,6 +4818,42 @@ mod tests {
         );
         game.key_down("Space", " ", false);
         assert!(prompt(&mut game), "the prompt again");
+    }
+
+    /// Spec 21: `travel_to` starts the engine's travel exactly when
+    /// [`u6_core::actors::travel::reachable`] lets it, and nothing before a start. On the user's
+    /// zip (skipped when absent) at the first prompt, the 49 cells round the leader (the castle's
+    /// fight is on there, so the refusals are what it shows; the walk itself is
+    /// `u6-core`'s real-data receipt, `actors/travel_tests.rs`).
+    #[test]
+    fn travel_to_starts_exactly_what_reachable_allows() {
+        let mut none = Game::new();
+        assert!(!none.travel_to(1, 1) && !none.travel_active(), "no game");
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let p = game.leader_position();
+        let (mut why, mut any) = (std::collections::BTreeMap::new(), false);
+        for dy in -3i16..=3 {
+            for dx in -3i16..=3 {
+                let c = (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy));
+                let reason = {
+                    let e = game.engine.as_ref().quiet();
+                    u6_core::actors::travel::reachable(&e.state(), c)
+                };
+                let started = game.travel_to(c.0, c.1);
+                assert_eq!(started, reason.is_none(), "{dx} {dy}");
+                any |= started;
+                assert_eq!(
+                    game.travel_active(),
+                    any,
+                    "a refusal leaves the travel as it was"
+                );
+                *why.entry(reason.map_or("started", |r| r.code()))
+                    .or_insert(0) += 1;
+            }
+        }
+        eprintln!("travel_to over 49 cells: {why:?}");
     }
 
     /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
