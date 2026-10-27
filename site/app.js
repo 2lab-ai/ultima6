@@ -315,9 +315,11 @@ let leaving = false; // the page is loading again into the other build: the game
 // files of the running game, data-saves = save files it booted with, data-leader = x,y,z,
 // data-prompt = 1 while the game waits for a command key, data-program = u / game / ended,
 // data-name = the party leader's name, data-keys = keys not yet taken by the game,
-// data-speed = the chosen speed (1, 1.5, .. 8, max), data-behind = 1 while steps are dropped;
-// on the body data-gain = the music's gain now (0 muted or above 4x, 1), data-hd-pack = the
-// images of the HD pack loaded (tiles,portraits,panels) or none, data-hd-pack-bytes = the bytes
+// data-speed = the chosen speed (1, 1.5, .. 8, max), data-behind = 1 while steps are dropped,
+// data-pointer = game / page (`showGamePointer`: whether the engine's sprite is under the
+// mouse's last place, by the last pointer event or frame); on the body data-gain = the music's
+// gain now (0 muted or above 4x, 1), data-hd-pack = the images of the HD pack loaded
+// (tiles,portraits,panels) or none, data-hd-pack-bytes = the bytes
 // its pictures take decoded, data-hd-matched = those the game on screen matches (empty without
 // a game); data-voice = the voices' state (off, terms, checking, loading, ready, failed),
 // data-voice-error = the last failure's code, data-voice-gain = the voice gain, data-voice-path =
@@ -1650,6 +1652,12 @@ let x4 = null; // the offscreen canvas that holds the ×4 frame while the HD lay
 let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: none, or stale)
 let parchmentShown = null; // the parchment's colour the last whole paint drew (`parchmentNow`)
 let sentButtons = 0; // the pointer's buttons as last sent to the game
+let mouseAt = null; // the mouse's client point as its last pointer event left it, or null
+// The canvas pixel mapped last (`layoutToGame`, `pixelAt`) shows no pixel of the game's at that
+// place: a gap or a margin round the game's regions, a letterbox side, a Wide window's frame or
+// title strip; the game's pointer is then at the nearest edge or off screen (LAYOUT_REST,
+// WIDE_REST), not under the system's (`gameUnder`).
+let pointerGap = false;
 
 // The layout in effect on the body (data-layout: the stylesheet's box): 'wide' in the Wide build
 // (HD on or off), else 'hd' or 'original'.
@@ -1869,14 +1877,17 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // likewise, a point on its dark sides at the nearest edge. In the game's regions a point in one
 // is that pixel of its classic rect; in a gap or a margin, a move with no button the nearest
 // pixel of the nearest region (the game's pointer stays where the player sees it), anything
-// else the rest of the screen (LAYOUT_REST).
+// else the rest of the screen (LAYOUT_REST). `pointerGap` says whether the point was in none
+// (a dark side, a gap, a margin).
 function layoutToGame(px, py, held = false) {
   if (WIDE && shownView !== FRAME) return wideToGame(px, py, held);
   if (shownView === FRAME) {
+    pointerGap = false;
     return [Math.floor((px * SCREEN_W) / canvas.width), Math.floor((py * SCREEN_H) / canvas.height)];
   }
   if (shownView === WHOLE_VIEW) {
     const [x, y, w, h] = LAYOUT_WHOLE;
+    pointerGap = px < x || px >= x + w || py < y || py >= y + h;
     return [clamp(Math.floor(((px - x) * SCREEN_W) / w), 0, SCREEN_W - 1),
       clamp(Math.floor(((py - y) * SCREEN_H) / h), 0, SCREEN_H - 1)];
   }
@@ -1888,6 +1899,7 @@ function layoutToGame(px, py, held = false) {
     const d = inside ? -1 : Math.hypot(Math.max(x - px, 0, px - x - w), Math.max(y - py, 0, py - y - h));
     if (d < far) [near, far] = [region, d];
   }
+  pointerGap = far >= 0;
   if (far >= 0 && held) return [...LAYOUT_REST];
   const [fx, fy, fw, fh] = near.from;
   const [x, y, w, h] = near.to;
@@ -2490,14 +2502,19 @@ function repaintWide() {
 // game's: a window shown first (each in front of the map, the one painted last in front; a dimmed
 // one too, whose press the engine ignores): in its content that pixel of its frame rect; on its
 // frame or its title strip (a gap), a move with no button the nearest pixel of its content,
-// anything else the rest of the screen (WIDE_REST); elsewhere the map, at its pixel.
+// anything else the rest of the screen (WIDE_REST); elsewhere the map, at its pixel (it covers
+// the canvas). `pointerGap` as there: a dark side, a window's frame or title strip.
 function wideToGame(px, py, held) {
   const through = ([fx, fy, fw, fh], [x, y, w, h]) => [
     clamp(fx + Math.floor(((px - x) * fw) / w), fx, fx + fw - 1),
     clamp(fy + Math.floor(((py - y) * fh) / h), fy, fy + fh - 1)];
-  if (shownView === WHOLE_VIEW) return through([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
+  if (shownView === WHOLE_VIEW) {
+    pointerGap = !inRect(px, py, WIDE_WHOLE);
+    return through([0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE);
+  }
   const win = shownWindows().findLast(({ outer }) => inRect(px, py, outer));
-  if (win && !inRect(px, py, win.to) && held) return [...WIDE_REST];
+  pointerGap = win !== undefined && !inRect(px, py, win.to);
+  if (pointerGap && held) return [...WIDE_REST];
   if (win) return through(win.from, win.to);
   return through(wideMap.from, wideMap.to);
 }
@@ -2974,7 +2991,8 @@ function frame(now) {
     checkSave();
     canvas.dataset.leader = game.leader_position().join(',');
     canvas.dataset.prompt = game.at_prompt() ? '1' : '0';
-    canvas.dataset.program = game.program();
+    put(canvas.dataset, 'program', game.program());
+    showGamePointer();
     canvas.dataset.name = game.leader_name();
     canvas.dataset.keys = String(game.keys_pending());
     followLine();
@@ -3899,26 +3917,104 @@ faster.addEventListener('click', () => changeSpeed(1));
 // this order, the focus, the game's pointer event (queued for the next step, exactly once) and
 // the gesture that starts the sound (the AudioContext is created before its first await, inside
 // the press's user activation); the sound starting never delays or drops the event.
+// The game pixel client point (x, y) reaches through the canvas's CSS box `box` (whatever the
+// canvas's own size), `held` as `layoutToGame`, which sets `pointerGap` (here too for the frame
+// as it is: never a gap).
+function pixelAt(x, y, box, held) {
+  if (shownView === FRAME) {
+    pointerGap = false;
+    return [Math.floor(((x - box.left) * game.width()) / box.width),
+      Math.floor(((y - box.top) * game.height()) / box.height)];
+  }
+  const px = ((x - box.left) * canvas.width) / box.width;
+  const py = ((y - box.top) * canvas.height) / box.height;
+  return layoutToGame(px, py, held);
+}
 // The game pixel of pointer event `e` (null on a canvas with no box), as `sendPointer` sends it.
 function pointerPixel(e) {
   const box = canvas.getBoundingClientRect();
   if (box.width === 0 || box.height === 0) return null;
   const buttons = e.buttons & 3;
-  if (shownView === FRAME) {
-    return [Math.floor(((e.clientX - box.left) * game.width()) / box.width),
-      Math.floor(((e.clientY - box.top) * game.height()) / box.height)];
+  if (WIDE && shownView !== FRAME) {
+    const px = ((e.clientX - box.left) * canvas.width) / box.width;
+    const py = ((e.clientY - box.top) * canvas.height) / box.height;
+    if (dragWindow(e, px, py)) return [...WIDE_REST];
   }
-  const px = ((e.clientX - box.left) * canvas.width) / box.width;
-  const py = ((e.clientY - box.top) * canvas.height) / box.height;
-  if (WIDE && dragWindow(e, px, py)) return [...WIDE_REST];
-  return layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
+  return pixelAt(e.clientX, e.clientY, box, buttons !== 0 || sentButtons !== 0);
 }
+
+// The system's pointer over the canvas (index.html: hidden while `game` runs, where the game's
+// own is under it): the mouse's last place (`mouseAt`), from the mouse's own pointer events only
+// (a touch or a pen moves the game's pointer, never the mouse); forgotten when the mouse leaves
+// the window, the window loses the focus or the page is hidden (it may come back elsewhere).
+// The page's elements over the canvas that cover the game's pointer while the canvas's cursor
+// shows over them: the speed badge, which lets the pointer through to the canvas, and the Exit
+// button, under which a press held on the canvas (captured: every press is, `pointerdown`) moves
+// on, the canvas's cursor shown and the game given each move (the hidden input never covers it:
+// opacity 0; the context menu takes the pointer, a press on the canvas closes it first).
+const OVER_CANVAS = [badge, fullscreenExit];
+for (const kind of ['pointerdown', 'pointermove', 'pointerup']) {
+  window.addEventListener(kind, (e) => {
+    if (e.pointerType === 'mouse') mouseAt = [e.clientX, e.clientY];
+  }, { capture: true });
+}
+const forgetMouse = () => {
+  mouseAt = null;
+  showGamePointer();
+};
+window.addEventListener('pointerout', (e) => {
+  if (e.pointerType === 'mouse' && e.relatedTarget === null) forgetMouse();
+}, { capture: true });
+window.addEventListener('blur', forgetMouse);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) forgetMouse();
+});
+
+// Where the game's pointer is against the system's at client point (x, y), as the page and the
+// engine show now: `game`, the engine's sprite drawn (Game.game_pointer: shown) at the very game
+// pixel the point reaches, the point on the canvas, under none of OVER_CANVAS, in a part of the
+// game (not a gap or a margin of the HD layout, a letterbox side, a Wide window's frame or title
+// strip: `pointerGap`), and no press the context menu takes held; `hold`, the same but for a
+// pointer event at that pixel queued for the next step (the mouse's own move, which the sprite
+// takes at that step: the cursor stays as it is, so a move never flickers it), for one frame at
+// most: the frame's end decides again from where the step put the sprite (where a context-menu
+// entry's target press, queued at that step after the move, put it elsewhere, `page` from
+// then; the cursor was hidden over the sprite's old place for that one frame); else `page`. The
+// engine decides where the sprite is, whatever moved it (the page's moves, a context-menu entry's
+// presses, a window dragged: the rest of the screen), so a layout, a view or a box changed under
+// a still mouse shows the system's pointer until the mouse moves again.
+function gameUnder(x, y) {
+  if (!game || crashed || leaving || swallowing) return 'page';
+  const inside = (r) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+  const box = canvas.getBoundingClientRect();
+  if (!inside(box)) return 'page';
+  if (OVER_CANVAS.some((el) => !el.hidden && inside(el.getBoundingClientRect()))) return 'page';
+  const [gx, gy] = pixelAt(x, y, box, false);
+  if (pointerGap) return 'page';
+  const [ex, ey, shown, queued, qx, qy] = game.game_pointer();
+  if (!shown) return 'page';
+  if (queued) return qx === gx && qy === gy ? 'hold' : 'page';
+  return ex === gx && ey === gy ? 'game' : 'page';
+}
+
+// The canvas's data-pointer, which the stylesheet reads: `game` while the game's pointer is
+// under the system's at the mouse's last place (`gameUnder`), else `page`, as it was while the
+// mouse's own move waits for a step. Set at each pointer event the page handles and at the end
+// of each frame of the loop, after its steps, so a change under a still mouse (the menu closed by
+// a key, a layout, a view or fullscreen in or out, the program, a window or the badge shown or
+// hidden, the engine moving or hiding its pointer) shows by the next frame.
+function showGamePointer() {
+  const under = mouseAt ? gameUnder(...mouseAt) : 'page';
+  if (under !== 'hold') put(canvas.dataset, 'pointer', under);
+}
+
 function sendPointer(e) {
   if (!game || crashed) return;
   if (swallowing) {
     // The press that opened the context menu, or the outside press that closed it: none of it
     // reaches the game, up to its release.
     if ((e.buttons & 3) === 0) swallowing = false;
+    showGamePointer();
     return;
   }
   const at = pointerPixel(e);
@@ -3926,6 +4022,7 @@ function sendPointer(e) {
   const buttons = e.buttons & 3;
   sentButtons = buttons;
   game.pointer(at[0], at[1], buttons);
+  showGamePointer();
 }
 canvas.addEventListener('pointerdown', (e) => {
   canvas.focus();
@@ -4038,6 +4135,7 @@ function openContextMenu(e) {
   }
   menuAt = at;
   swallowing = true;
+  showGamePointer();
   contextMenu.hidden = false;
   placeMenu(e.clientX, e.clientY);
   // No focus for the canvas from the press (its mouse default), the menu takes it, again once the
@@ -4157,12 +4255,14 @@ window.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   e.stopPropagation();
   swallowing = true;
+  showGamePointer();
   closeContextMenu();
 }, { capture: true });
 for (const kind of ['pointerup', 'pointercancel']) {
   window.addEventListener(kind, (e) => {
     if (!swallowing || (kind === 'pointerup' && (e.buttons & 3) !== 0)) return;
     swallowing = false;
+    showGamePointer();
     if (e.target === canvas) e.stopPropagation();
   }, { capture: true });
 }
