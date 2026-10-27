@@ -3313,6 +3313,47 @@ fn the_shared_copy_gives_every_entry_the_answer_of_a_fresh_copy() {
     }
 }
 
+/// Follow-up F1 (rounds 1 and 2), item 3 and its item 1: the fresh-copy switch through
+/// [`menu::query_fresh`] itself, on a real press (the closed door's cell by the leader): the press
+/// runs its checks on fresh copies (`menu::fresh_copies` goes up), a plain `query` on the same
+/// cell runs none (it does not move); clear after a `query_fresh` that gave a menu (the same menu
+/// `query` gives); a `query_fresh` inside an outer fresh scope leaves the switch set for the rest
+/// of that scope, and it is clear again after it.
+#[test]
+fn query_fresh_puts_the_fresh_copy_switch_back() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (door, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let at = at_slot(&s, door);
+    let io = Io::new(files.clone());
+    let mut prompt = s.clone();
+    prompt.main.reading = 1;
+    assert!(!menu::fresh_now(), "clear before");
+    let copies = menu::fresh_copies();
+    let fresh = menu::query_fresh(&prompt, &io, at.0, at.1);
+    let by_fresh = menu::fresh_copies() - copies;
+    assert!(fresh.is_some(), "a menu");
+    assert!(!menu::fresh_now(), "clear after query_fresh");
+    let copies = menu::fresh_copies();
+    let shared = menu::query(&prompt, &io, at.0, at.1);
+    let by_shared = menu::fresh_copies() - copies;
+    eprintln!("checks on a fresh copy: query_fresh {by_fresh}, query {by_shared}");
+    assert!(by_fresh > 0, "query_fresh runs its checks on fresh copies");
+    assert_eq!(by_shared, 0, "query runs none on a fresh copy");
+    assert!(fresh == shared, "the menu query gives");
+    let (inner, set) = menu::fresh_scope(|| {
+        let m = menu::query_fresh(&prompt, &io, at.0, at.1);
+        (m, menu::fresh_now())
+    });
+    assert!(
+        set,
+        "an outer scope's switch still set after the inner query_fresh"
+    );
+    assert!(inner == fresh, "the same menu inside the outer scope");
+    assert!(!menu::fresh_now(), "clear after the outer scope");
+}
+
 /// A loaf (0x80) made on a free tile next to the leader, the view rebuilt; its slot and pixel.
 fn loaf_beside(s: &mut State) -> (Slot, (i16, i16)) {
     let (lx, ly) = leader_at(s);
@@ -3413,7 +3454,10 @@ fn arrows(s: &State, hero: Slot) -> u16 {
 
 /// The format addresses of the lines combat said after `before`, only those: its queue keeps the
 /// last ones (`combat.said`, the oldest dropped first), so `after` is a tail of `before` followed
-/// by the new ones; the longest such tail is taken as the kept part.
+/// by the new ones; the longest such tail is taken as the kept part. The limit: once lines were
+/// dropped (the queue at its cap), new lines that repeat what it held can be taken for its kept
+/// part, and count as fewer ([`said_since_misses_only_a_full_queues_repeats`]); the Attack checks
+/// start from an empty queue, which one command never fills, so they are exact.
 fn said_since(before: &State, after: &State) -> Vec<u32> {
     let (old, now) = (&before.combat.said, &after.combat.said);
     let kept = (0..=old.len())
@@ -3421,6 +3465,71 @@ fn said_since(before: &State, after: &State) -> Vec<u32> {
         .find(|tail| now.starts_with(tail))
         .map_or(0, <[_]>::len);
     now[kept..].iter().map(|x| x.at).collect()
+}
+
+/// The queue of 0x108658's lines (`combat.said`) after the engine says `ats` in order, through
+/// its own [`crate::combat::present::say`] (the text on, which it needs; outside a poll there is
+/// no `Io`, so nothing is printed): its cap and its dropping are the engine's.
+fn said_queue(ats: &[u32]) -> State {
+    let mut s = State::default();
+    s.ui.text.on = true;
+    for &at in ats {
+        crate::combat::present::say(&mut s, at, Vec::new());
+    }
+    s
+}
+
+/// The said queue's cap, as the engine keeps it: what is left after more lines than it holds.
+fn said_cap() -> usize {
+    said_queue(&[0; 200]).combat.said.len()
+}
+
+/// Follow-up F1 (rounds 1 and 2), items 2 and 3: [`said_since`] on the engine's own keeping of the
+/// queue (its cap read from it, the oldest dropped first): exact while nothing was dropped, and
+/// after drops when the new lines differ from what it held; its limit, pinned: once lines were
+/// dropped, new lines that repeat what it held count as fewer: a full queue of one line, that
+/// line again gives none (the queue after is the queue before), that line and another give only
+/// the other.
+#[test]
+fn said_since_misses_only_a_full_queues_repeats() {
+    let cap = said_cap();
+    assert!(cap > 4 && cap < 200, "a cap");
+    let (a, b, c) = (1u32, 2, 3);
+    let some = said_queue(&[a, b]);
+    let more: Vec<u32> = [a, b, c, a].to_vec();
+    assert_eq!(
+        said_since(&some, &said_queue(&more)),
+        [c, a],
+        "not full: exact"
+    );
+    assert_eq!(said_since(&some, &some), Vec::<u32>::new(), "nothing said");
+    let lines: Vec<u32> = (0..cap as u32).map(|k| 100 + k).collect();
+    let full = said_queue(&lines);
+    assert_eq!(full.combat.said.len(), cap, "at its cap");
+    let then: Vec<u32> = lines.iter().copied().chain([a, b]).collect();
+    assert_eq!(
+        said_since(&full, &said_queue(&then)),
+        [a, b],
+        "full, new lines: exact"
+    );
+    let ones = vec![a; cap];
+    let same = said_queue(&ones);
+    let again = said_queue(&[ones.as_slice(), &[a]].concat());
+    assert!(
+        again.combat.said == same.combat.said,
+        "one more of the same: the queue as it was"
+    );
+    assert_eq!(
+        said_since(&same, &again),
+        Vec::<u32>::new(),
+        "the limit: none"
+    );
+    let and_b = said_queue(&[ones.as_slice(), &[a, b]].concat());
+    assert_eq!(
+        said_since(&same, &and_b),
+        [b],
+        "the limit: a, b said, b counted"
+    );
 }
 
 /// Spec 17 rounds 2, 3 and 5, items 4c, 14 and 9, Attack (0x124caa, 0x124a98, 0x124232), judged on
@@ -3446,6 +3555,7 @@ fn attacks_ammo_and_range_checks_agree_with_attack() {
     let a4 = crate::image::A4;
     let (no_arrows, out_of_range, interferes) = (a4 - 0x76dc, a4 - 0x7512, a4 - 0x75f2);
     let refusals = [no_arrows, out_of_range, interferes];
+    let cap = said_cap();
     type Checkpoint = Box<dyn Fn(&State, &State) -> bool>;
     // A case: its label, its state, the loaf aimed at and its pixel, the menu's answer, the check.
     type Case = (
@@ -3535,11 +3645,17 @@ fn attacks_ammo_and_range_checks_agree_with_attack() {
     for (label, mut c, (target, at), want, checkpoint) in cases {
         c.main.attack_target = -1;
         c.combat.hit = -1;
+        // An empty said queue: one command never fills it, so `said_since` is exact here.
+        c.combat.said.clear();
         let m = menu_of(&c, &files, at).expect("a menu");
         let r = reason(&m, target, menu::ATTACK).expect("Attack shown");
         let mut e = prompt_engine(c.clone(), &files);
         assert!(choose(&mut e, menu::ATTACK, at), "{label}: its target read");
         let after = e.state().clone();
+        assert!(
+            after.combat.said.len() < cap,
+            "{label}: the said queue never full"
+        );
         let reached = checkpoint(&c, &after);
         let refused = said_since(&c, &after).iter().any(|x| refusals.contains(x));
         eprintln!(
@@ -3833,8 +3949,9 @@ fn the_panels_stays_locked_and_away_checks_agree_with_the_handlers() {
 /// unworn and, in another state, one readied, each the hero's inventory panel shown: the section
 /// of the 0x4c lists literally Look alone (unworn) or the take-off and Look (readied; the take-off
 /// disabled as staying); no Use (the type is outside Use's list), no Drop, no Move. The left press
-/// the hidden Ready would give, made anyway, leaves the unworn one carried, not readied. The map's
-/// menu of the leader's cell never names it.
+/// the hidden Ready would give, made anyway, leaves the unworn one carried, not readied, while the
+/// same press on the same list cell readies an unworn shovel there (the matched control, follow-up
+/// F1 item 1). The map's menu of the leader's cell never names it.
 #[test]
 fn a_type_0x4c_worn_or_not_is_never_offered_drop() {
     let Some(files) = files() else { return };
@@ -3864,16 +3981,37 @@ fn a_type_0x4c_worn_or_not_is_never_offered_drop() {
             "{label}: literally these, no Ready, Drop or Move"
         );
         if place == crate::objects::IN_INVENTORY {
-            let mut e = prompt_engine(st.clone(), &files);
-            let [press, release] = menu::left_press(at.0, at.1);
-            e.tick(&[press, release], 16);
-            for _ in 0..200 {
-                e.tick(&[], 16);
-            }
-            let kept = e.state().objects.place(amulet) == crate::objects::IN_INVENTORY;
+            let pressed = |st: &State| {
+                let mut e = prompt_engine(st.clone(), &files);
+                let [press, release] = menu::left_press(at.0, at.1);
+                e.tick(&[press, release], 16);
+                for _ in 0..200 {
+                    e.tick(&[], 16);
+                }
+                e
+            };
+            let kept = pressed(&st).state().objects.place(amulet) == crate::objects::IN_INVENTORY;
+            // The matched control: the same press on the same list cell, an unworn shovel there
+            // instead, readies it, so the press reaches the slot's own action (0x10619c's Ready)
+            // and the amulet staying carried is that action refusing it, not a press that
+            // reached nothing.
+            let mut control = s.clone();
+            let shovel = crate::objects::create_in(&mut control, 0x67, place, 1, hero);
+            assert_eq!(
+                cell_of_carried(&mut control, shovel),
+                at,
+                "the same list cell"
+            );
+            let readied =
+                pressed(&control).state().objects.place(shovel) == crate::objects::READIED;
             eprintln!(
-                "{label}: the left press anyway, still carried {}",
-                u8::from(kept)
+                "{label}: the left press anyway, still carried {}; on a shovel there, readied {}",
+                u8::from(kept),
+                u8::from(readied)
+            );
+            assert!(
+                readied,
+                "the control: the same press readies an unworn shovel"
             );
             assert!(
                 kept,
