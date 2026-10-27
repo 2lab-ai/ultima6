@@ -30,8 +30,12 @@
 //!    read before it binds; a nested fn does not see it). A callee no plain path that names one
 //!    is a form.
 //! 2. A value comes only from a proven, unique binding: every binding of a name in the scopes it
-//!    is read from agrees, a pattern binding or a glob between it and the read that could bind
-//!    it hides it, a path's head is looked up from the innermost scope out (a fn's `use` of a
+//!    is read from agrees; a pattern binding hides it, but the last one before the read whose
+//!    origin the scan reads gives its value (round 6: the one immutable name a `let` binds, its
+//!    initializer's; the name in `Some(…)` of an `if let`, a `while let` or a `let … else`, what
+//!    the `Option` holds: `Some(x)`, `None`, a local, a block or an `if` of those, a call of a fn
+//!    of the sources that returns one, each value of its tail and its `return`s); a glob between
+//!    it and the read that could bind it hides it; a path's head is looked up from the innermost scope out (a fn's `use` of a
 //!    module before the module's child module of that name), `GameData::a4` only through
 //!    `objects::commands::data`'s `GameData`, a primitive's `from` and bounds only with no item
 //!    of its name in scope, a module path two `cfg` variants share names nothing, and no value
@@ -323,20 +327,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         Why::Slots(A4.wrapping_sub(0x7ae4).wrapping_sub(4), 9),
     ),
     (
-        "actors/rest/command.rs",
-        "say",
-        "msg",
-        Why::Consts(&[
-            "STR_COMBAT",
-            "STR_NO_REPAIR",
-            "STR_WILDERNESS",
-            "STR_FOES",
-            "STR_OTHERS",
-            "STR_SOLO",
-            "STR_ROOM",
-        ]),
-    ),
-    (
         "actors/rest/mod.rs",
         "game_string",
         "addr",
@@ -373,12 +363,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         Why::Forwarded(&["print_image"]),
     ),
     (
-        "combat/attack.rs",
-        "say",
-        "at",
-        Why::Consts(&["SHIP_CANNONS", "BARE_HANDS"]),
-    ),
-    (
         "combat/present.rs",
         "game_string",
         "at",
@@ -389,12 +373,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         "game_string",
         "addr",
         Why::Forwarded(&["say"]),
-    ),
-    (
-        "inventory/ready.rs",
-        "say",
-        "msg",
-        Why::Consts(&["STR_CANT", "STR_HEAVY", "STR_NO_PLACE"]),
     ),
     (
         "magic/book.rs",
@@ -415,18 +393,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         Why::Forwarded(&["print_at"]),
     ),
     (
-        "magic/cast.rs",
-        "print_at",
-        "fmt",
-        Why::Consts(&["FMT_S", "FMT_SPACE_S"]),
-    ),
-    (
-        "magic/cast.rs",
-        "print_at",
-        "refusal",
-        Why::Consts(&["MSG_LEVEL_LOW", "MSG_NO_POINTS", "MSG_NO_REAGENTS"]),
-    ),
-    (
         "magic/effects.rs",
         "game_string",
         "addr",
@@ -439,12 +405,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         Why::Forwarded(&["say"]),
     ),
     ("magic/items.rs", "pointed_string", "at", DIRECTIONS),
-    (
-        "magic/items.rs",
-        "print_at",
-        "fmt",
-        Why::Consts(&["FMT_S", "FMT_SPACE_S"]),
-    ),
     ("magic/spells.rs", "pointed_string", "at", DIRECTIONS),
     (
         "magic/tables.rs",
@@ -526,12 +486,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
     ),
     (
         "objects/commands/look.rs",
-        "print_at",
-        "lead",
-        Why::Consts(&["S_IT", "S_COMMA", "S_AND"]),
-    ),
-    (
-        "objects/commands/look.rs",
         "pointed",
         "at(SPELL_NAMES, u32::from(spell))",
         Why::Slots(A4.wrapping_sub(0x6f4c), 0x80),
@@ -547,12 +501,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         "pointed",
         "at(REAGENT_NAMES, b)",
         Why::Slots(A4.wrapping_sub(0x6d4c), 8),
-    ),
-    (
-        "objects/commands/look.rs",
-        "print_at",
-        "fmt",
-        Why::Consts(&["S_WORD", "S_SPACE_WORD"]),
     ),
     ("objects/commands/push.rs", "pointed", "at", DIRECTIONS),
     (
@@ -635,12 +583,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         ]),
     ),
     (
-        "usecmd/misc.rs",
-        "print",
-        "fmt",
-        Why::Consts(&["FMT_STR", "FMT_SP_STR"]),
-    ),
-    (
         "usecmd/mod.rs",
         "game_string",
         "fmt",
@@ -659,17 +601,6 @@ pub(super) const NOT_CATALOGUED: &[(&str, &str, &str, Why)] = &[
         Why::Forwarded(&["say"]),
     ),
     ("usecmd/mod.rs", "print", "fmt", Why::Forwarded(&["say"])),
-    (
-        "usecmd/travel.rs",
-        "print",
-        "m",
-        Why::Consts(&[
-            "STR_NOT_BOARDABLE",
-            "STR_LEADER_9",
-            "STR_LEADER_A4",
-            "STR_ON_HORSE",
-        ]),
-    ),
     (
         "usecmd/travel.rs",
         "print",
@@ -811,6 +742,13 @@ pub(super) const CONST_REASONS: &[(&str, &str, Why)] = &[
         "gfx/blit.rs",
         "ROW_BYTES",
         Why::Logic("a frame row's bytes from another crate's width, no address"),
+    ),
+    (
+        "gfx/cache.rs",
+        "FROZEN_BASE",
+        Why::Logic(
+            "the remembered sight's first tile slot, past every record (another crate's tile count), no image address",
+        ),
     ),
     (
         "gfx/sprite.rs",
@@ -1186,8 +1124,9 @@ struct Const {
 /// loop's, or an `if`'s or a `while`'s condition with what it guards (its parent the scope it is
 /// in), with the consts declared in it (a `static` is one, a `static mut` with no value), the
 /// names and globs its `use`s bring in, the names its patterns bind (a fn's parameters, `let`s,
-/// arms), which hide a const of that name, and its other items. Associated consts are not
-/// declared: a site naming one is not resolved (a finding).
+/// arms), which hide a const of that name unless the scan reads their origin ([`Binding`]), and
+/// its other items and `Option` fns. Associated consts are not declared: a site naming one is
+/// not resolved (a finding).
 #[derive(Default)]
 struct Scope {
     parent: Option<usize>,
@@ -1199,8 +1138,117 @@ struct Scope {
     uses: BTreeMap<String, Vec<Vec<String>>>,
     globs: Vec<Vec<String>>,
     locals: BTreeSet<String>,
+    /// Each pattern binding of a name, with where it binds and where its value comes from.
+    bindings: BTreeMap<String, Vec<Binding>>,
     /// The other items declared in it (types, fns, traits): names a `use` or a glob may bring.
     items: BTreeSet<String>,
+    /// The fns declared in it that return an `Option`.
+    option_fns: BTreeMap<String, Vec<OptionFn>>,
+}
+
+/// Where a pattern binding's value comes from, where the scan reads it (2026-10-27, round 6):
+/// the one immutable name a `let` binds (`Value`: its initializer, in the `let`'s scope, typed
+/// by its ascription), or the one in `Some(…)` of an `if let`, a `while let` or a `let … else`
+/// (`Some`: what the `Option` it matches holds, [`Scan::option`]).
+#[derive(Clone)]
+enum Origin {
+    Value {
+        init: Expr,
+        scope: usize,
+        want: Option<Ty>,
+    },
+    Some {
+        of: Expr,
+        scope: usize,
+    },
+}
+
+/// A pattern binding: the byte of its source from which it binds (a `let`'s end, a condition's
+/// end, else the name's own), and its origin where the scan reads one.
+#[derive(Clone)]
+struct Binding {
+    at: usize,
+    origin: Option<Origin>,
+}
+
+/// A fn of the sources that returns an `Option`: its body and source.
+#[derive(Clone)]
+struct OptionFn {
+    body: syn::Block,
+    src: usize,
+}
+
+/// What a name read at a byte of the sources is in a scope: a pattern binding of it there with
+/// its origin, one the scan does not read, or none there yet (an outer name).
+enum Local<'s> {
+    Known(&'s Origin),
+    Unknown,
+    Later,
+}
+
+/// A block's last statement: its value's expression, a `return`, a `break` or a `continue`
+/// (no value), or another.
+enum Tail<'e> {
+    Expr(&'e Expr),
+    Diverges,
+    Other,
+}
+
+fn tail(b: &syn::Block) -> Tail<'_> {
+    match b.stmts.last() {
+        Some(Stmt::Expr(Expr::Return(_) | Expr::Break(_) | Expr::Continue(_), _)) => Tail::Diverges,
+        Some(Stmt::Expr(e, None)) => Tail::Expr(e),
+        _ => Tail::Other,
+    }
+}
+
+/// The byte a block's `{` is at in its source.
+fn open_byte(b: &syn::Block) -> usize {
+    b.brace_token.span.open().byte_range().start
+}
+
+/// The one immutable name a pattern binds (`name` or `name: T`), with its integer type.
+fn simple(pat: &syn::Pat) -> Option<(String, Option<Ty>)> {
+    match pat {
+        syn::Pat::Ident(i)
+            if i.by_ref.is_none() && i.mutability.is_none() && i.subpat.is_none() =>
+        {
+            Some((i.ident.to_string(), None))
+        }
+        syn::Pat::Type(t) => {
+            let (name, _) = simple(&t.pat)?;
+            Some((name, int_ty(&t.ty)))
+        }
+        _ => None,
+    }
+}
+
+/// The one immutable name `Some(name)` binds.
+fn some_of(pat: &syn::Pat) -> Option<String> {
+    let syn::Pat::TupleStruct(t) = pat else {
+        return None;
+    };
+    let some = t.qself.is_none() && t.path.is_ident("Some") && t.elems.len() == 1;
+    some.then(|| simple(t.elems.first()?).map(|(n, _)| n))?
+}
+
+/// The `return`s of a fn's body (not a closure's, an async block's or a nested item's), and
+/// whether a macro there names `return` (its tokens no expressions the scan reads).
+struct Returns<'a, 'ast>(&'a mut Vec<&'ast syn::ExprReturn>, bool);
+
+impl<'ast> Visit<'ast> for Returns<'_, 'ast> {
+    fn visit_expr_return(&mut self, r: &'ast syn::ExprReturn) {
+        self.0.push(r);
+        visit::visit_expr_return(self, r);
+    }
+    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
+    fn visit_item(&mut self, _: &'ast Item) {}
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        let mut words = Vec::new();
+        idents(m.tokens.clone(), &mut words);
+        self.1 |= words.iter().any(|w| w == "return");
+    }
 }
 
 /// A call of the sources: its scope, source and line, its callee (a path's last segment, `Arg::`
@@ -1361,6 +1409,11 @@ struct Walk<'s> {
     /// Where the `::` of each qualified self type's path is (`<T>::f`, `<T as U>::f`): no leading
     /// colon.
     qself: BTreeSet<usize>,
+    /// Each block's scope and each `return`'s, by source and byte.
+    blocks: &'s mut BTreeMap<(usize, usize), usize>,
+    returns: &'s mut BTreeMap<(usize, usize), usize>,
+    /// The binding a pattern being walked makes: from where, and the name with its origin.
+    pending: Option<(usize, Option<(String, Origin)>)>,
     /// How deep the walk is in a site's address argument, and in an integer const's value.
     in_site: usize,
     in_const: usize,
@@ -1445,7 +1498,22 @@ impl Walk<'_> {
                     }
                 }
                 Item::Fn(f) if !self.off(&f.attrs) => {
-                    self.scopes[id].items.insert(f.sig.ident.to_string());
+                    let name = f.sig.ident.to_string();
+                    let option = matches!(&f.sig.output, syn::ReturnType::Type(_, ty)
+                        if matches!(&**ty, syn::Type::Path(p)
+                            if p.qself.is_none()
+                                && p.path.segments.last().is_some_and(|s| s.ident == "Option")));
+                    if option {
+                        self.scopes[id]
+                            .option_fns
+                            .entry(name.clone())
+                            .or_default()
+                            .push(OptionFn {
+                                body: (*f.block).clone(),
+                                src: self.src,
+                            });
+                    }
+                    self.scopes[id].items.insert(name);
                 }
                 Item::Struct(x) if !self.off(&x.attrs) => {
                     self.scopes[id].items.insert(x.ident.to_string());
@@ -1740,7 +1808,8 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_block(&mut self, b: &'ast syn::Block) {
-        self.open(None);
+        let id = self.open(None);
+        self.blocks.insert((self.src, open_byte(b)), id);
         let items: Vec<&Item> = b
             .stmts
             .iter()
@@ -1773,13 +1842,39 @@ impl<'ast> Visit<'ast> for Walk<'_> {
                 self.visit_expr(e);
             }
         }
+        let scope = self.here();
+        let origin = l.init.as_ref().and_then(|init| match &init.diverge {
+            None => simple(&l.pat).map(|(name, want)| {
+                let init = (*init.expr).clone();
+                (name, Origin::Value { init, scope, want })
+            }),
+            Some(_) => some_of(&l.pat).map(|name| {
+                let of = (*init.expr).clone();
+                (name, Origin::Some { of, scope })
+            }),
+        });
+        self.pending = Some((l.semi_token.spans[0].byte_range().end, origin));
         self.visit_pat(&l.pat);
+        self.pending = None;
     }
 
     /// A `let` of a condition: its value before its pattern binds (in the condition's scope).
     fn visit_expr_let(&mut self, l: &'ast syn::ExprLet) {
         self.visit_expr(&l.expr);
+        let scope = self.here();
+        let origin = some_of(&l.pat).map(|name| {
+            let of = (*l.expr).clone();
+            (name, Origin::Some { of, scope })
+        });
+        self.pending = Some((l.expr.span().byte_range().end, origin));
         self.visit_pat(&l.pat);
+        self.pending = None;
+    }
+
+    fn visit_expr_return(&mut self, r: &'ast syn::ExprReturn) {
+        let at = r.return_token.span.byte_range().start;
+        self.returns.insert((self.src, at), self.here());
+        visit::visit_expr_return(self, r);
     }
 
     fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
@@ -1869,9 +1964,36 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         }
     }
 
+    /// A pattern binding: from where it binds, with its origin when the pattern being walked
+    /// gives one for its name. A name that starts upper-case, or that a const or a `use` of the
+    /// scopes it is in declares, may be a const's pattern, not a binding: no origin.
     fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
         let id = self.here();
-        self.scopes[id].locals.insert(p.ident.to_string());
+        let name = p.ident.to_string();
+        self.scopes[id].locals.insert(name.clone());
+        let lower = name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_');
+        let declared = {
+            let mut s = Some(id);
+            let mut hit = false;
+            while let Some(k) = s {
+                let sc = &self.scopes[k];
+                hit |= sc.consts.contains_key(&name) || sc.uses.contains_key(&name);
+                s = sc.parent;
+            }
+            hit
+        };
+        let (at, origin) = match &self.pending {
+            Some((at, o)) => {
+                let o = o.as_ref().filter(|(n, _)| *n == name && lower && !declared);
+                (*at, o.map(|(_, o)| o.clone()))
+            }
+            None => (p.ident.span().byte_range().start, None),
+        };
+        self.scopes[id]
+            .bindings
+            .entry(name)
+            .or_default()
+            .push(Binding { at, origin });
         visit::visit_pat_ident(self, p);
     }
 
@@ -1980,6 +2102,9 @@ pub(super) struct Scan<'a> {
     /// The integer literals of image addresses outside integer consts and sites' addresses
     /// ([`Walk::visit_lit_int`]).
     literals: Vec<(usize, usize, u32)>,
+    /// Each block's scope and each `return`'s, by source and byte.
+    blocks: BTreeMap<(usize, usize), usize>,
+    returns: BTreeMap<(usize, usize), usize>,
 }
 
 /// An integer type of the sources, or a literal's type still open.
@@ -2299,6 +2424,7 @@ impl<'a> Scan<'a> {
             (Vec::new(), BTreeMap::new(), Vec::new(), Vec::new());
         let mut ambiguous = BTreeSet::new();
         let (mut globs, mut renames, mut literals) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut blocks, mut returns) = (BTreeMap::new(), BTreeMap::new());
         let compiled = compiled(sources, wide);
         for (k, src) in sources.iter().enumerate() {
             if !compiled.contains(&src.path) {
@@ -2339,6 +2465,9 @@ impl<'a> Scan<'a> {
                 in_site: 0,
                 in_const: 0,
                 qself: BTreeSet::new(),
+                blocks: &mut blocks,
+                returns: &mut returns,
+                pending: None,
                 stack: Vec::new(),
             };
             w.open(Some(module_of(&src.path).to_string()));
@@ -2355,6 +2484,8 @@ impl<'a> Scan<'a> {
             calls,
             walked,
             literals,
+            blocks,
+            returns,
         };
         let more = scan.glob_findings(&globs);
         scan.walked.extend(more);
@@ -2541,29 +2672,233 @@ impl<'a> Scan<'a> {
                     .collect::<Option<Vec<_>>>()?;
                 self.call(&path, &args, scope, d)
             }
-            Expr::Path(p) => self.resolve(&plain(p)?, scope, Sel::Scalar, d),
+            Expr::Path(p) => {
+                let at = Some(p.span().byte_range().start);
+                self.resolve(&plain(p)?, scope, Sel::Scalar, d, at)
+            }
             Expr::Index(i) => {
                 let Expr::Path(p) = &*i.expr else { return None };
-                self.resolve(&plain(p)?, scope, Sel::Elems, d)
+                let at = Some(p.span().byte_range().start);
+                self.resolve(&plain(p)?, scope, Sel::Elems, d, at)
             }
             Expr::Field(f) => {
                 let (Expr::Path(p), syn::Member::Unnamed(i)) = (&*f.base, &f.member) else {
                     return None;
                 };
-                self.resolve(&plain(p)?, scope, Sel::Field(i.index as usize), d)
+                let at = Some(p.span().byte_range().start);
+                self.resolve(&plain(p)?, scope, Sel::Field(i.index as usize), d, at)
             }
             Expr::If(i) => {
                 let (_, other) = i.else_branch.as_ref()?;
-                let mut v = self.eval(block_expr(&i.then_branch)?, scope, d, want)?;
-                for x in self.eval(other, scope, d, want)? {
+                let mut v = self.eval_block(&i.then_branch, scope, d, want)?;
+                let rest = match &**other {
+                    Expr::Block(b) if b.label.is_none() => {
+                        self.eval_block(&b.block, scope, d, want)?
+                    }
+                    e => self.eval(e, scope, d, want)?,
+                };
+                for x in rest {
                     if !v.contains(&x) {
                         v.push(x);
                     }
                 }
                 Some(v)
             }
-            Expr::Block(b) if b.label.is_none() => self.eval(block_expr(&b.block)?, scope, d, want),
+            Expr::Block(b) if b.label.is_none() => self.eval_block(&b.block, scope, d, want),
             _ => None,
+        }
+    }
+
+    /// The values of block `b` (evaluated from scope `scope`): its tail's, in the block's own
+    /// scope; none for a block that ends in a `return`, a `break` or a `continue`; `None` for
+    /// another.
+    fn eval_block(
+        &self,
+        b: &syn::Block,
+        scope: usize,
+        depth: usize,
+        want: Option<Ty>,
+    ) -> Option<Vec<Val>> {
+        match tail(b) {
+            Tail::Diverges => Some(Vec::new()),
+            Tail::Expr(e) => {
+                let own = self
+                    .blocks
+                    .get(&(self.scopes[scope].src, open_byte(b)))
+                    .copied();
+                let s = if b.stmts.len() == 1 {
+                    own.unwrap_or(scope)
+                } else {
+                    own?
+                };
+                self.eval(e, s, depth, want)
+            }
+            Tail::Other => None,
+        }
+    }
+
+    /// The values the `Option` `e` holds in scope `scope` (`None` holds none): the prelude's
+    /// `Some(x)`, of `x`'s values; `None`; a local bound to such an `Option` by a `let`; a block
+    /// or an `if` whose arms are such (an arm that ends in a `return`, a `break` or a `continue`
+    /// holds none); a call of a fn of the sources that returns an `Option` ([`Scan::fn_option`]).
+    /// `None` for another form.
+    fn option(&self, e: &Expr, scope: usize, depth: usize) -> Option<Vec<Val>> {
+        if depth > 24 {
+            return None;
+        }
+        let d = depth + 1;
+        match e {
+            Expr::Paren(x) => self.option(&x.expr, scope, d),
+            Expr::Group(x) => self.option(&x.expr, scope, d),
+            Expr::Path(p) => {
+                let segs = plain(p)?;
+                let [n] = segs.as_slice() else { return None };
+                if n == "None" {
+                    return (!self.shadowed(n, scope, d)).then(Vec::new);
+                }
+                match self.local(n, scope, p.span().byte_range().start) {
+                    Local::Known(Origin::Value { init, scope, .. }) => self.option(init, *scope, d),
+                    _ => None,
+                }
+            }
+            Expr::Call(c) => {
+                let Expr::Path(p) = &*c.func else { return None };
+                let segs = plain(p)?;
+                if segs == ["Some"] {
+                    if c.args.len() != 1 {
+                        return None;
+                    }
+                    let a = c.args.first()?;
+                    return (!self.shadowed("Some", scope, d))
+                        .then(|| self.eval(a, scope, d, None))?;
+                }
+                // A local of the callee's name (a closure) is not the fn.
+                let at = p.span().byte_range().start;
+                if let [n] = segs.as_slice()
+                    && !matches!(self.local(n, scope, at), Local::Later)
+                {
+                    return None;
+                }
+                let (s, name) = self.item(&segs, scope, d)?;
+                let [f] = self.scopes[s].option_fns.get(&name)?.as_slice() else {
+                    return None;
+                };
+                self.fn_option(f, d)
+            }
+            Expr::Block(b) if b.label.is_none() => {
+                self.option_block(&b.block, self.scopes[scope].src, scope, d)
+            }
+            Expr::If(i) => {
+                let (_, other) = i.else_branch.as_ref()?;
+                let src = self.scopes[scope].src;
+                let mut v = self.option_block(&i.then_branch, src, scope, d)?;
+                for x in self.option(other, scope, d)? {
+                    if !v.contains(&x) {
+                        v.push(x);
+                    }
+                }
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+
+    /// The values the `Option` block `b` of source `src` holds: its tail's, in its own scope;
+    /// none when it ends in a `return`, a `break` or a `continue`.
+    fn option_block(
+        &self,
+        b: &syn::Block,
+        src: usize,
+        scope: usize,
+        depth: usize,
+    ) -> Option<Vec<Val>> {
+        match tail(b) {
+            Tail::Diverges => Some(Vec::new()),
+            Tail::Expr(e) => {
+                let own = self.blocks.get(&(src, open_byte(b))).copied();
+                let s = if b.stmts.len() == 1 {
+                    own.unwrap_or(scope)
+                } else {
+                    own?
+                };
+                self.option(e, s, depth)
+            }
+            Tail::Other => None,
+        }
+    }
+
+    /// The values a fn's `Option` can hold: its body's tail's and each of its `return`s', each in
+    /// its own scope; `None` when one is not read, or when a macro of its body names `return`.
+    fn fn_option(&self, f: &OptionFn, depth: usize) -> Option<Vec<Val>> {
+        let body = self.blocks.get(&(f.src, open_byte(&f.body))).copied()?;
+        let mut v = self.option_block(&f.body, f.src, body, depth)?;
+        let mut returns = Vec::new();
+        let mut walk = Returns(&mut returns, false);
+        walk.visit_block(&f.body);
+        if walk.1 {
+            return None;
+        }
+        for r in returns {
+            let s = *self
+                .returns
+                .get(&(f.src, r.return_token.span.byte_range().start))?;
+            for x in self.option(r.expr.as_deref()?, s, depth + 1)? {
+                if !v.contains(&x) {
+                    v.push(x);
+                }
+            }
+        }
+        Some(v)
+    }
+
+    /// What `name`, read at byte `at` of scope `scope`'s source, is as a pattern binding, from
+    /// the innermost scope out to the fn it is in.
+    fn local(&self, name: &str, scope: usize, at: usize) -> Local<'_> {
+        for s in self.chain(scope) {
+            let sc = &self.scopes[s];
+            if sc.locals.contains(name) {
+                match self.local_in(s, name, Some(at)) {
+                    Local::Later => {}
+                    other => return other,
+                }
+            }
+            if sc.boundary {
+                break;
+            }
+        }
+        Local::Later
+    }
+
+    /// What `name` read at byte `at` is as a pattern binding of scope `s`: the last binding of
+    /// it there from before `at`, known or not; none there yet (`Later`). With no byte, any
+    /// binding there is one the scan does not read.
+    fn local_in(&self, s: usize, name: &str, at: Option<usize>) -> Local<'_> {
+        let Some(at) = at else {
+            return Local::Unknown;
+        };
+        let last = self.scopes[s]
+            .bindings
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.at <= at)
+            .max_by_key(|b| b.at);
+        match last {
+            None => Local::Later,
+            Some(b) => b.origin.as_ref().map_or(Local::Unknown, Local::Known),
+        }
+    }
+
+    /// The values of a pattern binding's origin, taken as a scalar.
+    fn origin_value(&self, o: &Origin, sel: Sel, depth: usize) -> Option<Vec<Val>> {
+        if sel != Sel::Scalar {
+            return None;
+        }
+        match o {
+            Origin::Value { init, scope, want } => self.eval(init, *scope, depth, *want),
+            Origin::Some { of, scope } => {
+                (!self.shadowed("Some", *scope, depth)).then(|| self.option(of, *scope, depth))?
+            }
         }
     }
 
@@ -2733,7 +3068,14 @@ impl<'a> Scan<'a> {
     }
 
     /// The values `path` names from `scope`, taken as `sel` says.
-    fn resolve(&self, path: &[String], scope: usize, sel: Sel, depth: usize) -> Option<Vec<Val>> {
+    fn resolve(
+        &self,
+        path: &[String],
+        scope: usize,
+        sel: Sel,
+        depth: usize,
+        at: Option<usize>,
+    ) -> Option<Vec<Val>> {
         if depth > 24 {
             return None;
         }
@@ -2752,10 +3094,10 @@ impl<'a> Scan<'a> {
             }
         }
         if prefix.is_empty() {
-            self.name(name, &self.chain(scope), sel, depth)
+            self.name(name, &self.chain(scope), sel, depth, at)
         } else {
             let m = self.module(prefix, scope, depth)?;
-            self.name(name, &[m], sel, depth)
+            self.name(name, &[m], sel, depth, None)
         }
     }
 
@@ -2766,7 +3108,14 @@ impl<'a> Scan<'a> {
     /// the globs that bind it give, `None` when a glob's module is not known. A glob outside an
     /// explicit binding, or beside one in its scope, is shadowed by it. `None` when the binding is
     /// not one the scan proves.
-    fn name(&self, name: &str, scopes: &[usize], sel: Sel, depth: usize) -> Option<Vec<Val>> {
+    fn name(
+        &self,
+        name: &str,
+        scopes: &[usize],
+        sel: Sel,
+        depth: usize,
+        at: Option<usize>,
+    ) -> Option<Vec<Val>> {
         if depth > 24 {
             return None;
         }
@@ -2784,7 +3133,11 @@ impl<'a> Scan<'a> {
         for &s in scopes {
             let sc = &self.scopes[s];
             if !outside && sc.locals.contains(name) {
-                return None;
+                match self.local_in(s, name, at) {
+                    Local::Known(o) => return self.origin_value(o, sel, depth + 1),
+                    Local::Unknown => return None,
+                    Local::Later => {}
+                }
             }
             outside |= sc.boundary;
             if sc.consts.contains_key(name) || sc.uses.contains_key(name) {
@@ -2795,7 +3148,7 @@ impl<'a> Scan<'a> {
                     agree(self.eval_const(c, sel, depth + 1)?)?;
                 }
                 for p in sc.uses.get(name).into_iter().flatten() {
-                    agree(self.resolve(p, s, sel, depth + 1)?)?;
+                    agree(self.resolve(p, s, sel, depth + 1, None)?)?;
                 }
                 bound = true;
                 continue;
@@ -2824,7 +3177,7 @@ impl<'a> Scan<'a> {
             return None;
         }
         for m in globbed {
-            agree(self.name(name, &[m], sel, depth + 1)?)?;
+            agree(self.name(name, &[m], sel, depth + 1, None)?)?;
         }
         found
     }
@@ -3112,7 +3465,7 @@ impl<'a> Scan<'a> {
                         v
                     }
                     Expr::Path(p) if int_ty(elem).is_some() => {
-                        self.resolve(&plain(p)?, scope, Sel::Elems, d)?
+                        self.resolve(&plain(p)?, scope, Sel::Elems, d, None)?
                     }
                     _ => return None,
                 }
@@ -3294,7 +3647,7 @@ fn checked(scan: &Scan<'_>, why: Why, scopes: &[usize], listed: &BTreeSet<u32>) 
         }
         Why::Consts(names) => {
             for n in names {
-                let v = scan.name(n, scopes, Sel::Scalar, 0).and_then(|v| {
+                let v = scan.name(n, scopes, Sel::Scalar, 0, None).and_then(|v| {
                     v.into_iter()
                         .map(|x| address(x, false).flatten())
                         .collect::<Option<Vec<u32>>>()
@@ -3737,10 +4090,12 @@ fn the_articles_left_out_are_the_object_commands_and_loaders_consts() {
         let m = *scan.modules.get(module)?;
         names
             .iter()
-            .map(|n| match scan.name(n, &[m], Sel::Scalar, 0)?.as_slice() {
-                [x] => address(*x, false).flatten(),
-                _ => None,
-            })
+            .map(
+                |n| match scan.name(n, &[m], Sel::Scalar, 0, None)?.as_slice() {
+                    [x] => address(*x, false).flatten(),
+                    _ => None,
+                },
+            )
             .collect()
     };
     let english = Some(super::strings::ENGLISH_AT.to_vec());
@@ -5086,6 +5441,88 @@ fn r5_forms_a_form_entry_names_files_not_a_directory() {
     assert!(
         files(&[(&["x/w.rs", "x/y.rs"], "queue_at", 2, false, "test")]).is_empty(),
         "each file listed, each with its call"
+    );
+}
+
+/// Round 6 (2026-10-27): the crate's own `Option` and block idioms (`objects/commands/push.rs`,
+/// `usecmd/misc.rs`), each resolved where round 5 gave no value, beside a listed control.
+#[test]
+fn r6_an_if_let_of_a_block_valued_option_resolves() {
+    let text = "const S_A: u32 = 0x0012_0000;\nconst S_B: u32 = 0x0012_0010;\nfn f(s: &State, io: &Io, k: bool, j: bool) {\n    let refusal = {\n        let n = 1;\n        if k {\n            Some(S_A)\n        } else if j {\n            Some(S_B)\n        } else {\n            None\n        }\n    };\n    if let Some(line) = refusal {\n        print_at(s, io, line, &[]);\n    }\n}\n";
+    assert_eq!(
+        found(&[("x/y.rs", text)], &[0x0012_0000], &[]),
+        ["x/y.rs:15 print_at(line) -> 0x120010: not catalogued"],
+        "the arm not listed"
+    );
+    assert!(
+        found(&[("x/y.rs", text)], &[0x0012_0000, 0x0012_0010], &[]).is_empty(),
+        "both listed"
+    );
+}
+
+#[test]
+fn r6_an_if_let_of_a_fns_option_resolves() {
+    let text = "const S_A: u32 = 0x0012_0000;\nconst S_B: u32 = 0x0012_0010;\nfn refusal(k: bool, j: bool) -> Option<u32> {\n    let n = 1;\n    if j {\n        return Some(S_B);\n    }\n    Some(if k {\n        S_A\n    } else {\n        return None;\n    })\n}\nfn f(s: &State, io: &Io) {\n    let r = refusal(true, false);\n    if let Some(line) = r {\n        print_at(s, io, line, &[]);\n    }\n}\n";
+    assert_eq!(
+        found(&[("x/y.rs", text)], &[0x0012_0000], &[]),
+        ["x/y.rs:17 print_at(line) -> 0x120010: not catalogued"],
+        "the early return not listed"
+    );
+    assert!(
+        found(&[("x/y.rs", text)], &[0x0012_0000, 0x0012_0010], &[]).is_empty(),
+        "both listed"
+    );
+}
+
+#[test]
+fn r6_a_block_whose_tail_is_an_if_of_consts_resolves() {
+    let text = "const S_A: u32 = 0x0012_0000;\nconst S_B: u32 = 0x0012_0010;\nfn f(ux: Ux, k: bool) {\n    let line = {\n        let mut n = 0;\n        for _ in 0..3 {\n            if k {\n                continue;\n            }\n            n += 1;\n        }\n        if n == 0 {\n            S_A\n        } else {\n            S_B\n        }\n    };\n    ux.print(line, &[]);\n}\n";
+    assert_eq!(
+        found(&[("x/y.rs", text)], &[0x0012_0000], &[]),
+        ["x/y.rs:18 print(line) -> 0x120010: not catalogued"],
+        "the else arm not listed"
+    );
+    assert!(
+        found(&[("x/y.rs", text)], &[0x0012_0000, 0x0012_0010], &[]).is_empty(),
+        "both listed"
+    );
+}
+
+#[test]
+fn r6_a_local_resolves_only_from_its_one_visible_immutable_binding() {
+    let text = "const S_A: u32 = 0x0012_0000;\nconst S_B: u32 = 0x0012_0010;\nfn a(ux: Ux) {\n    let line = S_A;\n    let line = S_B;\n    ux.print(line, &[]);\n}\nfn b(ux: Ux) {\n    let mut line = S_A;\n    line = S_B;\n    ux.print(line, &[]);\n}\nfn c(ux: Ux, o: Option<u32>) {\n    if let Some(line) = o {\n        ux.print(line, &[]);\n    }\n}\nfn d(ux: Ux) {\n    let r = |k: bool| if k { Some(S_A) } else { None };\n    if let Some(line) = r(true) {\n        ux.print(line, &[]);\n    }\n}\nfn e(ux: Ux, line: u32) {\n    ux.print(line, &[]);\n    let line = S_B;\n}\n";
+    assert_eq!(
+        found(&[("x/y.rs", text)], &[0x0012_0000], &[]),
+        [
+            "x/y.rs:6 print(line) -> 0x120010: not catalogued",
+            "x/y.rs:11 print(line): not resolved, no entry",
+            "x/y.rs:15 print(line): not resolved, no entry",
+            "x/y.rs:21 print(line): not resolved, no entry",
+            "x/y.rs:25 print(line): not resolved, no entry",
+        ],
+        "the later let; a mut, a parameter's, a closure's and a parameter read before its let: none"
+    );
+    let listed = [0x0012_0000, 0x0012_0010];
+    assert_eq!(
+        found(&[("x/y.rs", text)], &listed, &[]).len(),
+        4,
+        "listed: the four without a value stay"
+    );
+}
+
+#[test]
+fn r6_a_cast_of_another_crates_const_needs_its_reason() {
+    let text = "use u6_formats::gfx::TILE_COUNT;\nconst BASE: u16 = TILE_COUNT as u16;\n";
+    let parts: [(u32, &[u8]); 1] = [(0x0012_0010, b"Zc1 word")];
+    assert_eq!(
+        game_findings(&[("x/y.rs", text)], &parts, &[], &[], &[]),
+        ["x/y.rs BASE: an integer const the scan cannot evaluate, no reason"],
+        "another crate's const, not read"
+    );
+    let reasons = [("x/y.rs", "BASE", Why::Logic("test"))];
+    assert!(
+        game_findings(&[("x/y.rs", text)], &parts, &[], &[], &reasons).is_empty(),
+        "with its reason"
     );
 }
 
