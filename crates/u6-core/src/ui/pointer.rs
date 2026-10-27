@@ -283,7 +283,13 @@ impl SpriteFrame {
 ///
 /// `None` while the tables are not loaded (synthetic states).
 pub fn sprite(ptr: &PointerState, p: Pointer) -> Option<SpriteFrame> {
-    let shape = ptr.tables.shapes.get(usize::from(ptr.shape & 0x3fff))?;
+    sprite_as(ptr, ptr.shape, p)
+}
+
+/// Port-only (spec 17 Presentation): [`sprite`] in shape `shape` instead of the game's own (the
+/// arrow, 0, over the context menu, which the game's shape knows nothing of).
+pub fn sprite_as(ptr: &PointerState, shape: u16, p: Pointer) -> Option<SpriteFrame> {
+    let shape = ptr.tables.shapes.get(usize::from(shape & 0x3fff))?;
     let y = if ptr.shown { p.y } else { HIDDEN_Y };
     Some(SpriteFrame {
         x: p.x.wrapping_add(shape.dx),

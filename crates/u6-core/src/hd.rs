@@ -38,12 +38,14 @@ use crate::engine::{Engine, Io};
 use crate::state::State;
 
 /// Port-only (spec 07 HD0): the HD frame of an engine's published frame, on or off, at 2× or
-/// 4×. On, [`HdView::present`] composes it when the published frame
-/// ([`Engine::published_version`]) or the setting changed since the frame it holds; off, it does
-/// nothing (the pack included: nothing of it runs). Spec 11 Design 7: the published frame is the
+/// 4×. On, [`HdView::present`] composes it when the screen frame ([`Engine::screen_version`]:
+/// the published frame, spec 17's menu over it) or the setting changed since the frame it holds;
+/// off, it does nothing (the pack included: nothing of it runs). Spec 11 Design 7: the published frame is the
 /// screen without the pointer sprite ([`Engine::published_frame`]), so the HD frame and its glyph
 /// list are the screen as the game drew it, and a move of the sprite alone composes nothing; the
-/// platform draws the sprite over the HD frame ([`Engine::sprite`]).
+/// platform draws the sprite over the HD frame ([`Engine::sprite`]). Spec 17 Presentation: the
+/// frame composed is the screen frame ([`Engine::screen_frame`], [`Engine::screen_version`]), the
+/// published frame with the context menu over it while one is open.
 pub struct HdView {
     on: bool,
     scale: Scale,
@@ -144,14 +146,14 @@ impl HdView {
         self.images = ImageCache::new();
     }
 
-    /// With HD on: composes the published frame of `engine` ([`Engine::published_frame`], without
-    /// the pointer sprite; `blank` before a start) when the HD frame does not hold it at the
-    /// setting now. Returns whether a block of the HD frame changed.
+    /// With HD on: composes the screen frame of `engine` ([`Engine::screen_frame`]: the published
+    /// frame and the context menu, without the pointer sprite; `blank` before a start) when the HD
+    /// frame does not hold it at the setting now. Returns whether a block of the HD frame changed.
     pub fn present(&mut self, engine: Option<&Engine>, blank: &Framebuffer) -> bool {
         if !self.on {
             return false;
         }
-        let key = (engine.map(Engine::published_version), self.version);
+        let key = (engine.map(Engine::screen_version), self.version);
         if self.holds == Some(key) {
             return false;
         }
@@ -160,7 +162,7 @@ impl HdView {
                 let state = e.state();
                 let mut images = self.images.images(&state, e.io());
                 self.compositor
-                    .compose(&e.published_frame(), &mut images, self.scale)
+                    .compose(e.screen_frame(), &mut images, self.scale)
             }
             None => self.compositor.compose(blank, &mut NoImages, self.scale),
         };

@@ -678,7 +678,17 @@ pub struct Engine {
     /// Bumped each time the published frame is synced again from the screen: its colours and
     /// sources, or its sources alone ([`Engine::published_version`]).
     published_version: u64,
-    /// The published frame with the pointer sprite over it (the frame the platform shows).
+    /// Port-only (spec 17 Presentation): the published frame with the context menu over it
+    /// ([`Engine::screen_frame`]): synced from the published frame, the one frame `shown` syncs
+    /// from.
+    layer: Framebuffer,
+    /// Bumped each time `layer` is synced again for a change ([`Engine::screen_version`]).
+    layer_version: u64,
+    /// Port-only (spec 17): the context menu, its run and its share of the input.
+    popup: crate::ui::popup::Popup,
+    /// The [`crate::ui::popup::Popup::version`] drawn into `layer` last.
+    drawn_popup: u64,
+    /// The screen frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
     /// Bumped each time `shown` is composed again ([`Engine::frame_version`]).
     shown_version: u64,
@@ -754,6 +764,10 @@ impl Engine {
             ticks: 0,
             published_front: 0,
             published_version: 0,
+            layer: Framebuffer::new(),
+            layer_version: 0,
+            popup: crate::ui::popup::Popup::default(),
+            drawn_popup: 0,
             shown: Framebuffer::new(),
             shown_version: 0,
             src_version: 0,
@@ -773,7 +787,21 @@ impl Engine {
     /// buffer if the game presented, then the vertical-blank work of the display (the pointer
     /// sprite, at the handler's position, over the published frame,
     /// [`crate::ui::pointer::vblank`]).
+    ///
+    /// Port-only (spec 17): with the context menu on, `input` goes through it first
+    /// ([`crate::ui::popup::Popup::input`]): what it takes never reaches the queue, and a choice's
+    /// presses take their place; the menu is drawn over the published frame ([`Engine::screen_frame`]).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
+        let through;
+        let input = if self.popup.on() {
+            let quiet = self.io.pending_events() == 0;
+            through = self
+                .popup
+                .input(&self.state.borrow(), &self.io, input, quiet);
+            through.as_slice()
+        } else {
+            input
+        };
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -822,6 +850,7 @@ impl Engine {
                 self.finished = true;
             }
         }
+        self.popup.after_poll(&self.state.borrow());
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
         let version = self.io.front_version.get();
@@ -849,10 +878,27 @@ impl Engine {
                 self.src_publishes += u64::from(src_only);
             }
         }
+        // Port-only (spec 17 Presentation): the screen frame is the published one with the menu
+        // over it, synced again (and the menu drawn again over it) whenever either changed.
+        let drawn = self.popup.version();
+        let menu_moved = drawn != self.drawn_popup;
+        let layered = presented || menu_moved;
+        if layered || src_only || self.ticks == 1 {
+            self.layer.sync_from(&mut self.io.published.borrow_mut());
+            if let Some(open) = self.popup.open() {
+                open.draw(&mut self.layer, &self.state.borrow());
+            }
+            self.drawn_popup = drawn;
+            self.layer_version += u64::from(layered || src_only);
+        }
         let at = self.io.handler_pointer();
-        let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
-        if presented || sprite != self.sprite || self.ticks == 1 {
-            self.shown.sync_from(&mut self.io.published.borrow_mut());
+        let mut sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
+        if let Some(p) = self.popup.pointer() {
+            // The menu's pointer, in the arrow: the game's sample stays where the game took it.
+            sprite = crate::ui::pointer::sprite_as(&self.state.borrow().ui.pointer, 0, p);
+        }
+        if layered || sprite != self.sprite || self.ticks == 1 {
+            self.shown.sync_from(&mut self.layer);
             if let Some(sp) = &sprite {
                 sp.draw(&mut self.shown);
             }
@@ -866,7 +912,7 @@ impl Engine {
             let before = self.shown.src().map(<[crate::Src]>::to_vec);
             #[cfg(debug_assertions)]
             let colours = self.shown.pixels().to_vec();
-            self.shown.sync_from(&mut self.io.published.borrow_mut());
+            self.shown.sync_from(&mut self.layer);
             if let Some(sp) = &self.sprite {
                 sp.draw(&mut self.shown);
             }
@@ -886,7 +932,8 @@ impl Engine {
     }
 
     /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at
-    /// the handler's position), if any: its top left in frame pixels and its rows of values
+    /// the handler's position; spec 17: the arrow at the context menu's pointer while the menu
+    /// takes the pointer), if any: its top left in frame pixels and its rows of values
     /// 0..=3 (0 clear). Port-only use (spec 11 Design 7): a platform that shows the HD frame,
     /// composed without it ([`Engine::published_frame`]), draws it over that frame itself.
     pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
@@ -914,7 +961,8 @@ impl Engine {
         self.src_shows
     }
 
-    /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
+    /// The last published frame (320×200 indices plus the palette), the context menu over it
+    /// while one is open ([`Engine::screen_frame`]), with the pointer sprite.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
     }
@@ -935,11 +983,53 @@ impl Engine {
         self.published_version
     }
 
+    /// Port-only (spec 17 Presentation): the published frame with the context menu drawn over
+    /// it, without the pointer sprite: what [`Engine::frame`] is composed from, and the HD frame.
+    /// The published frame itself while no menu is open.
+    pub fn screen_frame(&self) -> &Framebuffer {
+        &self.layer
+    }
+
+    /// Port-only (spec 17): changes whenever [`Engine::screen_frame`] was synced again for a
+    /// change: a publish ([`Engine::published_version`]) or a change of the drawn menu; 0 before.
+    pub fn screen_version(&self) -> u64 {
+        self.layer_version
+    }
+
+    /// Port-only (spec 17): the context menu on or off (off by default: a right press is the
+    /// original's; off closes an open menu and drops a run).
+    pub fn set_context_menu(&mut self, on: bool) {
+        self.popup.set_on(on);
+    }
+
+    /// Port-only (spec 17 Presentation): the frame rects (x0, y0, x1, y1 inclusive) the platform
+    /// shows something else over: a context menu opened later keeps off them where it can.
+    pub fn set_context_menu_hidden(&mut self, rects: Vec<crate::ui::popup::Rect>) {
+        self.popup.set_hidden(rects);
+    }
+
+    /// Port-only (spec 17): the open context menu as drawn (no text), if one is open.
+    pub fn context_menu(&self) -> Option<crate::ui::popup::View> {
+        self.popup.open().map(crate::ui::popup::Open::view)
+    }
+
+    /// The context menu itself (tests).
+    #[cfg(test)]
+    pub(crate) fn popup_mut(&mut self) -> &mut crate::ui::popup::Popup {
+        &mut self.popup
+    }
+
+    /// Port-only (spec 17, unit M4 seam): the travel state "Go here" starts (spec 21).
+    pub fn travel(&self) -> &crate::ui::popup::Travel {
+        &self.popup.travel
+    }
+
     /// Port-only (spec 07 HD0): every buffer gets a source plane ([`Io::enable_src_plane`], and
     /// the frame with the pointer sprite, whose pixels are classic). Off unless called; the
     /// frames' colours are the same either way.
     pub fn enable_src_plane(&mut self) {
         self.io.enable_src_plane();
+        self.layer.enable_src();
         self.shown.enable_src();
     }
 

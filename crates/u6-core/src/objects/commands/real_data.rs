@@ -2124,7 +2124,7 @@ fn choose_then(e: &mut Engine, code: u16, at: (i16, i16), then: &[&[InputEvent]]
 
 /// The nearest closed steel door (0x12c, frames 4..7: closed, neither locked 8..11 nor magically
 /// locked 12..) with a tile beside it to stand on.
-fn closed_door(s: &State) -> (Slot, (u16, u16)) {
+pub(crate) fn closed_door(s: &State) -> (Slot, (u16, u16)) {
     nearest(s, 0x12c, |s, o| s.objects.tf(o) >> 10 & 0xc == 4)
         .into_iter()
         .find_map(|o| Some((o, beside(s, o)?)))

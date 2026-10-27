@@ -269,7 +269,10 @@ export async function forgetLocalePack() {
 // before a step reaches the game at the clock after that step (as the Rust tests' press:
 // `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for each change
 // of the buttons the page queued, at the clock of the step that took it: a press's delivered
-// hold is its release's clock less its own, whatever the wall time between them. `__presents`
+// hold is its release's clock less its own, whatever the wall time between them. `__taken`
+// holds [buttons, clock] for each change of the buttons the game's input handler has after a
+// step (`Game.game_buttons`): what the engine let through to the game, the context menu's own
+// presses left out (spec 17), each step's last. `__presents`
 // counts the page's presents, `__converted` those that converted a new frame (frame_version
 // moved: spec 06 O1); `__shownGame` is the game that presented last. `__pointerAt` is the last
 // game pixel the page queued for the pointer, `__presentMs` the wall ms the presents took.
@@ -282,6 +285,7 @@ globalThis.__u6mem = () => (wasm ? wasm.memory.buffer.byteLength : 0);
 globalThis.__ticks = 0;
 globalThis.__clock = 0;
 globalThis.__buttons = [];
+globalThis.__taken = [];
 globalThis.__sent = [];
 globalThis.__presents = 0;
 globalThis.__converted = 0;
@@ -295,6 +299,7 @@ globalThis.__presentMs = 0;
   const keyDown = Game.prototype.key_down;
   let queued = [];
   let held = 0;
+  let taken = 0;
   Game.prototype.pointer = function (x, y, buttons) {
     if (this.started()) queued.push(buttons & 3);
     globalThis.__pointerAt = [x, y];
@@ -319,6 +324,9 @@ globalThis.__presentMs = 0;
       held = b;
     }
     queued = [];
+    const game = this.game_buttons();
+    if (game !== taken) globalThis.__taken.push([game, globalThis.__clock]);
+    taken = game;
     globalThis.__saveGen = this.save_generation();
     globalThis.__owned = this.keys_owned();
   };
@@ -1010,13 +1018,30 @@ export const contextMenus = (page, points) => page.evaluate((list) => list.map((
   return json ? JSON.parse(json) : null;
 }), points);
 
-/// Presses the right button at game pixel (x, y) and waits until the page's context menu shows;
-/// the button stays down.
+/// Spec 17 Presentation: the menu the engine has open and drawn in the frame (`Game.menu_view` on
+/// `__shownGame`: its box, text area and rows, codes only), parsed; null while none is.
+export const menuView = (page) => page.evaluate(() => {
+  const json = globalThis.__shownGame?.menu_view() ?? '';
+  return json ? JSON.parse(json) : null;
+});
+
+/// Presses the right button at game pixel (x, y) and waits until the engine has its context menu
+/// open; the button stays down.
 export async function rightPress(page, x, y) {
   await page.mouse.move(...(await screenPoint(page, x, y)));
   await page.mouse.down({ button: 'right' });
-  await page.locator('#context-menu').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.waitForFunction(() => (globalThis.__shownGame?.menu_view() ?? '') !== '', null,
+    { timeout: 10_000, polling: 'raf' });
 }
+
+/// Waits until the engine's context menu is closed.
+export async function menuClosed(page) {
+  await page.waitForFunction(() => (globalThis.__shownGame?.menu_view() ?? '') === '', null,
+    { timeout: 10_000, polling: 'raf' });
+}
+
+/// The game pixel of row `i`'s label in the drawn menu `view` (`menuView`).
+export const rowPoint = (view, i) => [view.text[0] + 12, view.rows[i].y + 4];
 
 /// The directions a step tries, in this order, by arrow key and by the cell it walks to from the
 /// hero's (dx, dy): east, west, south, north.

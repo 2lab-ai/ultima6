@@ -6,8 +6,13 @@ tags: [ultima6, ui, input]
 
 # 17 — Context menu
 
-Status: in progress (2026-10-27). Item 2 of `objects-menu-fog-motion/ssot.md`. Research: round 1 unit M1
-(`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build: round 2 unit M2.
+Status: in progress (2026-10-28). Item 2 of `objects-menu-fog-motion/ssot.md`. Research: round 1 unit M1
+(`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build: round 2 unit M2 (shipped in deploy 30
+as a page overlay); in-game rework: unit M3 (branch `feat/ingame-menu`, from `60f92c6`). The entry "Go here" starts
+unit M4's travel (spec 21) through one seam that is a stub until M4 lands in integ.
+
+Owner, 2026-10-28, verbatim: "문맥 메뉴 인게임 ui로 해줘 시발 왜 웹페이지 ui로 만듬?" and "우클릭시 여기로 이동도
+하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령".
 
 ## Measured facts (main 88eb5b0, re-read at 587d973)
 
@@ -31,49 +36,208 @@ Status: in progress (2026-10-27). Item 2 of `objects-menu-fog-motion/ssot.md`. R
   (`ui/click.rs:127`, `:156-165`); Look takes any cell of the view.
 - Escape at the prompt passes a turn (`main_loop/commands.rs:376`).
 
+### Measured for the in-game menu (unit M3, 60f92c6)
+
+- The deploy-30 menu is a page element: `site/index.html:214` (`#context-menu`, styles `:78-92`), opened by
+  `openContextMenu` (`site/app.js:4004`) from the canvas's `pointerdown` (`:3934`) with the labels and reasons of
+  `site/i18n.js` (`cmd*`, `why*`, `theft`, en `:75-110`, ko `:297-332`) and the names of `Game::context_menu`'s JSON
+  (`crates/u6-web/src/lib.rs:820`, `menu_json` `:1837`). The engine never drew it; the HD compositor never saw it.
+- The engine owns the menu's meaning: `ui/menu.rs:219` `query`, `:694` `Run::start`, `:705` `Run::step`. The run was
+  held by the page's `Game` (`u6-web/src/lib.rs:515`, `step_run` `:1457`).
+- The original's text windows: ink A4-0x656a (6 in the owner's game) on paper A4-0x656c (15) (`ui/text.rs:77`,
+  `ui/textstate.rs:152`, 0x107d7c), glyphs through 0x105228 (`text.rs:186`) on the 40 × 25 grid of 8 × 8 cells
+  (`text.rs:5`). The frame round the message scroll is the paper bitmap 0x1350d8 draws at the boot
+  (`main_loop.rs:415-429`, kept as `ui.paper`): next to the window's first column, a few one-pixel lines of other
+  colours, then the paper's own colour again (5 lines in the owner's paper, read at run time, never stored).
+- The original marks the current line of a list with glyph 0x1a in column 0, the names from column 1 (the spellbook
+  page, 0x116218, `magic/book.rs:329-364`). Its only dither is 0x134044's checker, `(x + y) & 1` of a cell's pixels
+  (`~/Games/ultima6/re/dumps/game/0x134044.json`).
+- The pointer sprite is an overlay of the published frame, never part of the screen buffers (`ui/pointer.rs:8-10`);
+  the shown frame is synced from the published one (`engine.rs:855`, `:869`), and the HD frame is composed from the
+  published frame without the sprite (`hd.rs:163`). A frame plane syncs from one other only (`u6-render` `sync_from`).
+- The original copies and scrolls rectangles of its screen (`combat/present.rs:4`, `ui/text.rs:385`): a menu drawn
+  into the screen buffers would be taken as game screen.
+- The HD layout and Wide cut the frame into regions (`site/app.js:1583-1589`, `:2121-2130`): the map, the side panel,
+  and in Wide the inventory view split at its x 72 into the paper doll and the backpack list (panel x 0xf0: the
+  equipment cells end there, the list cells start at 0xf8, `inventory/panel.rs:372-420`).
+- The original's command letters at the prompt: A, B (Combat), C, D, G, L, M, R, T, U (`main_loop/commands.rs:234-290`).
+
 ## Contract
 
-**When.** A right press on the map or on an inventory or equipment slot (Wide's slots included) opens the menu only
-at the command prompt (`at_prompt`). Everywhere else the right press does what it does today: it confirms a pending
-target, underlines on the command bar, passes on the rest of the screen, and keeps its current effect in a
-conversation, at a more prompt, at Drop's count or spot and at Move's direction. Left-button walking and the arrows
-are unchanged; right-button walking on the map at the prompt is gone (the menu replaces it).
+**When.** With the engine's context menu on (`Engine::set_context_menu`; the web build turns it on at every start,
+the native build and the engine's own tests keep it off, so the original's right press stays the default), a right
+press (the right button alone going down) on the map or on an inventory or equipment slot (Wide's slots included)
+opens the menu only at the command prompt: A4-0x7a2c is 1, nothing is queued for the game and no chosen entry is
+still running. Everywhere else the right press reaches the game as before: it confirms a pending target, underlines
+on the command bar, passes on the rest of the screen, and keeps its current effect in a conversation, at a more
+prompt, at Drop's count or spot and at Move's direction. Left-button walking and the arrows are unchanged;
+right-button walking on the map at the prompt is gone (the menu replaces it).
 
 **What it lists.** One section per resolved object, headed by its display name (`objects::shown_name`, locale aware;
 never an actor's own name), in cell order: the selection's section, then the object under it. Each entry is a command
 that resolves to that object. Map: Attack, Cast (the book's current spell, on this cell), Talk, Look, Get, Move, Use.
 Panel: Look, Drop, Move, Use, and the slot's own left-press action (ready, open, take off). The underlined command,
-when there is one, is the first entry. Rest and Combat appear only as that first entry.
+when there is one, is the first entry. Rest and Combat appear only as that first entry. A map menu ends with **Go
+here** (port-only code 0x100) for the pressed cell, a bare tile included, except on the leader's own cell; it starts
+unit M4's travel (spec 21) and is disabled, reason Unreachable, when M4's reachability query refuses the cell.
 
 **Tiers** (M1 §2): a condition of the target's kind hides the entry (no Use on a type outside the 85, no Talk to
 oneself, no Get of an actor, no Move, Drop or Ready of type 0x4c, which the object moves refuse at the prompt:
 `move_to` always, `move_into` unless a body transfer sets its flag, objects/moves.rs). A situational, pure condition
 (a read of the current state: out of reach, too heavy, aboard, outside Wide's window, no free hand, no book, negate
 timer, no spells, level, points, reagents, solo, a blocked door, a locked door or chest (Use, reason Locked), readied
-by another member, a case's own refusal) disables it with a reason code the page words. A random draw
-or a later prompt never disables. Get of what is not the party's is marked as theft. An invisible selection gets no
-section (the cell shows as its tile with Look only); a cover keeps its section.
+by another member, a case's own refusal, no way there) disables it with a reason. A random draw or a later prompt
+never disables. Get of what is not the party's is marked as theft. An invisible selection gets no section (the cell
+shows as its tile with Look only); a cover keeps its section.
 
 **Running a choice.** The original's own mouse flow: a left press and release on the command's icon, then a left
 press and release at the target, the target press released only once the command reads its target: A4-0x7a32 is 1,
 A4-0x7a2e is the code, `ui.input.accept` is true, no queued events, and the engine is blocked inside the target
 read (a port-only flag set at `wait_event`'s entry, cleared on return). If the engine comes back to the prompt
 first, the target press is dropped. No underline is written and the savegame is untouched. Rest, Combat and the
-slot's own action are a single press.
+slot's own action are a single press (the icon's, or a left click on the slot). The engine holds the run
+(`ui::popup::Popup`), stepped at the start of every tick before that tick's input is queued.
 
-**Engine API (port-only, `u6-web`).** `Game::context_menu(x, y) -> String`: `""` unless at the prompt and on the map
-or a slot; else JSON `{kind: "map"|"panel", cell, underlined, sections: [{object, name, entries: [{code, enabled,
-reason, theft}]}]}`, computed read-only on a clone of `State` through the ported resolution functions.
-`Game::command_at(code, x, y) -> bool` queues the icon press now and holds the target press for the gate.
+**Engine API (port-only).**
+- `Engine::set_context_menu(on)`: the menu on or off (off closes an open one).
+- `Engine::set_context_menu_hidden(rects)`: the frame rects (x0, y0, x1, y1) the platform shows something else over;
+  a menu opened later keeps off them where it can (Where it is placed).
+- `Engine::context_menu() -> Option<View>`: the open menu as drawn: its box and text area in frame pixels, and per
+  row its kind (heading, entry, note), its code, whether it can run, its reason, its theft mark and its pixel rows,
+  the highlighted entry; no text (tests, the page's tests).
+- `Engine::screen_frame()` / `Engine::screen_version()`: the published frame with the menu over it, without the
+  pointer sprite, and its version (it moves when the published frame or the drawn menu changes). The shown frame
+  (`Engine::frame`) is it with the sprite; the HD frame is composed from it.
+- `u6-web`: `Game::context_menu(x, y) -> String` (read only, for tests): `""` unless at the prompt and on the map or a
+  slot; else JSON `{kind, cell, underlined, sections: [{object, kind, entries: [{code, enabled, reason, theft}]}],
+  go_here: {code, enabled, reason, theft} | null}`, no names. `Game::game_buttons()`: the buttons the game's input
+  handler has (what the engine let through; the page's tests). `Game::set_menu_hidden(rects)`: x, y, w, h in turn,
+  passed to the engine (kept for later starts); the page gives them in Wide's game view whenever they change
+  (`hiddenMapRects` in `site/app.js`: each window's frame, the map's parts off the canvas). `Game::menu_view() -> String`: `""` while closed, else JSON `{rect: [x, y, w, h], text: [x, y, w, h],
+  hover, rows: [{kind, code, enabled, reason, theft, y}]}` (frame pixels; codes only). `Game::command_at` and the
+  page's run are gone.
 
 **Predicates.** Each situational condition is a small function beside its handler citing the original's lines, with
 a test that runs the real handler on a clone and checks enabled ⇔ the handler reached its action.
 
-**Page.** An HTML menu inside `#screen-box` at the press point, flipped and clamped inside the box; works in Original,
-HD, Wide and fullscreen. While open it takes focus and swallows pointer events until the right button is up; Up/Down,
-Enter/Space, Home/End, the command letters, Escape and an outside press work, and Escape and the outside press never
-reach the game. Labels and reasons are the page's own (`site/i18n.js`, en and ko); object names come from the engine
-at run time. Disabled entries are greyed with the reason under the label (`aria-disabled`).
+## Presentation (in-game, unit M3; replaces the deploy-30 page element)
+
+The menu is drawn by the engine into the game's frame, in the game's own font, colours and window look; the page
+draws nothing of it and has no element for it.
+
+- **Where it is drawn.** Over the published frame, into a frame of its own (`Engine::screen_frame`, the published
+  frame with the menu over it), which the shown frame and the HD frame are made from, the pointer sprite over it last.
+  Never into the screen buffers: the original copies and scrolls rectangles of its screen, which would take the menu
+  for game screen, and closing it would need the screen restored. Shown in Original, HD (through the compositor, like
+  every engine frame: its glyph cells name their glyphs, so the HD font draws them) and Wide.
+- **The look** (the original's text window): the text area is paper (A4-0x656c) with ink (A4-0x656a) glyphs drawn as
+  0x105228 draws a cell (`ui::text::draw_char`), the game's `u6.ch` for codes below 0x100 and the Hangul table for a
+  syllable. Round it, the frame of the paper's message scroll window: the colours of the paper bitmap (0x1350d8) on
+  the row through the scroll's middle, from the pixel left of its first column outward up to the paper's own colour
+  again (at most 6), drawn as one-pixel rings on all four sides; with no paper, one ring of ink. Section headings start
+  in column 0 in the alert colour (A4-0x6576, the colour of the `@` keywords, 0x108376); entries start in column 1;
+  the highlighted entry has glyph 0x1a in column 0, as the spellbook marks its current line (0x116218).
+- **Disabled entries** are drawn in 0x134044's checker: of the label's ink pixels only those with `(x + y) & 1` = 0
+  (the others paper), not named as glyphs, so the HD font does not redraw them in full. The original greys nothing;
+  the checker is its only half-tone. A note row at the bottom (present when some entry has a reason or a theft mark)
+  shows the highlighted entry's reason, or the theft mark, in ink.
+- **Words.** The port's own words, in English or, when the Korean pack set the Korean language
+  (`ui.text.language`), in Korean drawn with the game's Hangul glyphs: one table in `ui/popup.rs` (the page's copies
+  in `site/i18n.js` are deleted). Section names are the engine's display names. Each row is cut to the text area's
+  width.
+- **Where it is placed.** Beside the pressed point: the text area's top left one cell right of and below the point's
+  cell, flipped to the other side where it would not fit, then held inside the bounds of the region pressed, rings
+  included: the shown map (`geom::SHOWN`), the side panel (click region 2), or a Wide slot (its rect; the inventory
+  slot's doll part left of the slot's x 72, its list part right of it, both below its name row). Text cells stay on
+  the 8-pixel grid (the HD font draws a cell only there). Of the four places beside the press (right and below first,
+  then left, then above, then both) the first whose box meets none of the frame rects the platform shows something
+  else over (`Engine::set_context_menu_hidden`: Wide's page windows over the map and the map's parts off the canvas,
+  given by the page from its layout); with none such, the place in the bounds whose box meets the fewest of their
+  pixels, the nearest to the first place among those.
+- **Input.** All of it goes through the engine's own input path (`Engine::tick`); nothing the menu takes reaches the
+  game's queue, and the game's pointer sample is not moved. The pointer: a move over an entry highlights it; a left
+  press on an entry that can run chooses it; a left press on a disabled entry, a heading, the note or the frame does
+  nothing; a left press outside or any right press closes it. Every press the menu takes is the menu's up to its
+  release, and so is the opening press: a held right button moved over the map sends nothing. Keys: Up and Down move
+  the highlight over the entries (wrapping, disabled ones included), Enter or Space chooses the highlighted entry when
+  it can run, a command letter (A, B, C, D, G, L, M, R, T, U, either case) chooses its first entry that can run,
+  Escape closes; every other key and typed text is taken and does nothing. The repeats of a key the menu took are its
+  own until that key's release, so a held Escape that closed it passes no turn. The pointer sprite while it is open
+  follows the pointer the menu took, in the arrow shape.
+- **Not state.** The menu is not part of `State` or the savegame: presentation and input only. It closes when the
+  prompt goes (A4-0x7a2c no longer 1 after a tick) and when the menu is turned off.
+
+## Trace (STV, written before the code)
+
+### §0 Client surface (the page)
+`canvas` `pointerdown`/`pointermove`/`pointerup` → `sendPointer` → `Game::pointer(x, y, buttons)` (a right press
+included; no page handler opens anything) → `Game::pending` → `Game::step` → `Engine::tick(&pending)`. `keydown` →
+`gameKey` → `Game::key_down`/`key_repeat` → `InputEvent::Key`/`Repeat`; `keyup` → `Game::key_up` → `Release`. Render:
+`Game::present` → `Engine::frame` (classic) or `HdView::present` → `Engine::screen_frame` (HD) → canvas. The canvas's
+`contextmenu` default stays suppressed.
+
+### §1 Entry
+`Engine::tick(input, ms)` (`engine.rs`), the menu on: before anything is queued, `Popup::input(&State, &Io, input,
+quiet)` with `quiet` = `io.pending_events() == 0`.
+
+### §2 Input and its checks
+- The run held: `Run::step(state, quiet && input all inert)` (inert = a button-less pointer event or a key release)
+  → `Release` appends the target press to the game's events, `Drop` forgets it.
+- A right press opens only if: the menu is closed, no run is held, `state.main.reading == 1`, `quiet`, every earlier
+  event of this tick's input inert, and `menu::query(state, io, x, y)` is `Some`. Else the press is the game's.
+
+### §3 Layer flow
+- Open: `Pointer{x, y, 2}` → `query` → `Menu` → `Open::new(&menu, (x, y), &State)` → rows (`Row::Head(cells)`,
+  `Row::Entry(Item{code, object, reason, theft})`, `Row::Note`), the text area (`Open::text`, cells), the rings, the
+  highlight → `Popup.open`; `version += 1`.
+- Hover: `Pointer{x, y, _}` inside a row of an entry → `hover = row`; `version += 1` when it changed.
+- Choose: `Pointer{x, y, 1}` (left newly down) on an enabled entry, or Enter/Space/letter → `Popup::choose(row)` →
+  `Go here` → `travel_to((cell.x, cell.y))`; slot action → `menu::left_press(at)`; Rest/Combat → `menu::icon_press`;
+  else `Run::start(state, code, at)` → icon press to the game's events, `Popup.run = Some(run)`. The menu closes
+  (`version += 1`).
+- Close: Escape, a right press, a left press outside → `open = None` (`version += 1`), the press or key swallowed to
+  its release.
+- Draw (after the poll): when the game presented or the menu's version moved, `layer.sync_from(published)`; open →
+  `Open::draw(&mut layer, &State)` (the paper filled, the rings, `draw_char` per cell, the checker for disabled labels,
+  `draw_symbol` of glyph 0x1a at the highlight), `screen_version += 1`; `shown.sync_from(layer)`; the sprite (the
+  arrow at the menu's pointer while the menu takes the pointer) over it.
+
+### §4 Side effects
+The game's queue receives only the events the menu let through plus the run's presses. `State` is never written by
+the menu. No savegame write.
+
+### §5 Error paths
+No query result → the press goes to the game. A run whose prompt came back → `Drop`, no target press. No font →
+nothing drawn but the paper and the rings. No paper → one ring of ink. The prompt gone while open → closed after the
+tick. Off → closed, every event the game's.
+
+### §6 Output
+The frame with the menu (`Engine::frame`, `screen_frame`), `Engine::context_menu()`'s view, the web JSON.
+
+### File map
+`crates/u6-core/src/ui/popup.rs` (new), `ui/mod.rs`, `ui/menu.rs` (Go here, Unreachable), `ui/pointer.rs` (a sprite of
+a given shape), `engine.rs` (layer, input, run), `hd.rs` (composes the screen frame), `ui/tests.rs`,
+`ui/tests/popup_tests.rs`, `ui/tests/popup_real.rs` (new); `crates/u6-web/src/lib.rs`; `site/app.js`,
+`site/index.html`, `site/i18n.js`; `tools/web/harness.mjs`, `tools/web/test-web.mjs`. Also `ui/tests/real_tests.rs`
+(a PNG of RGBA) and `objects/commands/real_data.rs` (`closed_door` shared). `re/notes/port-map.md` is unchanged: the
+module is port-only.
+
+## Replaced (2026-10-28)
+
+The deploy-30 page menu (`#context-menu`, its styles, `openContextMenu` and its handlers in `site/app.js`, the
+`cmd*`/`why*`/`theft` words in `site/i18n.js`, `Game::command_at` and the page-held run) is removed. Reason: the
+owner's goal item 2 asked for a right-click menu in the game, and a game's right-click menu is the game's own UI; the
+page element was a web page's menu laid over the game (owner, 2026-10-28, above). Migration: the right press goes to
+the engine, which opens, draws and runs the menu; `Game::context_menu` stays read only without names, and
+`Game::menu_view` reports the drawn menu.
+
+## Unit M4 seam (spec 21)
+
+`ui::popup::travel_to(travel: &mut Travel, target: (i16, i16))` starts travel to the map cell (world x, y on the
+leader's level), `Travel` being the engine-held travel state the menu owns (`Engine::travel`), and
+`ui::popup::travel_reason(s: &State, target: (i16, i16)) -> Option<Reason>` answers whether it can (`None`: it can).
+Until M4 is in integ both are stubs: every cell is reachable and a start only records the target (`Travel::asked`);
+M4 replaces `Travel` and the two bodies.
 
 ## Acceptance
 
@@ -87,12 +251,18 @@ at run time. Disabled entries are greyed with the reason under the label (`aria-
 4. Right press on an inventory object → the panel menu with its ready/open/take-off action, Look, Drop, Move, Use.
 5. Cast without a book: the entry is disabled; if forced through the engine, the target press is dropped and the
    party does not walk.
-6. Escape or an outside press closes the menu and passes no turn; a held right button moving over the map sends no
-   press to the engine.
+6. Escape, a right press or a left press outside closes the menu and passes no turn; a held right button moving over
+   the map sends no press to the game; the frame outside the menu is the frame without it.
 7. Wide: a non-Look entry on a cell outside the 11 × 11 window is disabled, reason "window".
+8. (M3) The menu is in the frame's pixels, in Original, HD and Wide; the page has no element for it; a left press on
+   Look runs Look; the menu's pixels are paper and ink inside its text area and the frame's own outside its box.
+9. (M3) Right press on bare ground → the tile's Look and Go here; choosing Go here calls `travel_to` with the cell.
 
 ## Not settled
 
 - The cost of one `State` clone per right press (estimate: a few MB, once per press, not per frame).
 - Talk's script-presence test without loading the script: until an index lookup exists, the slot/type part decides
   and a scriptless NPC prints the original's refusal.
+- Wide's page windows lie over the map: the page gives the engine the rects they hide and the menu keeps off them;
+  when every place in the map meets one (the windows dragged over most of it), the menu takes the place least hidden.
+- A Wide inventory menu is held to the doll's or the list's 72 pixels: longer words are cut there.
