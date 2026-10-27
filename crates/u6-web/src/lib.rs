@@ -1898,6 +1898,7 @@ fn json_string(out: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use u6_core::geom::{HALF_H, HALF_W};
     use u6_testkit::{Quiet, assert_same};
 
     #[test]
@@ -4696,8 +4697,9 @@ mod tests {
     #[test]
     fn before_a_start_there_is_no_context_menu_and_no_entry_runs() {
         let mut game = Game::new();
-        assert_eq!(game.context_menu(96, 96), "");
-        assert!(!game.command_at(0x88, 96, 96));
+        let (x, y) = hero_point();
+        assert_eq!(game.context_menu(x, y), "");
+        assert!(!game.command_at(0x88, x, y));
         assert!(game.pending.is_empty() && game.run.is_none());
     }
 
@@ -4743,7 +4745,8 @@ mod tests {
     }
 
     /// Spec 17, on the user's zip (skipped when absent; read only): at the prompt a right press
-    /// on the hero has a map menu with Look, also with a pointer move queued since the last step;
+    /// on the hero (the view's centre cell, [`cell_point`], so in either build's layout) has a
+    /// map menu with Look, also with a pointer move queued since the last step;
     /// `command_at` Look there queues the icon press and,
     /// once Look reads its target, the press on the hero (Look then shows the portrait and waits
     /// for a key: no prompt); with no prompt it refuses. A key gets the prompt back.
@@ -4768,16 +4771,18 @@ mod tests {
             false
         };
         assert!(prompt(&mut game), "the prompt");
-        let menu = game.context_menu(96, 96);
+        let (hx, hy) = hero_point();
+        let menu = game.context_menu(hx, hy);
         assert!(
             menu.starts_with(r#"{"kind":"map""#) && menu.contains(r#""code":132,"enabled":true"#)
         );
-        game.pointer(120, 120, 0);
-        let after_a_move = game.context_menu(96, 96);
+        let (mx, my) = cell_point(HALF_W as i32 + 2, HALF_H as i32 + 2);
+        game.pointer(mx, my, 0);
+        let after_a_move = game.context_menu(hx, hy);
         assert!(after_a_move == menu, "a pointer move queued: the same menu");
-        assert!(game.command_at(0x84, 96, 96));
+        assert!(game.command_at(0x84, hx, hy));
         assert!(
-            !game.command_at(0x84, 96, 96),
+            !game.command_at(0x84, hx, hy),
             "no prompt with the icon queued"
         );
         let mut read = false;
@@ -4825,25 +4830,46 @@ mod tests {
         false
     }
 
-    /// Spec 17 rounds 2 and 3, items 2 and 12, on the user's zip: `context_menu` on every cell of
-    /// the view and at three points of the side panel leaves the running game's state exactly as
-    /// it was (the checks run on a copy), and every one of the 121 view cells gives a menu. The
-    /// press point is the cell's centre except in the last column and row: their centre (168)
-    /// lies past the window's visible edge (no menu there: 100 of 121 at the raw centres), so
-    /// they are pressed at 164, inside the same cell (160..175) and inside the window.
+    /// The frame pixel a test presses for view cell (col, row), laid out from the build's map
+    /// geometry ([`u6_core::geom`]: the view's origin `MAP_X`/`MAP_Y`, Original (0, 0), Wide
+    /// (320, 0)): the cell's centre, except in the last column and row, whose centre lies past
+    /// the shown map's edge (`SHOWN`, the view less half a cell each side; no menu there), so
+    /// theirs is 3 pixels inside that edge, still in the same cell.
+    fn cell_point(col: i32, row: i32) -> (i32, i32) {
+        use u6_core::geom::{MAP_X, MAP_Y, SHOWN};
+        let at = |k: i32, origin: u16, edge: u16| {
+            (i32::from(origin) + 16 * k + 8).min(i32::from(edge) - 3)
+        };
+        (at(col, MAP_X, SHOWN.2), at(row, MAP_Y, SHOWN.3))
+    }
+
+    /// The hero's cell: the view's centre ([`HALF_W`], [`HALF_H`]), the leader's.
+    fn hero_point() -> (i32, i32) {
+        cell_point(HALF_W as i32, HALF_H as i32)
+    }
+
+    /// Spec 17 rounds 2 and 3 and follow-up F0, items 2 and 12, on the user's zip: `context_menu`
+    /// on every cell of the build's view (Original 11 × 11, Wide 37 × 21, each pressed at
+    /// [`cell_point`]) and at three points of the side panel leaves the running game's state
+    /// exactly as it was (the checks run on a copy), and every view cell gives a menu. The panel
+    /// points are the UI's: its 320 × 200 lies at the frame's top-left in both builds
+    /// (`u6_core::geom`), its panel at the same pixels (the inventory's cells, 0x10619c's), left of
+    /// the map's columns in both.
     #[test]
     fn context_menu_leaves_the_game_as_it_was() {
+        use u6_core::geom::{VIEW_H, VIEW_W};
         let Some(game) = at_the_prompt() else {
             return;
         };
         let before = game.engine.as_ref().quiet().state().clone();
         let mut cells = 0;
-        for row in 0..11 {
-            for col in 0..11 {
-                let (x, y) = ((8 + 16 * col).min(164), (8 + 16 * row).min(164));
+        for row in 0..VIEW_H as i32 {
+            for col in 0..VIEW_W as i32 {
+                let (x, y) = cell_point(col, row);
+                let cell = u6_core::ui::pointer::view_cell(x as i16, y as i16);
                 assert_eq!(
-                    (x / 16, y / 16),
-                    (col, row),
+                    cell,
+                    (col as i16, row as i16),
                     "the press point in its own cell"
                 );
                 cells += usize::from(!game.context_menu(x, y).is_empty());
@@ -4851,17 +4877,25 @@ mod tests {
         }
         let mut panel = 0;
         for (x, y) in [(0x100, 0x28), (0xb8, 0x20), (0xc0, 0x80)] {
+            assert!(
+                !u6_core::ui::pointer::map_column(x as i16),
+                "a panel point, off the map"
+            );
             panel += usize::from(!game.context_menu(x, y).is_empty());
         }
-        println!("menus given: view {cells}, panel {panel}");
-        assert_eq!(cells, 121, "a menu on every view cell");
+        println!(
+            "menus given: view {cells} of {}, panel {panel}",
+            VIEW_W * VIEW_H
+        );
+        assert_eq!(cells, VIEW_W * VIEW_H, "a menu on every view cell");
         let after = game.engine.as_ref().quiet().state().clone();
         assert!(after == before, "the game's state as it was");
     }
 
     /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip, through `Game::command_at` and
     /// `Game::step`: the leader starts without a readied spellbook, so the menu shows Cast disabled
-    /// as book; forced anyway on a cell two steps off, Cast runs its own refusal before any target
+    /// as book; forced anyway on a cell two to five steps off that shows it ([`cell_point`],
+    /// either build's layout), Cast runs its own refusal before any target
     /// read (its line printed, the prompt back), the held press is dropped, and the leader has not
     /// moved.
     #[test]
@@ -4869,11 +4903,24 @@ mod tests {
         let Some(mut game) = at_the_prompt() else {
             return;
         };
-        let (x, y) = (88 + 32, 88);
+        // Cast is offered on a cell with an object (a bare tile gives Look alone), so the cell is
+        // the first one with Cast disabled as book two to five steps from the hero (inside the
+        // original's targeting box in both builds), two east first: what stands where differs
+        // between the builds (at the start a temporary actor stands two east in Original, nothing
+        // in Wide).
+        const BOOK: &str = r#""code":130,"enabled":false,"reason":"book""#;
+        let near = (-5..=5i32).flat_map(|r| (-5..=5i32).map(move |c| (c, r)));
+        let (dx, dy) = std::iter::once((2, 0))
+            .chain(near.filter(|&(c, r)| c.abs().max(r.abs()) >= 2))
+            .find(|&(c, r)| {
+                let (x, y) = cell_point(HALF_W as i32 + c, HALF_H as i32 + r);
+                game.context_menu(x, y).matches(BOOK).count() == 1
+            })
+            .expect("a cell two to five steps off whose menu shows Cast disabled as book");
+        let (x, y) = cell_point(HALF_W as i32 + dx, HALF_H as i32 + dy);
         let menu = game.context_menu(x, y);
-        let books = menu
-            .matches(r#""code":130,"enabled":false,"reason":"book""#)
-            .count();
+        let books = menu.matches(BOOK).count();
+        println!("the cell {dx}, {dy} from the hero");
         assert_eq!(books, 1, "Cast shown, disabled as book");
         let at = game.leader_position();
         let lines = game.engine.as_ref().quiet().state().ui.messages.len();
@@ -4900,9 +4947,10 @@ mod tests {
         assert_eq!(game.leader_position(), at, "the leader did not move");
     }
 
-    /// Spec 17 round 2, item 0: a key let go just before a right press (its release queued, as
-    /// `key_up` queues it) does not hide the menu, and the entry chosen then runs: the release
-    /// is applied where the engine queues the input and is never one of its events.
+    /// Spec 17 round 2, item 0: a key let go just before a right press on the hero ([`hero_point`])
+    /// (its release queued, as `key_up` queues it) does not hide the menu, and the entry chosen
+    /// then runs: the release is applied where the engine queues the input and is never one of
+    /// its events.
     #[test]
     fn a_key_let_go_just_before_a_right_press_keeps_the_menu_and_its_run() {
         let Some(mut game) = at_the_prompt() else {
@@ -4911,14 +4959,16 @@ mod tests {
         assert!(game.key_down("KeyX", "x", false));
         game.step(20);
         assert!(steps_to_prompt(&mut game), "the prompt after the key");
-        let menu = game.context_menu(96, 96);
+        let (hx, hy) = hero_point();
+        let menu = game.context_menu(hx, hy);
+        assert!(!menu.is_empty(), "a menu on the hero");
         assert!(game.key_up("KeyX"), "the key was held");
-        let with_release = game.context_menu(96, 96);
+        let with_release = game.context_menu(hx, hy);
         assert!(
             with_release == menu,
             "the same menu with the release queued"
         );
-        assert!(game.command_at(0x84, 96, 96), "the entry runs");
+        assert!(game.command_at(0x84, hx, hy), "the entry runs");
         let mut read = 0;
         for _ in 0..200 {
             game.step(20);
