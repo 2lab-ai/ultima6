@@ -55,14 +55,14 @@ deploys.
 | K1 | 4 | `fix/held-key-drain` | spec 19 O1b: the poll keeps the newest press, a release cancels its repeats | — |
 | B12 | 1a | `feat/staff-wand-casts` (from main bce1bfe) | staff and wand casts, monsters included (row 5) | B2, B4 merged: done |
 | P1 | 1c | `~/Games/ultima6/i18n/ko-1027a` (a copy of ko-1026a) | Korean lines for B10's new catalogue entries, on top of the live pack. Export at main e0bc087: 469 game strings, 56 not in the live pack, all new since 1026a (`exports/ultima6-strings-1027-new.json`); dry run: 1 request, 931 characters. The `--send` run was refused by the session's auto-mode classifier; it goes through the handoff gate | B10 merged (done); message the row-25 session before the pack deploy |
-| M2 | 2 | `feat/context-menu` (from `integ/r1027` 41e8209) | spec 17: the query on a State clone, the icon-then-target run with its gate, the page menu | B6, B7 merged: done |
+| M2 | 2 | `feat/context-menu` (from `integ/r1027` 41e8209) | spec 17: the query on a State clone, the icon-then-target run with its gate, the page menu. Shipped in deploy 30 (main bd3e670) | B6, B7 merged: done |
 | W2 | 5 | `feat/smooth-motion` (from `integ/r1027` ec3c4f6) | spec 20: scene, presenter, early picture on a clone. r1 (6ca722b; `integ/r1027` merged in, 6c180c3): purity holds (State and RNG equal, publications byte-identical with the switch on and off); end-of-slide frames equal the engine's picture in 420 scenes; in-between offsets measured in all three modes; doorway frames read by the dispatcher (half-cell scroll, the mover under the doorway top). Deviation: HD recomposes the whole frame each display frame, which costs Wide 5.18 ms median / 9.01 p95 / 14.9 max per present. Decided: Wide stays on by default, and r2 builds Design 5's per-publication layers. r2 also explains the early-picture spikes and writes the kept deviations into spec 20 (`w2-r2.md`). Reviews wait for r2 | C1, B2, K1 merged (done) |
 | B13 | 1c | (later, after the units in flight) | replace the static scan with a compiler rule: clippy `disallowed-methods` on the image text readers, one string-registry module the catalogue is built from (opus, B10 r4). About 100+ production reader sites (`cstr` 32, `game_string` 31, `printf` 46) | B10, M2, W2, B12 merged |
 | E1 | 1a | (round 3) | the `end` program (O1 row 10): decompile, port, launcher state 2 | — |
 | C2 | 3 | `feat/sight-fade` (from `integ/r1027` b8ed317) | the owner's item-3 follow-up (`ssot.md`): remembered cells kept off the view and on other levels; fade by game days, 2^-d of the pixels through a 4 × 4 ordered pattern, black and forgotten from day 5; the window reset keeps the memory. Brief `c2.md` | C1 shipped: done |
 | K2 | 4 | `fix/held-key-immediate` (from `integ/r1027` ba6cd09) | the owner's report (2026-10-27): a held arrow steps once, waits for the OS repeat delay, then walks on. A held direction key is taken again at every command prompt at once (one step a turn); other waits keep the browser's repeat. Brief `k2.md` | K1 shipped: done |
 | C3 | 3 | (after C2) | the remembered sight written beside the savegame as a port-only file and read back with it | C2 |
-| M2-F | 2 | `feat/context-menu` | F0 (bd0eb13) + F0b (7345d88): the u6-web menu tests' press points from the shown map, so they hold in the wide build (the deploy-30 gate failed 3 there); both reviewers approve, merged into `integ/r1027` ba6cd09. F1 (cca6c84, test-only follow-ups): gpt and opus REVISE, round 2 in progress | M2 |
+| M2-F | 2 | `feat/context-menu` | F0 (bd0eb13) + F0b (7345d88): the u6-web menu tests' press points from the shown map, so they hold in the wide build (the deploy-30 gate failed 3 there); both reviewers approve, merged into `integ/r1027` ba6cd09. F1 (cca6c84, test-only follow-ups): r1 gpt and opus REVISE; r2 (`m2-f1r2.diff`: the fresh-copy counter in `Press::check`, the said queue built by the engine's own `say`, a state check after each query, the panel count from the inventory) both APPROVE; r3 (`m2-f1r3.diff`: each slot checked against its own occupancy, RED by swapping the two flags; two comment NITs) both APPROVE. Next: the dispatcher's gate on r3, commit, merge into `integ/r1027` for deploy 31 | M2 |
 
 ### Review state (2026-10-27)
 
@@ -147,6 +147,21 @@ Deploy 29 (2026-10-27): main 87ae3f8, which is deploy 28 plus B12 (staff and wan
   - The live wasm (both builds) and `app.js` match the local build by SHA-256.
   - `live19.mjs`: LIVE OK; 0 page errors.
 - Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy29/`.
+
+Deploy 30 (2026-10-27): main bd3e670, which is deploy 29 plus M2 (the context menu, spec 17 shipped) and its test fixes F0 and F0b, pushed. The main-into-integ merge after the gate touches `.prd` only.
+- `merge-gate.sh` on ba6cd09 (`deploy30b/`; the first try, `deploy30/`, failed 3 u6-web menu tests in the wide build, fixed by F0 and F0b):
+  - fmt and clippy pass in both builds.
+  - Workspace tests: 1812 passed, 1837 with wide, 0 failed.
+  - Web: 153 of 154, three runs. The one failure is the Wide compositor time-per-frame test at S 4, at 10.40–10.90 ms against an 8 ms limit.
+  - Oracles 8/8; port-map up to date; loop-lint 0 FAIL.
+- Control for the Wide failure: run alone, alternating main (deploy 29 code) and the integration branch, at load ~69-79. It measured main 10.60 / 10.50 ms and integration 10.60 / 10.50 ms. The menu does not raise it.
+- Packs unchanged: `ultima6-deploy` 72aa055, byte-identical.
+- Production deploy (wrangler): https://629c8a76.ultima6.pages.dev.
+- Live check:
+  - The live wasm (both builds) and `app.js` match the local build by SHA-256.
+  - `live19.mjs`: LIVE OK; 0 page errors.
+  - `live30-menu.mjs` (production, Wide layout, ko-KR): a right press near the map's centre at the prompt opens the menu with the focus; 1 section, 2 entries (Look enabled, Cast disabled with its reason); the menu inside the screen box; the held right button moved over the map walks no one; Escape closes it with the leader where he was and the canvas focused; 0 page errors. Frame `d30-menu.png` read by the dispatcher: the leader's section, Look highlighted, Cast greyed with "no spellbook in hand" under it, Talk absent (no Talk to oneself).
+- Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy30/`.
 
 Carried to B12: when the staff cast (row 5) turns the text switch off, check every line it prints goes through
 `queue_print` or `combat::present::say` (both test the switch since B2). The forced-on writes once noted here were
