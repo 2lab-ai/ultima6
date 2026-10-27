@@ -231,11 +231,15 @@ pub async fn book_cast(state: &RefCell<State>, io: &Io, book1: Slot, book2: Slot
 
 /// The level, magic-point and reagent checks of 0x11abd0, with their messages.
 async fn checks_pass(state: &RefCell<State>, io: &Io, actor: u16, spell: u16, circle: u16) -> bool {
-    let refusal = match checks_refusal(&state.borrow(), actor, spell, circle) {
-        Some(Refusal::Level) => MSG_LEVEL_LOW,
-        Some(Refusal::Points) => MSG_NO_POINTS,
-        Some(_) => MSG_NO_REAGENTS,
-        None => return true,
+    let r = checks_refusal(&state.borrow(), actor, spell, circle);
+    let refusal = if r == Some(Refusal::Level) {
+        MSG_LEVEL_LOW
+    } else if r == Some(Refusal::Points) {
+        MSG_NO_POINTS
+    } else if r == Some(Refusal::Reagents) {
+        MSG_NO_REAGENTS
+    } else {
+        return true;
     };
     print_at(state, io, refusal, &[]).await;
     false

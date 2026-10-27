@@ -26,7 +26,7 @@ mod look;
 pub(crate) mod push;
 mod seams;
 mod text;
-mod world;
+pub(crate) mod world;
 
 #[cfg(test)]
 mod real_data;

@@ -81,7 +81,7 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
         }
         0x5d => seams_sextant(ux).await,
         0x61 => food::study_scroll(ux).await,
-        0x62 => {
+        hunk15::world::CHEST => {
             hunk15::chest(&mut ux.s(), obj, false, false, false);
             ux.flush().await;
         }
@@ -134,7 +134,7 @@ pub(super) async fn dispatch_type(ux: Ux<'_>, obj: Slot, ty: u16, frame: u16) {
             ux.flush().await;
         }
         0x120 => mech::drawbridge(ux, obj).await,
-        0x129..=0x12c => {
+        hunk15::world::DOOR_FIRST..=hunk15::world::DOOR_LAST => {
             hunk15::door(&mut ux.s(), obj, false, false, false);
             ux.flush().await;
         }

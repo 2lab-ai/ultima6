@@ -40,10 +40,11 @@
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as h from './harness.mjs';
 
 const MARKER = { name: 'port-test-marker.txt', text: 'not a game file' };
@@ -1267,14 +1268,83 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
 }, { needs: h.haveHfes });
 
 // Spec 17: where the frames of the open context menu go (Original, S 4, and at phone width),
-// for the dispatcher to read: the directory U6_FRAMES_DIR names (outside the repository: the
-// frames show the user's game text); unset, no frame is written and the checks still run.
-const FRAMES_DIR = process.env.U6_FRAMES_DIR ?? null;
-async function keepFrame(locator, name) {
-  if (!FRAMES_DIR) return;
-  await mkdir(FRAMES_DIR, { recursive: true });
-  await writeFile(join(FRAMES_DIR, name), await locator.screenshot());
+// for the dispatcher to read: the directory U6_FRAMES_DIR names, read at each call; unset, no
+// frame is written and the checks still run. The frames show the user's game text, so a
+// directory inside the repository or inside its main checkout (a linked worktree lies in it),
+// resolved through the links of the part that exists, is refused before any screenshot: the test
+// fails and nothing is made. Nothing of a frame is ever printed.
+// `dir` absolute, its existing part resolved through its links (the rest as named).
+function realDir(dir) {
+  let at = resolve(dir);
+  const rest = [];
+  while (!existsSync(at) && dirname(at) !== at) {
+    rest.unshift(basename(at));
+    at = dirname(at);
+  }
+  return join(realpathSync(at), ...rest);
 }
+// The main checkout's root: the parent of git's common directory (the repository itself when
+// it is the main checkout, or when git cannot say).
+const MAIN_ROOT = (() => {
+  try {
+    const common = execFileSync('git', ['-C', h.REPO, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return dirname(common);
+  } catch {
+    return h.REPO;
+  }
+})();
+// `dir` is the repository or the main checkout, or lies inside one of them.
+function insideRepo(dir) {
+  const real = realDir(dir);
+  return [h.REPO, MAIN_ROOT].some((root) => {
+    const rel = relative(realpathSync(root), real);
+    return !(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel));
+  });
+}
+// Writes `locator`'s screenshot as `name` in `dir` (U6_FRAMES_DIR now by default); true when
+// written, false with no directory.
+async function keepFrame(locator, name, dir = process.env.U6_FRAMES_DIR ?? null) {
+  if (!dir) return false;
+  assert.ok(!insideRepo(dir), 'the frames directory outside the repository and its main checkout');
+  const real = realDir(dir);
+  const shot = await locator.screenshot();
+  await mkdir(real, { recursive: true });
+  await writeFile(join(real, name), shot);
+  return true;
+}
+test('the context menu (spec 17): keepFrame refuses a frames directory inside the repository (a child named ..frames too), inside its main checkout or named through a link into it, before any screenshot and making nothing, and writes the frame into one outside it', async () => {
+  const shots = { n: 0 };
+  const fake = { screenshot: async () => { shots.n += 1; return Buffer.from([1, 2, 3]); } };
+  const tag = `u6-frames-${process.pid}`;
+  const link = await mkdtemp(join(tmpdir(), 'u6-frames-'));
+  try {
+    await symlink(h.REPO, join(link, 'in'));
+    const refused = [
+      ['the repository itself', h.REPO, null],
+      ['a directory in it, not made yet', join(h.REPO, 'tools', tag, 'frames'), join(h.REPO, 'tools', tag)],
+      ['a child named ..frames', join(h.REPO, `..frames-${tag}`, 'x'), join(h.REPO, `..frames-${tag}`)],
+      ['in the main checkout', join(MAIN_ROOT, tag, 'frames'), join(MAIN_ROOT, tag)],
+      ['a main checkout child named ..frames', join(MAIN_ROOT, `..frames-${tag}`), join(MAIN_ROOT, `..frames-${tag}`)],
+      ['through a link into it', join(link, 'in', tag), join(h.REPO, tag)],
+    ];
+    for (const [what, dir, made] of refused) {
+      assert.ok(insideRepo(dir), `${what}: inside`);
+      await assert.rejects(keepFrame(fake, 'frame.png', dir), assert.AssertionError, `${what}: refused`);
+      assert.equal(shots.n, 0, `${what}: no screenshot`);
+      if (made) assert.ok(!existsSync(made), `${what}: nothing made`);
+    }
+    assert.equal(await keepFrame(fake, 'frame.png', null), false, 'no directory: nothing');
+    assert.equal(shots.n, 0, 'no directory: no screenshot');
+    const out = join(link, 'out', 'frames');
+    assert.ok(!insideRepo(out) && !insideRepo(tmpdir()), 'outside');
+    assert.equal(await keepFrame(fake, 'frame.png', out), true, 'outside: written');
+    assert.equal(shots.n, 1, 'one screenshot');
+    assert.deepEqual([...(await readFile(join(out, 'frame.png')))], [1, 2, 3], 'the frame in it');
+  } finally {
+    await rm(link, { recursive: true, force: true });
+  }
+});
+
 const USE = 0x88;
 const LOOK = 0x84;
 // The game pixel at the middle of view cell (col, row) of the Original map window (11 x 11 cells
@@ -1433,10 +1503,12 @@ test('the context menu (spec 17): a right press at the prompt opens it with the 
   assert.equal(after.kind[1], before.kind[1] ^ 4, 'the door opened: its frame lost bit 2');
 }, { needs: h.haveHfes });
 
-test('the context menu (spec 17): after a press outside closes it (a press and release off the canvas, as a touch gives them, with no move between), the next left press on the canvas, with no move before it, reaches the game (its press and its release)', async (env) => {
+test('the context menu (spec 17): after a press outside closes it (a press and release off the canvas, as a touch gives them, with no move between), the next left press on the canvas, with no move before it, reaches the game (its press and its release, in that order, and nothing before them)', async (env) => {
   const { page } = await menuPage(env);
   const menu = page.locator('#context-menu');
-  const buttons = () => page.evaluate(() => globalThis.__buttons.length);
+  // The game's button changes ([buttons, clock] each, harness `__buttons`).
+  const changes = () => page.evaluate(() => globalThis.__buttons.map(([b, at]) => [b, at]));
+  const before = await changes();
   await h.rightPress(page, 88, 88);
   await page.mouse.up({ button: 'right' });
   // The press outside, on the status line, its release there too; the mouse stays on the canvas.
@@ -1448,12 +1520,14 @@ test('the context menu (spec 17): after a press outside closes it (a press and r
   });
   await menu.waitFor({ state: 'hidden' });
   await h.waitTicks(page, 10);
-  const b0 = await buttons();
+  assert.deepEqual(await changes(), before, 'the right press and the press outside: no button change');
   await page.mouse.down();
   await h.waitTicks(page, 3);
   await page.mouse.up();
   await h.waitTaken(page);
-  assert.equal(await buttons(), b0 + 2, 'the press and its release reached the game');
+  const added = (await changes()).slice(before.length);
+  assert.deepEqual(added.map(([b]) => b), [1, 0], 'the press, then its release, and nothing else');
+  assert.ok(added[1][1] >= added[0][1], 'the release after the press');
 }, { needs: h.haveHfes });
 
 // The open menu's rect and the visible part of the screen box (its rect within the viewport),
@@ -1470,26 +1544,39 @@ const menuRects = (page) => page.evaluate(() => {
 });
 const inside = ({ menu: [x, y, w, h], visible: [vx, vy, vw, vh] }) => x >= vx && y >= vy && x + w <= vx + vw && y + h <= vy + vh;
 
-// The largest menu (most rows) among the view cells whose screen point lies inside the viewport,
-// preferring the lowest such cell (where a menu must flip up), and that point.
-async function lowestLargestMenu(page) {
-  const height = await page.evaluate(() => innerHeight);
-  const menus = await h.contextMenus(page, VIEW.map(([c, r]) => viewCell(c, r)));
+// Of `candidates` ({ n: its rows, row: its view row, ... }) the largest menu, of those the lowest
+// cell's: rows first, then the row; null for none.
+function largestLowest(candidates) {
   let best = null;
+  for (const c of candidates) {
+    if (!best || c.n > best.n || (c.n === best.n && c.row > best.row)) best = c;
+  }
+  return best;
+}
+// The largest menu (most rows) among the view cells whose screen point lies inside the viewport,
+// of those the lowest cell's (where a menu must flip up), and that point.
+async function lowestLargestMenu(page) {
+  const [width, height] = await page.evaluate(() => [innerWidth, innerHeight]);
+  const menus = await h.contextMenus(page, VIEW.map(([c, r]) => viewCell(c, r)));
+  const candidates = [];
   for (let i = 0; i < VIEW.length; i += 1) {
     const m = menus[i];
     if (!m) continue;
     const at = viewCell(...VIEW[i]);
-    const [, sy] = await h.screenPoint(page, ...at);
-    if (sy >= height - 4) continue;
+    const [sx, sy] = await h.screenPoint(page, ...at);
+    if (sx < 4 || sy < 4 || sx >= width - 4 || sy >= height - 4) continue;
     const n = m.sections.reduce((k, x) => k + 1 + x.entries.length, 0);
-    const key = [VIEW[i][1], n];
-    if (!best || key[0] > best.key[0] || (key[0] === best.key[0] && key[1] > best.key[1])) {
-      best = { key, n, sections: m.sections.length, at };
-    }
+    candidates.push({ n, row: VIEW[i][1], sections: m.sections.length, at });
   }
-  return best;
+  return largestLowest(candidates);
 }
+test('the context menu (spec 17): the placement checks pick the largest menu, rows first: a higher cell with more rows beats a lower one with fewer, and among equal rows the lowest cell wins', async () => {
+  const pick = (cells) => largestLowest(cells.map(([n, row]) => ({ n, row })));
+  assert.deepEqual(pick([[5, 9], [8, 2]]), { n: 8, row: 2 }, 'more rows beat a lower cell');
+  assert.deepEqual(pick([[8, 2], [5, 9]]), { n: 8, row: 2 }, 'in either order');
+  assert.deepEqual(pick([[6, 3], [6, 7], [6, 5]]), { n: 6, row: 7 }, 'equal rows: the lowest cell');
+  assert.equal(pick([]), null, 'none');
+});
 
 test('the context menu (spec 17): a menu stays inside the part of the screen box the viewport shows, flipped up near its bottom and scrolling inside when taller, at phone width (390 x 844), on a phone held sideways (844 x 390, the box taller than the viewport) and in fullscreen (receipt: each menu rect beside the visible box and the viewport) (screenshot)', async (env) => {
   const { page } = await menuPage(env, { width: 390, height: 844 });
@@ -1518,6 +1605,141 @@ test('the context menu (spec 17): a menu stays inside the part of the screen box
   await check('fullscreen');
 }, { needs: h.haveHfes });
 
+// The rect of the open menu's last entry, as `menuRects` gives the menu's.
+const lastEntryRect = (page) => page.evaluate(() => {
+  const items = document.querySelectorAll('#context-menu [role="menuitem"]');
+  const b = items[items.length - 1].getBoundingClientRect();
+  return [b.left, b.top, b.width, b.height].map(Math.round);
+});
+
+test('the context menu (spec 17): a menu taller than the part of the screen box the viewport shows scrolls inside it: its list taller than its box, the last entry out of sight until the list is scrolled to its end, then inside the visible box (receipt: the heights)', async (env) => {
+  const { page } = await menuPage(env, { width: 844, height: 390 });
+  const menu = page.locator('#context-menu');
+  for (const height of [220, 180, 150, 120, 100]) {
+    await page.setViewportSize({ width: 844, height });
+    await page.evaluate(() => document.getElementById('screen-box').scrollIntoView({ block: 'start' }));
+    await h.waitFrames(page, 3);
+    const big = await lowestLargestMenu(page);
+    if (!big) continue;
+    await h.rightPress(page, ...big.at);
+    await page.mouse.up({ button: 'right' });
+    const rects = await menuRects(page);
+    const sizes = await page.evaluate(() => {
+      const m = document.getElementById('context-menu');
+      return [m.scrollHeight, m.clientHeight];
+    });
+    const unseen = await lastEntryRect(page);
+    // Taller by at least its last entry: that entry out of sight until the list scrolls.
+    if (sizes[0] <= sizes[1] || inside({ menu: unseen, visible: rects.visible })) {
+      await page.keyboard.press('Escape');
+      await menu.waitFor({ state: 'hidden' });
+      continue;
+    }
+    await page.evaluate(() => {
+      const m = document.getElementById('context-menu');
+      m.scrollTop = m.scrollHeight;
+    });
+    await h.waitFrames(page, 2);
+    const seen = await lastEntryRect(page);
+    console.log(`  receipt: viewport height ${height}: ${big.n} rows; list ${sizes[0]} in a box of ${sizes[1]}; menu ${rects.menu} in visible ${rects.visible}`);
+    assert.ok(inside(rects), 'the menu inside the visible screen box');
+    assert.ok(sizes[0] > sizes[1], 'its list taller than its box');
+    assert.ok(!inside({ menu: unseen, visible: rects.visible }), 'the last entry out of sight before the scroll');
+    assert.ok(inside({ menu: seen, visible: rects.visible }), 'the last entry inside the visible box after it');
+    assert.ok(await menu.isVisible(), 'still open');
+    return;
+  }
+  assert.fail('no menu taller than the visible part of the screen box');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17): where the visible part of the screen box is narrower than the menu\'s 10em minimum, the menu is no wider than that part and stays inside it (receipt: the widths)', async (env) => {
+  const { page } = await menuPage(env, { width: 120, height: 600 });
+  const menu = page.locator('#context-menu');
+  const big = await lowestLargestMenu(page);
+  assert.ok(big, 'a menu in view');
+  await h.rightPress(page, ...big.at);
+  await page.mouse.up({ button: 'right' });
+  const rects = await menuRects(page);
+  const tenEm = await page.evaluate(() => 10 * parseFloat(getComputedStyle(document.getElementById('context-menu')).fontSize));
+  console.log(`  receipt: menu ${rects.menu} in visible ${rects.visible}, 10em ${Math.round(tenEm)}`);
+  assert.ok(rects.visible[2] < tenEm, 'the visible part narrower than 10em');
+  assert.ok(rects.menu[2] <= rects.visible[2], 'the menu no wider than it');
+  assert.ok(inside(rects), 'inside the visible screen box');
+  assert.ok(await menu.isVisible(), 'open');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17): a key that closes it gives the canvas the focus back at the release of that physical key (its code) only: not at the release of another key, at a release of that key giving another character; a blur of the window while that release is awaited forgets it, so a later release takes no focus', async (env) => {
+  const { page } = await menuPage(env);
+  const menu = page.locator('#context-menu');
+  const focused = async () => (await h.state(page)).focused;
+  const open = async () => {
+    await h.rightPress(page, 88, 88);
+    await page.mouse.up({ button: 'right' });
+    await page.waitForFunction(() => document.getElementById('context-menu').contains(document.activeElement));
+  };
+  // A key event made in the page: on the focused element (`at` 'focus') or on the window.
+  const key = (type, at, init) => page.evaluate(([type, at, init]) => {
+    const to = at === 'window' ? window : document.activeElement;
+    to.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
+  }, [type, at, init]);
+  await open();
+  await key('keydown', 'focus', { key: 'Escape', code: 'Escape' });
+  await menu.waitFor({ state: 'hidden' });
+  assert.notEqual(await focused(), 'screen', 'not at the press');
+  await key('keyup', 'window', { key: 'Escape', code: 'KeyQ' });
+  assert.notEqual(await focused(), 'screen', 'another key let go: not yet');
+  await key('keyup', 'window', { key: 'Unidentified', code: 'Escape' });
+  assert.equal(await focused(), 'screen', 'that key let go, another character: the canvas has it');
+
+  await open();
+  await key('keydown', 'focus', { key: 'Escape', code: 'Escape' });
+  await menu.waitFor({ state: 'hidden' });
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await key('keyup', 'window', { key: 'Escape', code: 'Escape' });
+  assert.notEqual(await focused(), 'screen', 'after a blur its release takes no focus');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17): a key let go just before a right press, with no step of the game between (the release queued), still gives the menu, an entry of it able to run', async (env) => {
+  const { page } = await menuPage(env);
+  const menu = page.locator('#context-menu');
+  await page.keyboard.down('x');
+  await h.waitTaken(page);
+  await h.waitPrompt(page);
+  // The game's steps held off from here: the release and the press meet the same queue.
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const [step, up] = [g.step, g.key_up];
+    globalThis.__held = true;
+    g.step = function (ms) {
+      if (!globalThis.__held) step.call(this, ms);
+    };
+    g.key_up = function (code) {
+      globalThis.__releaseQueued = up.call(this, code);
+      return globalThis.__releaseQueued;
+    };
+  });
+  const ticks = await page.evaluate(() => globalThis.__ticks);
+  await page.keyboard.up('x');
+  const at = await h.screenPoint(page, 88, 88);
+  await page.mouse.move(...at);
+  await page.mouse.down({ button: 'right' });
+  await menu.waitFor({ state: 'visible', timeout: 10_000 });
+  const seen = await page.evaluate(() => ({
+    ticks: globalThis.__ticks,
+    queued: globalThis.__releaseQueued,
+    runnable: [...document.querySelectorAll('#context-menu [role="menuitem"]')]
+      .filter((x) => x.getAttribute('aria-disabled') !== 'true').length,
+  }));
+  await page.evaluate(() => {
+    globalThis.__held = false;
+  });
+  await page.mouse.up({ button: 'right' });
+  console.log(`  receipt: steps between ${seen.ticks - ticks}, release queued ${seen.queued ? 1 : 0}, entries able to run ${seen.runnable}`);
+  assert.equal(seen.ticks, ticks, 'no step of the game between the release and the press');
+  assert.equal(seen.queued, true, 'the key was held: its release queued');
+  assert.ok(seen.runnable > 0, 'the menu shown, an entry able to run');
+}, { needs: h.haveHfes });
+
 test('the context menu (spec 17): the underlined command is its first entry: Look on any cell, and Rest and Combat (only there); the engine names it (underlined)', async (env) => {
   const { page } = await menuPage(env);
   const menu = page.locator('#context-menu');
@@ -1538,6 +1760,146 @@ test('the context menu (spec 17): the underlined command is its first entry: Loo
     assert.equal(all, 1, `${code}: once`);
     await page.keyboard.press('Escape');
     await menu.waitFor({ state: 'hidden' });
+  }
+}, { needs: h.haveHfes });
+
+// Spec 19 O1b at the page: `key` held from the prompt on the focused canvas as a keyboard sends
+// it (Playwright's keyboard.down again is a keydown with `repeat` true): the press, the first
+// repeat 225 ms later, then one every 30 ms (the owner's macOS repeat) until the game ran `ms`
+// on its clock since the press; then, by `how`, the keyup on the canvas ('canvas'), the focus
+// moved to the Mute button first and the keyup there ('focus'), or the window's blur with the
+// key still down ('blur': the page lets every held key go; the keyup comes only after `check`,
+// and in any case, so it cannot stand in for the blur). The page writes the leader and
+// `data-keys` in its frame callback after the steps, and the release comes between frames, so
+// the window's listener (capture; a blur only of the window itself) reads them as of the last
+// step before the release reached the game. The walk: the observed position changes of the
+// leader before the release (`held`) and the cells after it (`afterCells`, read every frame
+// until the prompt is back), the repeats the canvas saw, the keys queued at the release and
+// once the step after it ran. `check(walk)` runs on a walk that moved while held.
+async function heldKey(page, key, ms, how, check) {
+  await h.waitPrompt(page);
+  await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const stop = new AbortController();
+    const seen = { repeats: 0, leaders: [c.dataset.leader], release: null, stop };
+    window.__held = seen;
+    const look = () => {
+      if (c.dataset.leader !== seen.leaders.at(-1)) seen.leaders.push(c.dataset.leader);
+    };
+    c.addEventListener('keydown', (e) => {
+      if (e.repeat) seen.repeats += 1;
+    }, { signal: stop.signal });
+    const mark = (e) => {
+      if (seen.release !== null || (e.type === 'blur' && e.target !== window)) return;
+      look();
+      seen.release = { at: seen.leaders.length, keys: Number(c.dataset.keys), ticks: globalThis.__ticks };
+    };
+    for (const type of ['keyup', 'blur']) window.addEventListener(type, mark, { signal: stop.signal, capture: true });
+    const poll = () => {
+      if (window.__held !== seen) return;
+      look();
+      requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
+  });
+  const clock = () => page.evaluate(() => globalThis.__clock);
+  await page.keyboard.down(key);
+  const t0 = await clock();
+  await h.sleep(225);
+  while ((await clock()) - t0 < ms) {
+    await page.keyboard.down(key);
+    await h.sleep(30);
+  }
+  if (how === 'focus') await page.evaluate(() => document.getElementById('mute').focus());
+  if (how === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  else await page.keyboard.up(key);
+  let failed = null;
+  try {
+    const ticks = await page.evaluate(() => window.__held.release.ticks);
+    await page.waitForFunction((t) => globalThis.__ticks > t, ticks, { timeout: 60_000, polling: 'raf' });
+    await h.waitFrames(page, 1);
+    const keysAfter = Number(await page.evaluate(() => document.getElementById('screen').dataset.keys));
+    await h.waitPrompt(page);
+    const seen = await page.evaluate(() => {
+      const s = window.__held;
+      window.__held = null;
+      s.stop.abort();
+      if (document.getElementById('screen').dataset.leader !== s.leaders.at(-1)) {
+        s.leaders.push(document.getElementById('screen').dataset.leader);
+      }
+      return { repeats: s.repeats, leaders: s.leaders, at: s.release.at, keys: s.release.keys };
+    });
+    const walk = {
+      held: seen.at - 1,
+      afterCells: seen.leaders.slice(seen.at),
+      repeats: seen.repeats,
+      keysAtRelease: seen.keys,
+      keysAfter,
+    };
+    if (walk.held > 0) check(walk);
+    return walk;
+  } catch (err) {
+    failed = err;
+    throw err;
+  } finally {
+    // The key up after a blur, the focus back on the canvas: each runs whatever happened above.
+    // A cleanup that fails beside a failure in flight is logged (its kind only) and attached to
+    // it, never thrown in its place; alone, it is the failure.
+    const cleanups = [];
+    if (how === 'blur') cleanups.push(() => page.keyboard.up(key));
+    if (how === 'focus') cleanups.push(() => page.focus('#screen'));
+    let cleanupError = null;
+    for (const cleanup of cleanups) {
+      try {
+        await cleanup();
+      } catch (err) {
+        cleanupError ??= err;
+      }
+    }
+    if (cleanupError !== null) {
+      if (failed === null) throw cleanupError;
+      console.error(`  the ${how} cleanup failed too: ${h.errorName(cleanupError)}`);
+      if (failed instanceof Error) failed.cleanupError = cleanupError;
+    }
+  }
+}
+
+// `heldKey` from the prompt in the first direction whose press walks (a foe beside the hero
+// blocks a way; as `h.stepOnce`, a pass after a round of four blocked).
+async function heldWalkingKey(page, ms, how, check) {
+  for (let round = 0; round < h.STEP_ROUNDS; round += 1) {
+    if (round > 0) await h.passTurn(page);
+    for (const { key } of h.STEPS) {
+      const walk = await heldKey(page, key, ms, how, check);
+      if (walk.held > 0) return walk;
+    }
+  }
+  assert.fail(`no held arrow walked in ${h.STEP_ROUNDS} rounds of the four directions`);
+}
+
+// The start fight as booted: an arrow that walks is held 1 s; the step's turn (the foes' turns
+// after it) outlasts the hold, so the repeats wait in the queue when the key is let go. The
+// press was taken at the prompt, so all that waits is repeats and the release takes them all
+// back: no step after it (the drain alone would give one, the newest repeat's). So when the
+// release is heard on the canvas, after the focus moved to another control, and when the window
+// lost the focus with no keyup. The fight can still kill the hero in the turns after the release
+// (he wakes on `h.WAKE_CELL`, as `h.stepResult` allows), so a position change after it is
+// allowed there only. The Rust tests (ui/tests/held_key.rs) pin no step at all after the
+// release in the quiet castle.
+test('a held arrow on the canvas: the browser\'s repeats wait while the turn runs, and its release takes them back at the next step, so the hero walks no cell after it: released on the canvas, on another control the focus moved to, or by the window\'s blur (spec 19 O1b)', async (env) => {
+  const { page } = await h.openPage(env); // gated: the glue keeps the engine clock and its ticks
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  for (const how of ['canvas', 'focus', 'blur']) {
+    await heldWalkingKey(page, 1000, how, (walk) => {
+      const woke = walk.afterCells.filter((cell) => cell === h.WAKE_CELL).length;
+      console.log(`  receipt (${how}): held 1 s, ${walk.repeats} repeats sent; observed position changes ${walk.held} while held, ${walk.afterCells.length} after the release (${woke} onto the wake cell); keys queued ${walk.keysAtRelease} at the release, ${walk.keysAfter} once it was taken`);
+      assert.ok(walk.repeats > 0, `${how}: the canvas saw the browser's repeats`);
+      assert.ok(walk.keysAtRelease > 0, `${how}: the repeats waited while the turn ran`);
+      assert.equal(walk.keysAfter, 0, `${how}: the release took them back`);
+      assert.ok(walk.afterCells.every((cell) => cell === h.WAKE_CELL), `${how}: no step after the release (a change only onto the wake cell)`);
+    });
   }
 }, { needs: h.haveHfes });
 

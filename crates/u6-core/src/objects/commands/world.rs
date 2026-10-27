@@ -109,50 +109,73 @@ fn leader_z(s: &State) -> u16 {
 pub fn door(s: &mut State, door: Slot, key: bool, lock: bool, unlock: bool) {
     queue(s, b"\n".to_vec(), Vec::new());
     let f = frame(s, door);
-    match f {
-        0..=3 => {
+    if !door_locked(f) {
+        if f < 4 {
             if !key && !lock && !unlock {
                 line(s, S_CLOSED);
                 set_frame(s, door, f ^ 4);
             } else {
                 line(s, S_OPEN_DOOR_LOCK);
             }
-        }
-        4..=7 => {
-            if key {
-                line(s, S_LOCKED);
-                set_frame(s, door, f ^ 0xc);
-            } else if lock {
-                line(s, S_MAGIC_LOCKED);
-                set_frame(s, door, f ^ 8);
+        } else if key {
+            line(s, S_LOCKED);
+            set_frame(s, door, f ^ 0xc);
+        } else if lock {
+            line(s, S_MAGIC_LOCKED);
+            set_frame(s, door, f ^ 8);
+        } else {
+            if find_child(&mut s.objects, door, TRAP as i16, TRAP_QUALITY) != -1 {
+                spring_trap(s, door);
             } else {
-                if find_child(&mut s.objects, door, TRAP as i16, TRAP_QUALITY) != -1 {
-                    spring_trap(s, door);
-                } else {
-                    line(s, S_OPENED);
-                }
-                set_frame(s, door, f ^ 4);
+                line(s, S_OPENED);
             }
+            set_frame(s, door, f ^ 4);
         }
-        8..=11 => {
-            if key {
-                line(s, S_UNLOCKED);
-                set_frame(s, door, f ^ 0xc);
-            } else if lock {
-                line(s, S_MAGIC_LOCKED);
-                set_frame(s, door, f ^ 4);
-            } else {
-                line(s, S_LOCKED_PLAIN);
-            }
+    } else if f < 12 {
+        if key {
+            line(s, S_UNLOCKED);
+            set_frame(s, door, f ^ 0xc);
+        } else if lock {
+            line(s, S_MAGIC_LOCKED);
+            set_frame(s, door, f ^ 4);
+        } else {
+            line(s, S_LOCKED_PLAIN);
         }
-        _ => {
-            if unlock {
-                line(s, S_UNLOCKED);
-                set_frame(s, door, f ^ 8);
-            } else {
-                line(s, S_MAGIC_LOCKED);
-            }
-        }
+    } else if unlock {
+        line(s, S_UNLOCKED);
+        set_frame(s, door, f ^ 8);
+    } else {
+        line(s, S_MAGIC_LOCKED);
+    }
+}
+
+/// 0x12bbc0: a door of frame `f` is locked: 8..11 locked, 12.. magically locked.
+pub(crate) fn door_locked(f: u16) -> bool {
+    f >= 8
+}
+
+/// 0x12bdfa: a chest of frame `f` is locked: 2 locked, 3 magically locked.
+pub(crate) fn chest_locked(f: u16) -> bool {
+    f >= 2
+}
+
+/// The chest type whose Use case runs [`chest`] (`usecmd::cases::dispatch_type`).
+pub(crate) const CHEST: u16 = 0x62;
+/// The first and last door types whose Use case runs [`door`] (`usecmd::cases::dispatch_type`).
+pub(crate) const DOOR_FIRST: u16 = 0x129;
+/// See [`DOOR_FIRST`].
+pub(crate) const DOOR_LAST: u16 = 0x12c;
+
+/// `obj` is a locked door ([`DOOR_FIRST`]..=[`DOOR_LAST`], [`door_locked`]) or chest ([`CHEST`],
+/// [`chest_locked`]): a plain Use (its case 0x12bbc0 / 0x12bdfa) only gives its line: the
+/// locked line, the magically-locked line, the no-effect message. The types are the ones Use's
+/// cases send to [`door`] and [`chest`], the same constants.
+pub(crate) fn locked(s: &State, obj: Slot) -> bool {
+    let f = frame(s, obj);
+    match s.objects.kind(obj) {
+        DOOR_FIRST..=DOOR_LAST => door_locked(f),
+        CHEST => chest_locked(f),
+        _ => false,
     }
 }
 
@@ -166,54 +189,48 @@ pub fn door(s: &mut State, door: Slot, key: bool, lock: bool, unlock: bool) {
 /// (0x1118c6).
 pub fn chest(s: &mut State, chest: Slot, key: bool, lock: bool, unlock: bool) {
     queue(s, b"\n".to_vec(), Vec::new());
-    match frame(s, chest) {
-        0 => {
-            if key || lock || unlock {
-                no_effect(s);
-            } else {
-                line(s, S_CLOSED);
-                set_frame(s, chest, 1);
-            }
+    let f = frame(s, chest);
+    if !chest_locked(f) && f == 0 {
+        if key || lock || unlock {
+            no_effect(s);
+        } else {
+            line(s, S_CLOSED);
+            set_frame(s, chest, 1);
         }
-        1 => {
-            if !key && !lock && !unlock {
-                if find_child(&mut s.objects, chest, TRAP as i16, TRAP_QUALITY) != -1 {
-                    spring_trap(s, chest);
-                } else {
-                    line(s, S_OPENED);
-                }
-                set_frame(s, chest, 0);
-                let (x, y) = (s.objects.x(chest), s.objects.y(chest));
-                search(s, chest, x, y);
-            } else if key {
-                line(s, S_LOCKED);
-                set_frame(s, chest, 2);
-            } else if lock {
-                line(s, S_MAGIC_LOCKED);
-                set_frame(s, chest, 3);
+    } else if !chest_locked(f) {
+        if !key && !lock && !unlock {
+            if find_child(&mut s.objects, chest, TRAP as i16, TRAP_QUALITY) != -1 {
+                spring_trap(s, chest);
             } else {
-                no_effect(s);
+                line(s, S_OPENED);
             }
+            set_frame(s, chest, 0);
+            let (x, y) = (s.objects.x(chest), s.objects.y(chest));
+            search(s, chest, x, y);
+        } else if key {
+            line(s, S_LOCKED);
+            set_frame(s, chest, 2);
+        } else if lock {
+            line(s, S_MAGIC_LOCKED);
+            set_frame(s, chest, 3);
+        } else {
+            no_effect(s);
         }
-        2 => {
-            if key {
-                line(s, S_UNLOCKED);
-                set_frame(s, chest, 1);
-            } else if lock {
-                line(s, S_MAGIC_LOCKED);
-                set_frame(s, chest, 3);
-            } else {
-                no_effect(s);
-            }
+    } else if f == 2 {
+        if key {
+            line(s, S_UNLOCKED);
+            set_frame(s, chest, 1);
+        } else if lock {
+            line(s, S_MAGIC_LOCKED);
+            set_frame(s, chest, 3);
+        } else {
+            no_effect(s);
         }
-        _ => {
-            if unlock {
-                line(s, S_UNLOCKED);
-                set_frame(s, chest, 1);
-            } else {
-                no_effect(s);
-            }
-        }
+    } else if unlock {
+        line(s, S_UNLOCKED);
+        set_frame(s, chest, 1);
+    } else {
+        no_effect(s);
     }
     if s.objects.place(chest) != 0 {
         seams::redraw_inventory(s);

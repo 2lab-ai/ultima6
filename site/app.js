@@ -4057,7 +4057,9 @@ function focusMenu() {
 
 // The menu at client point (x, y): to the right of and below the point, or flipped to the other
 // side where it would not fit, kept inside the part of the screen box the viewport shows; at most
-// that part's size, scrolling inside when its entries need more.
+// that part's size, scrolling inside when its entries need more. Its style's minimum width gives
+// way where that part is narrower (a minimum outweighs a maximum), and it is sized at the box's
+// corner before its rect is read, so the width it gets is not the room left where it was last.
 function placeMenu(x, y) {
   const box = screenBox.getBoundingClientRect();
   const view = {
@@ -4067,10 +4069,13 @@ function placeMenu(x, y) {
     bottom: Math.min(box.bottom, window.innerHeight),
   };
   const [vw, vh] = [Math.max(0, view.right - view.left), Math.max(0, view.bottom - view.top)];
+  contextMenu.style.left = '0px';
+  contextMenu.style.top = '0px';
+  contextMenu.style.minWidth = `min(10em, ${vw}px)`;
   contextMenu.style.maxWidth = `${vw}px`;
   contextMenu.style.maxHeight = `${vh}px`;
-  const w = Math.min(contextMenu.offsetWidth, vw);
-  const h = Math.min(contextMenu.offsetHeight, vh);
+  const size = contextMenu.getBoundingClientRect();
+  const [w, h] = [size.width, size.height];
   let left = x;
   let top = y;
   if (left + w > view.right) left -= w;

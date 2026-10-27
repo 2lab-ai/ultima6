@@ -67,8 +67,10 @@ pub struct InputState {
     /// while it is set ([`super::menu::target_read`]).
     pub in_wait: bool,
     /// Port-only (spec 17): the event waits entered while the command loop reads a command
-    /// (A4-0x7a2c set), wrapping: a new prompt since a context menu's choice began drops its held
-    /// target press ([`super::menu::Run`]).
+    /// (A4-0x7a2c set), wrapping. Not one per prompt: the key read enters a wait again after each
+    /// panel code it handles itself (`ui/wait.rs` `read_key`), and a more prompt there waits too.
+    /// Any wait at the prompt after a context menu's icon press drops its held target press
+    /// ([`super::menu::Run`]): the command it started is over.
     pub prompt_reads: u32,
 }
 

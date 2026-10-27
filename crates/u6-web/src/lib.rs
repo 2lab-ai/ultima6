@@ -4825,27 +4825,36 @@ mod tests {
         false
     }
 
-    /// Spec 17 round 2, item 2, on the user's zip: `context_menu` on every cell of the view and at
-    /// three points of the side panel leaves the running game's state exactly as it was (the
-    /// checks run on a copy).
+    /// Spec 17 rounds 2 and 3, items 2 and 12, on the user's zip: `context_menu` on every cell of
+    /// the view and at three points of the side panel leaves the running game's state exactly as
+    /// it was (the checks run on a copy), and every one of the 121 view cells gives a menu. The
+    /// press point is the cell's centre except in the last column and row: their centre (168)
+    /// lies past the window's visible edge (no menu there: 100 of 121 at the raw centres), so
+    /// they are pressed at 164, inside the same cell (160..175) and inside the window.
     #[test]
     fn context_menu_leaves_the_game_as_it_was() {
         let Some(game) = at_the_prompt() else {
             return;
         };
         let before = game.engine.as_ref().quiet().state().clone();
-        let mut menus = 0;
+        let mut cells = 0;
         for row in 0..11 {
             for col in 0..11 {
                 let (x, y) = ((8 + 16 * col).min(164), (8 + 16 * row).min(164));
-                menus += usize::from(!game.context_menu(x, y).is_empty());
+                assert_eq!(
+                    (x / 16, y / 16),
+                    (col, row),
+                    "the press point in its own cell"
+                );
+                cells += usize::from(!game.context_menu(x, y).is_empty());
             }
         }
+        let mut panel = 0;
         for (x, y) in [(0x100, 0x28), (0xb8, 0x20), (0xc0, 0x80)] {
-            menus += usize::from(!game.context_menu(x, y).is_empty());
+            panel += usize::from(!game.context_menu(x, y).is_empty());
         }
-        println!("menus given: {menus}");
-        assert!(menus > 0);
+        println!("menus given: view {cells}, panel {panel}");
+        assert_eq!(cells, 121, "a menu on every view cell");
         let after = game.engine.as_ref().quiet().state().clone();
         assert!(after == before, "the game's state as it was");
     }

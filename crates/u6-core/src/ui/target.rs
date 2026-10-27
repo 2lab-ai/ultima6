@@ -146,10 +146,17 @@ impl<'a> InWait<'a> {
 }
 
 impl Drop for InWait<'_> {
+    /// The flag back. A borrow of the state held across the wait's end is a fault of its caller:
+    /// it fails here, loudly; only while a panic unwinds is the restore skipped then (no second
+    /// panic).
     fn drop(&mut self) {
-        if let Ok(mut s) = self.state.try_borrow_mut() {
-            s.ui.input.in_wait = self.outer;
+        if std::thread::panicking() {
+            if let Ok(mut s) = self.state.try_borrow_mut() {
+                s.ui.input.in_wait = self.outer;
+            }
+            return;
         }
+        self.state.borrow_mut().ui.input.in_wait = self.outer;
     }
 }
 
@@ -814,5 +821,33 @@ mod tests {
         assert!(st.borrow().ui.input.in_wait, "waiting");
         drop(e);
         assert!(!st.borrow().ui.input.in_wait, "the dropped wait cleared it");
+    }
+
+    /// Spec 17 round 3, item 1: the end of a wait puts back exactly the flag it found, set or
+    /// clear.
+    #[test]
+    fn the_end_of_a_wait_puts_back_the_flag_it_found() {
+        for outer in [false, true] {
+            let state = RefCell::new(State::default());
+            state.borrow_mut().ui.input.in_wait = outer;
+            drop(InWait::enter(&state));
+            assert_eq!(
+                state.borrow().ui.input.in_wait,
+                outer,
+                "outer {}",
+                u8::from(outer)
+            );
+        }
+    }
+
+    /// Spec 17 round 3, item 1: a borrow of the state held while a wait ends is a fault of its
+    /// caller, and it fails at once (never a flag silently left set).
+    #[test]
+    #[should_panic(expected = "already borrowed")]
+    fn a_borrow_held_as_a_wait_ends_fails_loudly() {
+        let state = RefCell::new(State::default());
+        let wait = InWait::enter(&state);
+        let _held = state.borrow();
+        drop(wait);
     }
 }

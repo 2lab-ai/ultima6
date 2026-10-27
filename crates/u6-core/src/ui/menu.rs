@@ -170,7 +170,7 @@ impl Entry {
 }
 
 /// The commands that resolve to one object, headed by its display name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Section {
     /// The object (-1: the cell's tile).
     pub object: Slot,
@@ -179,6 +179,19 @@ pub struct Section {
     /// Its display name, UTF-8 (the user's game text or the locale pack's).
     pub name: String,
     pub entries: Vec<Entry>,
+}
+
+/// Everything but the name, which is the user's game text: its length only, so a failed
+/// comparison or a debug print of a menu never shows it.
+impl std::fmt::Debug for Section {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Section")
+            .field("object", &self.object)
+            .field("kind", &self.kind)
+            .field("name_len", &self.name.len())
+            .field("entries", &self.entries)
+            .finish()
+    }
 }
 
 /// The menu of one right press.
@@ -258,28 +271,67 @@ fn shown_text(shown: Shown, plural: bool) -> String {
 /// The press's copy of the state, each check run on it as the press left it: the selection and
 /// the target put back before each (the checks resolve them their own way); what else a check
 /// writes (the location cursor, the sums, the weapon list, the book's page) no later check reads.
+///
+/// Kept to one copy for speed (spec 17 round 2, item 4e); in the tests `fresh` gives each check a
+/// copy of its own instead, the press's state as it was, to show the shared copy skews no answer.
 struct Press<'a> {
     c: &'a mut State,
     selection: Slot,
     target: (i16, i16),
+    fresh: Option<State>,
 }
 
 impl<'a> Press<'a> {
     fn new(c: &'a mut State) -> Self {
         let (selection, target) = (c.ui.input.selection, c.ui.input.target);
+        #[cfg(test)]
+        let fresh = FRESH.with(std::cell::Cell::get).then(|| c.clone());
+        #[cfg(not(test))]
+        let fresh = None;
         Press {
             c,
             selection,
             target,
+            fresh,
         }
     }
 
     /// The copy, its selection and target as the press left them.
     fn check(&mut self) -> &mut State {
+        if let Some(f) = &self.fresh {
+            self.c.clone_from(f);
+        }
         self.c.ui.input.selection = self.selection;
         self.c.ui.input.target = self.target;
         self.c
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Each check on a fresh copy ([`Press`]): set only by the tests ([`query_fresh`]).
+    static FRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`query`] with each check on a copy of its own of the press's state (each entry as if it were
+/// the only one asked): the tests compare it with [`query`].
+#[cfg(test)]
+pub(crate) fn query_fresh(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
+    fresh_scope(|| query(s, io, x, y))
+}
+
+/// Runs `f` with [`FRESH`] set, then puts back the value it found, also when `f` panics or
+/// nests another scope.
+#[cfg(test)]
+fn fresh_scope<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FRESH.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(FRESH.with(|v| v.replace(true)));
+    f()
 }
 
 /// The entries of one press, each with the object its command resolves to.
@@ -451,10 +503,11 @@ fn use_entry(u: &mut State, io: &Io) -> Option<(Slot, Option<Reason>)> {
         Some(Reason::Hand)
     } else {
         let frame = u.objects.tf(obj) >> 10;
-        cases::refusal(u, obj, ty, frame).map(|r| match r {
+        let case = cases::refusal(u, obj, ty, frame).map(|r| match r {
             cases::CaseRefusal::NotSolo => Reason::Solo,
             _ => Reason::Case,
-        })
+        });
+        case.or_else(|| crate::objects::commands::world::locked(u, obj).then_some(Reason::Locked))
     };
     Some((obj, reason))
 }
@@ -531,7 +584,10 @@ fn cast_reason(r: crate::magic::cast::Refusal) -> Reason {
 }
 
 /// The panel menu: the slot's object (0x111e3c / 0x111eec), its own left-press action (0x10619c:
-/// open, ready, take off), Use, Look, Drop and Move.
+/// open, ready, take off), Use, Look, Drop and Move. Drop and Move are hidden on a type 0x4c,
+/// readied or not, and so is Ready on an unworn one: the object moves refuse that type at the
+/// prompt (0x10c9d2 always, 0x10cda8 unless the game allows it, `objects::moves::FIXED_TYPE`),
+/// so none of them can ever put it anywhere. A readied one's take-off stays, disabled.
 fn panel_menu(c: &mut State, io: &Io) -> Option<Menu> {
     let (px, py) = c.ui.input.pointer;
     // The container figure goes back to the parent (0x10619c), it is no slot.
@@ -550,6 +606,8 @@ fn panel_menu(c: &mut State, io: &Io) -> Option<Menu> {
     };
     if code == 0x9c {
         own.code = UNREADY;
+        // 0x1122dc: the take-off meets the amulet of submission first: it stays.
+        own.reason = crate::inventory::ready::stays(c, sel).then_some(Reason::Stays);
     } else {
         let kind = c.objects.kind(sel);
         if crate::objects::in_type_set_670c(&c.objects, kind) && kind != READY_ANYWAY {
@@ -558,21 +616,23 @@ fn panel_menu(c: &mut State, io: &Io) -> Option<Menu> {
         }
     }
     let aboard = aboard(c).then_some(Reason::Aboard);
-    let stays = crate::inventory::ready::stays(c, sel).then_some(Reason::Stays);
+    let fixed = push::fixed(c, sel);
     let mut p = Press::new(c);
     let mut e = Entries::default();
-    e.add(sel, own.code, own.reason);
+    if !(fixed && own.code == READY) {
+        e.add(sel, own.code, own.reason);
+    }
     if let Some((o, r)) = use_entry(p.check(), io) {
         e.add(o, USE, r);
     }
     e.add(sel, LOOK, None);
     let c = p.check();
-    if !drop::nothing_to_drop(c, sel) {
-        e.add(sel, DROP, aboard.or(stays));
+    if !drop::nothing_to_drop(c, sel) && !fixed {
+        e.add(sel, DROP, aboard);
     }
-    if sel as u16 != c.ui.panel.container && !push::fixed(c, sel) {
+    if sel as u16 != c.ui.panel.container && !fixed {
         let away = push::giver_away(c).then_some(Reason::Screen);
-        e.add(sel, MOVE, aboard.or(stays).or(away));
+        e.add(sel, MOVE, aboard.or(away));
     }
     Some(Menu {
         kind: Kind::Panel,
@@ -725,5 +785,47 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), Reason::ALL.len());
+    }
+
+    /// Spec 17 round 5, item 1: a menu's debug print (what a failed `assert_eq!` shows) has no
+    /// section name, the user's game text: its length instead (a made-up name here).
+    #[test]
+    fn a_menus_debug_print_leaves_out_the_names() {
+        let name = "made-up name";
+        let m = Menu {
+            kind: Kind::Map,
+            cell: Some((1, 2)),
+            underlined: None,
+            sections: vec![Section {
+                object: 300,
+                kind: Some((0x80, 0)),
+                name: name.into(),
+                entries: vec![Entry {
+                    code: LOOK,
+                    reason: None,
+                    theft: false,
+                }],
+            }],
+        };
+        let shown = format!("{m:?} {m:#?}");
+        assert!(!shown.contains(name), "no name");
+        assert!(shown.contains("name_len: 12") && shown.contains("object: 300"));
+    }
+
+    /// Spec 17 round 5, item 8: the fresh-copy switch is put back as it was after a scope, nested
+    /// or ended by a panic.
+    #[test]
+    fn the_fresh_copy_switch_comes_back_as_it_was() {
+        let now = || FRESH.with(std::cell::Cell::get);
+        assert!(!now());
+        fresh_scope(|| {
+            assert!(now());
+            fresh_scope(|| assert!(now()));
+            assert!(now(), "still set after the inner scope");
+        });
+        assert!(!now(), "clear after the outer");
+        let ended = std::panic::catch_unwind(|| fresh_scope(|| panic!("ended")));
+        assert!(ended.is_err());
+        assert!(!now(), "clear after a panic");
     }
 }
