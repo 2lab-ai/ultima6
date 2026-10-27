@@ -582,8 +582,11 @@ export const CHOSEN = { lang: 'en' };
 /// null keeps none, the page's default: the Wide build, spec 13), kept only while the page keeps
 /// none (a choice the page made survives a reload);
 /// `font`: the font the page finds kept (spec 11 Design 5: `pixel` or `hd`; null, the default,
-/// keeps none: the page's default, the HD font), kept likewise only while the page keeps none.
-export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US', layout = 'original', font = null } = {}) {
+/// keeps none: the page's default, the HD font), kept likewise only while the page keeps none;
+/// `memory`: the remembered sight the page finds kept (spec 18, `u6.memory`: `off` unless a test
+/// asks for `on`, so every test that compares the map with the original's keeps its black; null
+/// keeps none, the page's default: on), kept likewise only while the page keeps none.
+export async function openPage(env, { gated = true, gameFirst = true, setup = CHOSEN, gpu = false, locale = 'en-US', layout = 'original', font = null, memory = 'off' } = {}) {
   const browser = gpu ? await env.gpuBrowser() : env.browser;
   const context = await browser.newContext({ viewport: { width: 1024, height: 900 }, locale });
   await context.addInitScript(pageHooks);
@@ -613,6 +616,15 @@ export async function openPage(env, { gated = true, gameFirst = true, setup = CH
         // An opaque origin (about:blank) has no storage.
       }
     }, font);
+  }
+  if (memory) {
+    await context.addInitScript((value) => {
+      try {
+        if (localStorage.getItem('u6.memory') === null) localStorage.setItem('u6.memory', value);
+      } catch {
+        // An opaque origin (about:blank) has no storage.
+      }
+    }, memory);
   }
   if (gated) {
     await context.route(/\/store\.js(\?real)?$/, async (route) => {
