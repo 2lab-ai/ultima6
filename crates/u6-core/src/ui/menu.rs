@@ -300,6 +300,8 @@ impl<'a> Press<'a> {
     fn check(&mut self) -> &mut State {
         if let Some(f) = &self.fresh {
             self.c.clone_from(f);
+            #[cfg(test)]
+            FRESH_COPIES.with(|n| n.set(n.get() + 1));
         }
         self.c.ui.input.selection = self.selection;
         self.c.ui.input.target = self.target;
@@ -311,6 +313,14 @@ impl<'a> Press<'a> {
 thread_local! {
     /// Each check on a fresh copy ([`Press`]): set only by the tests ([`query_fresh`]).
     static FRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The checks a [`Press`] ran on a fresh copy, in all ([`fresh_copies`]).
+    static FRESH_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many checks ran on a fresh copy so far on this thread ([`Press::check`]), for the tests.
+#[cfg(test)]
+pub(crate) fn fresh_copies() -> usize {
+    FRESH_COPIES.with(std::cell::Cell::get)
 }
 
 /// [`query`] with each check on a copy of its own of the press's state (each entry as if it were
@@ -320,10 +330,16 @@ pub(crate) fn query_fresh(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
     fresh_scope(|| query(s, io, x, y))
 }
 
+/// Whether the checks run on fresh copies now ([`FRESH`]), for the tests.
+#[cfg(test)]
+pub(crate) fn fresh_now() -> bool {
+    FRESH.with(std::cell::Cell::get)
+}
+
 /// Runs `f` with [`FRESH`] set, then puts back the value it found, also when `f` panics or
 /// nests another scope.
 #[cfg(test)]
-fn fresh_scope<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn fresh_scope<R>(f: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
