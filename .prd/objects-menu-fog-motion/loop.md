@@ -70,16 +70,30 @@ deploys.
 | B4 | 1 test ok, fmt ok | APPROVE | APPROVE | 2 SHOULDs + `obj_quality` doc done — committed on its branch (e95a936) |
 | B6 | lib 1144 ok, fmt ok, clippy ok (scripts/cargo.sh) | APPROVE (r2) | APPROVE (r2) | M1 note from the asm, S1 six-cell test, N1, N2 done — committed on its branch (19e5b8d) |
 | B7 | r3: B7 tests 11 ok default, 12 ok wide, fmt ok; clippy ok both | APPROVE (code r2, tests r3) | APPROVE (r2) | committed on its branch (97e3d10), merged into `integ/r1027` |
-| B10 | 107 targeted ok, fmt ok | a APPROVE; b, c1, c2 REVISE | REVISE | item words in `%s` (ring, cloak, wand) translated, not excused; counter as a precomputed boundary-aware set; scanner fail-closed (9 shapes); const sweep; scan to its own file — sent back, scope widened to clock.rs, actors/seams.rs, attack.rs |
-| K1 | (agent: lib 1145, wide 1168, native 21; web 142/143, the Wide frame-time test) | a APPROVE (NITs); b REVISE | APPROVE (SHOULDs) | release outside the canvas and on blur; release by physical key; `run_each` fails on an untaken key; a test that sees the release half; same-tick room test; NITs — sent back |
-| C1 | u6-core 1145 ok, wide gfx 94 ok, u6-render 56 ok, u6-web 44+1 ok, fmt ok, clippy ok both | a, b, c REVISE | REVISE | a 0x176's 0x1a9 parts kept as a ghost; the missile `redraw_over` (now in scope); reset detected by its event, darkness keeps memory; switch-off parity against the base renderer; the web test must reject black — sent back |
+| B10 | r4: lib 1193 ok, wide subset 195 ok (agent; dispatcher re-run pending) | r3: a, b, s1 APPROVE; s2, s3, s4 REVISE | r3 REVISE | Production code approved: item words in `%s` go through `shown`, and the set is boundary-aware. The scan was rebuilt on `syn`, as a dev-dependency only (player tree unchanged at 33 lines). The r3 holes were fixed as three rules: a reader is found wherever it is named; a value comes only from a proven unique binding; `const_pass` covers every address in a worded run, and an unevaluated const is a finding. Self-audit: `b10-r4-audit.md`, 40 rows. Next: the r4 review. |
+| K1 | lib 1147, u6-web 44+1, u6-native 22, fmt ok, clippy ok both | a APPROVE; b APPROVE (r4) | APPROVE (r3) | committed (05765c9), merged, deployed (26) |
+| C1 | r2: u6-core 1156, wide 1179, u6-render 57, u6-web 44+1, fmt ok, clippy ok both | r2: a, b APPROVE; c, d REVISE | r2 APPROVE | r3: the remembered look is frozen at last sight (shore records are copied per version); in-sight cells are identical with the switch on and off (new test); the canvas pixels are checked; each creature's pixels are proven before it is hidden. Dispatcher re-run pending, then the r3 review. |
+| M2 | (agent: lib 1186, wide menu subset 18, u6-web 46, web 142/143 — the one failure is the Wide frame-time test) | round 1 pending | round 1 pending | Built. Dispatcher re-run pending. Review parts: `r1027-r2/review/m2-*`. |
 
 Carried (from K1 opus, outside K1): `main_loop/test_support.rs:89-97` builds test states with the key drain off,
 unlike the image word 0x153caa = 1, so tests that queue several keys at once (`actors/rest/tests.rs:136,189,215`)
 read them in order where a drained wait would merge them.
 
-Integration: `integ/r1027` (worktree `.worktrees/integ-r1027`) holds B1, B3, B9, B11, B4, B2, B5, B8, B6, B7 (lib 1162 ok, clippy clean before B7); conflicts
-were two appended tests (kept both) and `port-map.md` (regenerated, `--check` up to date).
+Integration: `integ/r1027` (worktree `.worktrees/integ-r1027`) holds B1, B3, B9, B11, B4, B2, B5, B8, B6, B7 and K1. Two kinds of merge conflict came up: two appended tests (both kept) and `port-map.md` (regenerated; `--check` up to date).
+
+Deploy 26 (2026-10-27): main 7a87fd2, fast-forward of `integ/r1027`, pushed.
+- `merge-gate.sh`:
+  - fmt and clippy pass in both builds.
+  - Workspace tests: 1652 passed, 1676 with wide, 0 failed.
+  - Oracles 8/8; port-map up to date; loop-lint 0 FAIL.
+  - Web: 142 of 143, three runs. The one failure is the Wide compositor time-per-frame test at S 4: 10.40–12.00 ms against an 8 ms limit.
+  - Control for that failure: run alone, alternating main and the integration branch at load ~100, it measured main 11.70 / 11.10 ms and integration 11.60 / 10.95 ms. The failure is machine load.
+- Packs unchanged: `ultima6-deploy` 72aa055, `site/packs` byte-identical to deploy 25.
+- Production deploy (wrangler): https://780de565.ultima6.pages.dev.
+- Live check:
+  - The live wasm (both builds) and `app.js` match the local build by SHA-256.
+  - `live19.mjs`, run as a fresh visitor: LIVE OK; packs 200; Korean hits 23, misses 0; 0 page errors.
+- Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy26/`.
 
 Carried to B12: when the staff cast (row 5) turns the text switch off, check every line it prints goes through
 `queue_print` or `combat::present::say` (both test the switch since B2). The forced-on writes once noted here were
