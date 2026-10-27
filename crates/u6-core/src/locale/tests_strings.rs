@@ -3442,3 +3442,213 @@ fn the_levers_lines_print_the_packs_forms_and_else_the_english_byte_for_byte() {
         "the English with a pack that lacks them"
     );
 }
+
+/// Spec 16 item 1 (2026-10-27): with a pack installed, an executable string no list names is
+/// counted uncatalogued where a print hook or a label read finds no entry (neither a hit nor a
+/// miss), and so is nothing else: a catalogued string (a hit), the same bytes as only the tail
+/// of a longer executable string, a run at a segment's end with no NUL, an article (English on
+/// purpose), a format of no word in the executable, bytes the executable does not hold (a name),
+/// bytes that end before the string's NUL, and any of them with no pack. The counts after each
+/// event. A synthetic `game` of the test's own bytes.
+#[test]
+fn an_executable_string_no_list_names_is_counted_uncatalogued_and_nothing_else() {
+    let base = crate::image::IMAGE_BASE;
+    let listed = crate::map::seams::PRINTED[1];
+    let article = crate::locale::strings::ENGLISH_AT[0];
+    let (line, longer, no_word) = (base + 0x100, base + 0x120, base + 0x140);
+    let mut hunk = crate::image::SyntheticGame::new();
+    let mut bytes = vec![0u8; ((article - base) as usize + 8).next_multiple_of(4)];
+    for (at, text) in [
+        (listed, &b"Zq1 lead"[..]),
+        (line, b"Zq2 line\n"),
+        (longer, b"Zq7 head Zq8 tail"),
+        (no_word, b"%d\n"),
+        (article, b"Zqa "),
+    ] {
+        let o = (at - base) as usize;
+        bytes[o..o + text.len()].copy_from_slice(text);
+    }
+    // The segment ends in a run with no NUL after it.
+    bytes.extend_from_slice(b"Zq9 end!");
+    hunk = hunk.loaded(false, bytes);
+    let game = hunk.build();
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let catalogue = Catalogue::from_game(&game);
+    assert!(
+        catalogue.of(b"Zq1 lead").is_some(),
+        "the listed one is catalogued"
+    );
+    let run = |pack: Option<Pack>| -> Vec<([u32; 2], u32)> {
+        let mut s = State::empty();
+        if let Some(p) = pack {
+            install_catalogued(&mut s, &files, Rc::new(p), None, catalogue.clone())
+                .expect("the pack checks");
+        }
+        let mut after = Vec::new();
+        let counts = |s: &State| (s.locale.texts.get(), s.locale.texts.uncatalogued.get());
+        for english in [
+            &b"Zq1 lead"[..],
+            b"Zq2 line\n",
+            b"Zq8 tail",
+            b"Zq9 end!",
+            b"Zqa ",
+            b"%d\n",
+            b"Zq3 name",
+            b"Zq2 line",
+        ] {
+            let _ = exe_string(&s, english);
+            after.push(counts(&s));
+        }
+        let _ = shown(&s, b"Zq2 line\n".to_vec());
+        after.push(counts(&s));
+        after
+    };
+    let hit = [1, 0];
+    assert_eq!(
+        run(Some(use_ko(&[("Zq1 lead".into(), "가")]))),
+        [
+            (hit, 0),
+            (hit, 1),
+            (hit, 1),
+            (hit, 1),
+            (hit, 1),
+            (hit, 1),
+            (hit, 1),
+            (hit, 1),
+            (hit, 2)
+        ],
+        "a hit, then the unlisted line's print and label read and nothing else"
+    );
+    assert_eq!(run(None), [([0, 0], 0); 9], "no pack: nothing counted");
+}
+
+/// Spec 16 item 1 (2026-10-27): the display name of no object (0x10eef8(-1)'s word,
+/// `objects::names` for a slot below 0) where Use prints a name (`usecmd::Ux::name`, the name as
+/// `printf`'s format): with a Korean pack holding its form, the pack's form, a hit; without a
+/// pack, the English. A synthetic `game` holding the test's own word at its address.
+#[test]
+fn the_display_name_of_no_object_prints_the_packs_form_where_use_prints_it() {
+    let word = b"Zq5 none";
+    let at = crate::locale::strings::NAME_PRINTED[0];
+    let game = game_of(&[(at, word.to_vec())]);
+    let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
+    let run = |pack: Option<Pack>| {
+        let mut s = State::empty();
+        s.ui = crate::main_loop::test_support::test_ui();
+        s.objects.defs.nothing = "Zq5 none".into();
+        if let Some(p) = pack {
+            install_catalogued(
+                &mut s,
+                &files,
+                Rc::new(p),
+                None,
+                Catalogue::from_game(&game),
+            )
+            .expect("the pack checks");
+        }
+        let mut e = crate::engine::Engine::with_game(s, files.clone(), |st, io| async move {
+            crate::usecmd::Ux::new(&st, &io).name(-1).await;
+        });
+        for _ in 0..400 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished());
+        (
+            scroll(&e.state()).trim().to_string(),
+            e.state().locale.texts.get(),
+        )
+    };
+    assert_eq!(
+        run(Some(use_ko(&[("Zq5 none".into(), "없음")]))),
+        ("없음".into(), [1, 0]),
+        "the pack's form"
+    );
+    assert_eq!(run(None), ("Zq5 none".into(), [0, 0]), "the English");
+}
+
+/// Real data (spec 16 item 1, 2026-10-27): the object lines the catalogue holds since spec 16
+/// item 1, selected by address: the light sources' (the burned-out line, the torch's two, the
+/// five fixtures' names and the two endings), the dismount's two, the scout's warning, `map/`'s
+/// five, main's line that no character is made, the weight line's two (the values within their
+/// English's cells), the display name of no object, and the 20 place names (read through their
+/// pointers), each with a word of its own catalogued, the two of no word (the blank, the
+/// place-name line's end) not; and the vanished line's item words (the ring's, the cloak's, the
+/// wand's) as labels with no cells. Skips when the zip is absent; prints counts and pass/fail
+/// only, a failure an address, never a text.
+#[test]
+fn the_object_lines_are_catalogued_on_the_owners_game() {
+    use crate::image::A4;
+    use crate::locale::strings::{Kind, MIN_BYTES, has_words, pointed, printed, shown_at};
+    use u6_testkit::Quiet;
+    const NEW_SITES: [u32; 22] = [
+        A4 - 0x756f,
+        0x0012_8874,
+        0x0012_8896,
+        0x0012_88a6,
+        0x0012_88b0,
+        0x0012_88b8,
+        0x0012_88c4,
+        0x0012_88ce,
+        0x0012_88d6,
+        0x0012_88e4,
+        0x0012_ce32,
+        0x0012_cbd4,
+        A4 - 0x763a,
+        A4 - 0x7303,
+        0x0011_b8f8,
+        0x0011_b902,
+        0x0011_b90e,
+        A4 - 0x72cf,
+        0x0013_50a6,
+        0x0011_0bfc,
+        0x0011_0c04,
+        0x0010_a4ce,
+    ];
+    const WEIGHTS: u32 = 0x0011_0c04;
+    const ITEM_WORDS: [u32; 3] = [0x0010_1ef6, 0x0010_1efc, 0x0012_1b8e];
+    let Some(game) = super::tests_scan::owner_game() else {
+        return;
+    };
+    let img = crate::image::GameImage::parse(&game).quiet();
+    let c = Catalogue::from_game(&game);
+    let all: Vec<u32> = printed().collect();
+    assert!(
+        NEW_SITES.iter().all(|at| all.contains(at)),
+        "every new site is listed"
+    );
+    let direct = NEW_SITES.iter().map(|&at| (at, img.cstr(at).quiet()));
+    let through = pointed().map(|p| (p, img.cstr(img.pointer(p).quiet()).quiet()));
+    let (mut held, mut no_word) = (std::collections::BTreeSet::new(), 0);
+    for (at, text) in direct.chain(through) {
+        if text.len() < MIN_BYTES || !has_words(&text) {
+            assert!(c.of(&text).is_none(), "{at:#x}, of no word, not catalogued");
+            no_word += 1;
+            continue;
+        }
+        let e = c.of(&text);
+        assert!(e.is_some(), "{at:#x} catalogued");
+        let cells = (at == WEIGHTS).then_some(text.len() as u16);
+        assert_eq!(e.and_then(|e| e.cells), cells, "{at:#x}'s cells");
+        held.insert(text);
+    }
+    assert_eq!(no_word, 2, "the blank and the line's end");
+    let shown: Vec<u32> = shown_at().collect();
+    for at in ITEM_WORDS {
+        assert!(shown.contains(&at), "{at:#x} is a label at its address");
+        let text = img.cstr(at).quiet();
+        let e = c.label_of(&text);
+        assert!(
+            e.is_some_and(|e| e.kind == Kind::Label && e.cells.is_none()),
+            "{at:#x} a label with no cells"
+        );
+    }
+    eprintln!(
+        "catalogue: {} strings, {} executable strings unlisted; the new sites' {} strings with a word of their own catalogued, {no_word} of no word not, the 3 item words as labels: pass",
+        c.len(),
+        c.unlisted_len(),
+        held.len()
+    );
+}
