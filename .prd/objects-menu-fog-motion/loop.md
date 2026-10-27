@@ -71,9 +71,9 @@ deploys.
 | B4 | 1 test ok, fmt ok | APPROVE | APPROVE | 2 SHOULDs + `obj_quality` doc done — committed on its branch (e95a936) |
 | B6 | lib 1144 ok, fmt ok, clippy ok (scripts/cargo.sh) | APPROVE (r2) | APPROVE (r2) | M1 note from the asm, S1 six-cell test, N1, N2 done — committed on its branch (19e5b8d) |
 | B7 | r3: B7 tests 11 ok default, 12 ok wide, fmt ok; clippy ok both | APPROVE (code r2, tests r3) | APPROVE (r2) | committed on its branch (97e3d10), merged into `integ/r1027` |
-| B10 | r4: fmt ok, clippy 0 both, lib 1193, wide subset 195, port-map up to date (dispatcher) | r4: t APPROVE; w, e, r, f, x1, x2 REVISE (12 MUSTs, every one needing code the crate does not contain) | r4 APPROVE (3 SHOULDs) | Production code approved. The scan now has a written contract: exact for the crate's own idioms; exotic forms (`include!`, `#[path]`, leading `::`, `no_implicit_prelude`, user `From`/`Into`, block generic arguments, `use … as <module>`) are findings outright; a MUST needs a current site or an idiom the crate uses. The dispatcher's grep found no production text read outside `READERS`. r5 (`b10-r5.md`): binding scopes (closure, arm, `for`, `if let`), width-correct arithmetic, `named` bound to its const, empty reasons rejected, `static`, the rejection list, inline literals at byte accessors, `NOT_IMPLEMENTED` as English. The last scanner round: what remains is ruled against the contract, then merged. |
+| B10 | r4: fmt ok, clippy 0 both, lib 1193, wide subset 195, port-map up to date (dispatcher) | r4: t APPROVE; w, e, r, f, x1, x2 REVISE (12 MUSTs, every one needing code the crate does not contain) | r4 APPROVE (3 SHOULDs) | Production code approved. The scan now has a written contract: exact for the crate's own idioms; exotic forms (`include!`, `#[path]`, leading `::`, `no_implicit_prelude`, user `From`/`Into`, block generic arguments, `use … as <module>`) are findings outright; a MUST needs a current site or an idiom the crate uses. The dispatcher's grep found no production text read outside `READERS`. r5 (`b10-r5.md`): binding scopes (closure, arm, `for`, `if let`), width-correct arithmetic, `named` bound to its const, empty reasons rejected, `static`, the rejection list, inline literals at byte accessors, `NOT_IMPLEMENTED` as English. r5 built: all ten items with RED fixtures; `tests_scan.rs` 5213 lines; lib 1212, wide subset 214 (agent). Next: the r5 review, ruled against the contract. |
 | K1 | lib 1147, u6-web 44+1, u6-native 22, fmt ok, clippy ok both | a APPROVE; b APPROVE (r4) | APPROVE (r3) | committed (05765c9), merged, deployed (26) |
-| C1 | r3: fmt ok, clippy 0 both, lib 1157, wide 1180, u6-render 58, u6-web 44+1, port-map up to date (dispatcher) | r3: a, b, c, d APPROVE | r3 APPROVE | Frozen at last sight, exact in classic, Wide and HD; cost bounded (copies about 66 KiB Original, 430 KiB Wide). r3b before merge: an owner's HD pack art for a remembered shore cell (copy mapped back to its record), merged records counted by version, an HD slot-reuse test, a fresh compositor in the frozen comparison, the old darkness assert. |
+| C1 | r3b: fmt ok, clippy 0 both, lib 1159, wide 1182, u6-render 59, u6-web 44+1, port-map up to date (dispatcher) | r3: a, b, c, d APPROVE; r3b b APPROVE | r3 APPROVE; r3b APPROVE | committed (08925ae), merged, deployed (27); spec 18 shipped. Live: a door closed on a corridor leaves it in dark grey. |
 | M2 | r1: fmt ok, clippy 0 both, lib 1186, wide 1211, u6-web 46+1, render 53, port-map up to date (dispatcher) | r1: a, c, d1, d2 REVISE; b conditional | r1 REVISE (2 MUSTs) | r1 committed on its branch (29e513d); `integ/r1027` merged in (ce911d4) so K1 is in its base. r2 (`m2-r2.md`): the Release passes the gate; 0xba/0xc0 Use stays enabled (the original searches anyway); one source for the Use refusals; the held press dropped when the prompt returns; deterministic refusals judged on the clone; one clone per press; the menu bounded to the screen; the pointer swallow; exact acceptance tests 1, 3, 4, 5, 7 and predicate equivalence both ways. Two review claims checked and dropped (underlined first is in the page; the solo reason means "not allowed in solo mode"). |
 
 Carried (from K1 opus, outside K1): `main_loop/test_support.rs:89-97` builds test states with the key drain off,
@@ -95,6 +95,21 @@ Deploy 26 (2026-10-27): main 7a87fd2, fast-forward of `integ/r1027`, pushed.
   - The live wasm (both builds) and `app.js` match the local build by SHA-256.
   - `live19.mjs`, run as a fresh visitor: LIVE OK; packs 200; Korean hits 23, misses 0; 0 page errors.
 - Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy26/`.
+
+Deploy 27 (2026-10-27): main ec3c4f6, which is deploy 26 plus C1 (remembered sight, spec 18 shipped), pushed.
+- `merge-gate.sh`:
+  - fmt and clippy pass in both builds.
+  - Workspace tests: 1679 passed, 1703 with wide, 0 failed.
+  - Web: 143 of 144, three runs. The one failure is the Wide compositor time-per-frame test at S 4, at 10.50 / 10.55 ms against an 8 ms limit.
+  - Oracles 8/8; port-map up to date; loop-lint 0 FAIL.
+- Control for the Wide failure: run alone, alternating main (deploy 26 code) and the integration branch, at load ~170-190. It measured main 10.75 / 11.90 ms and integration 10.90 / 11.60 ms. The failure is load, and C1 does not raise it.
+- Packs unchanged: `ultima6-deploy` 72aa055, 20 files, byte-identical.
+- Production deploy (wrangler): https://c59d3d3b.ultima6.pages.dev.
+- Live check:
+  - The live wasm (both builds) and `app.js` match the local build by SHA-256.
+  - `live19.mjs`: LIVE OK; Korean hits 23, misses 0; 0 page errors.
+  - `live-sight.mjs`, a fresh visitor in the default Wide HD layout: walk south 10, open the south door, close it. Open: the corridor beyond shows in colour. Closed: the same corridor shows in dark grey with its statues and walls, the look it had when it left sight. 0 page errors.
+- Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy27/` (`sight-opened.png`, `sight-t1.png`).
 
 Carried to B12: when the staff cast (row 5) turns the text switch off, check every line it prints goes through
 `queue_print` or `combat::present::say` (both test the switch since B2). The forced-on writes once noted here were
