@@ -390,13 +390,60 @@ fn the_spellbook_by_clicks_through_the_command_loop() {
     assert!(lit > dark, "more view cells lit after the cast");
 }
 
+/// The executable strings' counts of `s` (`crate::locale::LocaleState::texts`): from the pack,
+/// misses, and (2026-10-27, spec 16 item 1) shown with no catalogue entry, in English whatever
+/// the pack.
+fn text_counts(s: &State) -> [u32; 3] {
+    let t = &s.locale.texts;
+    let [hits, misses] = t.get();
+    [hits, misses, t.uncatalogued.get()]
+}
+
+/// Spec 16 item 1 (2026-10-27): [`text_counts`] reads the three counts of the executable strings
+/// in the receipts' order. A Korean pack over a synthetic `game` of the test's own bytes: one
+/// listed line it has, shown once (a hit), one it lacks, shown twice (two misses), one line no
+/// list names, shown three times (three uncatalogued), so a permutation of the three fails.
+#[test]
+fn the_receipts_counts_hold_the_uncatalogued_count_beside_hits_and_misses() {
+    let (listed, lacked) = (crate::map::seams::PRINTED[1], crate::map::seams::PRINTED[2]);
+    let unlisted = crate::image::IMAGE_BASE + 0x100;
+    let mut s = State::empty();
+    crate::locale::strings::install_test_forms(
+        &mut s,
+        &[
+            (listed, b"Zq1 lead"),
+            (lacked, b"Zq4 other"),
+            (unlisted, b"Zq2 line"),
+        ],
+        &[(b"Zq1 lead", "가")],
+    );
+    assert_eq!(text_counts(&s), [0, 0, 0], "nothing shown yet");
+    let lines: [&[u8]; 6] = [
+        b"Zq1 lead",
+        b"Zq4 other",
+        b"Zq4 other",
+        b"Zq2 line",
+        b"Zq2 line",
+        b"Zq2 line",
+    ];
+    for line in lines {
+        let _ = crate::locale::exe_string(&s, line);
+    }
+    assert_eq!(
+        text_counts(&s),
+        [1, 2, 3],
+        "a hit, two misses, three uncatalogued"
+    );
+}
+
 /// Spec 08 Order 3 / Acceptance 5 (slices K2 and K3), through the command loop: the same keys
 /// with and without the identity pack of the owner's files (`crate::locale::identity`, installed
 /// before the loop starts, `wide` on): Look, Talk and Get at the leader's own cell, Begin and
 /// break off combat, a key the loop does not take, then Rest for an hour at a camp spot with the
 /// second member on guard. Every tick shows the same frame and scroll as English, and every
-/// catalogued string shown is one of the pack's (0 misses); Look here is at the leader's own
-/// cell, where no object name is shown. Prints counts and pass/fail only.
+/// catalogued string shown is one of the pack's (0 misses), and (2026-10-27) every executable
+/// string shown is catalogued (0 uncatalogued); Look here is at the leader's own cell, where no
+/// object name is shown. Prints counts and pass/fail only.
 #[test]
 fn the_identity_pack_shows_the_command_loop_exactly_as_english() {
     use crate::converse::disasm::catalog::hash64;
@@ -456,19 +503,25 @@ fn the_identity_pack_shows_the_command_loop_exactly_as_english() {
             }
         }
         // Object-name coverage is the object-commands receipt's (names shown > 0, misses 0).
-        let counts = e.state().locale.texts.get();
+        let counts = text_counts(&e.state());
         (ticks, counts)
     };
     let (en, _) = play(false);
-    let (id, [hits, misses]) = play(true);
+    let (id, [hits, misses, uncatalogued]) = play(true);
     let differ = en.iter().zip(&id).filter(|(a, b)| a != b).count();
     eprintln!(
-        "identity pack, command loop: ticks {} / {}, differing {differ}; game strings from the pack {hits}, misses {misses}",
+        "identity pack, command loop: ticks {} / {}, differing {differ}; game strings from the pack {hits}, misses {misses}, uncatalogued {uncatalogued}",
         en.len(),
         id.len()
     );
     assert_eq!(en.len(), id.len(), "as many ticks");
     assert_eq!(differ, 0, "every frame and scroll as in English");
     assert!(hits > 0 && misses == 0);
-    eprintln!("identity pack command loop identical to English: pass; misses 0: pass");
+    assert_eq!(
+        uncatalogued, 0,
+        "every executable string shown is catalogued"
+    );
+    eprintln!(
+        "identity pack command loop identical to English: pass; misses 0: pass; uncatalogued 0: pass"
+    );
 }

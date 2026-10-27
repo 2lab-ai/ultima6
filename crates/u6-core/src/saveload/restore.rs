@@ -83,9 +83,11 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
 /// (0x10edb4), the last command underlined (0x106506), the region's objects and map (0x10e1ce,
 /// 0x108ac4), A4-0x784e = 1, the window cache (0x108f90), the members back into the vehicle
 /// when aboard (0x10cda8) and the view flags (0x109e74) ([`crate::main_loop::finish_load_state`],
-/// which the boot runs too).
+/// which the boot runs too). Port (spec 18): the remembered sight is forgotten
+/// ([`crate::gfx::cache::RenderCache::forget_sight`]).
 pub fn load_state(s: &mut State, io: &Io, files: StateFiles) {
     s.map.window_key = [-1; 3];
+    s.gfx.cache.forget_sight();
     s.actors.schedules = Schedules {
         first: files.schedule.first,
         total: files.schedule.records.len() as u16,

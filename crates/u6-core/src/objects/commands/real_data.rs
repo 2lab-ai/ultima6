@@ -611,8 +611,9 @@ fn push_a_chair_and_open_a_door() {
 /// the commands of the receipts above (Look at the six things, the sign's text from book.dat
 /// among them, Get the bread and Drop it on a table, Move the chair, the door used twice) print
 /// exactly the lines they print without it, and every catalogued string, object name and book
-/// they show is one of the pack's (0 misses). Prints the counts of its own commands (runs, hits,
-/// misses) and pass/fail only, no size of the pack.
+/// they show is one of the pack's (0 misses), and (2026-10-27, spec 16 item 1) every executable
+/// string they show is catalogued (0 uncatalogued). Prints the counts of its own commands (runs,
+/// hits, misses, uncatalogued) and pass/fail only, no size of the pack.
 #[test]
 fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
     let Some(files) = files() else { return };
@@ -622,13 +623,13 @@ fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
     crate::locale::install(&mut with, &files, pack, None).quiet();
     assert!(with.ui.text.wide, "wide on");
     // Each command run on `s0`: its lines, and the counts after it (game strings, object names,
-    // books: hits, misses).
-    let commands = |s0: &State| -> Vec<(Vec<String>, [u32; 6])> {
+    // books: hits, misses; game strings uncatalogued).
+    let commands = |s0: &State| -> Vec<(Vec<String>, [u32; 7])> {
         let mut out = Vec::new();
         let at = |s: &State| {
             let l = &s.locale;
             let ([a, b], [c, d], [e, f]) = (l.texts.get(), l.look.get(), l.books.get());
-            [a, b, c, d, e, f]
+            [a, b, c, d, e, f, l.texts.uncatalogued.get()]
         };
         for kind in [0x8f, 0xce, 0x71, 0x9f] {
             let mut s = s0.clone();
@@ -717,8 +718,9 @@ fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
     let sum = |k: usize| -> u32 { id.iter().map(|(_, c)| c[k]).sum() };
     let (hits, misses) = (sum(0), sum(1));
     let (look_hits, look_misses, book_hits, book_misses) = (sum(2), sum(3), sum(4), sum(5));
+    let uncatalogued = sum(6);
     eprintln!(
-        "identity pack, object commands: {} runs, differing {differ}; game strings from the pack {hits}, misses {misses}; object names shown {look_hits}, misses {look_misses}; books read {book_hits}, misses {book_misses}",
+        "identity pack, object commands: {} runs, differing {differ}; game strings from the pack {hits}, misses {misses}, uncatalogued {uncatalogued}; object names shown {look_hits}, misses {look_misses}; books read {book_hits}, misses {book_misses}",
         id.len(),
     );
     assert_eq!(en.len(), id.len());
@@ -734,7 +736,13 @@ fn the_identity_pack_shows_look_get_drop_and_move_exactly_as_english() {
         (0, 0),
         "every name and book shown is in the pack"
     );
-    eprintln!("identity pack object commands identical to English: pass; misses 0: pass");
+    assert_eq!(
+        uncatalogued, 0,
+        "every executable string shown is catalogued"
+    );
+    eprintln!(
+        "identity pack object commands identical to English: pass; misses 0: pass; uncatalogued 0: pass"
+    );
 }
 
 /// Spec 08 (slices K2 and K3): the string export of the owner's files (`u6.string-bundle/1`) lists
@@ -1057,7 +1065,9 @@ fn the_string_export_of_the_owners_game_holds_magics_lines_and_results_but_no_sy
 /// each within the line's 7 cells; none of the panel formats it leaves out (the roster's number,
 /// the name line, the bare string, the values); and `cells` on no other entry but the
 /// spellbook page's (2026-10-25: its spells' and circles' names and its level word, the test
-/// above). Prints pass/fail only: a failure names the site, never its text.
+/// above) and (2026-10-27, spec 16 item 1) the inventory view's weight values, with the
+/// English's cells (`inventory::PANEL_PRINTED`). Prints pass/fail only: a failure names
+/// the site, never its text.
 #[test]
 fn the_string_export_of_the_owners_game_holds_the_panels_lines_and_mode_names_with_their_cells() {
     use crate::converse::disasm::catalog::hash64;
@@ -1149,6 +1159,12 @@ fn the_string_export_of_the_owners_game_holds_the_panels_lines_and_mode_names_wi
                 .map(|&at| img.cstr(at).quiet()),
         );
     budgeted.extend(book.map(|text| hash64(&text)));
+    let weights = img.cstr(0x0011_0c04).quiet();
+    assert!(
+        find(&weights).is_some_and(|e| e.cells == cells_of(&weights)),
+        "the weight values with their English's cells"
+    );
+    budgeted.push(hash64(&weights));
     assert!(
         export
             .strings

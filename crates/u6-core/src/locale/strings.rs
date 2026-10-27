@@ -24,7 +24,14 @@
 //! its magic, health and level headings ([`crate::ui::tables::PRINTED`]), each within its cells;
 //! 2026-10-25: the spellbook page's level word ([`crate::magic::PAGE_PRINTED`]), within its
 //! English's cells) and the conversation's own messages
-//! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format. And
+//! ([`crate::converse::text::SHOWN`]): each one game code passes to `printf` as its format;
+//! 2026-10-27 (spec 16 item 1): and the lines Use and the walk reach in the object code (a
+//! torch's and a fixture's, a dismount's, a scout's warning: the object commands' list), `map/`'s
+//! (the place-name line and the party-mode line, [`crate::map::seams::PRINTED`], and the place
+//! names it prints as formats, read through their pointers, [`crate::map::seams::PLACE_NAMES`]),
+//! main's line that no character is made yet (the loop's list), the inventory view's weight
+//! values, within the English's cells ([`crate::inventory::PANEL_PRINTED`]), and the display name
+//! of no object Use prints as a format ([`NAME_PRINTED`]). And
 //! the strings a loader table holds that game code shows through an escape (labels): the command
 //! names before their dash ([`crate::main_loop::commands::LABELS`]), the shared messages Use and
 //! the object commands print through `%s` ([`SHARED_MESSAGES`]), the amulet's line of that table
@@ -36,8 +43,10 @@
 //! each within its field on the page), the reagents' names that description prints through `%s`
 //! (2026-10-25, [`crate::objects::commands::LABELS`], each on a wrapping line: no budget), the
 //! wind's names the date line prints through `%s`
-//! ([`crate::actors::clock::LABELS`]), the combat-mode names the panels' line prints through
-//! `%s` (2026-10-24, [`crate::ui::tables::LABELS`], each within the line's field), and the
+//! ([`crate::actors::clock::LABELS`]), the carried items' and the wand's names the vanished line
+//! prints through `%s` (2026-10-27, labels at their own addresses, [`shown_at`]), the combat-mode
+//! names the panels' line prints through `%s` (2026-10-24, [`crate::ui::tables::LABELS`], each
+//! within the line's field), and the
 //! conversation's `$G`, `$T` and `$Y` words. And (2026-10-24) the inventory view's two weight
 //! labels, which it reads for display at their own addresses and puts with no lookup again
 //! ([`crate::ui::tables::SHOWN_AT`]): labels from 1 byte (each is 2 in the original), within
@@ -64,7 +73,9 @@
 //! escape generates, and never where logic reads a string. A string under [`MIN_BYTES`] is
 //! found only at such a label read: the same bytes printed as a format stay English. A string
 //! with a cell budget ([`Entry::cells`]) takes the pack's text only within it (2026-10-24, the
-//! lookup's check).
+//! lookup's check). Bytes a print hook or a label read finds no entry for are counted
+//! (2026-10-27, [`super::Counts::uncatalogued`]) when they equal a complete executable string no
+//! entry holds, found by their hash ([`Catalogue::uncatalogued`]).
 //!
 //! **The export** ([`Catalogue::to_json`], [`FORMAT`]): every catalogued string once, in the
 //! order the sites list them: its hash, its length, its kind and its text (one character per
@@ -80,7 +91,7 @@
 //! the user's game text: it is made in the user's browser and leaves it only as his own download
 //! (`tests/no_string_bundle_in_repo.rs`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -185,7 +196,7 @@ pub fn directives(format: &[u8]) -> Vec<Vec<u8>> {
 
 /// Whether `text` holds a letter outside its `%` directives ([`directives`]) and the letters an
 /// escape takes (`$n`, `#n`, `^c`, the plural letters after `/` and `\\`).
-fn has_words(text: &[u8]) -> bool {
+pub(super) fn has_words(text: &[u8]) -> bool {
     let mut i = 0;
     while i < text.len() {
         let c = text[i];
@@ -228,7 +239,9 @@ pub struct Entry {
     /// [`crate::ui::tables::SHOWN_AT`]'s the English's cells, its bytes with the `%` directives
     /// as written; a combat-mode name [`crate::ui::tables::MODE_CELLS`]; 2026-10-25, the
     /// spellbook page's: its level word, [`crate::magic::PAGE_PRINTED`], the English's cells, a
-    /// spell's name [`crate::magic::NAME_CELLS`], a circle's [`crate::magic::CIRCLE_CELLS`]);
+    /// spell's name [`crate::magic::NAME_CELLS`], a circle's [`crate::magic::CIRCLE_CELLS`];
+    /// 2026-10-27, the inventory view's weight values, [`crate::inventory::PANEL_PRINTED`], the
+    /// English's cells);
     /// `None` for one with no such place. Two sites of the same bytes keep the smaller.
     pub cells: Option<u16>,
 }
@@ -238,6 +251,19 @@ pub struct Entry {
 pub struct Catalogue {
     by_hash: BTreeMap<u64, usize>,
     entries: Vec<(u64, Entry)>,
+    /// 2026-10-27: the executable's strings no entry holds ([`Catalogue::uncatalogued`]).
+    unlisted: Unlisted,
+}
+
+/// The [`hash64`]es of the executable's strings no entry holds and none English on purpose
+/// ([`Catalogue::unlisted_of`], 2026-10-27). Its `Debug` gives the count only.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Unlisted(BTreeSet<u64>);
+
+impl std::fmt::Debug for Unlisted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Unlisted({} strings)", self.0.len())
+    }
 }
 
 /// One string of the export.
@@ -329,6 +355,21 @@ pub fn export(files: &crate::files::Files) -> Result<Export, &'static str> {
     Ok(export)
 }
 
+/// Tests (2026-10-27): a synthetic `game` holding `parts` (one CODE hunk from the image base:
+/// each part's bytes NUL-ended at its image address), as [`install_test_forms`] checks against.
+#[cfg(test)]
+pub(crate) fn test_game(parts: &[(u32, &[u8])]) -> Vec<u8> {
+    let at = |addr: u32| (addr - crate::image::IMAGE_BASE) as usize;
+    let end = parts.iter().map(|&(a, b)| at(a) + b.len() + 1).max();
+    let mut hunk = vec![0u8; end.unwrap_or(0).next_multiple_of(4)];
+    for &(addr, bytes) in parts {
+        hunk[at(addr)..at(addr) + bytes.len()].copy_from_slice(bytes);
+    }
+    crate::image::SyntheticGame::new()
+        .loaded(false, hunk)
+        .build()
+}
+
 /// Tests (2026-10-24): installs over `s` a Korean pack of `forms` (an English string and the
 /// pack's text for it, each the test's own), checked against the catalogue of a synthetic `game`
 /// holding `parts` (one CODE hunk from the image base: each part's bytes at its image address),
@@ -340,15 +381,19 @@ pub(crate) fn install_test_forms(
     parts: &[(u32, &[u8])],
     forms: &[(&[u8], &str)],
 ) {
-    let at = |addr: u32| (addr - crate::image::IMAGE_BASE) as usize;
-    let end = parts.iter().map(|&(a, b)| at(a) + b.len() + 1).max();
-    let mut hunk = vec![0u8; end.unwrap_or(0).next_multiple_of(4)];
-    for &(addr, bytes) in parts {
-        hunk[at(addr)..at(addr) + bytes.len()].copy_from_slice(bytes);
-    }
-    let game = crate::image::SyntheticGame::new()
-        .loaded(false, hunk)
-        .build();
+    let game = test_game(parts);
+    install_test_catalogue(s, &game, forms, Catalogue::from_game(&game));
+}
+
+/// Tests (2026-10-27): [`install_test_forms`] over `game` with the catalogue given (a string no
+/// list names, as a label of the test's own: [`Catalogue::from_entries`]).
+#[cfg(test)]
+pub(crate) fn install_test_catalogue(
+    s: &mut crate::state::State,
+    game: &[u8],
+    forms: &[(&[u8], &str)],
+    catalogue: Catalogue,
+) {
     let strings = forms.iter().map(|&(en, ko)| {
         let text = super::StringText {
             len: en.len() as u32,
@@ -364,76 +409,141 @@ pub(crate) fn install_test_forms(
     )
     .and_then(|p| p.with_strings(strings))
     .expect("the test's pack reads");
-    let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
-    super::install_catalogued(
-        s,
-        &files,
-        std::rc::Rc::new(pack),
-        None,
-        Catalogue::from_game(&game),
-    )
-    .expect("the pack checks");
+    let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game.to_vec())]));
+    super::install_catalogued(s, &files, std::rc::Rc::new(pack), None, catalogue)
+        .expect("the pack checks");
+}
+
+/// Port-only (spec 16 item 1, 2026-10-27): the executable's strings shown in English on purpose
+/// at their own addresses, the articles 0x12904c prints before an object name (the object
+/// commands' `S_A`, `S_AN`, `S_THE`, which the object tables' loader reads too as `STR_A`,
+/// `STR_AN`, `STR_THE`; modules the locale layer cannot name, so the scan's test pins each to
+/// those consts), which no list catalogues and the uncatalogued count leaves out
+/// ([`Catalogue::uncatalogued`]).
+pub(crate) const ENGLISH_AT: [u32; 3] = [0x0012_83e2, 0x0012_83e6, 0x0012_83ea];
+
+/// Port-only (spec 16 item 1, 2026-10-27): the pointer slots of the incantation syllables, the
+/// game's magic words, shown in English on purpose (A4-0x70b8 + 4 c for the letters c,
+/// [`crate::usecmd::defs::SPELL_NAMES`]; magic's syllable table), which the uncatalogued count
+/// leaves out ([`Catalogue::uncatalogued`]).
+pub(crate) fn english_slots() -> impl Iterator<Item = u32> {
+    (u32::from(b'A')..=u32::from(b'Z'))
+        .map(|c| A4.wrapping_add_signed(crate::usecmd::defs::SPELL_NAMES) + 4 * c)
+}
+
+/// Port-only (spec 16 item 1, 2026-10-27): the display name of no object (0x10eef8's word for a
+/// slot below 0; the string at 0x10a4ce, which the object tables' loader reads, `objects::defs`
+/// `STR_NOTHING`, and `objects::names` gives), which the
+/// printers that can name a slot below 0 pass to `printf` as its format (Use's
+/// `usecmd::Ux::name`, magic's `print_name`, the object commands' `text::print`). The printers
+/// that put a name in a `%s` field take a slot of 0 or more: Ready and Unready (`ui::click`
+/// gives no code for selection -1), combat's lines, the actors' (`objects::ObjectId`).
+pub(crate) const NAME_PRINTED: &[u32] = &[0x0010_a4ce];
+
+/// The image addresses of the strings game code passes to `printf` as its format (or to `puts`,
+/// `put_raw_str`), each module's list in site order: the catalogue's printed strings.
+pub(crate) fn printed() -> impl Iterator<Item = u32> {
+    crate::main_loop::commands::PRINTED
+        .iter()
+        .chain(
+            crate::objects::commands::PRINTED
+                .iter()
+                .flat_map(|s| s.iter()),
+        )
+        .chain(crate::usecmd::PRINTED.iter().flat_map(|s| s.iter()))
+        .chain(crate::actors::rest::PRINTED)
+        .chain(crate::combat::attack::PRINTED)
+        .chain(crate::combat::damage::PRINTED)
+        .chain(crate::inventory::PRINTED)
+        .chain(crate::ui::click::PRINTED)
+        .chain(crate::magic::PRINTED.iter().flat_map(|s| s.iter()))
+        .chain(crate::actors::clock::PRINTED)
+        .chain(crate::actors::turn::PRINTED)
+        .chain(crate::actors::party::PRINTED)
+        .chain(crate::actors::npc::PRINTED)
+        .chain(crate::actors::walk::PRINTED)
+        .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()))
+        .chain(crate::ui::tables::PRINTED)
+        .chain(crate::magic::PAGE_PRINTED)
+        .chain(crate::map::seams::PRINTED)
+        .chain(crate::inventory::PANEL_PRINTED)
+        .chain(NAME_PRINTED)
+        .copied()
+}
+
+/// The pointer slots of the strings game code passes to `printf` as its format through a pointer
+/// (2026-10-27: the place names, [`crate::map::seams::PLACE_NAMES`]): catalogued as printed
+/// strings, not labels.
+pub(crate) fn pointed() -> impl Iterator<Item = u32> {
+    crate::map::seams::PLACE_NAMES.iter().copied()
+}
+
+/// How a printed string is shown: a format when it holds a conversion, else a message.
+fn printed_kind(text: &[u8]) -> Kind {
+    if has_conversion(text) {
+        Kind::Format
+    } else {
+        Kind::Message
+    }
+}
+
+/// The pointer slots of the labels game code reads for display ([`super::shown`]): the
+/// catalogue's labels.
+pub(crate) fn labels() -> impl Iterator<Item = u32> {
+    crate::main_loop::commands::LABELS
+        .iter()
+        .chain(&SHARED_MESSAGES)
+        .chain(crate::objects::commands::LABELS)
+        .chain(crate::inventory::LABELS)
+        .chain(crate::magic::LABELS)
+        .chain(crate::actors::clock::LABELS)
+        .chain(crate::ui::tables::LABELS)
+        .chain(&crate::magic::NAME_LABELS)
+        .chain(&crate::magic::CIRCLE_LABELS)
+        .copied()
+}
+
+/// The labels game code reads for display at their own addresses (no pointer slot holds them):
+/// the panels' ([`crate::ui::tables::SHOWN_AT`], each within its English's cells) and
+/// (2026-10-27) the vanished line's item words ([`crate::actors::clock::SHOWN_AT`],
+/// [`crate::combat::attack::SHOWN_AT`], on a wrapping line: no budget).
+pub(crate) fn shown_at() -> impl Iterator<Item = u32> {
+    crate::ui::tables::SHOWN_AT
+        .iter()
+        .chain(crate::actors::clock::SHOWN_AT)
+        .chain(crate::combat::attack::SHOWN_AT)
+        .copied()
 }
 
 impl Catalogue {
     /// The catalogue of `game` (the decrunched executable): every site's string that reads
-    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer, a label read for display (a
-    /// pointer table's, or a panel label at its own address, [`crate::ui::tables::SHOWN_AT`]) 1
-    /// byte or longer ([`Catalogue::add_label`]). A file that is no hunk file gives an empty
-    /// catalogue (nothing is substituted then).
+    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer ([`printed`], then
+    /// [`pointed`]'s, each through its pointer), a label read for display (a pointer table's,
+    /// [`labels`], or a panel label at its own address, [`crate::ui::tables::SHOWN_AT`]) 1 byte
+    /// or longer ([`Catalogue::add_label`]). A file that is no hunk file gives an empty catalogue
+    /// (nothing is substituted then).
     pub fn from_game(game: &[u8]) -> Catalogue {
         let mut c = Catalogue::default();
         let Ok(img) = GameImage::parse(game) else {
             return c;
         };
-        let printed = crate::main_loop::commands::PRINTED
-            .iter()
-            .chain(
-                crate::objects::commands::PRINTED
-                    .iter()
-                    .flat_map(|s| s.iter()),
-            )
-            .chain(crate::usecmd::PRINTED.iter().flat_map(|s| s.iter()))
-            .chain(crate::actors::rest::PRINTED)
-            .chain(crate::combat::attack::PRINTED)
-            .chain(crate::combat::damage::PRINTED)
-            .chain(crate::inventory::PRINTED)
-            .chain(crate::ui::click::PRINTED)
-            .chain(crate::magic::PRINTED.iter().flat_map(|s| s.iter()))
-            .chain(crate::actors::clock::PRINTED)
-            .chain(crate::actors::turn::PRINTED)
-            .chain(crate::actors::party::PRINTED)
-            .chain(crate::actors::npc::PRINTED)
-            .chain(crate::actors::walk::PRINTED)
-            .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()))
-            .chain(crate::ui::tables::PRINTED)
-            .chain(crate::magic::PAGE_PRINTED);
-        for &at in printed {
+        for at in printed() {
             if let Ok(text) = img.cstr(at) {
-                let kind = if has_conversion(&text) {
-                    Kind::Format
-                } else {
-                    Kind::Message
-                };
-                // A panel's string (the spellbook page's level word too) is drawn at a fixed
-                // cell: the English's cells.
+                // A panel's string (the spellbook page's level word, the inventory view's weight
+                // values too) is drawn at a fixed cell: the English's cells.
                 let cells = (crate::ui::tables::PRINTED.contains(&at)
-                    || crate::magic::PAGE_PRINTED.contains(&at))
+                    || crate::magic::PAGE_PRINTED.contains(&at)
+                    || crate::inventory::PANEL_PRINTED.contains(&at))
                 .then(|| english_cells(&text));
-                c.add_within(kind, text, MIN_BYTES, cells);
+                c.add_within(printed_kind(&text), text, MIN_BYTES, cells);
             }
         }
-        let labels = crate::main_loop::commands::LABELS
-            .iter()
-            .chain(&SHARED_MESSAGES)
-            .chain(crate::objects::commands::LABELS)
-            .chain(crate::inventory::LABELS)
-            .chain(crate::magic::LABELS)
-            .chain(crate::actors::clock::LABELS)
-            .chain(crate::ui::tables::LABELS)
-            .chain(&crate::magic::NAME_LABELS)
-            .chain(&crate::magic::CIRCLE_LABELS);
-        for &ptr in labels {
+        for ptr in pointed() {
+            if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
+                c.add_within(printed_kind(&text), text, MIN_BYTES, None);
+            }
+        }
+        for ptr in labels() {
             if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
                 // A combat-mode name is centred in its line's field; a spell's and a circle's
                 // name each fill a field of the spellbook page.
@@ -449,11 +559,13 @@ impl Catalogue {
                 c.add_label(text, cells);
             }
         }
-        // The panel labels read for display at their own addresses, each at a fixed cell.
-        for &at in crate::ui::tables::SHOWN_AT {
+        // The labels read for display at their own addresses, a panel's at a fixed cell.
+        for at in shown_at() {
             if let Ok(text) = img.cstr(at) {
-                let cells = english_cells(&text);
-                c.add_label(text, Some(cells));
+                let cells = crate::ui::tables::SHOWN_AT
+                    .contains(&at)
+                    .then(|| english_cells(&text));
+                c.add_label(text, cells);
             }
         }
         if let Ok(messages) = ConverseText::from_game(game) {
@@ -468,7 +580,41 @@ impl Catalogue {
                 c.add(kind, messages.get(m).to_vec());
             }
         }
+        c.unlisted = Unlisted(c.unlisted_of(&img));
         c
+    }
+
+    /// The [`hash64`]es of `img`'s strings no entry holds (2026-10-27): each run of every loaded
+    /// segment that starts at a string's start (the segment's start or after a NUL) and ends at a
+    /// NUL inside the segment (a run the segment ends without one is none), [`MIN_BYTES`] to
+    /// [`MAX_BYTES`] long, with a word of its own; but the strings shown in English on purpose
+    /// ([`ENGLISH_AT`], [`english_slots`]'s). A string that follows code with no NUL before it
+    /// starts no run here (its run starts at the last NUL before it, in the code): such a string
+    /// is not in the set, a blind spot of the count.
+    fn unlisted_of(&self, img: &GameImage<'_>) -> BTreeSet<u64> {
+        let english: BTreeSet<u64> = ENGLISH_AT
+            .iter()
+            .filter_map(|&at| img.cstr(at).ok())
+            .chain(
+                english_slots().filter_map(|slot| img.pointer(slot).and_then(|p| img.cstr(p)).ok()),
+            )
+            .map(|text| hash64(&text))
+            .collect();
+        let mut out = BTreeSet::new();
+        for n in 0..img.segment_count() {
+            let segment = img.loaded(n).unwrap_or_default();
+            let mut start = 0;
+            while let Some(len) = segment[start..].iter().position(|&b| b == 0) {
+                let text = &segment[start..start + len];
+                let h = hash64(text);
+                let fits = (MIN_BYTES..=MAX_BYTES).contains(&len) && has_words(text);
+                if fits && self.get(h).is_none_or(|e| e.text != text) && !english.contains(&h) {
+                    out.insert(h);
+                }
+                start += len + 1;
+            }
+        }
+        out
     }
 
     /// A catalogue of `entries` (tests: a synthetic `game`'s strings), each added as a site's (a
@@ -564,6 +710,22 @@ impl Catalogue {
         }
         self.get(hash64(bytes))
             .filter(|e| e.text == bytes && (bytes.len() >= MIN_BYTES || e.kind == Kind::Label))
+    }
+
+    /// Whether `bytes`, which game code prints or reads as a label and the catalogue has no entry
+    /// for, are a complete executable string (2026-10-27, [`Catalogue::unlisted_of`]): one hash
+    /// and one tree lookup. The set classifies content, not origin: any bytes equal to a complete
+    /// executable string count (a name, a typed word or a pack's text equal to one would too). A
+    /// string's tail counts only when its bytes are also a complete string of their own somewhere
+    /// in the executable; an article does not count.
+    pub fn uncatalogued(&self, bytes: &[u8]) -> bool {
+        (MIN_BYTES..=MAX_BYTES).contains(&bytes.len()) && self.unlisted.0.contains(&hash64(bytes))
+    }
+
+    /// How many of the executable's strings no entry holds ([`Catalogue::unlisted_of`]; counts
+    /// only).
+    pub fn unlisted_len(&self) -> usize {
+        self.unlisted.0.len()
     }
 
     /// The strings catalogued.

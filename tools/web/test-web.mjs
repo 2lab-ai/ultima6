@@ -24,7 +24,8 @@
 // map covering the 1920 x 1080 canvas, the framed windows over it, the pointer through them, the
 // letterbox, fullscreen, the compositor's time and scale, the setting across the builds; spec 14:
 // the actor windows, the active one marked, the side panel's own window in another mode or a
-// conversation).
+// conversation), and the remembered sight (spec 18: on in the page, off in the harness, grey on
+// the canvas where the engine's frame remembers a cell out of sight).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
@@ -11370,6 +11371,200 @@ test('Wide layout (spec 14 Design 7, memory): places kept before spec 14 (the da
   assert.deepEqual(at('date').outer.slice(0, 2), old.date, 'the date line\'s after a reload');
   windowsPlaced(home({ ...s, windows: s.windows.map((w) => (w.name === 'doll' ? doll : w)) }), 'the others after a reload');
   console.log(`  receipt: spec 13's kept places: the date line kept, ${WIDE_NAMES.length} windows and the side panel's own at their default places; the doll dragged to ${moved.outer.slice(0, 2).join(',')}, kept across a reload: pass`);
+}, { needs: h.haveHfes });
+
+// --- the remembered sight (spec 18) --------------------------------------------------------------
+// The harness keeps it off (`openPage`'s `memory`), so every other test compares the map with the
+// original's black; here it is on. The start's room shows nothing a step hides, so the party walks
+// to the room's door ten cells south of the start cell and opens and closes it (Use, the door
+// south): what it showed through the door is out of sight then, in view.
+
+/// The party ten cells south of where it is: arrow keys toward that cell (south first), a pass when
+/// a key walked nothing (a gargoyle of the start fight, or a wall beside the column), bounded; a
+/// hero killed by the fight wakes on the start cell and walks on from there.
+async function walkSouth(page, cells) {
+  const at = async () => (await atPrompt(page)).leader.split(',').map(Number);
+  const [sx, sy] = await at();
+  const to = [sx, sy + cells];
+  for (let tries = 0; tries < 120; tries += 1) {
+    const [x, y] = await at();
+    if (x === to[0] && y === to[1]) return;
+    const key = y < to[1] ? 'ArrowDown' : x < to[0] ? 'ArrowRight' : x > to[0] ? 'ArrowLeft' : 'ArrowUp';
+    await page.keyboard.press(key);
+    await h.waitTaken(page);
+    const [nx, ny] = await at();
+    if (nx === x && ny === y) await h.passTurn(page);
+  }
+  assert.fail(`the party did not reach the cell ${cells} south of the start`);
+}
+
+/// Use on the cell south of the leader: U, the cross-hair one cell down, Enter; then the prompt.
+async function useSouth(page) {
+  await h.waitPrompt(page);
+  for (const key of ['u', 'ArrowDown', 'Enter']) await h.press(page, key, 20);
+  await h.waitPrompt(page);
+}
+
+/// Keeps in the page the game's RGBA frame and the canvas as they are now (`memoryShown`'s
+/// `before`: taken while the cells it checks were in sight).
+function keepBefore(page) {
+  return page.evaluate(() => {
+    const c = document.getElementById('screen');
+    globalThis.__memBefore = {
+      frame: globalThis.__shownGame.frame_rgba().slice(),
+      canvas: c.getContext('2d').getImageData(0, 0, c.width, c.height).data.slice(),
+    };
+  });
+}
+
+/// The remembered sight as the page shows it now, the display frozen: over the shown map (8..168
+/// both ways in Original), the pixels the engine's frame names the remembered sight
+/// (`hd_source_at` flags 0x80; a cell's top-left pixel read first, then its 256 when it has it).
+/// Of them, in the game's RGBA frame and on the canvas (every device pixel of a pixel's S x S
+/// block) apart: how many are grey (red = green = blue), how many are not black, how many grey
+/// levels they take, and how many are `grey` (site's K, u6-render `grey`) of what the same
+/// place showed in the frame or on the canvas kept by `keepBefore` (`before`). `blackout`
+/// ('frame' or 'canvas') makes the remembered pixels black in that copy first: the negative
+/// controls, which its checks must fail. The pixels under the pointer the page draws over the
+/// HD frame (`hd_pointer`) are left out, and so are the cells that show themselves.
+function memoryShown(page, { before = false, blackout = null } = {}) {
+  return page.evaluate(([useBefore, blackout]) => {
+    const g = globalThis.__shownGame;
+    const c = document.getElementById('screen');
+    const s = c.width / 320;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data.slice();
+    const f = g.frame_rgba().slice();
+    const was = useBefore ? globalThis.__memBefore : null;
+    const memory = (x, y) => ((g.hd_source_at(x, y)[5] ?? 0) & 0x80) !== 0;
+    const [px, py, pw, ph] = g.hd_pointer();
+    const pointer = (x, y) => x >= px && x < px + pw && y >= py && y < py + ph;
+    const grey = (a, i) => {
+      const v = (((77 * a[i] + 150 * a[i + 1] + 29 * a[i + 2] + 128) >> 8) * 115 + 128) >> 8;
+      return [v, v, v];
+    };
+    const pixels = [];
+    for (let cy = 0; cy < 11; cy += 1) {
+      for (let cx = 0; cx < 11; cx += 1) {
+        const [x0, y0] = [Math.max(8, cx * 16), Math.max(8, cy * 16)];
+        const [x1, y1] = [Math.min(168, cx * 16 + 16), Math.min(168, cy * 16 + 16)];
+        if (x0 >= x1 || y0 >= y1 || !memory(x0, y0)) continue;
+        for (let y = y0; y < y1; y += 1) {
+          for (let x = x0; x < x1; x += 1) if (!pointer(x, y) && memory(x, y)) pixels.push([x, y]);
+        }
+      }
+    }
+    // The device pixels of game pixel (x, y)'s block on the canvas, as byte offsets.
+    const block = (x, y) => Array.from({ length: s * s }, (_, k) =>
+      ((y * s + Math.floor(k / s)) * c.width + x * s + (k % s)) * 4);
+    for (const [x, y] of pixels) {
+      if (blackout === 'frame') f.fill(0, (y * 320 + x) * 4, (y * 320 + x) * 4 + 3);
+      if (blackout === 'canvas') for (const i of block(x, y)) d.fill(0, i, i + 3);
+    }
+    const isGrey = (a, i) => a[i] === a[i + 1] && a[i + 1] === a[i + 2];
+    const lit = (a, i) => a[i] + a[i + 1] + a[i + 2] > 0;
+    const same = (a, i, want) => want[0] === a[i] && want[1] === a[i + 1] && want[2] === a[i + 2];
+    const out = { flagged: pixels.length, s, hd: g.hd_on(), on: g.sight_memory(), places: pixels };
+    const frame = { grey: 0, lit: 0, expected: 0, levels: new Set() };
+    const canvas = { grey: 0, lit: 0, expected: 0, levels: new Set() };
+    for (const [x, y] of pixels) {
+      const i = (y * 320 + x) * 4;
+      if (isGrey(f, i)) frame.grey += 1;
+      if (lit(f, i)) frame.lit += 1;
+      frame.levels.add(f[i]);
+      if (was && same(f, i, grey(was.frame, i))) frame.expected += 1;
+      const b = block(x, y);
+      if (b.every((j) => isGrey(d, j))) canvas.grey += 1;
+      if (b.some((j) => lit(d, j))) canvas.lit += 1;
+      for (const j of b) canvas.levels.add(d[j]);
+      if (was && b.every((j) => same(d, j, grey(was.canvas, j)))) canvas.expected += 1;
+    }
+    for (const [name, m] of [['frame', frame], ['canvas', canvas]]) out[name] = { ...m, levels: m.levels.size };
+    return out;
+  }, [before, blackout]);
+}
+
+/// What `memoryShown` must hold of the remembered sight, in the game's frame and on the canvas
+/// each: some of it (a cell's worth), every pixel grey, most of it not black, at least 3 grey
+/// levels, and nine in ten pixels the grey of what they showed in sight (the rest: an animated
+/// tile, an actor that stood there). Returns the failed checks' labels.
+function memoryChecks(m) {
+  const failed = [];
+  if (m.flagged < 256) failed.push('a cell\'s worth');
+  for (const name of ['frame', 'canvas']) {
+    const v = m[name];
+    if (v.grey !== m.flagged) failed.push(`${name}: grey`);
+    if (v.lit * 2 <= m.flagged) failed.push(`${name}: not black`);
+    if (v.levels < 3) failed.push(`${name}: grey levels`);
+    if (v.expected * 10 < m.flagged * 9) failed.push(`${name}: the grey of its look in sight`);
+  }
+  return failed;
+}
+
+test('remembered sight (spec 18): on in the page by default and kept off across a reload, off in the harness; with it on at S 4, what the room\'s door showed is grey once the door is closed: every pixel the engine\'s frame remembers is grey in the game\'s frame and on the canvas, not black, the grey of its look in sight in each; switched off, those pixels are the original\'s black; a copy with them blacked out (the frame\'s, the canvas\'s) fails the checks', async (env) => {
+  const { page } = await h.openPage(env, { memory: 'on' });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  let m = await memoryShown(page);
+  assert.ok(m.on && m.hd && m.s === 4, 'on, HD on at S 4');
+  assert.equal(m.flagged, 0, 'nothing remembered at the start');
+  await walkSouth(page, 10);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  await keepBefore(page);
+  await useSouth(page);
+  // What the canvas shows, the display frozen (no step between the canvas and the frame read).
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  m = await memoryShown(page, { before: true });
+  assert.deepEqual(memoryChecks(m), [], 'the remembered sight shown');
+  for (const where of ['frame', 'canvas']) {
+    const control = memoryChecks(await memoryShown(page, { before: true, blackout: where }));
+    assert.ok(control.includes(`${where}: not black`) && control.includes(`${where}: the grey of its look in sight`), `the control: the ${where} blacked out fails`);
+    assert.ok(control.every((label) => label.startsWith(where)), `the control: only the ${where}'s checks fail`);
+  }
+  const line = (v) => `${v.grey} grey, ${v.lit} not black, ${v.levels} levels, ${v.expected} the grey of their look in sight`;
+  console.log(`  receipt: spec 18's remembered sight: ${m.flagged} pixels at S ${m.s}; frame ${line(m.frame)}; canvas ${line(m.canvas)}: pass`);
+  // Off: the same pixels (their places from the reading above: the engine's frame no longer
+  // names them) are the original's black in the RGBA frame and on the canvas.
+  await page.evaluate(() => globalThis.__shownGame.set_sight_memory(false));
+  await h.runFrames(page, 4);
+  const off = await page.evaluate((places) => {
+    const g = globalThis.__shownGame;
+    const c = document.getElementById('screen');
+    const s = c.width / 320;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const f = g.frame_rgba();
+    let black = 0;
+    for (const [x, y] of places) {
+      const i = (y * 320 + x) * 4;
+      const j = (y * s * c.width + x * s) * 4;
+      if (f[i] + f[i + 1] + f[i + 2] === 0 && d[j] + d[j + 1] + d[j + 2] === 0) black += 1;
+    }
+    return { black, on: g.sight_memory(), named: places.filter(([x, y]) => (g.hd_source_at(x, y)[5] ?? 0) & 0x80).length };
+  }, m.places);
+  assert.ok(!off.on && off.named === 0, 'off: nothing drawn from the remembered sight');
+  assert.equal(off.black, m.places.length, 'off: those pixels black');
+  // Every test page closes with its context; the harness's default and the page's own follow.
+  const { page: plain } = await h.openPage(env);
+  await h.load(plain, env);
+  await plain.setInputFiles('#picker', h.HFES);
+  await started(plain, FILES);
+  // The game the page presented last, once there is one (a reload starts the page again).
+  const kept = async (p) => {
+    await p.waitForFunction(() => globalThis.__shownGame?.started(), null, { timeout: 60_000 });
+    return p.evaluate(() => [globalThis.__shownGame.sight_memory(), localStorage.getItem('u6.memory')]);
+  };
+  assert.deepEqual(await kept(plain), [false, 'off'], 'the harness keeps it off');
+  const { page: fresh } = await h.openPage(env, { memory: null });
+  await h.load(fresh, env);
+  await fresh.setInputFiles('#picker', h.HFES);
+  await started(fresh, FILES);
+  assert.deepEqual(await kept(fresh), [true, null], 'nothing kept: on, the page\'s default');
+  await fresh.evaluate(() => localStorage.setItem('u6.memory', 'off'));
+  await fresh.reload();
+  await started(fresh, FILES);
+  assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

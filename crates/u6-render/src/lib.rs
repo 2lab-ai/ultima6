@@ -105,6 +105,28 @@ pub const FLAG_SYMBOL: u8 = 32;
 /// echoed (a character the player typed), on each pixel of the cell. Shown as without it; the HD
 /// font mode lists a whole space typed apart from the game's own ([`hd::TYPED_SPACE`]).
 pub const FLAG_TYPED: u8 = 64;
+/// Spec 18 [`Src::flags`] of a [`Kind::Tile`] pixel: drawn from the remembered sight (a cell in
+/// view that was seen and is out of sight now), its colour index the record's plus [`GREY`]. The
+/// HD compositor shows such a pixel as an unflagged one, from the grey copy of the HD image
+/// ([`hd`]).
+pub const FLAG_MEMORY: u8 = 0x80;
+
+/// Spec 18: the first palette entry of the remembered sight's colours: entry `GREY + i` is
+/// [`grey`] of game colour `i` (the game's 32, below `GREY`), written by the map window render
+/// while the remembered sight is on.
+pub const GREY: u8 = 0x20;
+
+/// Spec 18: the brightness of the remembered sight's grey, out of 256 of the colour's luma.
+pub const GREY_LEVEL: u32 = 115;
+
+/// Spec 18: `c` as the remembered sight shows it, in every channel its luma
+/// `(77r + 150g + 29b + 128) >> 8` times [`GREY_LEVEL`] / 256, rounded. The classic colours of
+/// the remembered sight ([`GREY`]) and the HD compositor's grey copies both take it.
+pub const fn grey(c: Rgb) -> Rgb {
+    let y = (77 * c.r as u32 + 150 * c.g as u32 + 29 * c.b as u32 + 128) >> 8;
+    let v = ((y * GREY_LEVEL + 128) >> 8) as u8;
+    Rgb::new(v, v, v)
+}
 
 /// [`Src::id`] of portrait `item` of the archive `portrait.<letter>` (the pair the portrait
 /// loader computes): the letter's byte in the high byte, the item in the low one. `None` for
@@ -141,7 +163,8 @@ pub struct Src {
     /// [`FLAG_OVERLAY`], [`FLAG_OUTLINE`]: the blit changed the image's colour here;
     /// [`FLAG_INK`]: a glyph's set pixel; [`FLAG_PAPER`]: a glyph's pixel over the paper;
     /// [`FLAG_PAPER_OFF`]: the paper's pixel of another colour than the paper's;
-    /// [`FLAG_SYMBOL`]: a symbol's ink pixel; [`FLAG_TYPED`]: a typed cell's pixel.
+    /// [`FLAG_SYMBOL`]: a symbol's ink pixel; [`FLAG_TYPED`]: a typed cell's pixel;
+    /// [`FLAG_MEMORY`]: a pixel of the remembered sight.
     pub flags: u8,
 }
 
@@ -642,6 +665,18 @@ impl Framebuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec 18: the grey of a colour is its luma at [`GREY_LEVEL`] / 256 in every channel: black
+    /// stays black, white is the level's grey, a green brighter than a blue of the same value.
+    #[test]
+    fn grey_is_the_dimmed_luma() {
+        assert_eq!(grey(Rgb::new(0, 0, 0)), Rgb::new(0, 0, 0));
+        let w = ((255 * GREY_LEVEL + 128) >> 8) as u8;
+        assert_eq!(grey(Rgb::new(255, 255, 255)), Rgb::new(w, w, w));
+        let (g, b) = (grey(Rgb::new(0, 200, 0)), grey(Rgb::new(0, 0, 200)));
+        assert!(g.r == g.g && g.g == g.b && g.r > b.r);
+        assert!(usize::from(GREY) == 32, "past the game's 32 colours");
+    }
 
     #[test]
     fn rgba_uses_palette_and_opaque_alpha() {

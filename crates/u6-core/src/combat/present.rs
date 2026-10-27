@@ -578,6 +578,10 @@ pub fn draw_borders(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
 /// per window cell the draw-list tiles with flags2 bit 4 (on top), darkness (tile 0xff) on a
 /// cell whose base is 0xff or 0x1bc, then the border)
 ///
+/// Port (spec 18, [`crate::Io::set_sight_memory`] on): a cell the window render shows from the
+/// remembered sight gets its grey layers first, in place of the darkness, then its tiles on top
+/// ([`crate::gfx::view::blit_remembered`]), as the render draws it.
+///
 /// Cells by view cell from the map's corner, `row * VIEW_W + col` (spec 13 C2).
 pub fn redraw_over(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
     let d = &s.objects.draw;
@@ -586,6 +590,11 @@ pub fn redraw_over(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
     for col in ((x0 - mx) >> 4)..=((x1 - mx) >> 4) {
         for row in ((y0 - my) >> 4)..=((y1 - my) >> 4) {
             let cell = (row * VIEW_W as i16 + col) as usize;
+            let remembered = with_current_io(|io| {
+                io.sight_memory()
+                    && io.draw_back(|fb| crate::gfx::view::blit_remembered(s, fb, col, row))
+            });
+            let remembered = remembered.unwrap_or(false);
             let mut n = d.cell.get(cell).copied().unwrap_or(0);
             let mut guard = 0;
             // At most the pool's nodes (256 in Original; spec 13 Design 2 sizes it in Wide).
@@ -603,7 +612,7 @@ pub fn redraw_over(s: &State, x0: i16, y0: i16, x1: i16, y1: i16) {
                 guard += 1;
             }
             let base = d.base.get(cell).copied().unwrap_or(0);
-            if base == 0xff || base == 0x1bc {
+            if !remembered && (base == 0xff || base == 0x1bc) {
                 let (x, y) = at(col, row);
                 back_blit(s, 0xff, x, y);
             }

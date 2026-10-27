@@ -50,10 +50,11 @@ deploys.
 | B11 | 1a | `tools/port-map-stale-seams` | `port_map.py` shows stale seams and multi-line stubs | — |
 | C1 | 3 | `feat/remembered-sight` | spec 18 from S1 §3–§5 | — |
 | K1 | 4 | `fix/held-key-drain` | spec 19 O1b: the poll keeps the newest press, a release cancels its repeats | — |
-| B12 | 1a | (later) | staff and wand casts, monsters included (row 5) | B2, B4 merged |
+| B12 | 1a | `feat/staff-wand-casts` (from main bce1bfe) | staff and wand casts, monsters included (row 5) | B2, B4 merged: done |
 | P1 | 1c | (later) | Korean lines for B10's new catalogue entries, on top of the live pack | B10 merged; message the row-25 session |
 | M2 | 2 | `feat/context-menu` (from `integ/r1027` 41e8209) | spec 17: the query on a State clone, the icon-then-target run with its gate, the page menu | B6, B7 merged: done |
 | W2 | 5 | (later) | spec 20: scene, presenter, early picture on a clone | C1, B2, K1 merged (gfx, walk.rs, engine.rs) |
+| B13 | 1c | (later, after the units in flight) | replace the static scan with a compiler rule: clippy `disallowed-methods` on the image text readers, one string-registry module the catalogue is built from (opus, B10 r4). About 100+ production reader sites (`cstr` 32, `game_string` 31, `printf` 46) | B10, M2, W2, B12 merged |
 | E1 | 1a | (round 3) | the `end` program (O1 row 10): decompile, port, launcher state 2 | — |
 
 ### Review state (2026-10-27)
@@ -70,10 +71,11 @@ deploys.
 | B4 | 1 test ok, fmt ok | APPROVE | APPROVE | 2 SHOULDs + `obj_quality` doc done — committed on its branch (e95a936) |
 | B6 | lib 1144 ok, fmt ok, clippy ok (scripts/cargo.sh) | APPROVE (r2) | APPROVE (r2) | M1 note from the asm, S1 six-cell test, N1, N2 done — committed on its branch (19e5b8d) |
 | B7 | r3: B7 tests 11 ok default, 12 ok wide, fmt ok; clippy ok both | APPROVE (code r2, tests r3) | APPROVE (r2) | committed on its branch (97e3d10), merged into `integ/r1027` |
-| B10 | r4: lib 1193 ok, wide subset 195 ok (agent; dispatcher re-run pending) | r3: a, b, s1 APPROVE; s2, s3, s4 REVISE | r3 REVISE | Production code approved: item words in `%s` go through `shown`, and the set is boundary-aware. The scan was rebuilt on `syn`, as a dev-dependency only (player tree unchanged at 33 lines). The r3 holes were fixed as three rules: a reader is found wherever it is named; a value comes only from a proven unique binding; `const_pass` covers every address in a worded run, and an unevaluated const is a finding. Self-audit: `b10-r4-audit.md`, 40 rows. Next: the r4 review. |
+| B10 | r4: fmt ok, clippy 0 both, lib 1193, wide subset 195, port-map up to date (dispatcher) | r4: t APPROVE; w, e, r, f, x1, x2 REVISE (12 MUSTs, every one needing code the crate does not contain) | r4 APPROVE (3 SHOULDs) | Production code approved. The scan now has a written contract: exact for the crate's own idioms; exotic forms (`include!`, `#[path]`, leading `::`, `no_implicit_prelude`, user `From`/`Into`, block generic arguments, `use … as <module>`) are findings outright; a MUST needs a current site or an idiom the crate uses. The dispatcher's grep found no production text read outside `READERS`. r5 (`b10-r5.md`): binding scopes (closure, arm, `for`, `if let`), width-correct arithmetic, `named` bound to its const, empty reasons rejected, `static`, the rejection list, inline literals at byte accessors, `NOT_IMPLEMENTED` as English. r5 built: all ten items with RED fixtures; `tests_scan.rs` 5213 lines; lib 1212, wide subset 214 (agent). r5 review against the contract: gpt p1, p2, p3 APPROVE; opus APPROVE (every r4 item closed; header contract matches the code; production unchanged). SHOULDs and NITs for B13: the `<T>::f::<{1}>()` qself check (p1); the const arm tested only on empty `Consts` (p3); an unresolved site's arguments never checked; A4-offset literals at byte accessors not swept; a `Logic` reason goes false if that message is later printed (opus). Committed 115ed0c, merged into `integ/r1027` (2ec05d8). On the merged tree the scan finds 4 sites from other units: B7's two `print_at(line)` through `if let Some(line) = refusal` (`push.rs:438`, `:566`), a block-tailed `print(line)` (`usecmd/misc.rs:521`), and C1's `FROZEN_BASE = TILE_COUNT as u16` (`gfx/cache.rs:195`). Every const they print is listed, so only the site resolution is missing. r6: resolve those idioms in the scan, and give `FROZEN_BASE` a reason. Deploy 28 waits for it. |
 | K1 | lib 1147, u6-web 44+1, u6-native 22, fmt ok, clippy ok both | a APPROVE; b APPROVE (r4) | APPROVE (r3) | committed (05765c9), merged, deployed (26) |
-| C1 | r2: u6-core 1156, wide 1179, u6-render 57, u6-web 44+1, fmt ok, clippy ok both | r2: a, b APPROVE; c, d REVISE | r2 APPROVE | r3: the remembered look is frozen at last sight (shore records are copied per version); in-sight cells are identical with the switch on and off (new test); the canvas pixels are checked; each creature's pixels are proven before it is hidden. Dispatcher re-run pending, then the r3 review. |
-| M2 | (agent: lib 1186, wide menu subset 18, u6-web 46, web 142/143 — the one failure is the Wide frame-time test) | round 1 pending | round 1 pending | Built. Dispatcher re-run pending. Review parts: `r1027-r2/review/m2-*`. |
+| C1 | r3b: fmt ok, clippy 0 both, lib 1159, wide 1182, u6-render 59, u6-web 44+1, port-map up to date (dispatcher) | r3: a, b, c, d APPROVE; r3b b APPROVE | r3 APPROVE; r3b APPROVE | committed (08925ae), merged, deployed (27); spec 18 shipped. Live: a door closed on a corridor leaves it in dark grey. |
+| M2 | r1: fmt ok, clippy 0 both, lib 1186, wide 1211, u6-web 46+1, render 53, port-map up to date (dispatcher) | r1: a, c, d1, d2 REVISE; b conditional | r1 REVISE (2 MUSTs) | r1 committed on its branch (29e513d); `integ/r1027` merged in (ce911d4) so K1 is in its base. r2 (`m2-r2.md`): the Release passes the gate; 0xba/0xc0 Use stays enabled (the original searches anyway); one source for the Use refusals; the held press dropped when the prompt returns; deterministic refusals judged on the clone; one clone per press; the menu bounded to the screen; the pointer swallow; exact acceptance tests 1, 3, 4, 5, 7 and predicate equivalence both ways. Two review claims checked and dropped (underlined first is in the page; the solo reason means "not allowed in solo mode"). |
+| B12 | r2: fmt ok, clippy 0 both, lib 1190 (dispatcher) | r1: a, b REVISE; r2: a REVISE (1 MUST, 2 NITs), b APPROVE (1 SHOULD) | r1 REVISE (1 MUST, 4 SHOULDs); r2 REVISE (1 MUST, 1 SHOULD, 3 NITs) | r2 closed: one index-16 accessor (`actors::party::roster_byte`, `leader_actor`), the Attack tail after the cast and its report, movement points paid after the cast, a test that fails if the text-off is deleted, pinned RNG and target. The Gate Travel premise was wrong: 0x104124 `moveq #0,d0; bsr 0x103fd4` resets the leader index to 0 before the follow loop, so the party forms round member 0 (dispatcher's byte check; opus withdrew its round-1 claim). r2 MUST (both reviewers): a deferred cast reorders `retreat`'s tail. The original 0x126738 runs the assault (line 51), then the recovery roll (line 63-64); the port rolls first. r3: an ordered after-cast list, every NPC caller of the hit audited, `Party::leader()` on the same model (u6-web `data-leader`, the pointer's viewer), damage.rs routed, member locations in the Gate Travel test, headers and wording. Then `integ/r1027` is merged in, so the string scan checks its print sites. |
 
 Carried (from K1 opus, outside K1): `main_loop/test_support.rs:89-97` builds test states with the key drain off,
 unlike the image word 0x153caa = 1, so tests that queue several keys at once (`actors/rest/tests.rs:136,189,215`)
@@ -94,6 +96,21 @@ Deploy 26 (2026-10-27): main 7a87fd2, fast-forward of `integ/r1027`, pushed.
   - The live wasm (both builds) and `app.js` match the local build by SHA-256.
   - `live19.mjs`, run as a fresh visitor: LIVE OK; packs 200; Korean hits 23, misses 0; 0 page errors.
 - Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy26/`.
+
+Deploy 27 (2026-10-27): main ec3c4f6, which is deploy 26 plus C1 (remembered sight, spec 18 shipped), pushed.
+- `merge-gate.sh`:
+  - fmt and clippy pass in both builds.
+  - Workspace tests: 1679 passed, 1703 with wide, 0 failed.
+  - Web: 143 of 144, three runs. The one failure is the Wide compositor time-per-frame test at S 4, at 10.50 / 10.55 ms against an 8 ms limit.
+  - Oracles 8/8; port-map up to date; loop-lint 0 FAIL.
+- Control for the Wide failure: run alone, alternating main (deploy 26 code) and the integration branch, at load ~170-190. It measured main 10.75 / 11.90 ms and integration 10.90 / 11.60 ms. The failure is load, and C1 does not raise it.
+- Packs unchanged: `ultima6-deploy` 72aa055, 20 files, byte-identical.
+- Production deploy (wrangler): https://c59d3d3b.ultima6.pages.dev.
+- Live check:
+  - The live wasm (both builds) and `app.js` match the local build by SHA-256.
+  - `live19.mjs`: LIVE OK; Korean hits 23, misses 0; 0 page errors.
+  - `live-sight.mjs`, a fresh visitor in the default Wide HD layout: walk south 10, open the south door, close it. Open: the corridor beyond shows in colour. Closed: the same corridor shows in dark grey with its statues and walls, the look it had when it left sight. 0 page errors.
+- Receipts: `~/Games/ultima6/work/dispatch/r1027-r2/deploy27/` (`sight-opened.png`, `sight-t1.png`).
 
 Carried to B12: when the staff cast (row 5) turns the text switch off, check every line it prints goes through
 `queue_print` or `combat::present::say` (both test the switch since B2). The forced-on writes once noted here were

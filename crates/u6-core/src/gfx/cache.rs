@@ -30,13 +30,22 @@
 //! ([`check_static`]). The records are written only by the shore merge (`anim::merge_rows`); a
 //! writer of [`super::GfxState::records`] elsewhere must report the record
 //! ([`RenderCache::record_changed`]).
+//!
+//! Spec 18: the remembered sight ([`SightMemory`]) is render state of the same kind, kept in the
+//! cache: what the window last showed of each cell in view while it was in sight, drawn in grey
+//! where the cell is out of sight now. A remembered cell's box reads its layers
+//! ([`WindowKey::of`]), which never change while it stays out of sight, so the refresh leaves
+//! its box out as any other.
 
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use super::GfxState;
 use super::view::{ViewWindow, cell_pixel};
-use crate::geom::{MAP_X, MAP_Y, VIEW_H, VIEW_W};
+use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, VIEW_H, VIEW_W};
+use crate::map::view::{DARK, NOT_VISIBLE};
+use crate::objects::DRAW_NODES;
 use crate::state::State;
 use u6_formats::gfx::{ANIM_FRAMES, TILE_COUNT, TILE_H, TILE_W};
 use u6_render::Src;
@@ -62,11 +71,13 @@ pub struct RenderCache {
     /// Window renders that redrew some boxes only, and the boxes they redrew.
     pub(crate) window_partial: u64,
     pub(crate) boxes_redrawn: u64,
+    /// Spec 18: the remembered sight.
+    pub(super) memory: SightMemory,
 }
 
 impl Clone for RenderCache {
-    /// No window memo and no counts; the records' versions and the static tables' fingerprint
-    /// (the clone holds the same records and tables).
+    /// No window memo, no remembered sight and no counts; the records' versions and the static
+    /// tables' fingerprint (the clone holds the same records and tables).
     fn clone(&self) -> Self {
         Self {
             versions: self.versions.clone(),
@@ -100,6 +111,327 @@ impl RenderCache {
     /// starts again at 0).
     pub fn version(&self, r: usize) -> u32 {
         self.versions.get(r).copied().unwrap_or(0)
+    }
+
+    /// Spec 18: forgets the remembered sight (load state 0x105350 and the window reset 0x133a96:
+    /// the view shows black outside sight until its cells are seen again, as the original's).
+    pub fn forget_sight(&mut self) {
+        self.memory = SightMemory::default();
+    }
+
+    /// Spec 18: the pixels and transparency of the remembered sight's copy with source id `id`
+    /// ([`FROZEN_BASE`] + its slot), if it holds one.
+    pub(crate) fn frozen_image(&self, id: u16) -> Option<(&[u8], &[bool])> {
+        let f = self.frozen(id)?;
+        Some((&f.pixels, &f.transparent))
+    }
+
+    /// Spec 18: the record the remembered sight's copy with source id `id` was taken from, if it
+    /// holds one.
+    pub(crate) fn frozen_record(&self, id: u16) -> Option<u16> {
+        self.frozen(id).map(|f| f.record)
+    }
+
+    fn frozen(&self, id: u16) -> Option<&Frozen> {
+        let slot = usize::from(id.checked_sub(FROZEN_BASE)?);
+        self.memory.frozen.get(slot)?.as_ref()
+    }
+}
+
+/// Spec 18, port-only, no original address: the remembered sight. Per world cell of the view's
+/// level, what the framed window render last drew there while the cell was in sight: the base
+/// tile's draw, then those of its still objects in draw order (never an actor's or a part that
+/// moves with one, a light overlay or a flash: [`crate::objects::DrawLists::node_still`]). Kept
+/// only for the cells inside the view, at most [`VIEW_W`] × [`VIEW_H`]; another level empties
+/// it, and so does the window reset 0x133a96 ([`RenderCache::forget_sight`]). Never saved: it
+/// lives in the [`RenderCache`], outside the game state's equality.
+///
+/// The look is the one of the last sight: a layer keeps its record and masktype resolved (an
+/// animdata substitution, 0x152cd2, changes only which record a tile draws) and the overlay frame
+/// then; a record whose pixels the shore merge rewrites in place (0x152dac, the 32 shore tiles'
+/// records, the only writer of records after the load: the module docs), and any record
+/// rewritten so far (its version not 0, whichever tile draws it now), is kept as a copy of its
+/// pixels at that version ([`Frozen`]), one copy per record and version that a remembered layer
+/// names, dropped with the last such layer.
+#[derive(Debug)]
+pub struct SightMemory {
+    /// The level of the cells kept.
+    z: u8,
+    cells: HashMap<(u16, u16), Vec<Layer>>,
+    /// An unlit cell in sight (0x1bc) shows its remembered sight: [`MEMORY_IN_DARKNESS`].
+    darkness: bool,
+    /// The copies of merged records' pixels, by slot ([`Layer::frozen`]).
+    frozen: Vec<Option<Frozen>>,
+    /// The slot of each copy, by its record and version.
+    frozen_at: HashMap<(u16, u32), u16>,
+}
+
+impl Default for SightMemory {
+    /// Nothing remembered, darkness as [`MEMORY_IN_DARKNESS`].
+    fn default() -> Self {
+        Self {
+            z: 0,
+            cells: HashMap::new(),
+            darkness: MEMORY_IN_DARKNESS,
+            frozen: Vec::new(),
+            frozen_at: HashMap::new(),
+        }
+    }
+}
+
+/// A record's pixels and transparency at one version (the record and the version it was taken
+/// at), as a remembered layer shows them.
+#[derive(Debug)]
+struct Frozen {
+    record: u16,
+    ver: u32,
+    pixels: Vec<u8>,
+    transparent: Vec<bool>,
+}
+
+/// [`u6_render::Src::id`] of copy slot 0 of the remembered sight ([`SightMemory`]), with
+/// [`u6_render::Kind::Tile`]: slot n is `FROZEN_BASE + n`, past every record (the HD
+/// compositor's images take it from [`RenderCache::frozen_image`]).
+pub const FROZEN_BASE: u16 = TILE_COUNT as u16;
+
+/// One draw of a remembered cell: the record and the masktype its word drew then, the record's
+/// version then, the overlay frame then, and for a record the shore merge rewrites the slot of
+/// the copy of its pixels then ([`SightMemory`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Layer {
+    pub(super) record: u16,
+    pub(super) masktype: u8,
+    pub(super) frame: u8,
+    pub(super) ver: u32,
+    pub(super) frozen: Option<u16>,
+}
+
+impl Layer {
+    /// Word `w` as the blitter draws it now ([`GfxState::record`]), not yet copied.
+    fn of(gfx: &GfxState, w: u16) -> Layer {
+        let t = usize::from(w & 0x7ff);
+        let record = gfx.record_of[t];
+        Layer {
+            record,
+            masktype: gfx.masktype[t],
+            frame: gfx.frame,
+            ver: gfx.cache.version(usize::from(record)),
+            frozen: None,
+        }
+    }
+
+    /// The pixels and transparency the layer draws and the source it names them by: the copy's
+    /// ([`FROZEN_BASE`] + its slot, version 0: a copy never changes), else the record's at its
+    /// version now.
+    pub(super) fn image<'a>(&self, gfx: &'a GfxState) -> Option<(&'a [u8], &'a [bool], u16, u32)> {
+        match self.frozen {
+            Some(slot) => {
+                let f = gfx.cache.memory.frozen.get(usize::from(slot))?.as_ref()?;
+                Some((&f.pixels, &f.transparent, FROZEN_BASE + slot, 0))
+            }
+            None => {
+                let r = usize::from(self.record);
+                let rec = gfx.records.get(r)?;
+                Some((
+                    &rec.pixels,
+                    &rec.transparent,
+                    self.record,
+                    gfx.cache.version(r),
+                ))
+            }
+        }
+    }
+}
+
+/// Spec 18 (`ssot.md` item 3): darkness too shows the remembered sight, a cell in sight but unlit
+/// (0x1bc) as one out of sight (0xff). The owner's veto of darkness is this one constant.
+const MEMORY_IN_DARKNESS: bool = true;
+
+/// A view cell whose base tile is `base` shows nothing of itself now: out of sight
+/// ([`NOT_VISIBLE`]) or unlit ([`DARK`]). Such a cell is never remembered.
+fn unseen(base: u16) -> bool {
+    base == NOT_VISIBLE || base == DARK
+}
+
+impl SightMemory {
+    /// The world cell of view cell (col, row) round the view centre `c` (0x10e81e's mapping,
+    /// `objects::draw`), in `mask`'s world.
+    fn world_cell(c: (u16, u16), mask: u16, col: usize, row: usize) -> (u16, u16) {
+        let x = c.0.wrapping_add(col as u16).wrapping_sub(HALF_W as u16);
+        let y = c.1.wrapping_add(row as u16).wrapping_sub(HALF_H as u16);
+        (x & mask, y & mask)
+    }
+
+    /// A view cell whose base tile is `base` shows its remembered sight, if any: out of sight, or
+    /// unlit with [`SightMemory::darkness`].
+    fn shows(&self, base: u16) -> bool {
+        base == NOT_VISIBLE || (self.darkness && base == DARK)
+    }
+
+    /// The layers view cell (col, row), whose base tile is `base`, shows in grey in the state's
+    /// view now: its remembered sight when it [`SightMemory::shows`] it, on the view's level.
+    pub(super) fn shown(&self, state: &State, (col, row): (usize, usize), base: u16) -> &[Layer] {
+        let c = state.map.centre;
+        if self.z != c.z || !self.shows(base) {
+            return &[];
+        }
+        let at = Self::world_cell((c.x, c.y), state.map.world_mask, col, row);
+        self.cells.get(&at).map_or(&[], Vec::as_slice)
+    }
+
+    /// The slot of the copy of `record`'s pixels at its version now, made if there is none.
+    fn freeze(&mut self, gfx: &GfxState, record: u16) -> u16 {
+        let r = usize::from(record);
+        let ver = gfx.cache.version(r);
+        if let Some(&slot) = self.frozen_at.get(&(record, ver)) {
+            return slot;
+        }
+        let rec = &gfx.records[r];
+        let copy = Frozen {
+            record,
+            ver,
+            pixels: rec.pixels.clone(),
+            transparent: rec.transparent.clone(),
+        };
+        let slot = match self.frozen.iter().position(Option::is_none) {
+            Some(free) => {
+                self.frozen[free] = Some(copy);
+                free
+            }
+            None => {
+                self.frozen.push(Some(copy));
+                self.frozen.len() - 1
+            }
+        };
+        let slot = slot as u16;
+        self.frozen_at.insert((record, ver), slot);
+        slot
+    }
+
+    /// Drops the copies no remembered layer names.
+    fn drop_unnamed(&mut self) {
+        let mut named = vec![false; self.frozen.len()];
+        for slot in self.cells.values().flatten().filter_map(|l| l.frozen) {
+            named[usize::from(slot)] = true;
+        }
+        for (slot, f) in self.frozen.iter_mut().enumerate() {
+            if !named[slot]
+                && let Some(f) = f.take()
+            {
+                self.frozen_at.remove(&(f.record, f.ver));
+            }
+        }
+    }
+
+    /// The remembered sight for the render of `window` (the state's view now): with `framed`,
+    /// the memory of another level forgotten, every cell in sight remembered as the render
+    /// draws it now (in the cell's own entry, kept; a merged shore record as a copy of its
+    /// pixels now) and every cell off the view forgotten, with the copies no layer names; then
+    /// per box, the layers the render draws in grey ([`SightMemory::shown`]).
+    pub(super) fn layers(state: &mut State, window: &ViewWindow, framed: bool) -> Vec<Vec<Layer>> {
+        let c = state.map.centre;
+        let mask = state.map.world_mask;
+        let at = |col, row| Self::world_cell((c.x, c.y), mask, col, row);
+        if framed {
+            let State { gfx, objects, .. } = &mut *state;
+            let d = &objects.draw;
+            let mut memory = std::mem::take(&mut gfx.cache.memory);
+            if memory.z != c.z {
+                memory.cells.clear();
+                memory.z = c.z;
+            }
+            // The records the shore merge writes (0x152d52: the record of tile `shore_dst[i] / 4`).
+            let merged: Vec<u16> = (gfx.tables.shore_dst.iter())
+                .filter(|&&w| w.is_multiple_of(4) && usize::from(w / 4) < TILE_COUNT)
+                .map(|&w| gfx.record_of[usize::from(w / 4)])
+                .collect();
+            let mut cells = std::mem::take(&mut memory.cells);
+            for (row, tiles) in window.tiles.iter().enumerate() {
+                for (col, &base) in tiles.iter().enumerate() {
+                    if unseen(base) {
+                        continue;
+                    }
+                    let layers = cells.entry(at(col, row)).or_default();
+                    layers.clear();
+                    layers.push(Layer::of(gfx, base));
+                    let mut n = d.cell[row * VIEW_W + col];
+                    // At most the pool's nodes, as [`crate::objects::DrawLists::tiles`] reads.
+                    for _ in 0..DRAW_NODES {
+                        if n == 0 {
+                            break;
+                        }
+                        let i = usize::from(n);
+                        if d.node_still[i] {
+                            layers.push(Layer::of(gfx, d.node_tile[i]));
+                        }
+                        n = d.node_next[i];
+                    }
+                    let rewritten = |l: &&mut Layer| {
+                        merged.contains(&l.record) || gfx.cache.version(usize::from(l.record)) != 0
+                    };
+                    for l in layers.iter_mut().filter(rewritten) {
+                        l.frozen = Some(memory.freeze(gfx, l.record));
+                    }
+                }
+            }
+            let (x0, y0) = at(0, 0);
+            let inside = |&(x, y): &(u16, u16)| {
+                usize::from(x.wrapping_sub(x0) & mask) < VIEW_W
+                    && usize::from(y.wrapping_sub(y0) & mask) < VIEW_H
+            };
+            cells.retain(|cell, _| inside(cell));
+            memory.cells = cells;
+            memory.drop_unnamed();
+            gfx.cache.memory = memory;
+        }
+        let memory = &state.gfx.cache.memory;
+        let mut out = vec![Vec::new(); VIEW_W * VIEW_H];
+        for (row, tiles) in window.tiles.iter().enumerate() {
+            for (col, &base) in tiles.iter().enumerate() {
+                let layers = memory.shown(state, (col, row), base);
+                if !layers.is_empty() {
+                    out[row * VIEW_W + col].extend_from_slice(layers);
+                }
+            }
+        }
+        out
+    }
+
+    /// Cells remembered now (the tests read it).
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// The copies of merged records' pixels held now (the tests read it).
+    #[cfg(test)]
+    pub(super) fn copies(&self) -> usize {
+        self.frozen.iter().flatten().count()
+    }
+
+    /// Whether world cell (x, y) is remembered now (the tests read it).
+    #[cfg(test)]
+    pub(super) fn holds(&self, x: u16, y: u16) -> bool {
+        self.cells.contains_key(&(x, y))
+    }
+
+    /// World cell (x, y)'s remembered layers (the tests read them).
+    #[cfg(test)]
+    pub(super) fn at(&self, x: u16, y: u16) -> Option<&[Layer]> {
+        self.cells.get(&(x, y)).map(Vec::as_slice)
+    }
+
+    /// The records of every remembered layer (the tests read them).
+    #[cfg(test)]
+    pub(super) fn records(&self) -> impl Iterator<Item = u16> + '_ {
+        self.cells.values().flatten().map(|l| l.record)
+    }
+
+    /// Sets whether darkness shows the remembered sight (the tests try both values of
+    /// [`MEMORY_IN_DARKNESS`]).
+    #[cfg(test)]
+    pub(super) fn set_darkness(&mut self, on: bool) {
+        self.darkness = on;
     }
 }
 
@@ -206,15 +538,17 @@ pub(super) struct WindowKey {
 const GLOBAL: usize = 1;
 
 impl WindowKey {
-    /// The values the framed render of `window` reads, per box: the cell's base word and the
-    /// count of its object words, each word as [`WindowKey::word`] has it (with a clock word the
-    /// hour and the minute), then the target cursor's word when it is in the box, then the
-    /// box's border word. `None` when the render cannot be remembered: the sparkle, the
-    /// dissolve or XOR plots on, the cursor outside the cells, an overlay or clock hands that
-    /// would leave their box.
+    /// The values the framed render of `window` reads, per box: the cell's base word, the count
+    /// of its remembered layers (spec 18, `memory`: per box, empty with the remembered sight off)
+    /// and each as [`WindowKey::layer`] has it, the count of its object words, each word as
+    /// [`WindowKey::word`] has it (with a clock word the hour and the minute), then the target
+    /// cursor's word when it is in the box, then the box's border word. `None` when the render
+    /// cannot be remembered: the sparkle, the dissolve or XOR plots on, the cursor outside the
+    /// cells, an overlay or clock hands that would leave their box.
     pub(super) fn of(
         state: &State,
         window: &ViewWindow,
+        memory: &[Vec<Layer>],
         clock: Option<u16>,
         cursor: Option<(u16, u16, u16)>,
         border: &[Option<u16>; BOXES],
@@ -237,6 +571,11 @@ impl WindowKey {
             for (col, &tile) in tiles.iter().enumerate() {
                 let b = row * VIEW_W + col;
                 key.word(gfx, tile)?;
+                let layers = memory.get(b).map_or(&[][..], Vec::as_slice);
+                key.values.push(layers.len() as u32);
+                for &l in layers {
+                    key.layer(gfx, l);
+                }
                 let objects = &window.objects[b];
                 key.values.push(objects.len() as u32);
                 for &w in objects {
@@ -296,6 +635,30 @@ impl WindowKey {
             self.values.push(first as u32);
         }
         Some(())
+    }
+
+    /// Remembered layer `l` drawn in a box ([`super::view`]'s memory blit, which stays in it):
+    /// the record, the masktype, whether it draws a copy and the version of the pixels it draws
+    /// (the copy's, which never changes, else the record's now), and when the overlay is drawn
+    /// (masktype bit 2, an overlay) the first frame with the rows of the frame kept.
+    fn layer(&mut self, gfx: &GfxState, l: Layer) {
+        let r = usize::from(l.record);
+        let ver = match l.frozen {
+            Some(_) => l.ver,
+            None => gfx.cache.version(r),
+        };
+        self.values.extend([
+            r as u32,
+            u32::from(l.masktype),
+            u32::from(l.frozen.is_some()),
+            ver,
+        ]);
+        let ov = gfx.overlays.get(r).and_then(Option::as_ref);
+        if let Some(ov) = ov.filter(|_| l.masktype & 4 != 0) {
+            let rows = &ov.frames[usize::from(l.frame) % ANIM_FRAMES];
+            let first = ov.frames.iter().position(|f| f == rows).unwrap_or(0);
+            self.values.push(first as u32);
+        }
     }
 
     fn of_box(&self, b: usize) -> &[u32] {

@@ -14,6 +14,11 @@ const HORSE: u16 = 0x1ae;
 const S_REAR_HORSE: u32 = 0x0012_ce32;
 const S_NO_ROOM: u32 = 0x0012_cbd4;
 
+/// Port-only (spec 08, slice K2; spec 16 item 1, 2026-10-27): the strings this module passes to
+/// `printf` as its format, for the locale layer's catalogue ([`crate::locale::strings`]): the
+/// dismount's two lines (0x12f8fe pushes them at 0x12fa34 and 0x12faec).
+pub(super) const PRINTED: &[u32] = &[S_REAR_HORSE, S_NO_ROOM];
+
 fn z(s: &State) -> u16 {
     u16::from(s.map.centre.z)
 }
