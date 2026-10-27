@@ -22,6 +22,25 @@ const S_DOUSED: u32 = 0x0012_88d6;
 const S_LIT: u32 = 0x0012_88e4;
 /// Original: A4-0x756f (the burned-out torch line, data hunk)
 const MSG_BURNED_OUT: i32 = -0x756f;
+
+/// Port-only (spec 08, slice K2; spec 16 item 1, 2026-10-27): the strings this module passes to
+/// `printf` as its format, for the locale layer's catalogue ([`crate::locale::strings`]): the
+/// torch's lines (0x12c326 pushes them at 0x12c358, 0x12c370 and 0x12c52a) and a fixture's line,
+/// three formats in a row: the newline, the fixture's name (0x12c594: 0x12c5e2..0x12c616) and the
+/// ending (0x12c648 doused, 0x12c67a lit).
+pub(super) const PRINTED: &[u32] = &[
+    super::GameData::a4(MSG_BURNED_OUT),
+    S_NO_FREE_HAND,
+    S_TORCH_LIT,
+    S_FIREPLACE,
+    S_BRAZIER,
+    S_CANDELABRA,
+    S_CAMPFIRE,
+    S_CANDLE,
+    S_DOUSED,
+    S_LIT,
+];
+
 const TORCH: u16 = 0x5a;
 /// The two hand slots of the equipment table (A4+0x1364, A4+0x136a).
 const HANDS: [i16; 2] = [2, 5];

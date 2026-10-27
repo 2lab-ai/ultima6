@@ -52,15 +52,19 @@ pub use world::{
 use crate::files::Files;
 
 /// Port-only (spec 08, slice K2): the strings the object commands pass to `printf` as its
-/// format (Look, Get, Drop, Move, the keys, search, doors and traps), for the locale layer's
-/// catalogue ([`crate::locale::strings`]).
-pub(crate) const PRINTED: [&[u32]; 6] = [
+/// format (Look, Get, Drop, Move, the keys, search, doors and traps; spec 16 item 1, 2026-10-27:
+/// and the light sources', the horses' and the egg hatch's, which Use and the walk reach), for
+/// the locale layer's catalogue ([`crate::locale::strings`]).
+pub(crate) const PRINTED: [&[u32]; 9] = [
     look::PRINTED,
     get::PRINTED,
     drop::PRINTED,
     push::PRINTED,
     keys::PRINTED,
     world::PRINTED,
+    light::PRINTED,
+    horse::PRINTED,
+    eggs::PRINTED,
 ];
 
 /// Port-only (spec 08, 2026-10-25): the pointers of the reagents' names, A4-0x6d4c + 4 n for the

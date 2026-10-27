@@ -60,6 +60,13 @@ const TAIL_FRAME: i32 = -0x6586;
 /// (pointers to the 8 direction names)
 const MSG_WARNING: i32 = -0x763a;
 const DIR_NAMES: i32 = -0x61be;
+
+/// Port-only (spec 08, slice K2; spec 16 item 1, 2026-10-27): the strings this module passes to
+/// `printf` as its format, for the locale layer's catalogue ([`crate::locale::strings`]): the
+/// scout's warning (0x1319b2 pushes it at 0x1321aa, its `%s` the direction's name, a label of
+/// [`crate::magic::LABELS`]).
+pub(super) const PRINTED: &[u32] = &[super::GameData::a4(MSG_WARNING)];
+
 /// The companion who warns (actor 3) and the status bits he needs.
 const SCOUT: u16 = 3;
 

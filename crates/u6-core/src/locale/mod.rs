@@ -108,7 +108,8 @@
 //! The counters ([`LocaleState`]) count catalogued units only: a table string read at its start
 //! or a catalogued executable string shown, put from the pack (a hit) or not (a miss); a look
 //! entry or a book shown (a read past the look table's entries, or of no unit of `book.dat`, is
-//! none).
+//! none). And (2026-10-27) an executable string shown with a pack installed that the catalogue
+//! does not hold, which prints in English ([`Counts::uncatalogued`]).
 //!
 //! **Slice K4: the `u` program's strings.** A pack may also hold the formats the `u` program
 //! prints (the opening, the introduction story, the gypsy's passages and questions, character
@@ -160,6 +161,8 @@ pub mod strings;
 mod tests;
 #[cfg(test)]
 mod tests_program;
+#[cfg(test)]
+mod tests_scan;
 #[cfg(test)]
 mod tests_strings;
 #[cfg(test)]
@@ -1290,6 +1293,10 @@ pub struct Counts {
     pub hits: Cell<u32>,
     /// Catalogued units shown with the pack installed that it does not have: in English.
     pub misses: Cell<u32>,
+    /// 2026-10-27 (spec 16 item 1): executable strings shown with the pack installed that the
+    /// catalogue does not hold ([`strings::Catalogue::uncatalogued`]): in English whatever the
+    /// pack, and neither a hit nor a miss. Only [`LocaleState::texts`] counts them.
+    pub uncatalogued: Cell<u32>,
 }
 
 impl Counts {
@@ -1299,6 +1306,11 @@ impl Counts {
 
     fn miss(&self) {
         self.misses.set(self.misses.get().saturating_add(1));
+    }
+
+    fn not_catalogued(&self) {
+        self.uncatalogued
+            .set(self.uncatalogued.get().saturating_add(1));
     }
 
     /// `[hits, misses]`.
@@ -1443,11 +1455,12 @@ pub(crate) fn run_at(state: &mut State, at: i32) -> Option<(Rc<Pack>, RunKey)> {
 }
 
 /// Slice K2: what the installed pack has for `english` (bytes up to a NUL) where game code shows
-/// it, counted: `None` without a pack, for a string the catalogue does not have (not counted;
+/// it, counted: `None` without a pack, for a string the catalogue does not have (no hit or miss;
 /// a print hook never has one under [`strings::MIN_BYTES`], [`strings::Catalogue::of`], while a
-/// `label` read has the catalogue's short labels, [`strings::Catalogue::label_of`]), and for a
-/// catalogued one the pack lacks or whose text does not keep to its place ([`within_place`]: a
-/// miss); else the pack's language and text (a hit).
+/// `label` read has the catalogue's short labels, [`strings::Catalogue::label_of`]; 2026-10-27:
+/// counted uncatalogued when it is an executable string, [`strings::Catalogue::uncatalogued`]),
+/// and for a catalogued one the pack lacks or whose text does not keep to its place
+/// ([`within_place`]: a miss); else the pack's language and text (a hit).
 fn lookup(state: &State, english: &[u8], label: bool) -> Option<(Language, Vec<u8>)> {
     let l = &state.locale;
     let pack = l.pack.as_ref()?;
@@ -1456,10 +1469,16 @@ fn lookup(state: &State, english: &[u8], label: bool) -> Option<(Language, Vec<u
         .position(|&b| b == 0)
         .unwrap_or(english.len())];
     let catalogue = l.catalogue.as_ref()?;
-    let entry = if label {
-        catalogue.label_of(english)?
+    let found = if label {
+        catalogue.label_of(english)
     } else {
-        catalogue.of(english)?
+        catalogue.of(english)
+    };
+    let Some(entry) = found else {
+        if catalogue.uncatalogued(english) {
+            l.texts.not_catalogued();
+        }
+        return None;
     };
     match pack
         .string(hash64(english))
