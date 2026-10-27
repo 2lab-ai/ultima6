@@ -22,10 +22,11 @@ Owner's follow-up (2026-10-27, verbatim): "화면에 안보이면 바로 없는�
 ## Contract
 
 - **What is remembered.** Each map-window cell that was in sight keeps its look from its last sight, with the game time of that sight: its ground, and its objects that do not move. Actors are never remembered, and neither are objects that move with an actor (`objects/moves.rs:29` `moves_with_actor`: parted objects, 0x1a9, the serpent). The look is drawn in dark grey, in the window and through the HD compositor.
-- **Where it is kept.** `gfx::cache::SightMemory` (`gfx/cache.rs:164`), keyed by level and world cell. A cell stays remembered after it leaves the window and while the party is on another level. It shows again, in grey, when it is back in the window and out of sight. It is never saved.
-  - Load state (0x105350, a restore) forgets it all: `RenderCache::forget_sight`, `gfx/cache.rs:118`, called at `saveload/restore.rs:90`. The saved memory is unit C3.
+- **Where it is kept.** `gfx::cache::SightMemory` (`gfx/cache.rs:177`), keyed by level and world cell packed in 32 bits (`cell_key`, `:227`). A cell stays remembered after it leaves the window and while the party is on another level. It shows again, in grey, when it is back in the window and out of sight. It is never saved.
+  - A cell is 16 bytes (`Remembered`, `:219`): the minute of its last sight, its first layer, and whether it has more. A cell with more layers keeps all of them in a side table (`stacks`).
+  - Load state (0x105350, a restore) forgets it all: `RenderCache::forget_sight`, `gfx/cache.rs:120`, called at `saveload/restore.rs:90`. It also drops the memoized window, whose key names copies by slot. The saved memory is unit C3.
   - The window reset 0x133a96 (death, arrest, the healer) keeps it. The reset window shows the remembered cells.
-- **Fading by game days.** The age is the game time since the cell's last sight, on the original's calendar: 60 minutes, 24 hours, days 1..28, months 1..12 (`minutes`, `gfx/cache.rs:245`). d is the whole days of 1440 minutes (`fade_of`, `:253`).
+- **Fading by game days.** The age is the game time since the cell's last sight, on the original's calendar: 60 minutes, 24 hours, days 1..28, months 1..12 (`minutes`, `gfx/cache.rs:290`). d is the whole days of 1440 minutes (`fade_of`, `:298`).
 
   | d (whole days) | 0 | 1 | 2 | 3 | 4 | 5 and later |
   |---|---|---|---|---|---|---|
@@ -33,19 +34,21 @@ Owner's follow-up (2026-10-27, verbatim): "화면에 안보이면 바로 없는�
   | of a fully opaque 16 × 16 tile | 256 | 128 | 64 | 32 | 16 | 0 |
 
   A lit cell in sight is seen again at every framed render (its look taken again), so it is day 0. An unlit cell in sight (0x1bc) is not seen: it keeps the age of its last lit sight.
-- **The pattern.** A fixed 4 × 4 ordered (Bayer) matrix on the original's pixel grid (`BAYER`, `gfx/cache.rs:232`; `keeps`, `:239`). It is anchored to the world: a cell is 16 pixels, so the cell's own column and row stand for the world's. Day d keeps the pixels whose threshold is below 16 >> d. Each day's pixels are a subset of the day before's, and 50 % is a checkerboard.
+- **The pattern.** A fixed 4 × 4 ordered (Bayer) matrix on the original's pixel grid (`BAYER`, `gfx/cache.rs:277`; `keeps`, `:284`). It is anchored to the world: a cell is 16 pixels, so the cell's own column and row stand for the world's. Day d keeps the pixels whose threshold is below 16 >> d. Each day's pixels are a subset of the day before's, and 50 % is a checkerboard.
   - The window render first draws the cell's own tile (0xff or 0x1bc, black), then the remembered layers, writing only the kept pixels (`draw_remembered` and `blit_memory`, `gfx/view.rs:156` and `:107`). The overlay OR pass (masktype bit 2) obeys the same mask.
   - The missiles' redraw (`blit_remembered`, `gfx/view.rs:175`, called from `combat/present.rs`) and the cached window path draw the same way. The window cache keys a remembered box by its fade too.
   - In HD, only the kept pixels carry `FLAG_MEMORY`. The left-out pixels name the cell's own black tile, so the pattern holds at the original's pixel grid.
 - **Frozen at last sight.** The shore merge 0x152dac rewrites map records in place (`gfx/anim.rs:121`, the only writer of record pixels after the load). A remembered layer of a record in the merge set, or of any record already rewritten (version not 0), keeps a copy of the record's pixels from that sight (`Frozen`).
-  - The copies are an append-only store (`freeze`, `gfx/cache.rs:374`): one per record and content (pixels and transparency, compared in full behind a hash). A new version whose content was held before takes the copy it took then.
-  - The owner's game makes 255 copies, of 32 records, over 10 000 animation ticks (the shore merges of the water's cycle; measured in round 2, counts only). So no copy is ever freed: a slot names one content until load state, and the window cache keys a copy by its slot.
-  - A copy's image id is `FROZEN_BASE` + slot, at version 0 (`gfx/cache.rs:216`). `FROZEN_BASE` is 2048, past every record.
-  - At most `MAX_COPIES` copies (8 192, `:223`), 32 times the measured need. When the store is full and a cell in sight needs a new copy, that cell is forgotten: it is black once out of sight. Its older look is not kept, because it is not the look of its last sight. A remembered layer never draws a rewritten record live.
+  - The copies are an append-only store (`freeze`, `gfx/cache.rs:465`): one per record and content (pixels and transparency, compared in full behind a hash). A new version whose content was held before takes the copy it took then.
+  - The store's size is a constant of the game data, not of play. A merged record's content is its load content with the masked pixels of the records its source water tiles draw now (`gfx/anim.rs:111-117`). Those records come from a finite frame set: each animdata frame is the animation counter `& and_mask`, a byte, shifted (`gfx/anim.rs:147-156`), so the frames repeat every 256 ticks. So no copy is ever freed: a slot names one content until load state, and the window cache keys a copy by its slot.
+  - A copy's image id is `FROZEN_BASE` + slot, at version 0 (`gfx/cache.rs:258`). `FROZEN_BASE` is 2048, past every record.
+  - At most `MAX_COPIES` copies (8 192, `:268`). When the store is full and a cell in sight needs a new copy, that cell is forgotten: it is black once out of sight. Its older look is not kept, because it is not the look of its last sight.
+  - A layer with no copy is of a record outside the shore-merge set at version 0, which nothing rewrites after the load: the animation's 64 ticks rewrite no record outside that set (`real_a_rewritten_record_outside_the_shore_set_keeps_its_look`, `gfx/view.rs:1800`). So no remembered layer of the shore-merge set, or of a record rewritten before its sight, draws its record live.
 - **Bounds.**
-  - At most `MAX_CELLS` cells (131 072, `gfx/cache.rs:219`). Past it the oldest sights are forgotten first, down to seven eighths (`cap`, `:423`).
-  - Cells of day 5 and later show nothing at once. A sweep forgets them (`sweep`, `:413`).
-  - Two passes scan every cell, inside a framed render: the sweep, at most once per game hour, and the cap, only when the cells are over `MAX_CELLS` (then not again for the next 16 384 new cells). Every other render touches only the cells of the view.
+  - At most `MAX_CELLS` cells (458 752, seven eighths of 2^19, `gfx/cache.rs:264`). Five game days of a Wide walk over unseen land remember at most 169 762 (with a light burning at night; Cost below), so the five-day fade, not the cap, forgets the cells of a continuous exploration. The old bound, 131 072, filled after 3.7 game days with the light, 4.5 without.
+  - Past `MAX_CELLS` the oldest sights are forgotten first, down to seven eighths (`cap`, `:519`). Among the sights of the cutoff's own minute, the lowest keys go first, so the cells kept do not depend on the table's order.
+  - Cells of day 5 and later show nothing at once. A sweep forgets them (`sweep`, `:504`).
+  - Two passes scan every cell, inside a framed render: the sweep, at most once per game hour, and the cap, only when the cells are over `MAX_CELLS` (then not again for the next 57 344 new cells). Every other render touches only the cells of the view.
 - **The grey.** One function serves classic and HD: `u6_render::grey` (`u6-render/src/lib.rs:125`), the luma `(77r + 150g + 29b + 128) >> 8` × `GREY_LEVEL` 115 / 256, rounded.
   - In classic, palette entries `GREY + i` (0x20..0x3f) hold the grey of game colour `i`, written by the map window render only while the switch is on. With the switch off, entries 32..63 are left alone, so the frames match the original pixel for pixel (visual parity, not 256-entry parity).
   - In HD, a pixel flagged `FLAG_MEMORY` (0x80) is drawn from the grey copy of its HD image.
@@ -54,22 +57,32 @@ Owner's follow-up (2026-10-27, verbatim): "화면에 안보이면 바로 없는�
 - **In sight is unchanged.** A cell in sight draws exactly as it did before, whether the switch is on or off (`real_a_cell_in_sight_is_the_same_with_the_switch_on_and_off`, both builds).
 - **The switch.** `Io::set_sight_memory` defaults to off, so tests, oracle comparisons and receipts see the original's frames. The page turns it on for each game. A visitor who stores `localStorage['u6.memory'] = 'off'` keeps it off.
 
-## Cost (unit C2 round 2, measured on the owner's game, gate profile, source plane on, load average about 100 to 127)
+## Cost (unit C2 round 3, measured on the owner's game, gate profile, source plane on, load average about 100 to 210)
 
-- Tick at idle, after the door scenario (`receipt_the_tick_with_50k_remembered_cells`, run with `--ignored`), median of 600 ticks:
+- **Cells over five game days** (`receipt_five_days_of_a_wide_walk_fit_the_remembered_cells`, Wide, run with `--ignored`). The game is played by its own keys from a place on the land with the view open. Each step is the arrow key toward the nearest cell not yet seen. The party's hit points are kept and other actors are kept off, so no fight stops the walk. The clock runs as the game runs it, 0.72 to 0.75 game minutes a step.
+
+  | walk | steps | cells after 5 days | with more than one layer | heap | 131 072 passed at |
+  |---|---|---|---|---|---|
+  | no light | 9 651 | 149 585 | 756 | 5.73 MB | minute 6 413 (4.5 days) |
+  | a light burning (night light level 4) | 9 947 | 169 762 | 876 | 5.77 MB | minute 5 383 (3.7 days) |
+
+  - A full daylight hour remembers 1 258 cells on average without a light and 1 417 with one. The busiest hour remembers 3 723.
+  - The worst case, 169 762 cells, is 37 % of `MAX_CELLS`. So five days of continuous exploration on foot fit, and the five-day fade, not the cap, forgets them. Faster travel (a ship, the carpet) is not measured; past the cap, the oldest and most faded sights go first.
+- **The copy store** (`real_the_copies_of_the_merged_records_are_a_constant_of_the_game_data`, in the gate). A copy of every merged record is taken after each animation tick: 255 copies of 32 records after 512 ticks, and still 255 after 1 024. Each copy is about 0.6 KiB, 0.15 MB in all.
+- **Tick at idle**, after the door scenario (`receipt_the_tick_with_50k_remembered_cells`, run with `--ignored`), median of 600 ticks:
 
   | build | memory off | on | on, 50 000 more cells | the same at night |
   |---|---|---|---|---|
-  | Wide (912 × 408) | 2.333 ms | 2.380 ms | 2.422 ms | 2.420 ms |
-  | Original (320 × 200) | 0.389 ms | 0.400 ms | 0.412 ms | 0.415 ms |
+  | Wide (912 × 408) | 2.568 ms | 2.627 ms | 2.648 ms | 2.660 ms |
+  | Original (320 × 200) | 0.469 ms | 0.479 ms | 0.487 ms | 0.493 ms |
 
   - The 50 000 more cells are off the view (one layer each, seen at the time of the injection). They are never drawn; the hourly sweep scans them.
   - The night case also sets the hour to 23 and the ambient light to 0, as the clock does then. The unlit cells in sight that the scenario remembered then draw their remembered look too: 10 885 grey pixels instead of 8 007 (Original), 30 036 instead of 23 722 (Wide). Cells never seen stay black, so this is not every cell of the window.
-- Memory (`SightMemory::heap_bytes`: every table and buffer by its capacity, std's hashbrown bucket layout, not the allocator's overhead; native build):
-  - 50 221 cells (Original) hold 3.09 MB, and 50 276 cells (Wide) hold 3.10 MB.
-  - At the bounds (`the_bounds_hold_the_heap_under_24_mib`): `MAX_CELLS` cells of one layer each hold 11.8 MB, and 17.2 MB with `MAX_COPIES` copies.
-  - On wasm32 the pointers are half the size, so the tables are smaller [추정: computed from the layouts, not measured in the page].
-- Copies: about 0.5 KiB each. The owner's game makes 255 over 10 000 animation ticks, 0.13 MB.
+- **Memory** (`SightMemory::heap_bytes`: every table and buffer by its capacity, std's hashbrown bucket layout, not the allocator's overhead; native build):
+  - A cell is 21 bytes a bucket: 16 for `Remembered`, 4 for its key and 1 control byte. Round 2's cell, with its own vector of layers, took about 90 bytes.
+  - 50 221 cells (Original) hold 1.38 MB, and 50 276 cells (Wide) hold 1.38 MB (round 2: 3.09 and 3.10 MB).
+  - At the bounds (`the_bounds_hold_the_heap_under_16_mib`), `MAX_CELLS` cells of one layer each hold 11.0 MB in a table of 2^19 buckets. With `MAX_COPIES` copies they hold 16 400 416 bytes, under the test's ceiling of 16 MiB (16 777 216 bytes).
+  - On wasm32 the pointers are half the size, so the tables are no larger [추정: computed from the layouts, not measured in the page].
 
 ## Residual
 
@@ -82,4 +95,6 @@ The receipts are in `objects-menu-fog-motion/loop.md`, under C1 and deploy 27. T
 - frames at `~/Games/ultima6/work/dispatch/r1027-r2/c1-frames/`, by day and night, and for shore and flight;
 - the live check after deploy.
 
-Unit C2's frames are at `~/Games/ultima6/work/dispatch/r1027-r2/c2-frames/` (round 2, the final code): one place on days 0..5 in classic and HD ×4, through the window cache, and a cell that leaves the window and comes back.
+Unit C2's frames are at `~/Games/ultima6/work/dispatch/r1027-r2/c2-frames/` (round 2): one place on days 0..5 in classic and HD ×4, through the window cache, and a cell that leaves the window and comes back.
+
+Round 2 first measured the copy store with a scratch count over 10 000 animation ticks: 255 copies of 32 records. Round 3 keeps the receipt in the gate, with the bound's reason in the contract (Frozen at last sight).
