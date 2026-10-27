@@ -1284,19 +1284,26 @@ function realDir(dir) {
   return join(realpathSync(at), ...rest);
 }
 // The main checkout's root: the parent of git's common directory (the repository itself when
-// it is the main checkout, or when git cannot say).
+// it is the main checkout); null when git cannot say (it fails, or gives no existing absolute
+// path), and then every use of it fails (the guard would check the worktree alone without saying
+// so).
 const MAIN_ROOT = (() => {
   try {
     const common = execFileSync('git', ['-C', h.REPO, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return dirname(common);
+    return isAbsolute(common) && existsSync(common) ? dirname(common) : null;
   } catch {
-    return h.REPO;
+    return null;
   }
 })();
+// MAIN_ROOT, or a failure saying git could not give it.
+function mainRoot() {
+  assert.ok(MAIN_ROOT !== null && existsSync(MAIN_ROOT), 'the main checkout root (git rev-parse --git-common-dir) known');
+  return MAIN_ROOT;
+}
 // `dir` is the repository or the main checkout, or lies inside one of them.
 function insideRepo(dir) {
   const real = realDir(dir);
-  return [h.REPO, MAIN_ROOT].some((root) => {
+  return [h.REPO, mainRoot()].some((root) => {
     const rel = relative(realpathSync(root), real);
     return !(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel));
   });
@@ -1316,6 +1323,8 @@ test('the context menu (spec 17): keepFrame refuses a frames directory inside th
   const shots = { n: 0 };
   const fake = { screenshot: async () => { shots.n += 1; return Buffer.from([1, 2, 3]); } };
   const tag = `u6-frames-${process.pid}`;
+  const main = mainRoot();
+  console.log(`  receipt: the main checkout is ${main === h.REPO ? 'the repository itself' : 'another directory than the worktree'}`);
   const link = await mkdtemp(join(tmpdir(), 'u6-frames-'));
   try {
     await symlink(h.REPO, join(link, 'in'));
@@ -1323,8 +1332,8 @@ test('the context menu (spec 17): keepFrame refuses a frames directory inside th
       ['the repository itself', h.REPO, null],
       ['a directory in it, not made yet', join(h.REPO, 'tools', tag, 'frames'), join(h.REPO, 'tools', tag)],
       ['a child named ..frames', join(h.REPO, `..frames-${tag}`, 'x'), join(h.REPO, `..frames-${tag}`)],
-      ['in the main checkout', join(MAIN_ROOT, tag, 'frames'), join(MAIN_ROOT, tag)],
-      ['a main checkout child named ..frames', join(MAIN_ROOT, `..frames-${tag}`), join(MAIN_ROOT, `..frames-${tag}`)],
+      ['in the main checkout', join(main, tag, 'frames'), join(main, tag)],
+      ['a main checkout child named ..frames', join(main, `..frames-${tag}`), join(main, `..frames-${tag}`)],
       ['through a link into it', join(link, 'in', tag), join(h.REPO, tag)],
     ];
     for (const [what, dir, made] of refused) {

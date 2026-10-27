@@ -320,10 +320,16 @@ pub(crate) fn query_fresh(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
     fresh_scope(|| query(s, io, x, y))
 }
 
+/// Whether the checks run on fresh copies now ([`FRESH`]), for the tests.
+#[cfg(test)]
+pub(crate) fn fresh_now() -> bool {
+    FRESH.with(std::cell::Cell::get)
+}
+
 /// Runs `f` with [`FRESH`] set, then puts back the value it found, also when `f` panics or
 /// nests another scope.
 #[cfg(test)]
-fn fresh_scope<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn fresh_scope<R>(f: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
