@@ -69,3 +69,28 @@ Decisions on it (reversible):
   cheapest step of that recommendation is built in round 2 beside item 5, and the deploy report names it.
 - **Item 5 is presentation only.** The engine stays tile-based and on the original's timing. A slide between two
   cells lasts a share of the step's own interval, scales with the speed setting and collapses at Max.
+
+Owner's follow-ups (2026-10-28, verbatim, in order):
+
+> 문맥 메뉴 인게임 ui로 해줘 시발 왜 웹페이지 ui로 만듬?
+> 그리고 인게임에서 마우스 표시되니까 게임 화면에서는 마우스 숨겨줘
+
+> 그리고 우클릭시 여기로 이동도 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령
+
+> 그리고 대화시 나오는 사람패널 밑에 job 대화랑 name 대화 버튼 만들고 (인게임 ui로) 클릭시 해당 대사 입력 그리고 대화창에서 빨간색 키워드 클릭시 해당 대사 하도록해줘. 그리고 메세지창에서 스크롤로 지난 대화 볼수 있게 해줘 오른족에 스크롤바도 추가해줘
+
+- **Item 2 is in-game UI.** The deploy-30 menu (a page element over the canvas) was the wrong reading. A game's
+  right-click menu is the game's own UI: the engine draws it in the game's font and window style, it is
+  operated by the game's pointer and keys, and no page element is used (unit M3, spec 17 reworked).
+- **Port UI is in-game UI from here on.** Every new control in this workstream (the menu, the talk buttons,
+  the scrollbar) is drawn by the engine in the game's own style. Page elements stay for page concerns
+  only (the chooser, packs, settings).
+- **The OS cursor is hidden over the game screen**, where the game draws its own pointer (unit K3).
+- **"여기로 이동" walks, it never teleports.** A* over the leader's real step rule. Each step is a real
+  move entered as a direction key would be, so every rule and turn applies. It stops on arrival, a block,
+  combat or a hostile in view, or any input (unit M4, spec 21).
+- **Talk by click** (unit D1, spec 22): Job and Name buttons under the conversation portrait, and a press on a
+  coloured keyword. Each types the word as conversation input would.
+- **Message scrollback** (unit D2, spec 23): the wheel scrolls through past lines, with a scrollbar on the
+  right. With the view at the live bottom the frame equals the original's.
+
