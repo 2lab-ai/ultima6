@@ -30,7 +30,7 @@ use u6_render::{FLAG_MEMORY, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, GREY, Kind
 
 use super::GfxState;
 use super::blit::outline_colour;
-use super::cache::Layer;
+use super::cache::{Layer, Shown as Remembered, keeps};
 use super::view::{CLOCK_TYPE, border_tiles, clock_points};
 use crate::engine::Io;
 use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
@@ -44,9 +44,9 @@ const OVERLAYS: std::ops::RangeInclusive<u16> = 0x1bd..=0x1bf;
 #[derive(Debug)]
 pub struct Shot {
     pub scene: Scene,
-    /// Per view cell, the remembered sight's layers drawn in place of its base (spec 18); empty
-    /// with the remembered sight off.
-    memory: Vec<Vec<Layer>>,
+    /// Per view cell, what the remembered sight draws in grey over its base, with its fade (spec
+    /// 18: no layers where it draws none); empty with the remembered sight off.
+    memory: Vec<Remembered>,
     /// The target cursor (tile, x, y) the render drew over the cells.
     cursor: Option<(u16, u16, u16)>,
     /// The clock's tile (its object gets hands).
@@ -125,13 +125,14 @@ pub(crate) fn shown_hash(fb: &Framebuffer) -> u64 {
 
 /// Keeps the shot of the framed render just presented, with its remembered layers, cursor and
 /// clock tile (what 0x102c90 took before it drew); `snap` when it was presented dissolving or drew
-/// XOR plots (the sparkle) its scene does not hold. A render of the window cache that drew no box
+/// XOR plots (the sparkle) its scene does not hold, or is the first after a load
+/// ([`Io::break_motion`]). A render of the window cache that drew no box
 /// (`same`: every box's draws those of the last render) keeps the last shot again. Nothing with the
 /// switch off.
 pub(super) fn record(
     state: &State,
     io: &Io,
-    memory: Vec<Vec<Layer>>,
+    memory: Vec<Remembered>,
     (cursor, clock): (Option<(u16, u16, u16)>, Option<u16>),
     snap: bool,
     same: bool,
@@ -142,6 +143,7 @@ pub(super) fn record(
     if io.warm_early_picture() {
         drop(std::hint::black_box(state.clone()));
     }
+    let snap = snap | io.take_motion_break();
     let hash = io.draw(|fb| shown_hash(fb));
     if let Some(last) = io.last_shot().filter(|l| same && l.hash == hash && !snap) {
         io.keep_shot(last);
@@ -175,8 +177,10 @@ pub fn keep_scene(io: &Io, scene: Scene) {
 
 /// Spec 20 Design 4: the early picture of the leader's step just made: on a copy of `state`, the
 /// view rebuilt ([`crate::map::view::update_view`], 0x109e74, which ends in the draw lists of
-/// 0x10e81e: an RNG draw it makes stays on the copy) and the remembered sight taken as a framed
-/// render would take it; its shot kept for the engine to hand over ([`Io::keep_preview`]). The
+/// 0x10e81e: an RNG draw it makes stays on the copy) and the remembered sight read as a framed
+/// render of the copy would draw it ([`super::cache::SightMemory::shown_in`] of the state's
+/// memory, unchanged: the cells in sight are drawn live, so what this render would remember
+/// changes nothing it shows); its shot kept for the engine to hand over ([`Io::keep_preview`]). The
 /// copy is dropped; nothing with the switch off, nor in combat mode, where a fight's frames (a
 /// missile's flight, a flash) can show the party where it was before the turn's picture does.
 pub(crate) fn preview(state: &State, io: &Io) {
@@ -186,8 +190,10 @@ pub(crate) fn preview(state: &State, io: &Io) {
     let mut copy = state.clone();
     crate::map::view::update_view(&mut copy);
     let window = super::seams::view_window(&copy);
+    // The copy's cache holds no remembered sight (a clone of the cache drops it): what the
+    // render would draw in grey is read from the state's, round the copy's view and at its time.
     let memory = if io.sight_memory() {
-        super::cache::SightMemory::layers(&mut copy, &window, true)
+        state.gfx.cache.memory.shown_in(&copy, &window)
     } else {
         Vec::new()
     };
@@ -401,8 +407,9 @@ fn blit_at(gfx: &GfxState, fb: &mut impl Canvas, word: u16, (x, y): (i32, i32), 
     }
 }
 
-/// The window render's grey draw of a remembered layer (spec 18, `blit_memory`) at any pixel.
-fn memory_at(gfx: &GfxState, fb: &mut impl Canvas, layer: Layer, x: i32, y: i32) {
+/// The window render's grey draw of a remembered layer `fade` whole days old (spec 18,
+/// `blit_memory`) at any pixel: the pixels the fade keeps ([`keeps`]).
+fn memory_at(gfx: &GfxState, fb: &mut impl Canvas, layer: Layer, (x, y): (i32, i32), fade: u8) {
     let r = usize::from(layer.record);
     let (Some((pixels, transparent, id, ver)), Some(overlay)) =
         (layer.image(gfx), gfx.overlays.get(r))
@@ -413,7 +420,7 @@ fn memory_at(gfx: &GfxState, fb: &mut impl Canvas, layer: Layer, x: i32, y: i32)
     let pixels = pixels.iter().zip(transparent).take(TILE_W * TILE_H);
     for (i, (&p, &clear)) in pixels.enumerate() {
         let (row, c) = (i / TILE_W, i % TILE_W);
-        if !clear {
+        if !clear && keeps(fade, c, row) {
             put(fb, (x + c as i32, y + row as i32), src(c, row, 0), |_| {
                 p | GREY
             });
@@ -428,7 +435,8 @@ fn memory_at(gfx: &GfxState, fb: &mut impl Canvas, layer: Layer, x: i32, y: i32)
             if row >= TILE_H {
                 break;
             }
-            for c in (0..TILE_W).filter(|c| bits & (0x8000 >> c) != 0) {
+            let drawn = |&c: &usize| bits & (0x8000 >> c) != 0 && keeps(fade, c, row);
+            for c in (0..TILE_W).filter(drawn) {
                 let at = (x + c as i32, y + row as i32);
                 put(fb, at, src(c, row, FLAG_OVERLAY), |p| p | 1 << ANIM_PLANE);
             }
@@ -485,14 +493,14 @@ fn draw_ops(state: &State, presenter: &Presenter<Shot>, ops: &[Op], fb: &mut imp
         let at = (op.x, op.y);
         match op.draw {
             Draw::Base { scene, cell } => {
+                // As the window render's `draw_remembered`: the base (black for a remembered
+                // cell), then the remembered layers the fade keeps.
                 let shot = &presenter.history()[scene];
-                match shot.memory.get(cell).filter(|m| !m.is_empty()) {
-                    Some(layers) => {
-                        for &layer in layers {
-                            memory_at(gfx, fb, layer, op.x, op.y);
-                        }
+                blit_at(gfx, fb, shot.scene.cells[cell].base, at, frame);
+                if let Some(m) = shot.memory.get(cell) {
+                    for &layer in &m.layers {
+                        memory_at(gfx, fb, layer, at, m.fade);
                     }
-                    None => blit_at(gfx, fb, shot.scene.cells[cell].base, at, frame),
                 }
             }
             Draw::Word(w) => {

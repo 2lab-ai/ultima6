@@ -695,6 +695,8 @@ impl LayerPixels {
                 if !drawn.contains(&true) {
                     return true;
                 }
+                #[cfg(test)]
+                ROWS_COMPARED.with(|n| n.set(n.get() + 1));
                 let (pixels, src) = (&self.pixels[i..i + n], &self.src[i..i + n]);
                 let (old_pixels, old_src) = (&old.pixels[o..o + n], &old.src[o..o + n]);
                 // Equal as stored, or equal where drawn (a clear pixel's colour is no one's).
@@ -755,6 +757,12 @@ impl LayerPixels {
         let y1 = ops.iter().map(|o| o.y + CELL).max()?;
         Some((x0, y0, (x1 - x0) as usize, (y1 - y0) as usize))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The block rows whose pixels [`LayerPixels::changed_since`] compared (the tests read it).
+    static ROWS_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

@@ -503,9 +503,16 @@ impl SightMemory {
             memory.cap();
             gfx.cache.memory = memory;
         }
-        let memory = &state.gfx.cache.memory;
+        state.gfx.cache.memory.shown_in(state, window)
+    }
+
+    /// Per box of `window` (the view of `state`), what the render draws in grey there
+    /// ([`SightMemory::shown`]: keyed by `state`'s view and faded at its time), this memory
+    /// unchanged. Port (spec 20): the early picture reads the state's memory round the view of its
+    /// copy, whose cache holds none.
+    pub(super) fn shown_in(&self, state: &State, window: &ViewWindow) -> Vec<Shown> {
         cells_of(window)
-            .map(|(at, base)| match memory.shown(state, at, base) {
+            .map(|(at, base)| match self.shown(state, at, base) {
                 Some((fade, layers)) => Shown {
                     fade,
                     layers: layers.to_vec(),

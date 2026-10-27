@@ -120,15 +120,30 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      - **Cost in Wide (a measured deviation: the 8 ms target is not met).** At S 4 in the browser test (2026-10-28,
        load 24–28 on 18 cores; 20 frames each), a display frame that makes the layers as changes costs 10.7 ms median
        and 16.6 ms p95 in the fight and 8.9 / 9.5 ms out of combat (2026-10-27 at load 30–100: 10.5 / 14.8 and
-       9.4 / 12.1). The first make after the page took none (a start, a pack) is whole: 35.9 ms (31.6). A frame that
+       9.4 / 12.1). The first make after a start (the page holds no layers) is whole: 35.9 ms (31.6); so is the
+       first after a pack, a scale or a switch change (the HD view's version moved). A frame that
        only draws the slide costs the page 2.6 / 3.4 ms in the fight and 2.5 / 3.0 ms out of combat. The timer leaves
        out the engine's step (1.35–1.70 ms a step in Wide's wasm), and p95 here is the 19th of 20 frames, not a
        maximum nor a whole frame's time. On main, without smooth motion, the Wide layout's compositor test (a whole
        composition of the Wide frame at S 4) measures 10.3–10.6 ms against the same 8 ms limit.
-       It is accepted because it falls once a step, on the slide's first frame, and a 360 ms slide moves about
-       0.74 game pixel per 16.7 ms display frame, so a late frame shifts the picture by less than a game pixel. A
+       It is accepted because it falls on a slide's first frame only, once a generation of the slides: out of combat
+       about once a step (26 generations in 23 steps of the town runs, 2026-10-28), in a fight about seven times a
+       step (216 in 31 steps of the fight runs: each turn's moves of the other combatants start their own), and a
+       360 ms slide moves about 0.74 game pixel per 16.7 ms display frame, so a late frame shifts the picture by less
+       than a game pixel. A
        later option is to rasterize only the cells whose draw lists changed (at most about 2.5 ms natively: the
        static layer's raster and its change scan).
+   - **Remembered sight (spec 18) in slides.** Each scene keeps what its render drew in grey for each cell out of
+     sight (the remembered layers and their fade, `cache::Shown`). A cell takes the look of the newest scene that holds
+     it (the static layer), as the window render drew it then: its base word (black for a remembered cell), then the
+     remembered layers in grey, each pixel only where the fade keeps it (`keeps`, as `draw_remembered`). So a slide's
+     end is the engine's picture for faded cells too (the receipt ages remembered cells 0 to 4 game days).
+     - The early picture's grey cells are read from the live remembered sight, unchanged, round the copy's view and
+       at its time (`SightMemory::shown_in`): the copy's cache holds none, and the cells in sight are drawn live,
+       so what that render would remember changes nothing it shows.
+     - No slide crosses a load (load state 0x105350): the remembered sight's copies are forgotten there, which the
+       scenes kept before name, so the engine drops its kept scenes and the next framed render's scene snaps
+       (`Io::break_motion`).
    - **Page:** `draw()` also runs while a slide is active. The wasm exports the presentation clock.
 6. **Switch.** Smooth motion on by default in the page, off in the engine and the web harness by default (as spec 18's
    switch). Off is today's picture exactly.

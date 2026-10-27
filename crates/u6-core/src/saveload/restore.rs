@@ -84,10 +84,12 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
 /// 0x108ac4), A4-0x784e = 1, the window cache (0x108f90), the members back into the vehicle
 /// when aboard (0x10cda8) and the view flags (0x109e74) ([`crate::main_loop::finish_load_state`],
 /// which the boot runs too). Port (spec 18): the remembered sight is forgotten
-/// ([`crate::gfx::cache::RenderCache::forget_sight`]).
+/// ([`crate::gfx::cache::RenderCache::forget_sight`]); (spec 20) and no slide crosses the load
+/// ([`Io::break_motion`]: the scenes kept before name the forgotten copies, and show another game).
 pub fn load_state(s: &mut State, io: &Io, files: StateFiles) {
     s.map.window_key = [-1; 3];
     s.gfx.cache.forget_sight();
+    io.break_motion();
     s.actors.schedules = Schedules {
         first: files.schedule.first,
         total: files.schedule.records.len() as u16,

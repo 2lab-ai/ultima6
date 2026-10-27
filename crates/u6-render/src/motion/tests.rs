@@ -899,8 +899,8 @@ fn the_movers_are_placed_where_their_cells_put_them_crossing_under_a_sliding_cam
 }
 
 /// Spec 20 Design 5: a row clear in both layers is unchanged whatever colours and sources its
-/// clear pixels hold (the cursor and border layer is mostly such rows), and a drawn pixel's
-/// change in the same block still changes it.
+/// clear pixels hold (the cursor and border layer is mostly such rows) and its pixels are not
+/// compared at all, and a drawn pixel's change in the same block still changes it.
 #[test]
 fn a_row_clear_in_both_layers_is_unchanged_and_a_drawn_change_in_its_block_counts() {
     let mut old = LayerPixels::clear(0, 0, 48, 32);
@@ -921,10 +921,17 @@ fn a_row_clear_in_both_layers_is_unchanged_and_a_drawn_change_in_its_block_count
             new.src[y * 48 + x].id ^= 0x40;
         }
     }
+    ROWS_COMPARED.with(|n| n.set(0));
     assert_eq!(
         new.changed_since(&old, (0, 0)),
         Some(vec![]),
         "clear rows: unchanged"
+    );
+    // Only the 8 drawn rows of block (1, 0) are compared, none of the 88 clear block rows.
+    assert_eq!(
+        ROWS_COMPARED.with(|n| n.get()),
+        8,
+        "clear rows: not compared"
     );
     new.pixels[3 * 48 + 20] ^= 1;
     assert_eq!(
@@ -1065,4 +1072,170 @@ fn a_restart_stays_under_the_top_tiles_of_its_swept_cells_reversed_diagonal_and_
         Some(BODY),
         "fractional: drawn"
     );
+}
+
+/// Spec 20 Design 3, against a composition of its own: in each of the four directions, a mover
+/// sliding from cell A to B restarted at 31/32 of the way toward C (drawn a pixel into A, as
+/// `Track::offset` rounds), with a top tile in A and in C. At the restart and half and three
+/// quarters of the way on, the three cells are the ground, the mover at its linear place rounded
+/// to whole pixels, and the top tiles over both.
+#[test]
+fn a_fractional_restart_in_every_direction_paints_the_cells_it_sweeps_as_composed_apart() {
+    let mut failed = Vec::new();
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        // A, B, C along the way, off the leader's cell.
+        let a = if dx != 0 {
+            (97 - dx, 95)
+        } else {
+            (97, 97 - dy)
+        };
+        let at = |k: i32| (a.0 + k * dx, a.1 + k * dy);
+        let (b, c) = (at(1), at(2));
+        let s = |cell: (i32, i32)| {
+            let mut s = scene(
+                (100, 100),
+                0,
+                &[(LEADER, (100, 100), 0x180), (2, cell, 0x181)],
+            );
+            for (k, wall) in [(10, a), (11, c)] {
+                add(&mut s, wall, WALL, Some(k), Rank::Top);
+                place(&mut s, k, wall, 0x20);
+            }
+            s
+        };
+        let restart = SLIDE_MS * 31.0 / 32.0;
+        let mut p = two(s(a), s(b), 0.0);
+        p.publish(Rc::new(s(c)), restart, true);
+        let rest = s(c);
+        let world = |cell: (i32, i32)| (f64::from(16 * cell.0), f64::from(16 * cell.1));
+        // Where the restart starts: the first slide's place then.
+        let from = {
+            let (pa, pb) = (world(a), world(b));
+            (
+                pa.0 + (pb.0 - pa.0) * 31.0 / 32.0,
+                pa.1 + (pb.1 - pa.1) * 31.0 / 32.0,
+            )
+        };
+        for q in [0.0, 0.5, 0.75] {
+            let t = restart + SLIDE_MS * q;
+            let pc = world(c);
+            let x = (from.0 + (pc.0 - from.0) * q, from.1 + (pc.1 - from.1) * q);
+            let (ox, oy) = ((x.0 - pc.0).round() as i32, (x.1 - pc.1).round() as i32);
+            let (cx, cy) = rest.pixel(c);
+            let mover = (cx + ox, cy + oy);
+            let fb = frame_at(&p, t);
+            let mut differ = Vec::new();
+            for cell in [a, b, c] {
+                let (x0, y0) = rest.pixel(cell);
+                for y in y0..y0 + CELL {
+                    for x in x0..x0 + CELL {
+                        let inside = |(mx, my): (i32, i32)| {
+                            (mx..mx + CELL).contains(&x) && (my..my + CELL).contains(&y)
+                        };
+                        // The top tiles (whole cells) over the mover, the mover over the ground.
+                        let want = if cell == a || cell == c {
+                            4
+                        } else if inside(mover) {
+                            BODY
+                        } else {
+                            BASE
+                        };
+                        if fb.get(x as usize, y as usize) != Some(want) {
+                            differ.push((x, y));
+                        }
+                    }
+                }
+            }
+            if !differ.is_empty() {
+                failed.push(((dx, dy), q, differ.len()));
+            }
+            if q == 0.0 {
+                // The pixel into A is the top tile's, not the mover's.
+                let (axp, ayp) = rest.pixel(a);
+                let into = (mover.0 - axp, mover.1 - ayp);
+                assert!(
+                    (into.0.abs() == 15 || into.1.abs() == 15) && (into.0 == 0 || into.1 == 0),
+                    "({dx}, {dy}): drawn a pixel into A ({into:?})"
+                );
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "(direction, progress of the restart, pixels differing): {failed:?}"
+    );
+}
+
+/// Spec 20 Design 3 and 5: over sequences of the leader's publications (a chain of restarts, a
+/// reverse, a far jump, and 300 of every kind at pseudo-random times), the camera is never drawn
+/// farther than [`SNAP_PX`] from rest, which the static layer's margin covers (u6-core
+/// `slide_layers` asserts the bound against the shown map's inset).
+#[test]
+fn the_camera_stays_within_its_reach_over_any_sequence_of_publications() {
+    let at = |x: i32, y: i32| scene((x, y), 0, &[(LEADER, (x, y), 0x180)]);
+    let reach = |p: &Presenter<Scene>, t: f64| {
+        p.view(t)
+            .map_or(0, |v| v.camera.0.abs().max(v.camera.1.abs()))
+    };
+    let run = |steps: &[(f64, (i32, i32))]| {
+        let mut p = Presenter::new();
+        p.publish(Rc::new(at(100, 100)), 0.0, true);
+        let (mut most, mut k, mut t) = (0, 0, 0.0);
+        let end = steps.last().map_or(0.0, |s| s.0) + SLIDE_MS + 50.0;
+        while t <= end {
+            while k < steps.len() && steps[k].0 <= t {
+                let (x, y) = steps[k].1;
+                p.publish(Rc::new(at(x, y)), steps[k].0, true);
+                k += 1;
+            }
+            most = most.max(reach(&p, t));
+            p.end(t);
+            t += 5.0;
+        }
+        most
+    };
+    let bound = SNAP_PX as i32;
+    // A chain of restarts half way, each a cell on: restarts at the bound, then snaps.
+    let chain: Vec<_> = (1..=6)
+        .map(|k| (180.0 * f64::from(k), (100 + k, 100)))
+        .collect();
+    assert_eq!(
+        run(&chain),
+        bound,
+        "the chain reaches the bound and no farther"
+    );
+    // A reverse half way, and a far jump (two cells: a snap, nothing slides).
+    assert!(
+        run(&[(0.0, (101, 100)), (180.0, (100, 100))]) <= bound,
+        "a reverse"
+    );
+    assert_eq!(run(&[(0.0, (102, 100))]), 0, "a far jump snaps");
+    // 300 publications of every kind (a step any way, standing, a jump) at random times.
+    let mut seed = 7u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        seed >> 16
+    };
+    let (mut x, mut y, mut t) = (100, 100, 0.0);
+    let mut steps = Vec::new();
+    for _ in 0..300 {
+        t += f64::from(next() % 400);
+        let (dx, dy) = match next() % 10 {
+            8 => (2, 0),
+            9 => (0, 0),
+            k => [
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+            ][k as usize],
+        };
+        (x, y) = (x + dx, y + dy);
+        steps.push((t, (x, y)));
+    }
+    assert!(run(&steps) <= bound, "300 publications: within the bound");
 }

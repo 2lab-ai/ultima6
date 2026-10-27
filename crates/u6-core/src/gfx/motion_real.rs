@@ -116,22 +116,10 @@ fn play(
     town: bool,
     mut each: impl FnMut(&mut Engine),
 ) {
-    let mut settle = |e: &mut Engine, input: &[InputEvent]| {
-        e.tick(input, STEP_MS);
-        each(e);
-        for _ in 0..TURN_TICKS {
-            if at_prompt(e) {
-                return;
-            }
-            e.tick(&[], STEP_MS);
-            each(e);
-        }
-        panic!("a turn did not come back to the prompt");
-    };
-    settle(e, &[]);
+    turn(e, &[], &mut each);
     if !town {
         for k in TURNS {
-            settle(e, &[InputEvent::Key(k)]);
+            turn(e, &[InputEvent::Key(k)], &mut each);
         }
         return;
     }
@@ -143,10 +131,25 @@ fn play(
             }
         }
     }
-    settle(e, &[InputEvent::Key(Key::Char('b'))]);
+    turn(e, &[InputEvent::Key(Key::Char('b'))], &mut each);
     for k in STEPS {
-        settle(e, &[InputEvent::Key(k)]);
+        turn(e, &[InputEvent::Key(k)], &mut each);
     }
+}
+
+/// One turn: `input`, then ticks of [`STEP_MS`] until the prompt is back (at most
+/// [`TURN_TICKS`]), calling `each` after every tick.
+fn turn(e: &mut Engine, input: &[InputEvent], each: &mut impl FnMut(&mut Engine)) {
+    e.tick(input, STEP_MS);
+    each(e);
+    for _ in 0..TURN_TICKS {
+        if at_prompt(e) {
+            return;
+        }
+        e.tick(&[], STEP_MS);
+        each(e);
+    }
+    panic!("a turn did not come back to the prompt");
 }
 
 #[test]
@@ -333,6 +336,8 @@ fn hd_differ(hd: &HdView, drawn: Option<&[u32]>) -> (usize, usize) {
 fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
     let Some(files) = files() else { return };
     let mut totals = [0usize; 6];
+    // Per run kind (the fight, the town): the slides' generations, the leader's steps.
+    let (mut generations, mut steps) = ([0usize; 2], [0usize; 2]);
     for (seed, town) in [0, 7, 100]
         .into_iter()
         .flat_map(|s| [(s, false), (s, true)])
@@ -343,6 +348,8 @@ fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
         let mut bad = Vec::new();
         let mut hd = HdView::new();
         hd.set(true, Scale::X2);
+        // The generations of the slides, and the leader's steps (scenes that moved its cell).
+        let (mut generation, mut leader) = (p.generation(), None);
         play(&mut e, town, |e| {
             for publ in e.take_motion() {
                 let Some(shot) = publ.shot else {
@@ -351,10 +358,23 @@ fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
                     continue;
                 };
                 let time = publ.time_ms as f64;
+                let at = shot
+                    .scene
+                    .leader
+                    .and_then(|l| shot.scene.find(l))
+                    .map(|l| l.cell);
+                if at != leader && !publ.preview {
+                    steps[usize::from(town)] += usize::from(leader.is_some());
+                    leader = at;
+                }
                 if publ.preview {
                     p.preview(shot, time, true);
                 } else {
                     p.publish(shot, time, true);
+                }
+                if p.generation() != generation {
+                    generation = p.generation();
+                    generations[usize::from(town)] += 1;
                 }
                 let start = p.view(time);
                 checked[1] += usize::from(start.as_ref().is_some_and(|v| !v.movers.is_empty()));
@@ -427,6 +447,11 @@ fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
          {} scenes drawn half way with movers, nothing outside the map changed (classic) and \
          every shown word drawn (HD); {} foreign publications",
         totals[0], totals[5], totals[1], totals[2], totals[3], totals[4]
+    );
+    println!(
+        "the slides' generations against the leader's steps: the fight {} in {} steps, the town \
+         {} in {} steps",
+        generations[0], steps[0], generations[1], steps[1]
     );
 }
 
@@ -565,4 +590,209 @@ fn bench_the_state_clone_of_the_early_picture() {
         "early picture (clone, view, draw lists, scene): median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
         times[100], times[190], times[199]
     );
+}
+
+/// Remembers every cell within 12 of the leader's on its level as last seen `days` whole game days
+/// ago, its look the leader's cell's ground ([`super::cache::SightMemory::remember`]): a cell in
+/// sight at the next framed render takes its own look again, one out of sight shows this one,
+/// faded `days`.
+fn remember_round(state: &mut State, days: u8) {
+    let now = super::cache::minutes(&state.actors.calendar);
+    let c = state.map.centre;
+    let i = crate::geom::HALF_H * crate::geom::VIEW_W + crate::geom::HALF_W;
+    let t = usize::from(state.objects.draw.base[i] & 0x7ff);
+    let gfx = &mut state.gfx;
+    let layer = super::cache::Layer {
+        record: gfx.record_of[t],
+        masktype: gfx.masktype[t],
+        frame: 0,
+        frozen: None,
+    };
+    let seen = now - u64::from(days) * 24 * 60;
+    for dy in -12i32..=12 {
+        for dx in -12i32..=12 {
+            let (x, y) = ((i32::from(c.x) + dx) as u16, (i32::from(c.y) + dy) as u16);
+            gfx.cache.memory.remember((c.z, x, y), vec![layer], seen);
+        }
+    }
+}
+
+/// Whether pixel `(x, y)` of `fb` is drawn from the remembered sight ([`u6_render::FLAG_MEMORY`]).
+fn remembered(fb: &Framebuffer, x: usize, y: usize) -> bool {
+    fb.src_at(x, y)
+        .is_some_and(|s| s.flags & u6_render::FLAG_MEMORY != 0)
+}
+
+/// Spec 18 and 20 Design 3–5, on the user's zip: remembered cells seen 0 to 4 game days ago (after
+/// the town's steps, the cells round the leader remembered that long ago: [`remember_round`];
+/// then the steps again). At the end of every slide
+/// the map drawn again over a poisoned map is the engine's picture in colour and source, classic
+/// and HD, the faded cells included; and each early picture (out of combat) drawn at its start
+/// shows every cell remembered in the engine's picture then, and out of sight in the early
+/// picture too, as that picture shows it.
+#[test]
+fn remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them() {
+    let Some(files) = files() else { return };
+    let mut totals = [0usize; 4];
+    for days in 0..=4u8 {
+        let mut game = boot(&files, 0, true);
+        play(&mut game, true, |e| drop(e.take_motion()));
+        remember_round(&mut game.1.borrow_mut(), days);
+        let (mut e, _state) = game;
+        let mut p: Presenter<Shot> = Presenter::new();
+        let mut hd = HdView::new();
+        hd.set(true, Scale::X2);
+        let (mut bad, mut early_bad) = (Vec::new(), Vec::new());
+        let mut seen = [0usize; 4];
+        let mut each = |e: &mut Engine| {
+            for publ in e.take_motion() {
+                let Some(shot) = publ.shot else {
+                    p.foreign();
+                    continue;
+                };
+                let time = publ.time_ms as f64;
+                let want = e.published_frame().clone();
+                if publ.preview {
+                    // The early picture at its start, against the engine's picture now.
+                    p.preview(Rc::clone(&shot), time, true);
+                    let Some(start) = p.view(time) else { continue };
+                    let mut fb = poisoned(e);
+                    paint(&e.state(), &p, &start, &mut fb);
+                    let n = &shot.scene;
+                    let (mut compared, mut differ) = (0, 0);
+                    let (x0, y0, x1, y1) = SHOWN;
+                    for y in usize::from(y0)..=usize::from(y1) {
+                        for x in usize::from(x0)..=usize::from(x1) {
+                            // The early picture's cell drawn at (x, y) at its start.
+                            let (rx, ry) = (x as i32 + start.camera.0, y as i32 + start.camera.1);
+                            let cell = (
+                                n.origin.0 + (rx - n.corner.0).div_euclid(16),
+                                n.origin.1 + (ry - n.corner.1).div_euclid(16),
+                            );
+                            let unseen = n.index(cell).is_some_and(|i| {
+                                let base = n.cells[i].base;
+                                base == crate::map::view::NOT_VISIBLE
+                                    || base == crate::map::view::DARK
+                            });
+                            if remembered(&want, x, y) && unseen {
+                                compared += 1;
+                                let same = fb.get(x, y) == want.get(x, y)
+                                    && fb.src_at(x, y) == want.src_at(x, y);
+                                differ += usize::from(!same);
+                            }
+                        }
+                    }
+                    seen[2] += 1;
+                    seen[3] += compared;
+                    if differ > 0 {
+                        early_bad.push((e.ticks(), compared, differ));
+                    }
+                    continue;
+                }
+                p.publish(shot, time, true);
+                let view = p.view(time + SLIDE_MS).unwrap_or(View {
+                    camera: (0, 0),
+                    movers: Vec::new(),
+                });
+                let (colours, sources, outside) = classic(e, &p, &view, Draws::Port, &want);
+                hd.present(Some(e), &Framebuffer::new());
+                let drawn = hd_drawn(e, &mut hd, &p, &view, Draws::Port);
+                let (words, uncovered) = hd_differ(&hd, drawn.as_deref());
+                if colours + sources + outside + words + uncovered > 0 {
+                    bad.push((e.ticks(), colours, sources, outside, words, uncovered));
+                }
+                let (x0, y0, x1, y1) = SHOWN;
+                let memory = (usize::from(y0)..=usize::from(y1))
+                    .flat_map(|y| (usize::from(x0)..=usize::from(x1)).map(move |x| (x, y)))
+                    .filter(|&(x, y)| remembered(&want, x, y))
+                    .count();
+                seen[0] += 1;
+                seen[1] += memory;
+            }
+        };
+        for k in STEPS {
+            turn(&mut e, &[InputEvent::Key(k)], &mut each);
+        }
+        assert!(
+            bad.is_empty(),
+            "{days} days: (tick, colours, sources, outside, HD words, HD words uncovered) \
+             differing at a slide's end: {bad:?}"
+        );
+        assert!(
+            early_bad.is_empty(),
+            "{days} days: (tick, remembered pixels compared, differing) in early pictures: \
+             {early_bad:?}"
+        );
+        assert!(
+            seen[1] > 0 && seen[2] > 0 && seen[3] > 0,
+            "{days} days: remembered pixels at slides' ends and in early pictures: {seen:?}"
+        );
+        println!(
+            "{days} days: {} slide ends equal to the engine's picture, {} remembered pixels in \
+             them; {} early pictures, {} remembered pixels each as the engine's picture",
+            seen[0], seen[1], seen[2], seen[3]
+        );
+        for (t, s) in totals.iter_mut().zip(seen) {
+            *t += s;
+        }
+    }
+    println!("in all: {totals:?}");
+}
+
+/// Spec 20 (load state 0x105350, spec 18's forget): no slide crosses a load. The party steps a cell
+/// in the start fight, then the game is restored (the boot's save: the party back a cell away,
+/// the remembered sight forgotten), then a turn passes: its picture's scene snaps, so a presenter
+/// fed every publication shows no slide into it (the scenes before the load name copies of the
+/// forgotten store and another game).
+#[test]
+fn no_slide_crosses_a_load() {
+    let Some(files) = files() else { return };
+    let (mut e, state) = boot(&files, 0, true);
+    let mut p: Presenter<Shot> = Presenter::new();
+    // The first scene published since it was emptied, and whether a slide ran into it.
+    let last: RefCell<Option<(Rc<Shot>, bool)>> = RefCell::new(None);
+    let mut feed = |e: &mut Engine| {
+        for publ in e.take_motion() {
+            let time = publ.time_ms as f64;
+            match publ.shot {
+                Some(shot) if publ.preview => p.preview(shot, time, true),
+                Some(shot) => {
+                    p.publish(Rc::clone(&shot), time, true);
+                    let mut first = last.borrow_mut();
+                    if first.is_none() {
+                        *first = Some((shot, p.view(time).is_some()));
+                    }
+                }
+                None => p.foreign(),
+            }
+        }
+    };
+    turn(&mut e, &[], &mut feed);
+    last.borrow_mut().take();
+    let at = |s: &RefCell<State>| (s.borrow().map.centre.x, s.borrow().map.centre.y);
+    let start = at(&state);
+    for k in [Key::Right, Key::Left, Key::Up, Key::Down] {
+        turn(&mut e, &[InputEvent::Key(k)], &mut feed);
+        if at(&state) != start {
+            break;
+        }
+    }
+    let stepped = at(&state);
+    assert!(stepped != start, "a step walked");
+    assert!(
+        last.borrow().as_ref().is_some_and(|f| f.1),
+        "the step's picture slid (the presenter slides here)"
+    );
+    crate::saveload::restore(&mut state.borrow_mut(), e.io()).quiet();
+    assert_eq!(
+        at(&state),
+        start,
+        "the restore put the party back a cell away"
+    );
+    last.borrow_mut().take();
+    turn(&mut e, &[InputEvent::Key(Key::Space)], &mut feed);
+    let (shot, slides) = last.borrow_mut().take().quiet();
+    assert!(shot.scene.snap, "the first picture after the load snaps");
+    assert!(!slides, "no slide into it");
+    println!("a step, a load a cell back, a turn: its picture snapped, no slide");
 }

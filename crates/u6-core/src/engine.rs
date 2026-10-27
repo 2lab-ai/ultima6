@@ -177,6 +177,8 @@ pub struct Io {
     preview: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
     /// Port-only (spec 20 Design 4): [`Io::warm_early_picture`] answered.
     warmed: Cell<bool>,
+    /// Port-only (spec 20): [`Io::break_motion`] since the last framed render kept its scene.
+    motion_break: Cell<bool>,
 }
 
 impl Io {
@@ -203,6 +205,7 @@ impl Io {
             last_shot: RefCell::new(None),
             preview: RefCell::new(None),
             warmed: Cell::new(false),
+            motion_break: Cell::new(false),
         }
     }
 
@@ -471,6 +474,22 @@ impl Io {
         while shots.len() > SHOTS {
             shots.pop_front();
         }
+    }
+
+    /// Port-only (spec 20): the remembered sight's copies were forgotten (load state 0x105350,
+    /// [`crate::saveload::restore::load_state`]), which the scenes kept so far name, and the game
+    /// shown is another: the shots kept are dropped, and the next framed render's scene snaps (no
+    /// slide across the load: [`Io::take_motion_break`]).
+    pub(crate) fn break_motion(&self) {
+        self.motion_break.set(true);
+        self.shots.borrow_mut().clear();
+        self.last_shot.borrow_mut().take();
+        self.preview.borrow_mut().take();
+    }
+
+    /// Port-only (spec 20): whether [`Io::break_motion`] ran since the last call.
+    pub(crate) fn take_motion_break(&self) -> bool {
+        self.motion_break.replace(false)
     }
 
     /// Port-only (spec 20 Design 4): true the first time it is asked: the first framed render

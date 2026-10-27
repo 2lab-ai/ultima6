@@ -12331,10 +12331,9 @@ for (const mode of ['original', 'hd', 'layout', 'wide']) {
 
 // Keeps in the page `__motionRing()`: the canvas pixels of the ring two canvas pixels outside the
 // shown map's rect on the canvas (the frame's border round it, in the Wide layouts the layout's
-// own, the windows left out), the rect found as `motionReference` maps the map, and
-// `__motionInside()`: a 24 x 16 grid of canvas pixels inside it, a quarter of the rect in from each
-// edge (the windows left out); and counts the page's draws of a slide (each one reads Game.slide)
-// in `__slideCalls`.
+// own, the windows left out), the rect found as `motionReference` maps the map; and counts the
+// page's draws of a slide (each one reads Game.slide) in `__slideCalls` and its draws of the
+// slide's static layer canvas in `__staticDraws`.
 const motionRing = (page) => page.evaluate(() => {
   const g = globalThis.__shownGame;
   const c = document.getElementById('screen');
@@ -12368,19 +12367,10 @@ const motionRing = (page) => page.evaluate(() => {
     if (wide && covered(x, y)) continue;
     if (x >= 0 && y >= 0 && x < c.width && y < c.height) at.push((y * c.width + x) * 4);
   }
-  const inside = [];
-  for (let j = 0; j < 16; j += 1) {
-    for (let i = 0; i < 24; i += 1) {
-      const [x, y] = [Math.floor(l + (r - l) * (0.25 + (0.5 * i) / 23)), Math.floor(t + (b - t) * (0.25 + (0.5 * j) / 15))];
-      if (!(wide && covered(x, y))) inside.push((y * c.width + x) * 4);
-    }
-  }
-  const read = (list) => {
+  globalThis.__motionRing = () => {
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    return list.map((i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+    return at.map((i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
   };
-  globalThis.__motionRing = () => read(at);
-  globalThis.__motionInside = () => read(inside);
   const proto = Object.getPrototypeOf(g);
   if (!proto.__counted) {
     const slide = proto.slide;
@@ -12390,34 +12380,47 @@ const motionRing = (page) => page.evaluate(() => {
     };
     proto.__counted = true;
   }
+  // The draws of the slide's static layer canvas (drawSlide's, its size the static layer's at a
+  // whole scale; no other canvas the page draws has its proportions).
+  const canvas2d = CanvasRenderingContext2D.prototype;
+  if (!canvas2d.__countedStatic) {
+    const draw = canvas2d.drawImage;
+    canvas2d.drawImage = function (source, ...rest) {
+      const size = globalThis.__shownGame?.slide_layer_size(0) ?? [];
+      if (source instanceof HTMLCanvasElement && size.length === 2 && source.width > 0
+        && source.width % size[0] === 0 && source.width / size[0] === source.height / size[1]) globalThis.__staticDraws += 1;
+      return draw.call(this, source, ...rest);
+    };
+    canvas2d.__countedStatic = true;
+  }
   globalThis.__slideCalls = 0;
+  globalThis.__staticDraws = 0;
   return at.length;
 });
 
 // On the virtual display: frames until `until` (`'sliding'`: a slide drawn from layers;
 // `'settled'`: the prompt back for five frames and no slide), at most `max`. Per frame with a slide
-// placed: whether the ring (`motionRing`) differs from `ref`; whether the map's inside changed
-// since the frame before (the page drew a moved map); and whether the static layer's place
-// (Game.slide's first triple) moved along `dir` (dx, dy) since the frame before, which a slide
-// toward -dir does (the camera's offset from rest shrinking toward the new cell). Returns the
-// frames, the frames with a slide placed, those whose map changed, those whose map changed with the
-// static layer moving along `dir`, the ring's differing frames, the newest layers version, whether
+// placed: whether the ring (`motionRing`) differs from `ref`; whether the page drew the slide's
+// static layer canvas in it (`__staticDraws`: no redraw of the HD frame counts); and whether that
+// layer's place (Game.slide's first triple) moved along `dir` (dx, dy) since the frame before,
+// which a slide toward -dir does (the camera's offset from rest shrinking toward the new cell).
+// Returns the frames, the frames with a slide placed, those that drew the static layer, those
+// that drew it moved along `dir`, the ring's differing frames, the newest layers version, whether
 // `until` was met and the leader.
 const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluate(([want, base, limit, [dx, dy]]) => {
   const v = window.__display;
   const g = globalThis.__shownGame;
   const c = document.getElementById('screen');
   let [frames, sliding, drawn, along, ring, run] = [0, 0, 0, 0, 0, 0];
-  let [inside, place] = [globalThis.__motionInside(), null];
+  let place = null;
   const met = () => (want === 'sliding' ? g.sliding() && g.slide().length > 0 : run >= 5 && !g.sliding());
   while (frames < limit && !met()) {
+    const draws = globalThis.__staticDraws;
     v.run();
     frames += 1;
     run = c.dataset.prompt === '1' && c.dataset.keys === '0' ? run + 1 : 0;
     const placed = g.slide();
-    const now = globalThis.__motionInside();
-    const changed = now.some((p, i) => p !== inside[i]);
-    inside = now;
+    const changed = globalThis.__staticDraws > draws;
     if (placed.length > 0) {
       sliding += 1;
       drawn += changed ? 1 : 0;
@@ -12472,7 +12475,7 @@ for (const mode of ['hd', 'wide']) {
       return [globalThis.__slideCalls, g.slide_version() === version, g.sliding()];
     });
     assert.deepEqual(settled, [0, true, false], `${mode}: no slide drawn once settled`);
-    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + out.sliding + after.sliding} frames with a slide placed, ${step.out.drawn + out.drawn + after.drawn} of them drawing a moved map, ${after.along} of the return step's moving back; the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
+    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + out.sliding + after.sliding} frames with a slide placed, ${step.out.drawn + out.drawn + after.drawn} of them drawing the static layer canvas, ${after.along} of the return step's drawing it moved back; the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
     await context.close();
   }, { needs: h.haveHfes });
 }
