@@ -43,7 +43,7 @@ mod party;
 mod run;
 mod script;
 pub(crate) mod seams;
-mod start;
+pub(crate) mod start;
 pub mod text;
 mod vars;
 

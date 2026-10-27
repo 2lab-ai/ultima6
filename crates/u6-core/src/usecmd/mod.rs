@@ -33,9 +33,9 @@
 //! (kegs 0x12db7e / 0x12d9ee, horses 0x12f6ee / 0x12f8fe) are `objects::commands`' ports; the
 //! type switch calls them there (integration M2: one implementation per address).
 
-mod cases;
+pub(crate) mod cases;
 pub mod defs;
-mod dispatch;
+pub(crate) mod dispatch;
 mod food;
 mod mech;
 mod misc;

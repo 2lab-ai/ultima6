@@ -223,6 +223,28 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
     printf(state, io, &fmt, args).await;
 }
 
+/// 0x116084's count of the casts of `spell` the carried reagents of `actor` allow: the least
+/// count over its reagents (quality 0), 99 when it needs none; Help (7) and Armageddon (0x70)
+/// always 1. `None` for a spell without reagents other than those two (0x116084 then prints
+/// nothing and leaves the line's count as it was).
+pub(crate) fn casts_of(s: &State, actor: Slot, spell: u16) -> Option<i16> {
+    let mask = s.magic.tables.mask(usize::from(spell));
+    if mask == 0 && spell != 7 && spell != 0x70 {
+        return None;
+    }
+    let mut count = 99i16;
+    for i in 0..8 {
+        if mask >> i & 1 != 0 {
+            let kind = s.magic.tables.reagents[i];
+            count = count.min(carried_count(&s.objects, actor, kind, 0));
+        }
+    }
+    if spell == 7 || spell == 0x70 {
+        count = 1;
+    }
+    Some(count)
+}
+
 /// Original: 0x116084 (magic: casts of `spell` the carried reagents allow, kept for page line
 /// `line` and printed)
 ///
@@ -232,23 +254,9 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
 pub async fn reagent_count(state: &RefCell<State>, io: &Io, actor: Slot, spell: u16, line: i16) {
     let count = {
         let mut s = state.borrow_mut();
-        let mask = s.magic.tables.mask(usize::from(spell));
-        if mask == 0 && spell != 7 && spell != 0x70 {
+        let Some(count) = casts_of(&s, actor, spell) else {
             return;
-        }
-        let mut count = 99i16;
-        for i in 0..8 {
-            if mask >> i & 1 != 0 {
-                let kind = s.magic.tables.reagents[i];
-                let n = carried_count(&s.objects, actor, kind, 0);
-                if n < count {
-                    count = n;
-                }
-            }
-        }
-        if spell == 7 || spell == 0x70 {
-            count = 1;
-        }
+        };
         if let Some(b) = usize::try_from(line)
             .ok()
             .and_then(|i| s.magic.page_reagents.get_mut(i))

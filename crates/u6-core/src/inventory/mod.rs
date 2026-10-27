@@ -38,7 +38,7 @@
 
 mod panel;
 mod portrait;
-mod ready;
+pub(crate) mod ready;
 #[cfg(test)]
 mod real_data;
 mod seams;

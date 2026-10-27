@@ -155,6 +155,84 @@ pub fn list_weapons(s: &mut State) {
     }
 }
 
+/// 0x124caa (pseudocode l.10-18): the party is aboard (A4-0x7b7a = the party size) a vessel other
+/// than a ship with cannons (0x19c): refused before the target is read.
+pub(crate) fn refused_aboard(s: &State) -> bool {
+    let p = &s.actors.party;
+    p.leader_index == p.size && kind(s, leader(s)) != 0x19c
+}
+
+/// 0x124a98 / 0x124232: `attacker` has a bow or crossbow of type `wt` and no arrows (0x37) or
+/// bolts (0x38) for it (0x116526 over what it carries).
+pub(crate) fn no_ammo(s: &mut State, attacker: i16, wt: u16) -> bool {
+    ammo_type(wt).is_some_and(|ammo| objects::find_child(&mut s.objects, attacker, ammo, -1) < 0)
+}
+
+/// 0x124232: (x, y) is farther from `attacker` (the A4-0x69a0 distance, 0x124e0e) than
+/// `weapon`'s range (0x12271e).
+pub(crate) fn out_of_range(s: &State, attacker: i16, x: i16, y: i16, weapon: i16) -> bool {
+    let (ax, ay) = pos(s, attacker);
+    leaves::cell_distance(s, x, y, ax, ay) > leaves::range(s, weapon)
+}
+
+/// 0x124232: a weapon of type `wt` used (dx, dy) off flies as a missile: any but 0x28 and 0x2f
+/// used past the next cell, and the missile weapons always.
+fn flies(wt: u16, dx: i16, dy: i16) -> bool {
+    let adjacent = (-1..=1).contains(&dx) && (-1..=1).contains(&dy);
+    wt != 0x28 && wt != 0x2f && (!adjacent || MISSILE_WEAPONS.contains(&wt))
+}
+
+/// What stops one weapon's attack before any draw (0x124a98, 0x124232).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WeaponRefusal {
+    /// A bow or crossbow without its ammunition.
+    Ammo,
+    /// The cell is out of the weapon's range.
+    Range,
+    /// A foe next to the attacker stops the missile (0x12276a).
+    Blocked,
+}
+
+/// Port-only (spec 17): the first refusal `weapon` meets at the selected cell (A4-0x2f02 /
+/// -0x2f00) in the order 0x124a98 and 0x124232 test them: its ammunition, the range, a foe in
+/// the way of a missile. Writes the location cursor of the `State` it is given (0x116526).
+pub(crate) fn weapon_refusal_on(s: &mut State, weapon: i16) -> Option<WeaponRefusal> {
+    let attacker = leader(s);
+    let (x, y) = s.ui.input.target;
+    let wt = kind(s, weapon);
+    let (ax, ay) = pos(s, attacker);
+    if no_ammo(s, attacker, wt) {
+        Some(WeaponRefusal::Ammo)
+    } else if out_of_range(s, attacker, x, y, weapon) {
+        Some(WeaponRefusal::Range)
+    } else if flies(wt, x.wrapping_sub(ax), y.wrapping_sub(ay)) && interferes(s, attacker) {
+        Some(WeaponRefusal::Blocked)
+    } else {
+        None
+    }
+}
+
+/// Port-only (spec 17): Attack's refusal at the selected cell when every weapon 0x1249de lists
+/// (bare hands when none) refuses there, the first weapon's; `None` when one can strike. Writes
+/// the `State` it is given (the weapon list, its line queued, the location cursor).
+pub(crate) fn refusal_on(s: &mut State) -> Option<WeaponRefusal> {
+    list_weapons(s);
+    let attacker = leader(s);
+    let weapons: Vec<i16> = if s.combat.weapon_count == 0 {
+        vec![attacker]
+    } else {
+        let n = usize::try_from(s.combat.weapon_count).unwrap_or(0).min(8);
+        s.combat.weapons[..n].to_vec()
+    };
+    let refusals: Vec<Option<WeaponRefusal>> =
+        weapons.iter().map(|&w| weapon_refusal_on(s, w)).collect();
+    if refusals.iter().all(Option::is_some) {
+        refusals[0]
+    } else {
+        None
+    }
+}
+
 /// Original: 0x124caa (combat: the Attack command)
 ///
 /// The command word (A4-0x769b); refused aboard ship unless the vessel has cannons (0x19c),
@@ -171,8 +249,7 @@ pub async fn attack(state: &RefCell<State>, io: &Io) {
     let aboard = {
         let mut s = state.borrow_mut();
         say(&mut s, ATTACK_WORD, vec![]);
-        let p = &s.actors.party;
-        let aboard = p.leader_index == p.size && kind(&s, leader(&s)) != 0x19c;
+        let aboard = refused_aboard(&s);
         if aboard {
             say(&mut s, DASH, vec![]);
             say(&mut s, NOT_ABOARD, vec![]);
@@ -245,11 +322,7 @@ pub fn attack_with_weapon(s: &mut State) {
     let attacker = leader(s);
     let weapon = current_weapon(s, attacker);
     let wt = kind(s, weapon);
-    let out_of_ammo = match ammo_type(wt) {
-        Some(ammo) => objects::find_child(&mut s.objects, attacker, ammo, -1) < 0,
-        None => false,
-    };
-    if out_of_ammo {
+    if no_ammo(s, attacker, wt) {
         say(s, if is_bow(wt) { NO_ARROWS } else { NO_BOLTS }, vec![]);
     } else {
         let sel = s.ui.input.selection;
@@ -415,13 +488,11 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
     let (mut x, mut y) = (x, y);
     let (ax, ay) = pos(s, attacker);
     let a = attacker as usize;
-    if leaves::cell_distance(s, x, y, ax, ay) > leaves::range(s, weapon) {
+    if out_of_range(s, attacker, x, y, weapon) {
         return 2;
     }
     let wt = kind(s, weapon);
-    if let Some(ammo) = ammo_type(wt)
-        && objects::find_child(&mut s.objects, attacker, ammo, -1) < 0
-    {
+    if no_ammo(s, attacker, wt) {
         return 0;
     }
     let ddx = x.wrapping_sub(ax);
@@ -451,8 +522,7 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
     }
     crate::main_loop::after_turn_refresh(s);
     s.combat.hit = s.ui.input.selection;
-    let adjacent = (-1..=1).contains(&ddx) && (-1..=1).contains(&ddy);
-    let flies = wt != 0x28 && wt != 0x2f && (!adjacent || MISSILE_WEAPONS.contains(&wt));
+    let flies = flies(wt, ddx, ddy);
     if flies && interferes(s, attacker) {
         return 1;
     }

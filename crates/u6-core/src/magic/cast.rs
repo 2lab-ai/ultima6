@@ -66,30 +66,29 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
     printf(state, io, &fmt, args).await;
 }
 
+/// 0x11af10 (pseudocode l.13-30): the caster's readied spellbooks (type 0x39, status 0x18 =
+/// 0x18), the first and the second found (a third replaces the second, as the original's second
+/// register); none gives the no-book line.
+pub(crate) fn readied_books(s: &mut State) -> Vec<Slot> {
+    let actor = Slot::from(caster(s) as i16);
+    let mut found: Vec<Slot> = Vec::new();
+    let mut o = crate::objects::first_child(&mut s.objects, actor);
+    while o >= 0 {
+        if s.objects.status(o) & WHERE_MASK == READIED && s.objects.kind(o) == SPELLBOOK {
+            found.truncate(1);
+            found.push(o);
+        }
+        o = crate::objects::next_child(&mut s.objects);
+    }
+    found
+}
+
 /// Original: 0x11af10 (magic: Cast command: the caster's readied spellbooks, then 0x11abd0)
 ///
 /// The caster's contents are walked (0x10ae52 / 0x10aed6); readied objects of type 0x39 are
 /// the books, the first and the second found. Without one: the no-book line (0x115b36).
 pub async fn cast(state: &RefCell<State>, io: &Io) {
-    let books = {
-        let mut s = state.borrow_mut();
-        let actor = Slot::from(caster(&s) as i16);
-        let mut found: Vec<Slot> = Vec::new();
-        let mut o = crate::objects::first_child(&mut s.objects, actor);
-        while o >= 0 {
-            if s.objects.status(o) & WHERE_MASK == READIED && s.objects.kind(o) == SPELLBOOK {
-                if found.is_empty() {
-                    found.push(o);
-                } else {
-                    // A third book replaces the second, as the original's second register.
-                    found.truncate(1);
-                    found.push(o);
-                }
-            }
-            o = crate::objects::next_child(&mut s.objects);
-        }
-        found
-    };
+    let books = readied_books(&mut state.borrow_mut());
     match books.as_slice() {
         [] => print_at(state, io, MSG_NO_BOOK, &[]).await,
         [a] => book_cast(state, io, *a, 0).await,
@@ -171,22 +170,13 @@ pub async fn book_cast(state: &RefCell<State>, io: &Io, book1: Slot, book2: Slot
     let actor = {
         let mut s = state.borrow_mut();
         s.magic.books = [book1, book2];
-        if s.actors.timers[NEGATE_TIMER] != 0 {
-            None
-        } else {
-            Some(caster(&s))
-        }
+        if negated(&s) { None } else { Some(caster(&s)) }
     };
     let Some(actor) = actor else {
         print_at(state, io, MSG_NO_MAGIC, &[]).await;
         return;
     };
-    let any = {
-        let mut s = state.borrow_mut();
-        load_book(&mut s);
-        s.magic.known.iter().any(|&w| w != 0)
-    };
-    if !any {
+    if !has_spells(&mut state.borrow_mut()) {
         print_at(state, io, MSG_NO_SPELLS, &[]).await;
         return;
     }
@@ -242,33 +232,100 @@ pub async fn book_cast(state: &RefCell<State>, io: &Io, book1: Slot, book2: Slot
 
 /// The level, magic-point and reagent checks of 0x11abd0, with their messages.
 async fn checks_pass(state: &RefCell<State>, io: &Io, actor: u16, spell: u16, circle: u16) -> bool {
-    let (level, points, reagents) = {
-        let s = state.borrow();
-        let a = usize::from(actor);
-        let line = page_line(&s.magic, spell);
-        // Line -1 reads the byte before the counts (the last page byte, A4+0x17ff).
-        let count = if line < 0 {
-            s.magic.page[7]
-        } else {
-            s.magic.page_reagents[line as usize]
-        };
-        (
-            u16::from(s.actors.attrs.level[a]),
-            u16::from(s.actors.attrs.magic[a]),
-            count & 0x7f,
-        )
-    };
-    let refusal = if level < circle {
+    let r = checks_refusal(&state.borrow(), actor, spell, circle);
+    let refusal = if r == Some(Refusal::Level) {
         MSG_LEVEL_LOW
-    } else if points < circle {
+    } else if r == Some(Refusal::Points) {
         MSG_NO_POINTS
-    } else if reagents == 0 {
+    } else if r == Some(Refusal::Reagents) {
         MSG_NO_REAGENTS
     } else {
         return true;
     };
     print_at(state, io, refusal, &[]).await;
     false
+}
+
+/// What Cast refuses before a spell runs (0x11af10, 0x11abd0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// No readied spellbook (the no-book line).
+    Book,
+    /// The Negate Magic timer runs.
+    Negate,
+    /// The books hold no spell.
+    Spells,
+    /// The caster's level is below the spell's circle.
+    Level,
+    /// Fewer magic points than the circle.
+    Points,
+    /// The page line's reagent count is 0.
+    Reagents,
+}
+
+/// 0x11abd0 (pseudocode l.24): the Negate Magic timer (A4-0x7b65) runs.
+pub(crate) fn negated(s: &State) -> bool {
+    s.actors.timers[NEGATE_TIMER] != 0
+}
+
+/// 0x11abd0 (pseudocode l.27-34): the books (`magic.books`) loaded (0x115c1a), they hold a spell.
+pub(crate) fn has_spells(s: &mut State) -> bool {
+    load_book(s);
+    s.magic.known.iter().any(|&w| w != 0)
+}
+
+/// Original: 0x11abd0 (magic: the checks after the choice, pseudocode l.97-108: `actor`'s level
+/// against `spell`'s circle, the magic points, the reagent count of the page line that shows the
+/// spell (0x11612e; line -1 reads the byte before the counts, the last page byte A4+0x17ff))
+pub(crate) fn checks_refusal(s: &State, actor: u16, spell: u16, circle: u16) -> Option<Refusal> {
+    let a = usize::from(actor);
+    let line = page_line(&s.magic, spell);
+    let count = if line < 0 {
+        s.magic.page[7]
+    } else {
+        s.magic.page_reagents[line as usize]
+    };
+    if u16::from(s.actors.attrs.level[a]) < circle {
+        Some(Refusal::Level)
+    } else if u16::from(s.actors.attrs.magic[a]) < circle {
+        Some(Refusal::Points)
+    } else if count & 0x7f == 0 {
+        Some(Refusal::Reagents)
+    } else {
+        None
+    }
+}
+
+/// Port-only (spec 17): what Cast at a map target (the book's current spell on the cell,
+/// 0x11abd0 pseudocode l.41-49) refuses. Writes the `State` it is given, as the command does
+/// (the books, their loading 0x115da4, the page's lines and counts 0x116218 / 0x116084, the
+/// current spell's mark): the context menu passes its own copy. No book, the negate timer, no
+/// spells, then the checks on that page ([`checks_refusal`]).
+pub(crate) fn refusal_at_target_on(s: &mut State) -> Option<Refusal> {
+    let books = readied_books(s);
+    let (Some(&b1), b2) = (books.first(), books.get(1).copied().unwrap_or(0)) else {
+        return Some(Refusal::Book);
+    };
+    s.magic.books = [b1, b2];
+    if negated(s) {
+        return Some(Refusal::Negate);
+    }
+    if !has_spells(s) {
+        return Some(Refusal::Spells);
+    }
+    let actor = caster(s);
+    let (lines, _) = super::book::layout(&mut s.magic);
+    let current = s.magic.current_spell();
+    for (i, &spell) in lines.iter().enumerate() {
+        s.magic.page[i] = spell as u8;
+        if let Some(n) = super::book::casts_of(s, Slot::from(actor as i16), spell) {
+            s.magic.page_reagents[i] = n as u8;
+        }
+        if spell == current {
+            s.magic.page_reagents[i] |= 0x80;
+        }
+    }
+    checks_refusal(s, actor, current, current / 16 + 1)
 }
 
 /// Original: 0x11615a (magic: use one of each reagent spell `spell` needs from `actor`, and

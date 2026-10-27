@@ -61,6 +61,17 @@ pub struct InputState {
     pub target_void: bool,
     /// Original: A4-0x7a56 (refresh the map view while the cursor idles)
     pub idle_refresh: bool,
+    /// Port-only (spec 17): the engine is blocked inside the event wait 0x106bbc
+    /// ([`super::target::wait_event`]): set at its entry, put back as it was when it ends (a
+    /// more prompt waits inside an outer wait). A context menu's held target press goes in only
+    /// while it is set ([`super::menu::target_read`]).
+    pub in_wait: bool,
+    /// Port-only (spec 17): the event waits entered while the command loop reads a command
+    /// (A4-0x7a2c set), wrapping. Not one per prompt: the key read enters a wait again after each
+    /// panel code it handles itself (`ui/wait.rs` `read_key`), and a more prompt there waits too.
+    /// Any wait at the prompt after a context menu's icon press drops its held target press
+    /// ([`super::menu::Run`]): the command it started is over.
+    pub prompt_reads: u32,
 }
 
 impl InputState {

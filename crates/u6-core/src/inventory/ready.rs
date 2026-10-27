@@ -206,6 +206,11 @@ fn place(s: &mut State, obj: Slot, ty: u16, strength: u8) -> Option<u32> {
     None
 }
 
+/// 0x1122dc's first test: `obj` is the amulet of submission (0x4c) readied: it stays.
+pub(crate) fn stays(s: &State, obj: Slot) -> bool {
+    s.objects.place(obj) == READIED && s.objects.kind(obj) == AMULET
+}
+
 /// Original: 0x1122dc (inventory: what Unready meets first: 1 = the amulet of submission (0x4c)
 /// stays, with its message; 2 = a lit torch burns out (removed); else 0)
 pub async fn unready_check(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
@@ -217,7 +222,7 @@ pub async fn unready_check(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
     if place != READIED {
         return 0;
     }
-    if ty == AMULET {
+    if stays(&state.borrow(), obj) {
         // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
         // it when it has one ([`LABELS`], [`crate::locale::shown`]).
         let line = pointed_string(io, A4.wrapping_sub(PTR_AMULET));
