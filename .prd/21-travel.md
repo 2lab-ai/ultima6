@@ -6,9 +6,9 @@ tags: [ultima6, input, pathfinding, ui]
 
 # 21 — Travel ("여기로 이동")
 
-Status: planned (2026-10-28; built in round 2 as unit M4 on `feat/travel` from integ `60f92c6`, shipped when it is
-merged). The owner, 2026-10-28, verbatim: "그리고 우클릭시 여기로 이동도 하나 추가해줘 해당 위치까지 a*로 검색해서
-이동하는 명령". Spec 17's context menu (unit M3, `feat/ingame-menu`) draws the entry; this spec owns the search, the
+Status: planned (2026-10-28; unit M4 on `feat/travel` from integ `60f92c6`: round 1 `db3f01b`, round 2 the review's
+fixes; shipped when it is merged; the menu entry is wired in a later round, after this merges). The owner,
+2026-10-28, verbatim: "그리고 우클릭시 여기로 이동도 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령". Spec 17's context menu (unit M3, `feat/ingame-menu`) draws the entry; this spec owns the search, the
 walk and the API the entry calls. Related: spec 19 (the turn model, O1c held keys = unit K2), spec 20 (smooth motion).
 
 Evidence labels: **read** = `file:line` or an original address; **measured** = printed by a test named here (counts
@@ -37,17 +37,19 @@ only); **cited** = an outside source; `[추정]` = inference.
 
 ### Ultima VI: move costs and diagonals (read)
 
-- **The step rule is the player's step 0x11d4ee** (`actors/party.rs:284` `player_step`; lines on this branch): the leader may enter (x, y)
-  when 0x11b1c0 allows it (`actors/walk.rs:322` `can_move_to`: the map tile, then each object there; party members
-  swap); a diagonal also needs one of its two orthogonal neighbours enterable (`party.rs:399` `step_test`, which `player_step` runs at `:324`; before this unit it was
-  inline there). With a clicked
-  target (the mouse walk only, `work.mouse_walk`) a blocked diagonal slides along an axis (`party.rs:417` `slide`);
-  a key never sets that flag (`ui/target.rs:313-315` clears the target on any key).
+- **The step rule is the player's step 0x11d4ee** (`actors/party.rs:284` `player_step`; lines on this branch): the
+  leader may enter (x, y) when 0x11b1c0 allows it (`actors/walk.rs:326` `can_move_to`: the map tile, then each object
+  there; party members swap); a diagonal also needs one of its two orthogonal neighbours enterable (`party.rs:399`
+  `step_test`, which `player_step` runs at `:324` with the damaging-tile switch clear; before this unit it was inline
+  there). While a pointer button walks (`work.mouse_walk`, set by a press only, `ui/target.rs:261-262`, cleared once
+  the buttons are up, `:255-258`) a blocked diagonal slides along an axis (`party.rs:417` `slide`); a key clears the
+  clicked target `work.mouse_target` (`ui/target.rs:313-315`).
 - **The cost** (`party.rs:472` `pay_step`): on foot the step pays the move cost of the tile it leaves, 0x11ef84
   (`walk.rs:217` `spend_tile_cost`: 5, plus the high nibble of flags1 of the map tile and of every non-impassable
   object tile there), and 5 more on a diagonal. 0x11c650 (`walk.rs:179` `spend_mp`) then halves it for type 0x1af or
-  the party haste, doubles it under the slow timer, and floors it at 1: per-actor factors, the same for every step of
-  a walk. A turn ends when the scheduler picks the leader again (spec 19), so the points are the walk's game time.
+  the party haste, doubles it under the slow timer, and floors it at 1, per call: per-actor factors, the same for
+  every step of a walk; a diagonal pays in two calls (`party.rs:487-488`). A turn ends when the scheduler picks the
+  leader again (spec 19), so the points are the walk's game time.
 - **The original's own pathfinder** is the NPCs': a bucket-queue Dijkstra over the cost map 0x1206e2 builds, four
   directions only, inside the window grid, 40 × 40 in Original (`actors/path.rs:1-8`, `:94`, `:18-21` `DX4`).
 - **Keys and directions.** The command loop takes eight direction codes as the walk (0x106c6c, `ui/target.rs:62-71`
@@ -71,7 +73,7 @@ only); **cited** = an outside source; `[추정]` = inference.
 - **The search's cost vs the original's NPC cost map.** The NPC map (0x1206e2) charges nibble + 1 per cell, lets a
   door through below frame 8 (an NPC opens a closed door on its way) and blocks the cell before a door
   (`actors/path.rs:91-92`). The travel search charges what the player's step pays (above) and lets a door through
-  only where the step rule does: open (frames 0..3; 4..7 closed, 8.. locked, `walk.rs:510` `door_at_actor` writes
+  only where the step rule does: open (frames 0..3; 4..7 closed, 8.. locked, `walk.rs:514` `door_at_actor` writes
   4 × closed + side). It plans the player's steps, and the player opens a closed door with Use first. The two differ
   on purpose.
 
@@ -83,21 +85,27 @@ keys in `engine.rs` `Key` and `ui/input.rs` `key_code`; the exports in `crates/u
 travel are unrelated: `map::travel` (level moves), `usecmd::travel` (vessels), `magic::travel` (gates).
 
 **The search.** A* from the leader's cell to the target cell on the party's level.
-- A step from cell c in direction d (eight, 0 = north clockwise, `walk.rs:19-20`) is valid exactly when the player's
+- A step from cell c in direction d (eight, 0 = north clockwise, `walk.rs:20-21`) is valid exactly when the player's
   step would take it: `party::step_test`, the test `player_step` itself runs, fed `can_move_to` for the leader. The
   search runs it on one copy of the state with the hiccup flag (A4-0x6a9c `work.hic`) clear, so no line is queued,
   and keeps each cell's answer for the search.
-- Its cost is `walk::tile_cost` of c plus `party::DIAGONAL_COST` on a diagonal: what `pay_step` charges on foot,
-  before 0x11c650's per-actor factors. Ties go to fewer steps. The estimate is 5 × (|dx| + |dy|) points and the
-  Chebyshev distance in steps: neither overestimates, so the path found is a cheapest one.
+- Its cost is `walk::tile_cost` of c, plus the leader's own object tile where the leader does not stand now (0x11ef84
+  counts every object tile on the cell it leaves, the leader's included: `walk::object_cost`), plus
+  `party::DIAGONAL_COST` on a diagonal: what `pay_step` charges on foot before 0x11c650's factors. The factors are left
+  out: under haste or slow each call rounds on its own, so a step pays within a point of the factor times the search's
+  points, and the path is a cheapest one in unscaled points. Ties go to fewer steps. The estimate is 5 × (|dx| + |dy|)
+  points and the Chebyshev distance in steps: neither overestimates, so the path found is a cheapest one.
 - Harm first avoided: the search runs once with the rule's own damaging-tile switch set (A4-0x6a8a `avoid_damage`,
-  the switch NPC steps use, `walk.rs:544` `step`, set at `:558`), which refuses a tile or object with flags1 0x08; only if that finds no path
-  it runs again without it, as a key would walk.
+  the switch NPC steps use, `walk.rs:548` `step`, set at `:562`) on the cell a step enters, which refuses a tile or
+  object with flags1 0x08; a diagonal's two side cells are tested without it, as the key's step tests them. Only if
+  that finds no path it runs again without the switch, as a key would walk.
 - Bound: the window, `geom::WINDOW` cells a side round its origin (40 × 40 in Original, 60 × 60 in Wide), the tiles
-  and objects the step rule reads there being loaded; each cell is expanded at most once, so at most `WINDOW²`
-  expansions. A target outside the window is `Far`; no path inside it is `Unreachable`.
-- Reads the state only: the real `State` is unchanged (compared `==` in a test), no RNG is drawn (the copy's `rng`
-  compared too), nothing is saved.
+  and objects the step rule reads there being loaded; each cell is expanded at most once a pass, so at most `WINDOW²`
+  expansions a pass and twice that a plan. A target outside the window is `Far`; no path inside it is `Unreachable`.
+- Reads the state only: the real `State` is unchanged (compared `==` in a test); the plan's copy (`plan` clones, then
+  `plan_on`) draws no RNG and queues no line (its `rng`, `pending_print` and A4-0x7afd compared, with a barrier 0x1a0,
+  whose refusal prints while the hiccup flag is set, on the search's way); nothing is saved. Each plan and each
+  prompt's step check clone the state once.
 
 **Refusals** (`travel::reachable(&State, (x, y)) -> Option<Reason>`, also what `travel_to` returns):
 `Here` (the leader stands there), `Aboard` (a vessel carries the party: its moves follow the wind and current, not
@@ -106,49 +114,76 @@ the map).
 
 **The walk.** One step per command prompt, entered as a direction key.
 - The command prompt = the command loop reads a command key with keys going through command processing: A4-0x7a2c
-  set (`main.reading == 1`, `main_loop/commands.rs:163-172`) and A4-0x7a42 set (`ui.input.accept`, which the more
-  prompt clears, `ui/print.rs:65-72`).
+  set (`main.reading == 1`, `main_loop/commands.rs:163-172`), A4-0x7a42 set (`ui.input.accept`, which the more
+  prompt clears, `ui/print.rs:65-72`), the line editor off, and no cursor up (`ui.input.targeting == 0`: with Tab's
+  cross-hair, 1, or the panel cursor, 2, a direction key moves the cursor, `ui/target.rs:497`, `:549`).
 - At each tick, before the platform's input is queued, `Engine::tick` asks the travel for a press: when the command
-  prompt is up and no key waits (neither queued nor in this tick's input), it returns the next step's key
+  prompt is up and no key waits (none in this tick's input; in the queue at most the travel's own last press, until the
+  game reads it), it returns the next step's key
   (`Key::Up`..`Key::UpLeft`), which the tick appends to the input. The same tick's poll takes it: the poll, the drain
   (A4-0x7a46), 0x151d00 (arrows) or the keypad code (diagonals), 0x106c6c's `DIRECTION_KEYS`, the walk command
   (`commands.rs:379-382`), `paced_player_step`, the followers' pass, the level test, the world turn and its NPC
   turns, the refresh and the slide of spec 20: everything a key press runs. No state is written by the travel.
-- Before it presses, the travel checks the step on a copy (the same test as the search): a step refused now is a
-  blocked step (below), not a press.
+- Before it presses, the travel checks where the leader stands against the last press (before the first press,
+  against the plan's start: the leader may have moved between the start and the first prompt) and the step on a copy
+  (the same test as the search): a step refused now is a blocked step (below), not a press. Distances are Chebyshev,
+  each axis taken round the level's mask (`map.world_mask`): the cells either side of the seam are one apart.
 
 **Stops** (`travel::End`; the walk ends, nothing is pressed after it):
 1. `Arrived`: the leader stands on the target at a prompt.
 2. `Blocked`: the next step is refused, or the leader did not reach the cell the last step aimed at (refused after
    paying, no wind, a drunk stagger, a swap that went elsewhere): one new plan from where the leader stands; if it
    finds none, or its first step is refused too, stop. The budget is one plan per blockage: a step that lands where
-   it aimed restores it.
+   it aimed restores it. At the first press a leader one cell off the plan's start is a blockage.
 3. `Combat`: combat mode (A4-0x7b84 + 0x78, `work.rs:241`) at a prompt.
 4. `Foe`: a hostile in view at a prompt. Hostile = an actor slot not in the party (status 0x80 clear), not dead
    (status 0x10 clear), aligned evil (status & 0x60 = 0x20) or chaotic (0x60): the alignments 0x12500a lets take a
    good (0x40) actor as a foe (`combat/npc.rs:136-187`). In view = on a view cell the leader sees (`map/view.rs:38`
    `is_visible`, flags bit 0x80) and seen by 0x1224ea (`actors/leaves.rs:118` `can_see`: not invisible, same level).
-5. `Input`: any key, repeat or text in a tick's input (K2's held repeat included), or a pointer button pressed (a
-   bit set that the handler's buttons before the tick did not have). A release or a pointer move is not a stop.
+   Narrower than the game's own enmity: neutrals that attack (worktype 0x9b), fleeing or guarding actors, an attacker
+   out of sight and lost hit points are not read; those reach the travel as combat (3), a prompt (6) or not at all.
+5. `Input`: any key, repeat or text in a tick's input (K2's held repeat included, which the page queues into the
+   tick's input), a pointer button pressed (a bit set that the handler's buttons before the tick did not have), or a
+   key in the queue the travel did not press (given before it started). A release, a pointer move, or a button held
+   down since before (1 then 1) is not a stop.
 6. `Prompt`: a key wait other than the command prompt: the event wait 0x106bbc (`ui.input.in_wait`) or the line
-   editor (`ui.input.line_input`) while the command prompt is not up (a more prompt, a question, a conversation).
+   editor (`ui.input.line_input`) while the command prompt is not up (a more prompt, a question, a conversation, a
+   cursor up).
 7. `Party`: a member the followers' pass moves (worktype 1, on the party's level, free to step: `party::following`)
-   stands more than 8 cells (Chebyshev) from the leader at a prompt; 8 is how far 0x11f0a0 lets a party member end
-   from the leader in combat mode (`walk.rs:552-557`), the original's one leash.
-8. `Displaced`: at a prompt the leader is more than one cell from where it stood when the last step was pressed, or
-   on another level, or another actor leads: not a step's result (a level change on the way, a load, a teleport).
+   stands more than 8 cells (Chebyshev, round the mask) from the leader at a prompt; 8 is how far 0x11f0a0 lets a
+   party member end from the leader in combat mode (`walk.rs:555-560`), the original's one leash.
+8. `Displaced`: at a prompt the leader is more than one cell from where it stood when the last step was pressed (from
+   the plan's start before the first), or on another level, or another actor leads, or a Restore ran since the travel
+   started (`SaveLoad::restores`, counted at the end of `saveload::restore`, `restore.rs:149`; port-only, never
+   saved), wherever it left the leader: not a step's result (a level change on the way, a load, a teleport). A ladder,
+   stairs or a gate as the target ends here, not as `Arrived`: the step onto it changes the level.
 9. `Gone`: no leader, or the game left the command loop's program.
 
 **Determinism and saves.** The travel is engine state (`Engine.travel`), not `State`: never saved, never cloned into a
 save, and a new engine (a load from the page) has none. The game's own Restore takes keys (Ctrl-R and its question),
-which stop it (5, 6). The search and the checks draw no RNG.
+which stop it (5, 6); one run at a turn's end without a key (save mode 0x52, 0x104d98, `commands.rs:667-673`) ends it
+by stop 8. The search and the checks draw no RNG.
 
 **API** (for M3's entry; signatures in the report):
 - `u6_core::actors::travel::reachable(s: &State, target: (u16, u16)) -> Option<Reason>`;
 - `Engine::travel_to(&mut self, target: (u16, u16)) -> Result<(), Reason>`, `Engine::travel_active(&self) -> bool`,
-  `Engine::travel_end(&self) -> Option<End>`;
+  `Engine::travel_end(&self) -> Option<End>`, `Engine::travel_progress(&self) -> Option<&Travel>` (its target and
+  receipts; named apart from spec 17's `Engine::travel()`);
 - u6-web `Game::travel_to(x, y) -> bool` (map cell, the party's level), `Game::travel_active() -> bool`.
 - `Reason::code()` and `End::code()` give stable ASCII codes for the page's words.
+
+**Merge contract with unit M3** (the menu; wired in a later round, not in this unit):
+- Order in a tick: `travel_press` runs on the raw platform input, ahead of the menu's input filter (`popup.input`),
+  so the press that opens or chooses in the menu first stops a travel under way. The menu filters after it, and a
+  chosen "여기로 이동" calls `Engine::travel_to` after that tick's `travel_press` ran.
+- The menu consumes its own choosing press: neither the game's queue nor the new travel sees it. A pointer event stops
+  the travel when it sets a button that the engine's handler buttons before the tick (`Io::handler_pointer`) lack; a
+  menu that keeps the press from the engine also keeps from the travel that press's held moves and its release, or
+  the first held move reads as a new press. The wiring round tests both: the travel survives its choosing press's
+  held moves and release; a later press ends it.
+- Names and types: M3 keeps `Engine::travel()`; this unit's accessor is `Engine::travel_progress()`. M3's cells are
+  `i16`; `travel_to` takes them `as u16` and masks them with the level's mask, so a cell left of x 0 wraps as the
+  map does.
 
 ## Trace (STV, before code)
 
@@ -164,10 +199,11 @@ Scenario: the owner right-presses an open cell beyond a door and chooses "여기
 3. **Layer flow.**
    - 3a `Travel::start` → `plan(&State, leader, from, target)`: `State.clone()` → `work.hic = 0` → `search(copy,
      grid, from, target)` with `avoid_damage = 1`, else again with 0 → `Vec<dir>` (next step last); `Travel { target,
-     z, leader, path, pressed: None, replanned: false, steps, presses, plans }` → `Engine.travel = Some(..)`,
-     `Engine.travel_end = None`.
-   - 3b each `Engine::tick(input, ms)`: `travel_press(input)` → `Travel::next(&State, Polled { input facts, queued,
-     buttons })` → `Hold` | `Press(Key)` | `Stop(End)`; on `Press(k)`: `input ++ [InputEvent::Key(k)]` → `io.events`.
+     z, leader, path, start, restores, pressed: None, replanned: false, steps, presses, plans }` →
+     `Engine.travel = Some(..)`, `Engine.travel_end = None`.
+   - 3b each `Engine::tick(input, ms)`: `travel_press(input)` → `Travel::next(&State, Polled { input, buttons, queued,
+     foreign })` → `Hold` | `Press(Key)` | `Stop(End)`; on `Press(k)`: `input ++ [InputEvent::Key(k)]` → `io.events`,
+     `Engine.travel_own = Some(k)` while it waits there.
    - 3c the game future, polled in the same tick: `command_loop` → `read_key` → `wait_event` → `idle_poll` → `poll`
      → `key_code(k)` → code → `map_key` → `DIRECTION_KEYS` → `ui.input.direction = d`, code WALK → `dispatch` →
      `paced_player_step(d)` → `player_step` (`step_test` → `can_move_to` …, `pay_step`, move, `follow`,
@@ -184,19 +220,32 @@ Scenario: the owner right-presses an open cell beyond a door and chooses "여기
 ## Acceptance
 
 1. Unit (crafted `State`): the search goes round obstacles and water, through an open door and not a closed one, takes
-   a diagonal only past an open side (the corner rule), returns `Unreachable` for a walled-off cell, stays within
-   `WINDOW²` expansions, and leaves the `State` and its RNG as they were.
+   a diagonal only past an open side (the corner rule) and past harm beside it as the key's one step, returns
+   `Unreachable` for a walled-off cell, stays within `WINDOW²` expansions a pass, and leaves the `State` and its RNG
+   as they were (the plan's copy too: no RNG, no line).
 2. Every planned path, walked by `player_step` on a copy step by step, ends on the target (the path = the keys).
-3. Each stop (1–9) ends the walk in an engine test, and each refusal shows in `reachable`.
+3. Each stop (1–9) ends the walk in an engine test, and each refusal shows in `reachable`. Each guard on its own: a
+   more prompt with the read up, the line editor, the cross-hair, the panel cursor; another leader, no leader; a
+   Restore leaving the leader where the last press found it; a key waiting that is not the travel's (its own waiting
+   key holds it); a held button (1 then 1) does not stop it, a second button does; an input stops it in its own tick
+   with no press, at the prompt and mid-turn; the first press checks the plan's start; each of two blockages gets its
+   own plan; distances wrap at the level's mask (both masks, both axes, both ways; a stagger across the seam plans
+   again, a member across it is beside the leader).
 4. The four diagonal keys read as the walk command in their direction, past the raw keymap
    (`ui/tests/input_tests.rs`); a diagonal into a shut corner is refused by `player_step` with no points spent, no
-   move and no line printed.
+   move and no line printed or queued. The keys' oracle is a table of its own (key → step on the map), not
+   `key_of`. Real data: the raw-key table gives no diagonal code in its plain, shift or control column (counts).
 5. Real data (the castle start state of spec 19's held-key tests): the party travels across a room to a closed door,
    opens it with `u` and a press on it, and travels through it to a cell beyond; each leg arrives with one key a
-   planned step and one move a key; the same inputs given at the same ticks from the same start leave an equal
-   `State` and frame (no shortcut); steps, turns (prompts), clock minutes and engine ms printed as counts.
-6. The page's `Game::travel_to` starts exactly what `reachable` allows, and a refusal leaves a travel under way as it
-   was (`crates/u6-web/src/lib.rs` test `travel_to_starts_exactly_what_reachable_allows`).
+   planned step and one move a key, diagonal keys among them; the same inputs given at the same ticks from the same
+   start show an equal frame at every tick and leave an equal `State` (no shortcut); steps, turns (prompts), clock
+   minutes and engine ms printed as counts, with `real receipt: ran` or `skipped`. Also real: a cursor up (Tab once,
+   twice) ends a travel as `Prompt` with no key and the cursor where it was; a Restore at the first turn's end ends
+   it as `Displaced` on the start cell.
+6. The page's `Game::travel_to` starts exactly what `reachable` allows (`crates/u6-web/src/lib.rs` test
+   `travel_to_starts_exactly_what_reachable_allows`, in the castle fight: refusals only); past the fight a reachable
+   cell starts, a refused request leaves that travel walking to its target, which it reaches, and a repeat queued as
+   the page queues it ends the next (`travel_to_starts_a_reachable_cell_and_a_refusal_leaves_it_walking`).
 7. RED: each guard removed fails its test.
 
 ## Not settled
@@ -204,3 +253,6 @@ Scenario: the owner right-presses an open cell beyond a door and chooses "여기
 - A step whose cell an NPC just entered replans at once; Exult waits and retries first. If replans feel jumpy in towns,
   a one-turn retry (a Pass) is the alternative, at the cost of a command the player did not enter.
 - No travel across a level change (ladders, stairs, gates): the walk ends `Displaced` there.
+- Cadence: one step a command prompt is as fast as the game turns. Above about 4.3× game speed (review estimate,
+  `[추정]`) that is faster than K2's held key, which paces its repeats at `MIN_STEP_MS` 150 (unit K2, not on this
+  branch). Follow-up once K2 merges: the travel shares K2's pacing.

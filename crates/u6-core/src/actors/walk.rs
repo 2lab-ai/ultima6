@@ -230,12 +230,16 @@ pub(crate) fn tile_cost(s: &State, x: u16, y: u16, z: u16) -> i16 {
         cost += i16::from(f >> 4);
     }
     for Found { id, .. } in seams::objects_at(s, x, y, z) {
-        let f = flags1(s, word_tile(s, seams::obj_word(s, id)));
-        if f & 0x02 == 0 {
-            cost += i16::from(f >> 4);
-        }
+        cost += object_cost(s, seams::obj_word(s, id));
     }
     cost
+}
+
+/// What one object of type/frame `word` adds to 0x11ef84's cost of its cell: the cost nibble of
+/// its tile, unless the tile is impassable.
+pub(crate) fn object_cost(s: &State, word: u16) -> i16 {
+    let f = flags1(s, word_tile(s, word));
+    if f & 0x02 == 0 { i16::from(f >> 4) } else { 0 }
 }
 
 /// Original: 0x11b92a (actors: is the actor outside the map-window cache)

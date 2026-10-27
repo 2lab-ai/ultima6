@@ -1,12 +1,12 @@
 //! Port-only (spec 21): the travel to a pressed map cell ("여기로 이동").
 //!
 //! The search is an A* over the player's own step rule ([`super::party::step_test`] fed
-//! [`super::walk::can_move_to`] for the leader) and its cost ([`super::walk::tile_cost`] of the
-//! cell left, [`super::party::DIAGONAL_COST`] more on a diagonal), inside the map window. The walk
-//! is one step per command prompt, entered as that step's direction key ([`Travel::next`], which
-//! [`crate::Engine::tick`] asks before it queues a tick's input), so every rule, turn and picture
-//! of a key's step applies. The travel reads the state only, draws no RNG and lives in the engine,
-//! not in the savegame.
+//! [`super::walk::can_move_to`] for the leader) and its cost (0x11ef84's of the cell left with the
+//! leader on it, [`super::party::DIAGONAL_COST`] more on a diagonal), inside the map window. The
+//! walk is one step per command prompt, entered as that step's direction key ([`Travel::next`],
+//! which [`crate::Engine::tick`] asks before it queues a tick's input), so every rule, turn and
+//! picture of a key's step applies. The travel reads the state only, draws no RNG and lives in the
+//! engine, not in the savegame.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -83,8 +83,8 @@ pub enum End {
     Prompt,
     /// A following member stands more than [`LEASH`] cells from the leader.
     Party,
-    /// The leader is not where a step could have put it (a level change, a load, a teleport,
-    /// another leader).
+    /// The leader is not where a step could have put it (a level change, a teleport, another
+    /// leader), or a Restore ran (a load: [`crate::saveload::SaveLoad::restores`] moved).
     Displaced,
     /// No leader, or the game left the command loop's program.
     Gone,
@@ -179,39 +179,68 @@ impl Window {
     }
 }
 
-/// The answers of the step rule for one search: each window cell's [`walk::can_move_to`] for the
-/// leader on the search's copy of the state, and each cell's [`walk::tile_cost`], asked once.
+/// The answers of the step rule for one pass of the search: each window cell's
+/// [`walk::can_move_to`] for the leader on the search's copy of the state, with the pass's
+/// damaging-tile switch (A4-0x6a8a) and without it, and each cell's cost, asked once.
 struct Grid {
     w: Window,
     leader: u16,
     z: u16,
-    open: Vec<Option<bool>>,
+    /// The pass's switch: 1 refuses harm on the cells a step enters.
+    avoid: u16,
+    /// The leader's own cell, and what its tile adds to 0x11ef84's cost of any cell it leaves.
+    home: Option<usize>,
+    own: i16,
+    strict: Vec<Option<bool>>,
+    plain: Vec<Option<bool>>,
     cost: Vec<Option<i16>>,
 }
 
 impl Grid {
-    fn new(w: Window, leader: u16, z: u16) -> Grid {
+    fn new(c: &State, w: Window, leader: u16, avoid: u16) -> Grid {
+        let p = c.objects.location[usize::from(leader)];
         Grid {
             w,
             leader,
-            z,
-            open: vec![None; WINDOW * WINDOW],
+            z: walk::party_z(c),
+            avoid,
+            home: w.cell((p.x, p.y)),
+            own: walk::object_cost(c, c.objects.type_frame[usize::from(leader)]),
+            strict: vec![None; WINDOW * WINDOW],
+            plain: vec![None; WINDOW * WINDOW],
             cost: vec![None; WINDOW * WINDOW],
         }
     }
 
-    /// May the leader enter map (x, y): 0x11b1c0 on the copy; a cell outside the window is not
-    /// searched.
-    fn enter(&mut self, c: &mut State, x: u16, y: u16) -> bool {
+    /// May the leader enter map (x, y): 0x11b1c0 on the copy, with the pass's switch when
+    /// `strict` (the cell a step enters), else without it (the side cells a diagonal looks at,
+    /// as a key's step tests them: 0x11d4ee calls 0x11b1c0 with the switch clear); a cell outside
+    /// the window is not searched.
+    fn enter(&mut self, c: &mut State, x: u16, y: u16, strict: bool) -> bool {
         let Some(i) = self.w.cell((x, y)) else {
             return false;
         };
-        *self.open[i].get_or_insert_with(|| walk::can_move_to(c, self.leader, x, y))
+        let (avoid, answers) = if strict && self.avoid != 0 {
+            (self.avoid, &mut self.strict)
+        } else {
+            (0, &mut self.plain)
+        };
+        let leader = self.leader;
+        *answers[i].get_or_insert_with(|| {
+            c.actors.work.avoid_damage = avoid;
+            let open = walk::can_move_to(c, leader, x, y);
+            c.actors.work.avoid_damage = 0;
+            open
+        })
     }
 
+    /// The points a step leaving window cell `i` pays on foot before 0x11c650's factors:
+    /// 0x11ef84's cost of the cell with the leader standing on it ([`walk::tile_cost`], plus the
+    /// leader's own tile where it does not stand now).
     fn cost(&mut self, c: &State, i: usize) -> i16 {
         let (x, y) = self.w.at(i);
-        *self.cost[i].get_or_insert_with(|| walk::tile_cost(c, x, y, self.z))
+        let own = if Some(i) == self.home { 0 } else { self.own };
+        *self.cost[i].get_or_insert_with(|| walk::tile_cost(c, x, y, self.z) + own)
     }
 }
 
@@ -285,7 +314,11 @@ fn search(c: &mut State, grid: &mut Grid, from: (u16, u16), to: (u16, u16)) -> S
             if closed[j] {
                 continue;
             }
-            let test = party::step_test(|x, y| grid.enter(c, x, y), here, usize::from(d));
+            let (nx, ny) = party::step_cell(here, usize::from(d));
+            if !grid.enter(c, nx, ny, true) {
+                continue;
+            }
+            let test = party::step_test(|x, y| grid.enter(c, x, y, false), here, usize::from(d));
             if test != StepTest::Open {
                 continue;
             }
@@ -306,20 +339,23 @@ fn search(c: &mut State, grid: &mut Grid, from: (u16, u16), to: (u16, u16)) -> S
     }
 }
 
-/// The plan of a walk from `from` to `to` on `s`: the search on one copy of the state with the
-/// hiccup flag (A4-0x6a9c) clear, so the step rule queues no line, first with its damaging-tile
-/// switch set (A4-0x6a8a, the one NPC steps use), refusing harm, then, if that finds no way,
-/// without it, as a key walks. The real state is not touched.
+/// The plan of a walk from `from` to `to` on `s`: [`plan_on`] a copy of it. The real state is not
+/// touched.
 pub(crate) fn plan(s: &State, leader: u16, from: (u16, u16), to: (u16, u16)) -> Search {
-    let mut c = s.clone();
+    plan_on(&mut s.clone(), leader, from, to)
+}
+
+/// The search on `c`, the plan's copy of the state, with the hiccup flag (A4-0x6a9c) clear, so
+/// the step rule queues no line: first with its damaging-tile switch set (A4-0x6a8a, the one NPC
+/// steps use) on the cells a step enters, refusing harm, then, if that finds no way, without it,
+/// as a key walks. Draws no RNG from `c` (tested).
+pub(crate) fn plan_on(c: &mut State, leader: u16, from: (u16, u16), to: (u16, u16)) -> Search {
     c.actors.work.hic = 0;
-    let w = Window::of(&c);
-    let z = walk::party_z(&c);
+    let w = Window::of(c);
     let mut expanded = 0;
     for avoid in [1, 0] {
-        c.actors.work.avoid_damage = avoid;
-        let mut grid = Grid::new(w, leader, z);
-        let found = search(&mut c, &mut grid, from, to);
+        let mut grid = Grid::new(c, w, leader, avoid);
+        let found = search(c, &mut grid, from, to);
         expanded += found.expanded;
         if found.path.is_some() {
             return Search {
@@ -382,25 +418,33 @@ pub fn foe_in_view(s: &State, leader: u16) -> bool {
 }
 
 /// A member the followers' pass moves ([`party::following`]) stands more than [`LEASH`] cells
-/// from the leader.
+/// from the leader (the distance under the level's mask: a member across the map's seam stands
+/// next to the leader).
 fn left_behind(s: &State, leader: u16) -> bool {
     let l = s.objects.location[usize::from(leader)];
+    let mask = s.map.world_mask;
     party::following(s).into_iter().any(|m| {
         let p = s.objects.location[usize::from(m)];
-        chebyshev((p.x, p.y), (l.x, l.y)) > LEASH
+        chebyshev((p.x, p.y), (l.x, l.y), mask) > LEASH
     })
 }
 
-fn chebyshev(a: (u16, u16), b: (u16, u16)) -> u16 {
-    let d = |p: u16, q: u16| (p as i16).wrapping_sub(q as i16).unsigned_abs();
+/// The Chebyshev distance of `a` and `b` on a level whose coordinates wrap under `mask`
+/// (A4-0x796c: 0x3ff on the surface, 0xff below): on each axis the shorter way round.
+pub(crate) fn chebyshev(a: (u16, u16), b: (u16, u16), mask: u16) -> u16 {
+    let d = |p: u16, q: u16| {
+        let ahead = p.wrapping_sub(q) & mask;
+        ahead.min(mask - ahead + 1)
+    };
     d(a.0, b.0).max(d(a.1, b.1))
 }
 
 /// The command prompt: the command loop reads a command key (A4-0x7a2c set) with keys going
-/// through command processing (A4-0x7a42 set: the more prompt clears it) and no line editor
-/// (A4-0x7a57).
+/// through command processing (A4-0x7a42 set: the more prompt clears it), no line editor
+/// (A4-0x7a57) and no cursor up (A4-0x7a60 = 0: with Tab's cross-hair, 1, or the panel cursor, 2,
+/// a direction key moves the cursor, `ui/target.rs` `tab_key`, `targeting_key` and `step`).
 pub fn command_prompt(s: &State) -> bool {
-    s.main.reading == 1 && s.ui.input.accept && !s.ui.input.line_input
+    s.main.reading == 1 && s.ui.input.accept && !s.ui.input.line_input && s.ui.input.targeting == 0
 }
 
 /// A key wait other than the command prompt: the event wait 0x106bbc or the line editor while the
@@ -424,11 +468,18 @@ pub struct Polled<'a> {
     pub buttons: u8,
     /// A key or text waits in the engine's queue.
     pub queued: bool,
+    /// One of them is not the travel's own last press: a key queued before the travel started
+    /// or past its input.
+    pub foreign: bool,
 }
 
 impl Polled<'_> {
-    /// A key, a repeat or text, or a pointer button that was up before going down.
+    /// A key, a repeat or text, a pointer button that was up before going down, or a key in the
+    /// queue the travel did not press.
     fn stops(&self) -> bool {
+        if self.foreign {
+            return true;
+        }
         let mut buttons = self.buttons;
         self.input.iter().any(|e| match *e {
             InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Text(_) => true,
@@ -461,6 +512,10 @@ pub struct Travel {
     leader: u16,
     /// The steps still to take, the next last.
     path: Vec<u8>,
+    /// The cell the plan starts from (the leader's at the start).
+    start: (u16, u16),
+    /// The Restores run when the travel started ([`crate::saveload::SaveLoad::restores`]).
+    restores: u32,
     /// The leader's cell when the last step was pressed, and the cell that step aims at.
     pressed: Option<((u16, u16), (u16, u16))>,
     /// The one new plan of the current blockage was made.
@@ -509,6 +564,8 @@ impl Travel {
             z: p.z,
             leader,
             path,
+            start: here,
+            restores: s.saveload.restores,
             pressed: None,
             replanned: false,
             steps: 0,
@@ -550,6 +607,9 @@ impl Travel {
         if s.main.program != Program::Game {
             return Next::Stop(End::Gone);
         }
+        if s.saveload.restores != self.restores {
+            return Next::Stop(End::Displaced);
+        }
         if other_prompt(s) {
             return Next::Stop(End::Prompt);
         }
@@ -566,16 +626,19 @@ impl Travel {
         let w = Window::of(s);
         let here = w.norm((p.x, p.y));
         let mut blocked = false;
-        if let Some((from, aimed)) = self.pressed.take() {
-            if here == aimed {
+        // Where the leader stood when the last step was pressed; before the first press, the
+        // plan's start (the leader may have moved between the start and the first prompt).
+        let last = self.pressed.take();
+        let from = last.map_or(self.start, |(from, _)| from);
+        match last {
+            Some((_, aimed)) if here == aimed => {
                 self.path.pop();
                 self.steps += 1;
                 self.replanned = false;
-            } else if chebyshev(here, from) > 1 {
-                return Next::Stop(End::Displaced);
-            } else {
-                blocked = true;
             }
+            None if here == self.start => {}
+            _ if chebyshev(here, from, w.mask) > 1 => return Next::Stop(End::Displaced),
+            _ => blocked = true,
         }
         if here == self.target {
             return Next::Stop(End::Arrived);

@@ -687,6 +687,9 @@ pub struct Engine {
     travel: Option<crate::actors::travel::Travel>,
     /// Port (spec 21): why the last travel ended.
     travel_end: Option<crate::actors::travel::End>,
+    /// Port (spec 21): the key the travel pressed last while it still waits in the queue (the
+    /// game reads it at its next prompt); any other waiting key is not the travel's.
+    travel_own: Option<InputEvent>,
     /// Port (spec 21): the keys the travel pressed, with the tick (from 1) each went in at.
     #[cfg(test)]
     travel_log: Vec<(u64, Key)>,
@@ -771,6 +774,7 @@ impl Engine {
             ticks: 0,
             travel: None,
             travel_end: None,
+            travel_own: None,
             #[cfg(test)]
             travel_log: Vec::new(),
             published_front: 0,
@@ -938,8 +942,9 @@ impl Engine {
         self.travel_end
     }
 
-    /// Port (spec 21): the travel under way, if any (its target and receipts).
-    pub fn travel(&self) -> Option<&crate::actors::travel::Travel> {
+    /// Port (spec 21): the travel under way, if any (its target and receipts). Named apart from
+    /// spec 17's menu state (unit M3).
+    pub fn travel_progress(&self) -> Option<&crate::actors::travel::Travel> {
         self.travel.as_ref()
     }
 
@@ -948,15 +953,28 @@ impl Engine {
     /// none otherwise, and the travel ends at a stop.
     fn travel_press(&mut self, input: &[InputEvent]) -> Option<InputEvent> {
         use crate::actors::travel::{End, Next, Polled};
+        let (waiting, own) = {
+            let events = self.io.events.borrow();
+            let own = self.travel_own.filter(|&k| events.iter().any(|&e| e == k));
+            let keys = events
+                .iter()
+                .filter(|e| !matches!(e, InputEvent::Pointer { .. }))
+                .count();
+            (keys, own.is_some())
+        };
+        if !own {
+            // Read by the game: no longer the travel's.
+            self.travel_own = None;
+        }
         let travel = self.travel.as_mut()?;
         let next = if self.finished {
             Next::Stop(End::Gone)
         } else {
-            let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. });
             let polled = Polled {
                 input,
                 buttons: self.io.handler_pointer().buttons,
-                queued: self.io.events.borrow().iter().any(key),
+                queued: waiting > 0,
+                foreign: waiting > usize::from(own),
             };
             travel.next(&self.state.borrow(), &polled)
         };
@@ -965,6 +983,7 @@ impl Engine {
             Next::Press(k) => {
                 #[cfg(test)]
                 self.travel_log.push((self.ticks + 1, k));
+                self.travel_own = Some(InputEvent::Key(k));
                 Some(InputEvent::Key(k))
             }
             Next::Stop(end) => {

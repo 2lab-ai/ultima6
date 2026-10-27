@@ -31,8 +31,9 @@ const HARM: u8 = 4;
 /// (as the real doors: `door_at_actor` writes 4 × closed + the side).
 const DOOR: u16 = 0x129;
 const DOOR_TILE: u16 = 200;
-/// The object slot of a crafted door.
+/// The object slot of a crafted door, and of a barrier (0x1a0).
 const DOOR_SLOT: usize = 0x200;
+const BARRIER_SLOT: usize = 0x201;
 
 /// An open window (every tile floor) with leader 1 alone at (C, C), the prompt up.
 fn open_map() -> State {
@@ -224,8 +225,10 @@ fn a_diagonal_goes_only_past_an_open_side() {
         "the keys refuse the shut corner"
     );
     assert!(
-        c.ui.text == s.ui.text && c.ui.messages == s.ui.messages,
-        "no line printed"
+        c.ui.text == s.ui.text
+            && c.ui.messages == s.ui.messages
+            && c.main.pending_print == s.main.pending_print,
+        "no line printed or queued"
     );
     assert_eq!(
         c.actors.movement_points, s.actors.movement_points,
@@ -237,6 +240,44 @@ fn a_diagonal_goes_only_past_an_open_side() {
     walk_keys(&s, &p, to);
     tile(&mut s, R + 1, R + 2, 0);
     assert_eq!(path(&s, to), Some(vec![1]), "one side open: the diagonal");
+}
+
+/// Spec 21 round 2 (review SHOULD-1): the harm-free pass refuses harm on the cell a step enters
+/// only; a diagonal's side cells are tested as the key's step tests them (0x11d4ee, the switch
+/// clear), so a diagonal past harm beside it is the one step a key takes.
+#[test]
+fn a_diagonal_past_harm_beside_it_is_the_keys_one_step() {
+    let mut s = room((R + 1, R + 3));
+    tile(&mut s, R + 1, R + 2, WALL);
+    tile(&mut s, R + 2, R + 3, HARM);
+    assert_eq!(
+        party::player_step(&mut s.clone(), 1),
+        StepResult::Moved,
+        "the key's diagonal"
+    );
+    assert_eq!(path(&s, (R + 2, R + 2)), Some(vec![1]), "the same one step");
+}
+
+/// Review opus NIT 1: the search's cost of a cell is 0x11ef84's with the leader standing on it: the
+/// leader's own cell as `tile_cost` reads it there (the leader counted), any other cell plus the
+/// leader's own tile (cost nibble 4 here).
+#[test]
+fn a_cells_cost_counts_the_leader_standing_on_it() {
+    let mut s = room((R + 1, R + 3));
+    let t = walk::word_tile(&s, s.objects.type_frame[1]);
+    s.tables.tileflags.flags1[usize::from(t)] = 0x40;
+    let w = Window::of(&s);
+    let mut grid = Grid::new(&s, w, 1, 0);
+    let home = w.cell((R + 1, R + 3)).expect("in the window");
+    let other = w.cell((R + 2, R + 3)).expect("in the window");
+    assert_eq!(
+        walk::tile_cost(&s, R + 1, R + 3, 0),
+        9,
+        "0x11ef84 counts the leader where it stands"
+    );
+    assert_eq!(walk::tile_cost(&s, R + 2, R + 3, 0), 5);
+    assert_eq!(grid.cost(&s, home), 9, "its own cell");
+    assert_eq!(grid.cost(&s, other), 9, "another cell, the leader on it");
 }
 
 #[test]
@@ -311,7 +352,7 @@ fn a_walled_off_cell_is_unreachable_after_every_open_cell_of_the_window() {
     }
     let mut c = s.clone();
     c.actors.work.hic = 0;
-    let mut grid = Grid::new(Window::of(&c), 1, 0);
+    let mut grid = Grid::new(&c, Window::of(&c), 1, 0);
     let one = search(&mut c, &mut grid, (C, C), to);
     assert_eq!(one.path, None);
     let cells = geom::WINDOW * geom::WINDOW;
@@ -398,20 +439,32 @@ fn the_search_reads_the_state_only_and_draws_no_rng() {
         tile(&mut s, R + 3, y, WALL);
     }
     tile(&mut s, R + 2, R + 4, HARM);
+    // A barrier (0x1a0) the search tests: with the hiccup flag set, 0x11b1c0 would queue its
+    // line there.
+    s.objects.type_frame[BARRIER_SLOT] = 0x1a0;
+    s.objects.location[BARRIER_SLOT] = Position {
+        x: R + 2,
+        y: R + 2,
+        z: 0,
+    };
+    crate::actors::walk::tests::link_objects(&mut s);
     s.actors.work.hic = 1;
     let before = s.clone();
     assert_eq!(reachable(&s, (R + 5, R + 3)), None);
-    assert!(s == before, "the state as it was");
+    assert!(s == before, "the state as it was, its RNG included");
+    // The plan's own copy (what `reachable` and `plan` search on): no draw, no line.
     let mut c = s.clone();
-    c.actors.work.hic = 0;
-    let mut grid = Grid::new(Window::of(&c), 1, 0);
     assert!(
-        search(&mut c, &mut grid, (R + 1, R + 3), (R + 5, R + 3))
+        plan_on(&mut c, 1, (R + 1, R + 3), (R + 5, R + 3))
             .path
             .is_some()
     );
-    assert_eq!(c.rng, s.rng, "the copy drew no RNG");
+    assert_eq!(c.rng, s.rng, "the plan's copy drew no RNG");
     assert!(c.main.pending_print.is_empty(), "and queued no line");
+    assert_eq!(
+        c.actors.work.prompt, 0,
+        "nor took the barrier's line (0x11b1c0 sets A4-0x7afd with it while A4-0x6a9c is set)"
+    );
 }
 
 #[test]
@@ -424,23 +477,46 @@ fn every_reason_and_end_has_its_own_code_and_each_direction_its_key() {
     codes.sort_unstable();
     codes.dedup();
     assert_eq!(codes.len(), End::ALL.len());
-    for d in 0..8u8 {
-        assert_eq!(dir_of(key_of(d)), Some(d));
+    for (d, &(key, dx, dy)) in KEYPAD.iter().enumerate() {
+        assert_eq!(key_of(d as u8), key, "direction {d}");
+        assert_eq!((DX8[d], DY8[d]), (dx, dy), "direction {d} steps as its key");
     }
 }
 
-/// The direction of a direction key ([`key_of`]'s inverse).
+/// The oracle of the direction keys, written apart from [`key_of`]: each key with the step on the
+/// map a player reads from it (x east, y south), north first and clockwise, as the PC keypad
+/// lays them out (8 up, 9 up-right, 6 right, 3, 2, 1, 4, 7).
+const KEYPAD: [(Key, i16, i16); 8] = [
+    (Key::Up, 0, -1),
+    (Key::UpRight, 1, -1),
+    (Key::Right, 1, 0),
+    (Key::DownRight, 1, 1),
+    (Key::Down, 0, 1),
+    (Key::DownLeft, -1, 1),
+    (Key::Left, -1, 0),
+    (Key::UpLeft, -1, -1),
+];
+
+/// The walk direction a key's step takes, by [`KEYPAD`] (not [`key_of`]): the 8-way direction
+/// whose step is the key's.
 fn dir_of(k: Key) -> Option<u8> {
-    (0..8u8).find(|&d| key_of(d) == k)
+    let &(_, dx, dy) = KEYPAD.iter().find(|(key, ..)| *key == k)?;
+    (0..8u8).find(|&d| (DX8[usize::from(d)], DY8[usize::from(d)]) == (dx, dy))
 }
 
-/// What the stand-in game does after step `n` (from 1) it took.
+/// What the stand-in game does after step `n` (from 1) it took, or at the read after `n` steps.
 type After = Box<dyn Fn(&mut State, u32)>;
 
 /// An engine whose game has the command loop's shape: at the prompt (A4-0x7a2c and A4-0x7a42 set,
 /// in the event wait) it reads one key, steps the party with a direction key's direction (the
 /// player's step) and runs `after`, then takes 100 ms for the turn.
 fn stand_in(s: State, after: After) -> Engine {
+    stand_in_with(s, nothing(), 0, after)
+}
+
+/// [`stand_in`] with `prompt` run at each read once the prompt is set (with the steps taken so
+/// far), and the read itself `lag` ms after it (the travel's key then waits in the queue).
+fn stand_in_with(s: State, prompt: After, lag: u32, after: After) -> Engine {
     Engine::with_game(
         s,
         Files::default(),
@@ -451,6 +527,10 @@ fn stand_in(s: State, after: After) -> Engine {
                     let mut s = st.borrow_mut();
                     s.main.reading = 1;
                     s.ui.input.in_wait = true;
+                    prompt(&mut s, n);
+                }
+                if lag > 0 {
+                    io.sleep(lag).await;
                 }
                 let k = io.next_key().await;
                 {
@@ -517,20 +597,45 @@ fn the_travel_presses_one_step_a_prompt_and_stops_on_arrival() {
     assert_eq!(e.travel_log().len(), n, "nothing after the end");
 }
 
-/// A walk east across the room, (R + 1, R + 3) to (R + 6, R + 3), with `setup` run on the room,
-/// `after` after each step and each of `inject` at its tick: how it ended, and the keys pressed.
+/// The stand-in ([`stand_in_with`]: `prompt` at each read, `lag`, `after` after each step) on
+/// the room with `setup` run on it, its travel east across the room started, (R + 1, R + 3) to
+/// (R + 6, R + 3).
+fn east(setup: impl FnOnce(&mut State), prompt: After, lag: u32, after: After) -> Engine {
+    let mut s = room((R + 1, R + 3));
+    setup(&mut s);
+    let mut e = stand_in_with(s, prompt, lag, after);
+    e.tick(&[], 20);
+    e.travel_to((R + 6, R + 3)).expect("reachable");
+    e
+}
+
+/// `e` run with each of `inject` at its tick: how its travel ended, and the keys pressed.
+fn ended(mut e: Engine, inject: &[(u64, InputEvent)]) -> (Option<End>, usize) {
+    run(&mut e, inject);
+    (e.travel_end(), e.travel_log().len())
+}
+
+/// The walk east with `setup` run on the room, `after` after each step and each of `inject` at
+/// its tick: how it ended, and the keys pressed.
 fn walk_east(
     setup: impl FnOnce(&mut State),
     after: After,
     inject: &[(u64, InputEvent)],
 ) -> (Option<End>, usize) {
-    let mut s = room((R + 1, R + 3));
-    setup(&mut s);
-    let mut e = stand_in(s, after);
-    e.tick(&[], 20);
-    e.travel_to((R + 6, R + 3)).expect("reachable");
-    run(&mut e, inject);
-    (e.travel_end(), e.travel_log().len())
+    ended(east(setup, nothing(), 0, after), inject)
+}
+
+/// [`run`] with no input, giving the most plans the travel had made at any tick it walked.
+fn run_plans(e: &mut Engine) -> u32 {
+    let mut most = 0;
+    for _ in 0..400 {
+        e.tick(&[], 20);
+        match e.travel_progress() {
+            Some(t) => most = most.max(t.plans),
+            None => return most,
+        }
+    }
+    most
 }
 
 fn nothing() -> After {
@@ -542,37 +647,60 @@ fn the_walk_east_arrives_in_five_presses() {
     assert_eq!(walk_east(|_| {}, nothing(), &[]), (Some(End::Arrived), 5));
 }
 
+/// Spec 21 round 2 (review gpt-d MUST 1): a key, a held key's repeat (spec 19 O1c), text or a
+/// press ends the travel in the tick it comes in, with no press of the travel's after it nor in
+/// that tick: at the command prompt (where the travel would press) and in the middle of a turn.
 #[test]
-fn any_key_or_press_stops_it_a_release_or_a_move_does_not() {
-    let at = |ev| vec![(8u64, ev)];
-    for (ev, name) in [
-        (InputEvent::Key(Key::Char('a')), "a key"),
-        (
-            InputEvent::Repeat(Key::Left),
-            "a held key's repeat (spec 19 O1c)",
-        ),
-        (InputEvent::Text('a'), "text"),
-        (
-            InputEvent::Pointer {
-                x: 9,
-                y: 9,
-                buttons: 1,
-            },
-            "a left press",
-        ),
-        (
-            InputEvent::Pointer {
-                x: 9,
-                y: 9,
-                buttons: 2,
-            },
-            "a right press",
-        ),
-    ] {
-        let (end, pressed) = walk_east(|_| {}, nothing(), &at(ev));
-        assert_eq!(end, Some(End::Input), "{name}");
-        assert!(pressed < 5, "{name}: stopped short ({pressed})");
+fn a_key_or_press_stops_it_in_its_tick_at_the_prompt_and_mid_turn() {
+    for at_prompt in [true, false] {
+        let phase = if at_prompt {
+            "at the prompt"
+        } else {
+            "mid-turn"
+        };
+        for (ev, name) in [
+            (InputEvent::Key(Key::Char('a')), "a key"),
+            (InputEvent::Repeat(Key::Left), "a repeat"),
+            (InputEvent::Text('a'), "text"),
+            (
+                InputEvent::Pointer {
+                    x: 9,
+                    y: 9,
+                    buttons: 1,
+                },
+                "a left press",
+            ),
+            (
+                InputEvent::Pointer {
+                    x: 9,
+                    y: 9,
+                    buttons: 2,
+                },
+                "a right press",
+            ),
+        ] {
+            let mut e = east(|_| {}, nothing(), 0, nothing());
+            for _ in 0..400 {
+                if e.travel_log().len() >= 2 && command_prompt(&e.state()) == at_prompt {
+                    break;
+                }
+                e.tick(&[], 20);
+            }
+            assert!(e.travel_active(), "{name} {phase}: still walking");
+            let (n, t) = (e.travel_log().len(), e.ticks() + 1);
+            e.tick(&[ev], 20);
+            assert_eq!(e.travel_end(), Some(End::Input), "{name} {phase}");
+            assert_eq!(e.travel_log().len(), n, "{name} {phase}: no press after it");
+            assert!(
+                e.travel_log().iter().all(|&(at, _)| at != t),
+                "{name} {phase}: none in its tick"
+            );
+        }
     }
+}
+
+#[test]
+fn a_release_or_a_move_does_not_stop_it() {
     for (ev, name) in [
         (InputEvent::Release(Key::Left), "a release"),
         (
@@ -585,35 +713,183 @@ fn any_key_or_press_stops_it_a_release_or_a_move_does_not() {
         ),
     ] {
         assert_eq!(
-            walk_east(|_| {}, nothing(), &at(ev)),
+            walk_east(|_| {}, nothing(), &[(8, ev)]),
             (Some(End::Arrived), 5),
             "{name}"
         );
     }
 }
 
+/// Review opus NIT 10: a button held down since before the travel started (1 then 1, the
+/// pointer moving) is no press; a second button going down is.
 #[test]
-fn another_prompt_stops_it() {
-    let more: After = Box::new(|s, n| {
+fn a_held_button_does_not_stop_it_a_new_press_does() {
+    let held = InputEvent::Pointer {
+        x: 9,
+        y: 9,
+        buttons: 1,
+    };
+    for (buttons, want) in [(1u8, End::Arrived), (3, End::Input)] {
+        let mut e = stand_in(room((R + 1, R + 3)), nothing());
+        e.tick(&[held], 20);
+        e.travel_to((R + 6, R + 3)).expect("reachable");
+        run(
+            &mut e,
+            &[(
+                8,
+                InputEvent::Pointer {
+                    x: 10,
+                    y: 10,
+                    buttons,
+                },
+            )],
+        );
+        assert_eq!(e.travel_end(), Some(want), "buttons 1, then {buttons}");
+    }
+}
+
+/// Review gpt-a SHOULD 1 and gpt-d MUST 2: a key waiting in the queue that the travel did not
+/// press (given before it started, the game not reading yet) ends it before its first press,
+/// though no input comes with the tick.
+#[test]
+fn a_waiting_key_not_its_own_stops_it() {
+    let mut e = stand_in_with(room((R + 1, R + 3)), nothing(), 200, nothing());
+    e.tick(&[], 20);
+    e.tick(&[InputEvent::Key(Key::Char('a'))], 20);
+    assert_eq!(e.io().pending_events(), 1, "the key waits");
+    e.travel_to((R + 6, R + 3)).expect("reachable");
+    e.tick(&[], 20);
+    assert_eq!(e.travel_end(), Some(End::Input), "a key it did not press");
+    assert!(e.travel_log().is_empty(), "no press");
+}
+
+/// The travel's own key waiting for a late read (the game reads 60 ms after its prompt: three
+/// ticks) only holds it, at each step.
+#[test]
+fn its_own_key_waiting_for_a_late_read_holds_it() {
+    assert_eq!(
+        ended(east(|_| {}, nothing(), 60, nothing()), &[]),
+        (Some(End::Arrived), 5),
+        "its own key, read late"
+    );
+}
+
+/// A stand-in prompt hook that runs `set` at the read after step 2 (the read up: A4-0x7a2c 1, in
+/// the event wait).
+fn at_read_2(set: fn(&mut State)) -> After {
+    Box::new(move |s, n| {
+        if n == 2 {
+            set(s);
+        }
+    })
+}
+
+/// The walk east with `set` run at the read after step 2: how it ended, and the keys pressed.
+fn east_set_at_read_2(set: fn(&mut State)) -> (Option<End>, usize) {
+    ended(east(|_| {}, at_read_2(set), 0, nothing()), &[])
+}
+
+/// Spec 21 round 2 (review opus MUST-2): a more prompt (A4-0x7a42 clear with the read up) ends
+/// the travel there with no further press.
+#[test]
+fn a_more_prompt_stops_it() {
+    assert_eq!(
+        east_set_at_read_2(|s| s.ui.input.accept = false),
+        (Some(End::Prompt), 2)
+    );
+}
+
+/// Review opus MUST-2: the line editor up (A4-0x7a57) ends it there.
+#[test]
+fn the_line_editor_stops_it() {
+    assert_eq!(
+        east_set_at_read_2(|s| s.ui.input.line_input = true),
+        (Some(End::Prompt), 2)
+    );
+}
+
+/// Review opus MUST-1: Tab's cross-hair (targeting 1) or the panel cursor (2) up ends it there:
+/// no direction key is pressed into the cursor.
+#[test]
+fn a_cursor_up_stops_it() {
+    assert_eq!(
+        east_set_at_read_2(|s| s.ui.input.targeting = 1),
+        (Some(End::Prompt), 2),
+        "the cross-hair"
+    );
+    assert_eq!(
+        east_set_at_read_2(|s| s.ui.input.targeting = 2),
+        (Some(End::Prompt), 2),
+        "the panel cursor"
+    );
+}
+
+/// A wait off the command prompt (the read down, in the event wait) ends it.
+#[test]
+fn a_wait_off_the_prompt_stops_it() {
+    let off: After = Box::new(|s, n| {
         if n == 2 {
             s.ui.input.in_wait = true;
             s.ui.input.accept = false;
         }
     });
-    assert_eq!(
-        walk_east(|_| {}, more, &[]),
-        (Some(End::Prompt), 2),
-        "a wait off the prompt"
-    );
-    let line: After = Box::new(|s, n| {
-        if n == 2 {
-            s.ui.input.line_input = true;
+    assert_eq!(walk_east(|_| {}, off, &[]), (Some(End::Prompt), 2));
+}
+
+/// Review opus MUST-2: another member made leader mid-walk ends the travel (Displaced).
+#[test]
+fn another_leader_ends_it() {
+    let switch: After = Box::new(|s, n| {
+        if n == 1 {
+            s.actors.party.leader_index = 1;
         }
     });
     assert_eq!(
-        walk_east(|_| {}, line, &[]),
-        (Some(End::Prompt), 2),
-        "the line editor"
+        walk_east(with_member, switch, &[]),
+        (Some(End::Displaced), 1),
+        "another leader"
+    );
+}
+
+/// Review opus MUST-2: no leader (the index past the roster's slots and slot 16) ends it (Gone).
+#[test]
+fn no_leader_ends_it() {
+    let none: After = Box::new(|s, n| {
+        if n == 1 {
+            s.actors.party.leader_index = crate::actors::PARTY_SLOTS as u8 + 1;
+        }
+    });
+    assert_eq!(
+        walk_east(|_| {}, none, &[]),
+        (Some(End::Gone), 1),
+        "no leader"
+    );
+}
+
+/// Review gpt-d MUST 2: a Restore during the walk that leaves the leader on the cell the last
+/// press found it on (as a save made at the start would) ends the travel; it does not read as a
+/// blocked step, and nothing presses after it.
+#[test]
+fn a_restore_during_the_walk_ends_it_at_the_same_cell() {
+    let load: After = Box::new(|s, n| {
+        if n == 1 {
+            seams::move_object(s, crate::objects::ObjectId(1), R + 1, R + 3, 0);
+            s.saveload.restores = s.saveload.restores.wrapping_add(1);
+        }
+    });
+    let mut e = east(|_| {}, nothing(), 0, load);
+    run(&mut e, &[]);
+    assert_eq!(
+        (e.travel_end(), e.travel_log().len()),
+        (Some(End::Displaced), 1)
+    );
+    assert_eq!(leader_at(&e.state()), (R + 1, R + 3), "back at the start");
+    for _ in 0..30 {
+        e.tick(&[], 20);
+    }
+    assert!(
+        !e.travel_active() && e.travel_log().len() == 1,
+        "and it stays over"
     );
 }
 
@@ -689,8 +965,12 @@ fn a_blocked_step_plans_once_then_stops() {
     let mut e = stand_in(s.clone(), ahead(R + 3));
     e.tick(&[], 20);
     e.travel_to((R + 6, R + 3)).expect("reachable");
-    run(&mut e, &[]);
+    let most = run_plans(&mut e);
     assert_eq!(e.travel_end(), Some(End::Arrived), "round it");
+    assert_eq!(
+        most, 2,
+        "the first plan and the one round it, while it walked"
+    );
     let keys: Vec<Key> = e.travel_log().iter().map(|&(_, k)| k).collect();
     assert_eq!(keys[0], Key::Right, "the first step east");
     assert_ne!(
@@ -698,7 +978,6 @@ fn a_blocked_step_plans_once_then_stops() {
         Key::Right,
         "then round the NPC, not into it: {keys:?}"
     );
-    assert_eq!(e.travel().map(|t| t.plans), None, "ended");
     // A corridor: the NPC in it leaves no way, so the one plan finds none.
     let mut s = s;
     for x in R..R + 8 {
@@ -753,6 +1032,198 @@ fn a_step_that_went_elsewhere_plans_again_a_jump_ends_it() {
     );
 }
 
+/// Review gpt-d SHOULD 1: each blockage has its own new plan. A step that leaves the leader where
+/// it was, after step 1 and again after step 3 with a good step between, plans again each time
+/// and the travel arrives.
+#[test]
+fn each_blockage_has_its_own_new_plan() {
+    let twice: After = Box::new(|s, n| {
+        if n == 1 || n == 3 {
+            let p = s.objects.location[1];
+            seams::move_object(s, crate::objects::ObjectId(1), p.x - 1, p.y, 0);
+        }
+    });
+    let mut e = east(|_| {}, nothing(), 0, twice);
+    let most = run_plans(&mut e);
+    assert_eq!(e.travel_end(), Some(End::Arrived));
+    assert_eq!(most, 3, "the first plan and one a blockage");
+    assert_eq!(
+        e.travel_log().len(),
+        7,
+        "five steps and the two that came back"
+    );
+}
+
+/// What a quiet tick polls: no input, no button, nothing queued.
+const QUIET: Polled<'static> = Polled {
+    input: &[],
+    buttons: 0,
+    queued: false,
+    foreign: false,
+};
+
+/// Review opus SHOULD-2: the first press checks the leader against the plan's start. One cell
+/// off (it moved between the start and the first prompt) plans again from where it stands;
+/// farther ends the travel.
+#[test]
+fn the_first_press_checks_the_plans_start() {
+    let s = room((R + 1, R + 3));
+    let to = (R + 6, R + 3);
+    let moved = |cell: (u16, u16)| {
+        let mut c = s.clone();
+        seams::move_object(&mut c, crate::objects::ObjectId(1), cell.0, cell.1, 0);
+        c
+    };
+    let mut t = Travel::start(&s, to).expect("reachable");
+    assert_eq!(
+        t.next(&s, &QUIET),
+        Next::Press(Key::Right),
+        "from the start"
+    );
+    assert_eq!(t.plans, 1);
+    let off = moved((R + 1, R + 4));
+    let first = path(&off, to).expect("a way")[0];
+    let mut t = Travel::start(&s, to).expect("reachable");
+    assert_eq!(
+        t.next(&off, &QUIET),
+        Next::Press(KEYPAD[usize::from(first)].0),
+        "one cell off: the new plan's first step"
+    );
+    assert_eq!(t.plans, 2, "planned again");
+    let mut t = Travel::start(&s, to).expect("reachable");
+    assert_eq!(
+        t.next(&moved((R + 3, R + 6)), &QUIET),
+        Next::Stop(End::Displaced),
+        "farther off"
+    );
+}
+
+/// The level's coordinate mask: the surface's at z 0, a dungeon's else.
+fn mask_of(z: u8) -> u16 {
+    if z == 0 {
+        crate::map::SURFACE_MASK
+    } else {
+        crate::map::DUNGEON_MASK
+    }
+}
+
+/// [`open_map`] on level `z`, its window straddling the level's seam on `axis` (0 x, 1 y), the
+/// leader on `at` on that axis (window cell C on both axes).
+fn seam(z: u8, axis: usize, at: u16) -> State {
+    let mut s = open_map();
+    let mask = mask_of(z);
+    s.map.world_mask = mask;
+    let mut origin = [0u16; 2];
+    origin[axis] = at.wrapping_sub(C) & mask;
+    s.map.window_origin = origin;
+    let mut p = [C, C];
+    p[axis] = at;
+    s.map.centre = Position {
+        x: p[0],
+        y: p[1],
+        z,
+    };
+    s.objects.location[1] = s.map.centre;
+    crate::actors::walk::tests::link_objects(&mut s);
+    s
+}
+
+/// The cell `along` cells from `at` on `axis` (masked) and `across` from C on the other axis.
+fn seam_cell(z: u8, axis: usize, at: u16, along: i16, across: i16) -> (u16, u16) {
+    let mut c = [C, C];
+    c[axis] = at.wrapping_add_signed(along) & mask_of(z);
+    c[1 - axis] = C.wrapping_add_signed(across);
+    (c[0], c[1])
+}
+
+/// Review gpt-a MUST 1 (opus NIT 9): the distance on a level wraps at its mask, on both axes and
+/// both ways: the cells either side of the seam are one apart.
+#[test]
+fn the_seam_is_one_cell_on_every_level() {
+    for z in [0u8, 1] {
+        let mask = mask_of(z);
+        for (a, b) in [((0, 5), (mask, 5)), ((5, 0), (5, mask))] {
+            assert_eq!(chebyshev(a, b, mask), 1, "{mask:#x}: {a:?} to {b:?}");
+            assert_eq!(chebyshev(b, a, mask), 1, "{mask:#x}: {b:?} to {a:?}");
+        }
+        assert_eq!(
+            chebyshev((1, 0), (mask - 1, mask), mask),
+            3,
+            "x 1, 0, mask, mask - 1"
+        );
+        assert_eq!(
+            chebyshev((0, 0), (mask / 2 + 1, 0), mask),
+            mask / 2 + 1,
+            "half way round"
+        );
+        assert_eq!(chebyshev((3, 4), (3, 4), mask), 0);
+    }
+}
+
+/// Review gpt-a MUST 1: on both levels, both axes and both ways, a travel across the seam presses
+/// the step across it; a step that lands one cell off across the seam is a stagger (planned
+/// again), three cells on is a jump (Displaced); a member beside the leader across the seam is
+/// not left behind, one past the leash is.
+#[test]
+fn a_stagger_across_the_seam_plans_again_a_jump_ends_it() {
+    for z in [0u8, 1] {
+        let mask = mask_of(z);
+        for axis in 0..2 {
+            for way in [1i16, -1] {
+                let at = if way == 1 { mask } else { 0 };
+                let s = seam(z, axis, at);
+                let name = format!("z {z}, axis {axis}, way {way}");
+                let across = KEYPAD
+                    .iter()
+                    .find(|&&(_, dx, dy)| (dx, dy) == if axis == 0 { (way, 0) } else { (0, way) })
+                    .expect("a key")
+                    .0;
+                let landed = |cell: (u16, u16)| {
+                    let to = seam_cell(z, axis, at, 2 * way, 0);
+                    let mut t = Travel::start(&s, to).unwrap_or_else(|r| panic!("{name}: {r:?}"));
+                    assert_eq!(t.next(&s, &QUIET), Next::Press(across), "{name}");
+                    let mut c = s.clone();
+                    seams::move_object(
+                        &mut c,
+                        crate::objects::ObjectId(1),
+                        cell.0,
+                        cell.1,
+                        u16::from(z),
+                    );
+                    t.next(&c, &QUIET)
+                };
+                assert_eq!(
+                    landed(seam_cell(z, axis, at, way, 0)),
+                    Next::Press(across),
+                    "{name}: the step across"
+                );
+                assert!(
+                    matches!(landed(seam_cell(z, axis, at, way, 1)), Next::Press(_)),
+                    "{name}: one cell off across the seam, planned again"
+                );
+                assert_eq!(
+                    landed(seam_cell(z, axis, at, 3 * way, 0)),
+                    Next::Stop(End::Displaced),
+                    "{name}: three cells on"
+                );
+                for (cells, behind) in [(1i16, false), (LEASH as i16 + 1, true)] {
+                    let mut m = s.clone();
+                    with_member(&mut m);
+                    let (x, y) = seam_cell(z, axis, at, cells * way, 0);
+                    m.objects.location[2] = Position { x, y, z };
+                    crate::actors::walk::tests::link_objects(&mut m);
+                    assert_eq!(party::following(&m), vec![2], "{name}: member 2 follows");
+                    assert_eq!(
+                        left_behind(&m, 1),
+                        behind,
+                        "{name}: a member {cells} across the seam"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn the_turn_holds_it_and_a_finished_game_or_another_program_ends_it() {
     let prompt = room((R + 1, R + 3));
@@ -760,18 +1231,25 @@ fn the_turn_holds_it_and_a_finished_game_or_another_program_ends_it() {
     busy.main.reading = 0;
     busy.ui.input.in_wait = false;
     let mut t = Travel::start(&prompt, (R + 4, R + 3)).expect("reachable");
-    let quiet = Polled {
-        input: &[],
-        buttons: 0,
-        queued: false,
-    };
+    let quiet = QUIET;
     assert_eq!(t.next(&busy, &quiet), Next::Hold, "the turn runs");
     let queued = Polled {
         queued: true,
         ..quiet
     };
-    assert_eq!(t.next(&prompt, &queued), Next::Hold, "a key waits");
+    assert_eq!(t.next(&prompt, &queued), Next::Hold, "its own key waits");
     assert_eq!(t.next(&prompt, &quiet), Next::Press(Key::Right));
+    let foreign = Polled {
+        queued: true,
+        foreign: true,
+        ..quiet
+    };
+    let mut f = t.clone();
+    assert_eq!(
+        f.next(&prompt, &foreign),
+        Next::Stop(End::Input),
+        "a key not its own waits"
+    );
     let mut u = prompt.clone();
     u.main.program = Program::U;
     assert_eq!(t.next(&u, &quiet), Next::Stop(End::Gone));
@@ -795,7 +1273,7 @@ mod real {
 
     fn files() -> Option<Files> {
         if !std::path::Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
+            println!("real receipt: skipped ({ZIP} not present)");
             return None;
         }
         let data = std::fs::read(ZIP).quiet();
@@ -824,6 +1302,11 @@ mod real {
     /// `game` at once with seed 0, the actors in the assault worktype 8 passed over (status bit
     /// 0x10), the fight broken off with `b`, at the prompt.
     fn castle(files: &Files) -> Engine {
+        castle_with(files).0
+    }
+
+    /// [`castle`], with the game's state for the test to change between ticks.
+    fn castle_with(files: &Files) -> (Engine, Rc<RefCell<State>>) {
         let mut state = State::new_game(files).quiet();
         state.rng.seed(0);
         let keep = Rc::new(RefCell::new(None));
@@ -847,7 +1330,40 @@ mod real {
             e.tick(&[], STEP_MS);
         }
         settle(&mut e);
-        e
+        (e, st)
+    }
+
+    /// A cell two or one steps from the leader (east, west, south, north first) that a travel
+    /// may start to.
+    fn reachable_near(s: &State) -> Option<(u16, u16)> {
+        let p = s.leader_position().quiet();
+        [
+            (2i16, 0i16),
+            (-2, 0),
+            (0, 2),
+            (0, -2),
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+        ]
+        .into_iter()
+        .map(|(dx, dy)| (p.x.wrapping_add_signed(dx), p.y.wrapping_add_signed(dy)))
+        .find(|&c| reachable(s, c).is_none())
+    }
+
+    /// The shown frame's pixels, hashed.
+    fn frame_hash(e: &Engine) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        e.frame().pixels().hash(&mut h);
+        h.finish()
+    }
+
+    /// One tick of `e` with `input`, its frame's hash kept in `frames`.
+    fn tick_kept(e: &mut Engine, input: &[InputEvent], frames: &mut Vec<u64>) {
+        e.tick(input, STEP_MS);
+        frames.push(frame_hash(e));
     }
 
     /// A door the receipt walks through: its slot, the cell before it (orthogonally beside it)
@@ -884,7 +1400,7 @@ mod real {
             .collect();
         doors.sort_by_key(|&i| {
             let p = s.objects.location[i];
-            (chebyshev((lp.x, lp.y), (p.x, p.y)), i)
+            (chebyshev((lp.x, lp.y), (p.x, p.y), w.mask), i)
         });
         let found = doors.iter().find_map(|&i| {
             let p = s.objects.location[i];
@@ -939,8 +1455,14 @@ mod real {
     }
 
     /// Ticks `e` until it is back at the command prompt with no travel under way (at most 20000
-    /// ticks), `given` (tick, input) fed at the tick it names, counting into `n`.
-    fn until_prompt(e: &mut Engine, given: &[(u64, InputEvent)], n: &mut Counts) {
+    /// ticks), `given` (tick, input) fed at the tick it names, counting into `n` and keeping each
+    /// tick's frame hash in `frames`.
+    fn until_prompt(
+        e: &mut Engine,
+        given: &[(u64, InputEvent)],
+        n: &mut Counts,
+        frames: &mut Vec<u64>,
+    ) {
         let mut at = e.state().leader_position().quiet();
         let mut prompt = at_prompt(e);
         for _ in 0..20_000 {
@@ -950,7 +1472,7 @@ mod real {
                 .filter(|&&(t, _)| t == tick)
                 .map(|&(_, ev)| ev)
                 .collect();
-            e.tick(&input, STEP_MS);
+            tick_kept(e, &input, frames);
             let p = e.state().leader_position().quiet();
             if p != at {
                 n.moves += 1;
@@ -975,8 +1497,9 @@ mod real {
 
     /// Spec 21 acceptance 5: in the castle the party travels across a room to a closed door,
     /// opens it with `u` and a press on it, and travels through it to a cell beyond; each leg
-    /// arrives with one key a planned step and one move a key. The same inputs given by hand at
-    /// the same ticks from the same start leave an equal state and an equal frame (no shortcut).
+    /// arrives with one key a planned step and one move a key, diagonal keys among them. The same
+    /// inputs given by hand at the same ticks from the same start show the same frame at every
+    /// tick and leave an equal state (no shortcut).
     #[test]
     fn the_party_travels_through_a_door_and_the_keys_walk_the_same() {
         let Some(files) = files() else { return };
@@ -986,6 +1509,7 @@ mod real {
             panic!("no closed door with a cell before and beyond it ({doors} closed doors)");
         };
         let (t0, m0, ms0) = (e.ticks(), minutes(&e.state()), e.io().now_ms());
+        let mut frames: Vec<u64> = Vec::new();
         let mut given: Vec<(u64, InputEvent)> = Vec::new();
         let mut legs = Vec::new();
         for leg in 0..2 {
@@ -999,7 +1523,7 @@ mod real {
             let pressed = e.travel_log().len();
             e.travel_to(to).expect("reachable");
             let mut n = Counts::default();
-            until_prompt(&mut e, &[], &mut n);
+            until_prompt(&mut e, &[], &mut n, &mut frames);
             assert_eq!(e.travel_end(), Some(End::Arrived), "leg {leg} arrives");
             let p = e.state().leader_position().quiet();
             assert_eq!((p.x, p.y), to, "leg {leg}: on the target");
@@ -1017,7 +1541,7 @@ mod real {
                 let closed = e.state().objects.type_frame[door.slot] >> 10;
                 let u = InputEvent::Key(Key::Char('u'));
                 given.push((e.ticks() + 1, u));
-                e.tick(&[u], STEP_MS);
+                tick_kept(&mut e, &[u], &mut frames);
                 for _ in 0..400 {
                     let waits = {
                         let s = e.state();
@@ -1026,7 +1550,7 @@ mod real {
                     if waits {
                         break;
                     }
-                    e.tick(&[], STEP_MS);
+                    tick_kept(&mut e, &[], &mut frames);
                 }
                 let mut n = Counts::default();
                 let at = cell_pixel(&e.state(), door.cell);
@@ -1034,7 +1558,7 @@ mod real {
                 for ev in crate::ui::menu::left_press(at.0, at.1) {
                     given.push((tick, ev));
                 }
-                until_prompt(&mut e, &given, &mut n);
+                until_prompt(&mut e, &given, &mut n, &mut frames);
                 let open = e.state().objects.type_frame[door.slot] >> 10;
                 assert_eq!(open, closed ^ 4, "Use opened the door");
                 legs.push((0, n));
@@ -1047,9 +1571,9 @@ mod real {
             .count();
         let total = |f: fn(&Counts) -> usize| legs.iter().map(|(_, n)| f(n)).sum::<usize>();
         println!(
-            "travel: {doors} closed doors in the window; legs planned {} and {} steps; pressed {} \
-             keys ({diagonals} diagonal) and {} by hand; the leader moved {} times; {} turns; \
-             {} clock minutes; {} engine ms; {} ticks",
+            "real receipt: ran; travel: {doors} closed doors in the window; legs planned {} and {} \
+             steps; pressed {} keys ({diagonals} diagonal) and {} by hand; the leader moved {} \
+             times; {} turns; {} clock minutes; {} engine ms; {} ticks",
             legs[0].0,
             legs[2].0,
             log.len(),
@@ -1060,6 +1584,8 @@ mod real {
             e.io().now_ms() - ms0,
             e.ticks() - t0
         );
+        assert!(diagonals > 0, "the walk took a diagonal key");
+        assert_eq!(frames.len() as u64, e.ticks() - t0, "a frame each tick");
         // The same inputs by hand.
         let mut k = castle(&files);
         assert_eq!(k.ticks(), t0, "the same start");
@@ -1075,6 +1601,13 @@ mod real {
                 .map(|&(_, ev)| ev)
                 .collect();
             k.tick(&input, STEP_MS);
+            let i = (k.ticks() - t0 - 1) as usize;
+            assert_eq!(
+                frame_hash(&k),
+                frames[i],
+                "the same frame at tick {}",
+                k.ticks()
+            );
         }
         assert!(!k.travel_active() && k.travel_log().is_empty(), "no travel");
         assert!(*k.state() == *e.state(), "the inputs leave the same state");
@@ -1082,5 +1615,122 @@ mod real {
             k.frame().pixels() == e.frame().pixels(),
             "and the same frame"
         );
+    }
+
+    /// Review opus MUST-1: with Tab's cross-hair up (targeting 1), and the panel cursor after a
+    /// second Tab (2), a travel to a reachable cell ends at its first ticks (Prompt) with no key
+    /// pressed, the cursor and the leader where they were.
+    #[test]
+    fn a_cursor_up_ends_the_travel_and_leaves_the_cursor() {
+        let Some(files) = files() else { return };
+        let mut e = castle(&files);
+        let to = reachable_near(&e.state()).expect("a reachable cell");
+        for want in [1u8, 2] {
+            e.tick(&[InputEvent::Key(Key::Char('\t'))], STEP_MS);
+            for _ in 0..400 {
+                let up = {
+                    let s = e.state();
+                    s.main.reading == 1 && s.ui.input.in_wait && s.ui.input.targeting == want
+                };
+                if up && e.io().pending_events() == 0 {
+                    break;
+                }
+                e.tick(&[], STEP_MS);
+            }
+            let (cursor, panel, at) = {
+                let s = e.state();
+                assert_eq!(s.ui.input.targeting, want, "Tab: targeting {want}");
+                (
+                    s.ui.input.cursor,
+                    s.ui.input.panel_cursor,
+                    s.leader_position().quiet(),
+                )
+            };
+            let pressed = e.travel_log().len();
+            e.travel_to(to).expect("starts");
+            for _ in 0..30 {
+                e.tick(&[], STEP_MS);
+            }
+            assert_eq!(e.travel_end(), Some(End::Prompt), "targeting {want}");
+            assert_eq!(e.travel_log().len(), pressed, "targeting {want}: no key");
+            let s = e.state();
+            assert!(
+                s.ui.input.targeting == want
+                    && s.ui.input.cursor == cursor
+                    && s.ui.input.panel_cursor == panel,
+                "targeting {want}: the cursor where it was"
+            );
+            assert_eq!(
+                s.leader_position().quiet(),
+                at,
+                "targeting {want}: the leader"
+            );
+        }
+        println!("real receipt: ran; a cursor up ends the travel at targeting 1 and 2");
+    }
+
+    /// Review gpt-d MUST 2: a Restore at the end of the travel's first turn (save mode 0x52, as
+    /// the loop's end runs it, 0x104d98) puts the leader back on the cell it was saved on, the one
+    /// the first press left: the travel ends (Displaced), not as a blocked step, and stays over.
+    #[test]
+    fn a_restore_during_the_travel_ends_it() {
+        let Some(files) = files() else { return };
+        let (mut e, st) = castle_with(&files);
+        crate::saveload::save(&mut st.borrow_mut());
+        let start = e.state().leader_position().quiet();
+        let to = reachable_near(&e.state()).expect("a reachable cell");
+        let restores = e.state().saveload.restores;
+        st.borrow_mut().objects.save_mode = 0x52;
+        e.travel_to(to).expect("starts");
+        let (mut n, mut frames) = (Counts::default(), Vec::new());
+        until_prompt(&mut e, &[], &mut n, &mut frames);
+        assert_eq!(e.travel_end(), Some(End::Displaced));
+        assert_eq!(e.travel_log().len(), 1, "one press");
+        assert_eq!(e.state().saveload.restores, restores + 1, "one Restore");
+        assert_eq!(
+            e.state().leader_position().quiet(),
+            start,
+            "back on the start"
+        );
+        assert_eq!(n.moves, 2, "the step, and the Restore back");
+        for _ in 0..50 {
+            e.tick(&[], STEP_MS);
+        }
+        assert!(
+            !e.travel_active() && e.travel_log().len() == 1,
+            "and it stays over"
+        );
+        println!("real receipt: ran; a Restore during the travel ends it");
+    }
+
+    /// Review opus SHOULD-4 (spec 21 Research): the Amiga raw-key table gives none of the four
+    /// diagonal codes in its plain, shift or control column (two of them stand in its Alt
+    /// column), so a key of the platform's reaches them only through the travel (counts only).
+    #[test]
+    fn no_raw_key_gives_a_diagonal_code_plain_shifted_or_with_control() {
+        let Some(files) = files() else { return };
+        let s = State::new_game(&files).quiet();
+        let codes: Vec<u16> = [Key::UpRight, Key::DownRight, Key::DownLeft, Key::UpLeft]
+            .into_iter()
+            .map(|k| crate::ui::input::keypad_code(k).quiet())
+            .collect();
+        let map = &s.ui.tables.keymap;
+        let columns: Vec<usize> = (0..4)
+            .map(|c| map.iter().filter(|e| codes.contains(&e[c])).count())
+            .collect();
+        let alt: std::collections::BTreeSet<u16> = map
+            .iter()
+            .map(|e| e[3])
+            .filter(|c| codes.contains(c))
+            .collect();
+        println!(
+            "real receipt: ran; {} raw keys; giving a diagonal code (plain, shift, control, alt): \
+             {columns:?}; distinct in alt {}",
+            map.len(),
+            alt.len()
+        );
+        assert!(!map.is_empty(), "the table read");
+        assert_eq!(columns[..3], [0, 0, 0], "plain, shift, control");
+        assert_eq!(alt.len(), 2, "two codes in Alt");
     }
 }
