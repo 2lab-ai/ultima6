@@ -1404,6 +1404,146 @@ test('the context menu (spec 17): a right press at the prompt opens it with the 
   assert.ok([...now].every((p) => !shown.has(p)), 'the object changed: none of its pictures before');
 }, { needs: h.haveHfes });
 
+// Spec 19 O1b at the page: `key` held from the prompt on the focused canvas as a keyboard sends
+// it (Playwright's keyboard.down again is a keydown with `repeat` true): the press, the first
+// repeat 225 ms later, then one every 30 ms (the owner's macOS repeat) until the game ran `ms`
+// on its clock since the press; then, by `how`, the keyup on the canvas ('canvas'), the focus
+// moved to the Mute button first and the keyup there ('focus'), or the window's blur with the
+// key still down ('blur': the page lets every held key go; the keyup comes only after `check`,
+// and in any case, so it cannot stand in for the blur). The page writes the leader and
+// `data-keys` in its frame callback after the steps, and the release comes between frames, so
+// the window's listener (capture; a blur only of the window itself) reads them as of the last
+// step before the release reached the game. The walk: the observed position changes of the
+// leader before the release (`held`) and the cells after it (`afterCells`, read every frame
+// until the prompt is back), the repeats the canvas saw, the keys queued at the release and
+// once the step after it ran. `check(walk)` runs on a walk that moved while held.
+async function heldKey(page, key, ms, how, check) {
+  await h.waitPrompt(page);
+  await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const stop = new AbortController();
+    const seen = { repeats: 0, leaders: [c.dataset.leader], release: null, stop };
+    window.__held = seen;
+    const look = () => {
+      if (c.dataset.leader !== seen.leaders.at(-1)) seen.leaders.push(c.dataset.leader);
+    };
+    c.addEventListener('keydown', (e) => {
+      if (e.repeat) seen.repeats += 1;
+    }, { signal: stop.signal });
+    const mark = (e) => {
+      if (seen.release !== null || (e.type === 'blur' && e.target !== window)) return;
+      look();
+      seen.release = { at: seen.leaders.length, keys: Number(c.dataset.keys), ticks: globalThis.__ticks };
+    };
+    for (const type of ['keyup', 'blur']) window.addEventListener(type, mark, { signal: stop.signal, capture: true });
+    const poll = () => {
+      if (window.__held !== seen) return;
+      look();
+      requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
+  });
+  const clock = () => page.evaluate(() => globalThis.__clock);
+  await page.keyboard.down(key);
+  const t0 = await clock();
+  await h.sleep(225);
+  while ((await clock()) - t0 < ms) {
+    await page.keyboard.down(key);
+    await h.sleep(30);
+  }
+  if (how === 'focus') await page.evaluate(() => document.getElementById('mute').focus());
+  if (how === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  else await page.keyboard.up(key);
+  let failed = null;
+  try {
+    const ticks = await page.evaluate(() => window.__held.release.ticks);
+    await page.waitForFunction((t) => globalThis.__ticks > t, ticks, { timeout: 60_000, polling: 'raf' });
+    await h.waitFrames(page, 1);
+    const keysAfter = Number(await page.evaluate(() => document.getElementById('screen').dataset.keys));
+    await h.waitPrompt(page);
+    const seen = await page.evaluate(() => {
+      const s = window.__held;
+      window.__held = null;
+      s.stop.abort();
+      if (document.getElementById('screen').dataset.leader !== s.leaders.at(-1)) {
+        s.leaders.push(document.getElementById('screen').dataset.leader);
+      }
+      return { repeats: s.repeats, leaders: s.leaders, at: s.release.at, keys: s.release.keys };
+    });
+    const walk = {
+      held: seen.at - 1,
+      afterCells: seen.leaders.slice(seen.at),
+      repeats: seen.repeats,
+      keysAtRelease: seen.keys,
+      keysAfter,
+    };
+    if (walk.held > 0) check(walk);
+    return walk;
+  } catch (err) {
+    failed = err;
+    throw err;
+  } finally {
+    // The key up after a blur, the focus back on the canvas: each runs whatever happened above.
+    // A cleanup that fails beside a failure in flight is logged (its kind only) and attached to
+    // it, never thrown in its place; alone, it is the failure.
+    const cleanups = [];
+    if (how === 'blur') cleanups.push(() => page.keyboard.up(key));
+    if (how === 'focus') cleanups.push(() => page.focus('#screen'));
+    let cleanupError = null;
+    for (const cleanup of cleanups) {
+      try {
+        await cleanup();
+      } catch (err) {
+        cleanupError ??= err;
+      }
+    }
+    if (cleanupError !== null) {
+      if (failed === null) throw cleanupError;
+      console.error(`  the ${how} cleanup failed too: ${h.errorName(cleanupError)}`);
+      if (failed instanceof Error) failed.cleanupError = cleanupError;
+    }
+  }
+}
+
+// `heldKey` from the prompt in the first direction whose press walks (a foe beside the hero
+// blocks a way; as `h.stepOnce`, a pass after a round of four blocked).
+async function heldWalkingKey(page, ms, how, check) {
+  for (let round = 0; round < h.STEP_ROUNDS; round += 1) {
+    if (round > 0) await h.passTurn(page);
+    for (const { key } of h.STEPS) {
+      const walk = await heldKey(page, key, ms, how, check);
+      if (walk.held > 0) return walk;
+    }
+  }
+  assert.fail(`no held arrow walked in ${h.STEP_ROUNDS} rounds of the four directions`);
+}
+
+// The start fight as booted: an arrow that walks is held 1 s; the step's turn (the foes' turns
+// after it) outlasts the hold, so the repeats wait in the queue when the key is let go. The
+// press was taken at the prompt, so all that waits is repeats and the release takes them all
+// back: no step after it (the drain alone would give one, the newest repeat's). So when the
+// release is heard on the canvas, after the focus moved to another control, and when the window
+// lost the focus with no keyup. The fight can still kill the hero in the turns after the release
+// (he wakes on `h.WAKE_CELL`, as `h.stepResult` allows), so a position change after it is
+// allowed there only. The Rust tests (ui/tests/held_key.rs) pin no step at all after the
+// release in the quiet castle.
+test('a held arrow on the canvas: the browser\'s repeats wait while the turn runs, and its release takes them back at the next step, so the hero walks no cell after it: released on the canvas, on another control the focus moved to, or by the window\'s blur (spec 19 O1b)', async (env) => {
+  const { page } = await h.openPage(env); // gated: the glue keeps the engine clock and its ticks
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  for (const how of ['canvas', 'focus', 'blur']) {
+    await heldWalkingKey(page, 1000, how, (walk) => {
+      const woke = walk.afterCells.filter((cell) => cell === h.WAKE_CELL).length;
+      console.log(`  receipt (${how}): held 1 s, ${walk.repeats} repeats sent; observed position changes ${walk.held} while held, ${walk.afterCells.length} after the release (${woke} onto the wake cell); keys queued ${walk.keysAtRelease} at the release, ${walk.keysAfter} once it was taken`);
+      assert.ok(walk.repeats > 0, `${how}: the canvas saw the browser's repeats`);
+      assert.ok(walk.keysAtRelease > 0, `${how}: the repeats waited while the turn ran`);
+      assert.equal(walk.keysAfter, 0, `${how}: the release took them back`);
+      assert.ok(walk.afterCells.every((cell) => cell === h.WAKE_CELL), `${how}: no step after the release (a change only onto the wake cell)`);
+    });
+  }
+}, { needs: h.haveHfes });
+
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);

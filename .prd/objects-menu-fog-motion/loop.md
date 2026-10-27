@@ -52,6 +52,36 @@ deploys.
 | K1 | 4 | `fix/held-key-drain` | spec 19 O1b: the poll keeps the newest press, a release cancels its repeats | — |
 | B12 | 1a | (later) | staff and wand casts, monsters included (row 5) | B2, B4 merged |
 | P1 | 1c | (later) | Korean lines for B10's new catalogue entries, on top of the live pack | B10 merged; message the row-25 session |
-| M2 | 2 | (later) | the right-press menu from M1 | B6, B7 merged (predicates read those handlers) |
+| M2 | 2 | `feat/context-menu` (from `integ/r1027` 41e8209) | spec 17: the query on a State clone, the icon-then-target run with its gate, the page menu | B6, B7 merged: done |
 | W2 | 5 | (later) | spec 20: scene, presenter, early picture on a clone | C1, B2, K1 merged (gfx, walk.rs, engine.rs) |
 | E1 | 1a | (round 3) | the `end` program (O1 row 10): decompile, port, launcher state 2 | — |
+
+### Review state (2026-10-27)
+
+| Unit | RED → GREEN (dispatcher re-run) | gpt-6-astra | opus | Open |
+|---|---|---|---|---|
+| B1 | 2 tests ok, fmt ok, clippy ok | APPROVE (after evidence file) | APPROVE | committed on its branch (17a697b) |
+| B11 | test_port_map 10 OK, classify 24 OK, `--check` up to date | APPROVE (r2) | APPROVE (r2) | committed on its branch (e683da4) |
+| B3 | turn tests 25 ok, fmt ok; agent full lib 1141 ok | APPROVE | APPROVE | committed on its branch (8c59cc0) |
+| B9 | 1 test ok, fmt ok | APPROVE | APPROVE | committed on its branch (6a1330a) |
+| B2 | 5 tests ok, fmt ok | APPROVE (r2) | APPROVE (r2) | M1 (`say` checks the switch) + SHOULD + NITs done — committed on its branch (6a5ce88) |
+| B5 | 2 tests ok, fmt ok | APPROVE (r2, with opus trace) | APPROVE | light assert, docs, address NITs done — committed on its branch (177a629) |
+| B8 | 1 test ok, fmt ok | APPROVE (r2) | APPROVE (r2) | bounded read kept port-only, documented; bit-7 tests — committed on its branch (06c5113) |
+| B4 | 1 test ok, fmt ok | APPROVE | APPROVE | 2 SHOULDs + `obj_quality` doc done — committed on its branch (e95a936) |
+| B6 | lib 1144 ok, fmt ok, clippy ok (scripts/cargo.sh) | APPROVE (r2) | APPROVE (r2) | M1 note from the asm, S1 six-cell test, N1, N2 done — committed on its branch (19e5b8d) |
+| B7 | r3: B7 tests 11 ok default, 12 ok wide, fmt ok; clippy ok both | APPROVE (code r2, tests r3) | APPROVE (r2) | committed on its branch (97e3d10), merged into `integ/r1027` |
+| B10 | 107 targeted ok, fmt ok | a APPROVE; b, c1, c2 REVISE | REVISE | item words in `%s` (ring, cloak, wand) translated, not excused; counter as a precomputed boundary-aware set; scanner fail-closed (9 shapes); const sweep; scan to its own file — sent back, scope widened to clock.rs, actors/seams.rs, attack.rs |
+| K1 | (agent: lib 1145, wide 1168, native 21; web 142/143, the Wide frame-time test) | a APPROVE (NITs); b REVISE | APPROVE (SHOULDs) | release outside the canvas and on blur; release by physical key; `run_each` fails on an untaken key; a test that sees the release half; same-tick room test; NITs — sent back |
+| C1 | u6-core 1145 ok, wide gfx 94 ok, u6-render 56 ok, u6-web 44+1 ok, fmt ok, clippy ok both | a, b, c REVISE | REVISE | a 0x176's 0x1a9 parts kept as a ghost; the missile `redraw_over` (now in scope); reset detected by its event, darkness keeps memory; switch-off parity against the base renderer; the web test must reject black — sent back |
+
+Carried (from K1 opus, outside K1): `main_loop/test_support.rs:89-97` builds test states with the key drain off,
+unlike the image word 0x153caa = 1, so tests that queue several keys at once (`actors/rest/tests.rs:136,189,215`)
+read them in order where a drained wait would merge them.
+
+Integration: `integ/r1027` (worktree `.worktrees/integ-r1027`) holds B1, B3, B9, B11, B4, B2, B5, B8, B6, B7 (lib 1162 ok, clippy clean before B7); conflicts
+were two appended tests (kept both) and `port-map.md` (regenerated, `--check` up to date).
+
+Carried to B12: when the staff cast (row 5) turns the text switch off, check every line it prints goes through
+`queue_print` or `combat::present::say` (both test the switch since B2). The forced-on writes once noted here were
+withdrawn: those addresses are thunks of 0x1231be, not switch writes. Only 0x124232 turns the switch off around
+0x11a586.

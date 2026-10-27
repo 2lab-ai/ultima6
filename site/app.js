@@ -3801,7 +3801,8 @@ async function leaveFullscreen() {
 // elements, modifier shortcuts) keeps its browser meaning. Ctrl + the letters of the game's
 // control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys there, so the browser's own
 // Save page / Reload do not fire. The speed keys (`speedKey`) are the page's and never reach the
-// game.
+// game. The browser's auto-repeat goes as repeats (spec 19 O1b), which the key's release takes
+// back.
 function gameKey(e) {
   gesture();
   if (!game || crashed || e.metaKey || e.altKey) return;
@@ -3810,11 +3811,28 @@ function gameKey(e) {
   if (by !== 0) {
     e.preventDefault();
     changeSpeed(by);
-  } else if (game.key_down(e.code, e.key, e.ctrlKey)) {
+  } else if (e.repeat ? game.key_repeat(e.code, e.key, e.ctrlKey) : game.key_down(e.code, e.key, e.ctrlKey)) {
     e.preventDefault();
   }
 }
+// A key let go (spec 19 O1b): outside the line editor its repeats still queued are taken back,
+// so a held key walks no further than the prompt it was let go at. The game releases what that
+// physical key gave (`code`), whatever the modifiers are now; a key it never had takes nothing.
+// Heard on the window, so a release after the focus moved to another control still counts; when
+// the window loses the focus or the page is hidden, a release may never come: every held key is
+// let go then.
+function gameKeyUp(e) {
+  if (game && !crashed) game.key_up(e.code);
+}
+function releaseKeys() {
+  if (game && !crashed) game.release_keys();
+}
 canvas.addEventListener('keydown', gameKey);
+window.addEventListener('keyup', gameKeyUp);
+window.addEventListener('blur', releaseKeys);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) releaseKeys();
+});
 canvas.addEventListener('focus', (e) => {
   keepCanvas = ime !== null && e.relatedTarget === ime && lineOpen;
 });

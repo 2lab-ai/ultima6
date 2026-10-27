@@ -12,7 +12,7 @@ use super::tables::Msg;
 use super::tests_real::{
     boot, cast_command, files, give_book, keys, lines_of, msg, png, printed, show, text_at,
 };
-use crate::engine::{Engine, Io};
+use crate::engine::{Engine, InputEvent, Io};
 use crate::files::Files;
 use crate::main_loop::flush_prints;
 use crate::objects::Slot;
@@ -30,14 +30,17 @@ fn word(files: &Files, spell: u8) -> String {
 }
 
 /// Boots, gives the hero a book with `spell` and the reagents, runs `setup`, casts: the
-/// incantation, return, then `after` one key per tick. Returns the engine when it is over.
+/// incantation, return, then `after`, one key per take ([`start`]). Returns the engine when it
+/// is over.
 fn cast(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
     let mut e = start(files, spell, setup, after);
     finish(&mut e);
     e
 }
 
-/// [`cast`] without waiting for the end.
+/// [`cast`] without waiting for the end. Each key goes in once the one before it was taken (the
+/// queue empty, or the cast over): a key wait drains what waits at its take (0x134e7c with
+/// A4-0x7a46 set keeps the last code), so keys queued while the spell is busy would be one.
 fn start(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
     let input = format!("{}\n{after}", word(files, spell));
     let state = State::new_game(files).quiet();
@@ -51,10 +54,37 @@ fn start(files: &Files, spell: u8, setup: Setup, after: &str) -> Engine {
         cast_command(&st, &io).await;
     });
     e.tick(&[], 16);
-    for k in keys(&input) {
-        e.tick(&[k], 16);
-    }
+    type_each(&mut e, &keys(&input), 4000);
     e
+}
+
+/// Gives `e` the events of `input` one per take: each, then idle ticks until the game took it
+/// (the queue empty) or finished, at most `budget`; one still queued then fails the test.
+fn type_each(e: &mut Engine, input: &[InputEvent], budget: usize) {
+    for &k in input {
+        e.tick(&[k], 16);
+        for _ in 0..budget {
+            if e.finished() || e.io().pending_events() == 0 {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(
+            e.finished() || e.io().pending_events() == 0,
+            "{k:?} not taken in {budget} ticks"
+        );
+    }
+}
+
+/// [`type_each`] fails when the game leaves a key queued past the budget (a game that reads
+/// none), rather than queue the next behind it, where a drained take would drop it.
+#[test]
+#[should_panic(expected = "not taken in 40 ticks")]
+fn keys_one_per_take_fail_when_a_key_is_not_taken() {
+    let mut e = Engine::with_game(State::empty(), Files::default(), |_st, io| async move {
+        io.sleep(u32::MAX).await;
+    });
+    type_each(&mut e, &keys(">>"), 40);
 }
 
 fn finish(e: &mut Engine) {
