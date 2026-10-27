@@ -40,7 +40,7 @@ const WAND: u32 = 0x0012_1b8e;
 
 /// Port-only (spec 08, slice K2): the strings Attack passes to `printf` as its format (queued
 /// through [`say`]), for the locale layer's catalogue ([`crate::locale::strings`]). The wand's
-/// word, which goes in as an argument, is left out (it stays English).
+/// word, which goes in as an argument, is a label ([`SHOWN_AT`]).
 pub(crate) const PRINTED: &[u32] = &[
     ATTACK_WORD,
     NOT_ABOARD,
@@ -63,6 +63,11 @@ pub(crate) const PRINTED: &[u32] = &[
     NAMED,
     NEWLINE,
 ];
+
+/// Port-only (spec 16 item 1, 2026-10-27): the wand's word the vanished line takes as its `%s`,
+/// a label of the locale layer's catalogue at its own address ([`crate::locale::strings`]): read
+/// for display ([`with_wand`]), on a wrapping line, so with no cell budget.
+pub(crate) const SHOWN_AT: &[u32] = &[WAND];
 /// Cross-hair confirmed (the key read's code 0x8e).
 const CONFIRMED: u16 = crate::ui::wait::REPEAT;
 
@@ -759,7 +764,7 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
         }
         0x4f | 0x50 if s.rng.range(1, 100) == 0x25 => {
             objects::remove(s, weapon);
-            let wand = with_wand();
+            let wand = with_wand(s);
             say(s, VANISHED, vec![wand]);
             s.actors.work.prompt = 1;
         }
@@ -780,8 +785,53 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
     1
 }
 
-/// The word for a wand (a PC-relative string of hunk 13), as a message argument.
-fn with_wand() -> Text {
+/// The word for a wand (a PC-relative string of hunk 13), as a message argument. Port (spec 16
+/// item 1, 2026-10-27): read for display, so the locale pack's label of it when it has one
+/// ([`SHOWN_AT`], [`crate::locale::shown`]).
+fn with_wand(s: &State) -> Text {
     let b = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, WAND));
-    Text::Str(b.unwrap_or_default())
+    Text::Str(crate::locale::shown(s, b.unwrap_or_default()))
+}
+
+/// Spec 16 item 1 (2026-10-27): the wand's word in the vanished line ([`with_wand`]) with a
+/// Korean pack holding a form for it, the pack's form; without a pack, the English. A synthetic
+/// `game` of the test's own bytes.
+#[cfg(test)]
+mod tests_words {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// The word [`with_wand`] gives, with a pack or none.
+    fn wand_word(pack: bool) -> Vec<u8> {
+        let parts: [(u32, &[u8]); 1] = [(WAND, b"Zw1")];
+        let mut s = State::empty();
+        if pack {
+            crate::locale::strings::install_test_forms(&mut s, &parts, &[(b"Zw1", "지팡이")]);
+        }
+        let game = crate::locale::strings::test_game(&parts);
+        let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game)]));
+        let out = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let got = out.clone();
+        let mut e = crate::engine::Engine::with_game(s, files, move |st, _io| async move {
+            let s = st.borrow();
+            if let Text::Str(w) = with_wand(&s) {
+                *got.borrow_mut() = w;
+            }
+        });
+        for _ in 0..40 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished());
+        out.take()
+    }
+
+    #[test]
+    fn the_wands_word_is_the_packs_form_and_else_the_english() {
+        assert_eq!(wand_word(true), "지팡이".as_bytes(), "the pack's form");
+        assert_eq!(wand_word(false), b"Zw1", "the English");
+    }
 }

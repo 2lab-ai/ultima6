@@ -208,6 +208,36 @@ pub(crate) fn play_song(state: &mut State, n: u16) {
     crate::sound::play_song(state, n)
 }
 
+/// Port-only (spec 08, slice K2; spec 16 item 1, 2026-10-27): the strings `map/` passes to
+/// `printf` as its format, for the locale layer's catalogue ([`crate::locale::strings`]): the
+/// place-name line's lead, its two prefixes and its end ([`say_place_name`]; 0x11d1d4 pushes them
+/// at 0x11d42a, 0x11d446, 0x11d470 and 0x11d49c) and the party-mode line
+/// ([`say_party_mode_needed`], 0x11d4d6). The place's name between them is a format too, read
+/// through its pointer ([`PLACE_NAMES`]).
+pub(crate) const PRINTED: &[u32] = &[
+    crate::image::A4.wrapping_sub(0x7303),
+    0x0011_b8f8,
+    0x0011_b902,
+    0x0011_b90e,
+    crate::image::A4.wrapping_sub(0x72cf),
+];
+
+/// Port-only (spec 16 item 1, 2026-10-27): the pointer slots of the place names
+/// [`say_place_name`] passes to `printf` as its format, A4-0x6a60 + 4 q for the qualities
+/// 1..=20 (0x11d1d4 reads the slot at 0x11d490..0x11d496 and pushes the name it holds as the
+/// format), for the locale layer's catalogue ([`crate::locale::strings`]).
+pub(crate) const PLACE_NAMES: [u32; 20] = place_names();
+
+const fn place_names() -> [u32; 20] {
+    let mut out = [0; 20];
+    let mut q = 0;
+    while q < 20 {
+        out[q] = crate::image::A4.wrapping_sub(0x6a60) + 4 * (q as u32 + 1);
+        q += 1;
+    }
+    out
+}
+
 /// Actor 3 names the place a dungeon entrance of quality `q` (1..=20) leads to (0x11d1d4):
 /// printf of the string at A4-0x7303, then the prefix string at 0x11b8f8 for q < 8 or the one
 /// at 0x11b902 for q 9..=11, then the name the pointer table A4-0x6a60 + 4q points at, then the

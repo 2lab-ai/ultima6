@@ -62,6 +62,10 @@ pub use weight::{
 /// layer's catalogue.
 pub(crate) use ready::{LABELS, PRINTED};
 
+/// Port-only (spec 16 item 1, 2026-10-27): the weight line's strings, each within its English's
+/// cells, for the locale layer's catalogue.
+pub(crate) use panel::PRINTED as PANEL_PRINTED;
+
 use crate::files::Files;
 use crate::state::LoadError;
 use crate::ui::pointer::LEADER_PIXEL;

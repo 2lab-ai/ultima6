@@ -39,6 +39,10 @@
 //! in conversations, and the page takes it after each frame with [`Game::take_speech`] for its
 //! on-device synthesis; off (the default), the tap keeps nothing and no frame changes either way.
 //!
+//! Remembered sight (spec 18): with [`Game::set_sight_memory`] on, the map window shows the cells
+//! in view that were seen and are out of sight now in dark grey ([`u6_core::Io::set_sight_memory`]);
+//! off (the default, the original's black), the frames are those without it.
+//!
 //! Korean (spec 08, slice K1): the page loads a dropped `ko.u6lp` once as a [`LocalePack`]
 //! (the engine's strict reader: at most [`max_locale_pack_bytes`]) and, in Korean mode, sets it
 //! on each game it starts ([`Game::set_locale`]): checked against that game's files, then its
@@ -512,6 +516,8 @@ pub struct Game {
     /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
     /// repeats were queued as, so its release takes back those ([`Game::key_up`]).
     held: Vec<(String, Key)>,
+    /// Spec 18: the remembered sight on ([`Game::set_sight_memory`]).
+    sight_memory: bool,
 }
 
 impl Default for Game {
@@ -555,6 +561,7 @@ impl Game {
             voices: false,
             run: None,
             held: Vec::new(),
+            sight_memory: false,
         };
         game.redraw();
         game
@@ -1362,6 +1369,22 @@ impl Game {
         }
     }
 
+    /// Spec 18: the remembered sight on or off: while on, the map window shows each cell in view
+    /// that was seen and is out of sight now as it last showed it, its ground and still objects
+    /// in dark grey; off (the default), black, as the original. Applies to the game running (from
+    /// its next map window render) and to every game started after.
+    pub fn set_sight_memory(&mut self, on: bool) {
+        self.sight_memory = on;
+        if let Some(engine) = &self.engine {
+            engine.io().set_sight_memory(on);
+        }
+    }
+
+    /// Whether the remembered sight is on ([`Game::set_sight_memory`]).
+    pub fn sight_memory(&self) -> bool {
+        self.sight_memory
+    }
+
     /// Spec 09 Design 1: the utterances NPCs said since the previous call, as a JSON array of
     /// `{seq, turn, speaker, script: [archive, item] | null, text, lang, traits: {type,
     /// worktype, alignment}}` (empty when there are none). A channel of its own: the text is
@@ -1644,10 +1667,11 @@ impl Game {
     }
 
     /// `engine`, just started, becomes the game on screen: no Save of it taken yet, no sound
-    /// machine, no queued input; its first frame converted and, with HD on, composed whole (its
-    /// versions start again at 0).
+    /// machine, no queued input, the voices and the remembered sight as set; its first frame
+    /// converted and, with HD on, composed whole (its versions start again at 0).
     fn put_on_screen(&mut self, mut engine: Engine) {
         engine.set_speech(self.voices);
+        engine.io().set_sight_memory(self.sight_memory);
         self.saved_gen = 0;
         self.save_out = Vec::new();
         self.save_whole = false;
@@ -2211,6 +2235,20 @@ mod tests {
         );
         game.step(20);
         assert_eq!(game.take_speech(), "", "no utterance: nothing");
+    }
+
+    /// Spec 18: the remembered sight is off until set; set before a start it applies to the
+    /// engine put on screen, and off again to the running one.
+    #[test]
+    fn the_sight_memory_follows_the_game() {
+        let mut game = Game::new();
+        assert!(!game.sight_memory(), "off by default");
+        game.set_sight_memory(true);
+        game.put_on_screen(synthetic_engine());
+        assert!(game.engine.as_ref().is_some_and(|e| e.io().sight_memory()));
+        game.set_sight_memory(false);
+        assert!(game.engine.as_ref().is_some_and(|e| !e.io().sight_memory()));
+        assert!(!game.sight_memory());
     }
 
     /// Spec 08 (slice K1): a pack reads through the engine's strict reader (a refusal names the

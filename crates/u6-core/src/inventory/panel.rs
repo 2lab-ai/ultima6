@@ -17,6 +17,14 @@ use crate::ui::text::fill_rect;
 /// Image strings 0x1118c6 prints (code hunk 8): six blanks, `%d%/%ds`.
 const STR_BLANK: u32 = 0x0011_0bfc;
 const STR_WEIGHT: u32 = 0x0011_0c04;
+
+/// Port-only (spec 16 item 1, 2026-10-27): the strings the weight line ([`draw_list`]'s 0x1118c6)
+/// passes to `printf` as its format, for the locale layer's catalogue
+/// ([`crate::locale::strings`]): the blank that clears each value's field (pushed at 0x111b5c and
+/// 0x111b96; no word of its own) and the values' format (0x111b86, 0x111bc6), each at
+/// status-window cells (2, 9) and (0xb, 9) after the blank cleared 6 cells there: the format
+/// within its English's cells, as the panels' formats ([`crate::ui::tables::PRINTED`]).
+pub(crate) const PRINTED: &[u32] = &[STR_BLANK, STR_WEIGHT];
 /// Background, empty-cell and both-hands tiles.
 const BLANK: u16 = 0x19b;
 const EMPTY: u16 = 0x19a;

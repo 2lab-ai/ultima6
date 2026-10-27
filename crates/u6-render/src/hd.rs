@@ -9,7 +9,11 @@
 //!   colour is the paper's at its own place (the paper bitmap, [`BITMAP_PAPER`], is drawn at
 //!   (0, 0)), the block `(x·S.., y·S..)` of the paper's HD version, so the text windows show the
 //!   HD paper in place behind the text (and text over a portrait or the spellbook does not);
-//! - for every other pixel (classic, glyph, flagged, stale), its classic colour.
+//! - for every other pixel (classic, glyph, flagged, stale), its classic colour;
+//! - spec 18: a pixel of the remembered sight ([`FLAG_MEMORY`], no other flag) as the same pixel
+//!   without the flag, from the grey copy of the image's HD version ([`crate::grey`] of each
+//!   sub-pixel, alpha kept; made once per HD image and kept with it); its classic colour is
+//!   already grey (its index is past the game's colours, [`crate::GREY`]).
 //!
 //! Spec 11, the HD font mode ([`Compositor::set_font_mode`]): on, each 8 × 8 cell of the screen
 //! grid whose 64 pixels are the glyph of one code drawn whole ([`Kind::Glyph`], (u, v) its place
@@ -66,8 +70,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::{
-    BITMAP_PAPER, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED, Framebuffer,
-    HEIGHT, Kind, Rgb, Src, WIDTH,
+    BITMAP_PAPER, FLAG_INK, FLAG_MEMORY, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED,
+    Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH, grey,
 };
 
 pub use mmpx::{mmpx, mmpx2x};
@@ -130,6 +134,14 @@ pub trait Images {
     /// before the colour table, which within one game are those of one file).
     fn key(&mut self, _kind: Kind, _id: u16) -> Option<u64> {
         None
+    }
+
+    /// Spec 18: the (kind, id) a pack keys image (kind, id) under ([`Pack::hd`]): the image's own
+    /// unless it is a copy of another's pixels (the remembered sight's copy of a record), then
+    /// that one's, so a copy shows the pack's image of what it was taken from when its content
+    /// key is the pack image's.
+    fn pack_id(&self, kind: Kind, id: u16) -> (Kind, u16) {
+        (kind, id)
     }
 }
 
@@ -288,6 +300,9 @@ struct Entry {
     input: Vec<u32>,
     /// `scale·width × scale·height` words.
     hd: Vec<u32>,
+    /// Spec 18: `hd` in grey ([`grey_word`]), made at the first pixel of the remembered sight
+    /// that shows it ([`HdImages::grey`]).
+    grey: Option<Vec<u32>>,
     /// What it was last reached from.
     source: Source,
     /// The composition that used it last ([`HdImages::stamp`]).
@@ -296,8 +311,16 @@ struct Entry {
 
 impl Entry {
     fn bytes(&self) -> usize {
-        (self.input.len() + self.hd.len()) * 4 + self.source.bytes()
+        let grey = self.grey.as_ref().map_or(0, Vec::len);
+        (self.input.len() + self.hd.len() + grey) * 4 + self.source.bytes()
     }
+}
+
+/// Spec 18: the packed word `w` in the remembered sight's grey ([`crate::grey`]), its alpha kept.
+fn grey_word(w: u32) -> u32 {
+    let [r, g, b, a] = w.to_le_bytes();
+    let c = grey(Rgb::new(r, g, b));
+    u32::from_le_bytes([c.r, c.g, c.b, a])
 }
 
 /// The lookup hash of an image's words, its shape and the scale.
@@ -409,6 +432,18 @@ impl HdImages {
         self.slab[slot].as_ref().expect("a live entry")
     }
 
+    /// Spec 18: the grey copy of the HD image in `slot`, made now if it has none (its words
+    /// counted in [`HdImages::bytes`], the bound kept at the composition's end as for any image).
+    fn grey(&mut self, slot: usize) -> &[u32] {
+        let e = self.slab[slot].as_mut().expect("a live entry");
+        if e.grey.is_none() {
+            e.grey = Some(e.hd.iter().map(|&w| grey_word(w)).collect());
+            self.bytes += e.hd.len() * 4;
+            self.peak = self.peak.max(self.bytes);
+        }
+        e.grey.as_deref().unwrap_or_default()
+    }
+
     /// Whether the entry in `slot` is still the one with `token`, at `scale`, last reached from
     /// `img`'s pixels under palette generation `palette`; marked used now if so.
     fn reached(
@@ -492,6 +527,7 @@ impl HdImages {
             height,
             input: input.to_vec(),
             hd,
+            grey: None,
             source,
             used: self.stamp,
         };
@@ -1054,7 +1090,8 @@ impl Compositor {
                 let mut shown = None;
                 // The place in the image shown whose HD block the pixel takes.
                 let mut at = (usize::from(src.u), usize::from(src.v));
-                if !matches!(src.kind, Kind::Classic | Kind::Glyph) && src.flags == 0 {
+                if !matches!(src.kind, Kind::Classic | Kind::Glyph) && src.flags & !FLAG_MEMORY == 0
+                {
                     if key != Some((src.kind, src.id)) {
                         key = Some((src.kind, src.id));
                         cur = res.resolve(src.kind, src.id);
@@ -1118,7 +1155,11 @@ impl Compositor {
                         }
                     }
                     Some(r) => {
-                        let hd = &res.hd.entry(r.slot).hd;
+                        let hd = if src.flags & FLAG_MEMORY != 0 {
+                            res.hd.grey(r.slot)
+                        } else {
+                            res.hd.entry(r.slot).hd.as_slice()
+                        };
                         let hw = r.width * s;
                         let b = at.1 * s * hw + at.0 * s;
                         for k in 0..s {
@@ -1231,6 +1272,7 @@ impl Resolver<'_> {
                             let source = Source::of(&img, self.palette);
                             let art = self.pack.and_then(|pack| {
                                 let key = self.images.key(kind, id)?;
+                                let (kind, id) = self.images.pack_id(kind, id);
                                 pack.hd(kind, id, key).filter(|a| {
                                     a.width == w * PACK_SCALE
                                         && a.height == h * PACK_SCALE
@@ -1255,5 +1297,287 @@ impl Resolver<'_> {
         };
         slot.resolved = Some(resolved);
         resolved
+    }
+}
+
+/// Spec 18: the remembered sight in the compositor, on a synthetic tile (no game data).
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::{FLAG_OVERLAY, GREY};
+
+    /// One 16 × 16 tile record, id 7: two colours split by a staircase diagonal (MMPX smooths
+    /// it, so its HD block is not the pixels scaled), a third in the corner.
+    struct Tile7(Vec<u8>);
+
+    impl Images for Tile7 {
+        fn image(&mut self, kind: Kind, id: u16) -> Option<Image<'_>> {
+            (kind == Kind::Tile && id == 7).then(|| Image {
+                ver: 0,
+                width: 16,
+                height: 16,
+                pixels: &self.0,
+                transparent: None,
+            })
+        }
+    }
+
+    fn tile7() -> Tile7 {
+        Tile7(
+            (0..256)
+                .map(|i: usize| match (i % 16, i / 16) {
+                    (u, v) if u < 3 && v < 3 => 5,
+                    (u, v) if u > v => 1,
+                    _ => 2,
+                })
+                .collect(),
+        )
+    }
+
+    /// The tile drawn at (32, 48), each pixel named the record with `flags` and its colour plus
+    /// `add`; a palette of distinct colours, entry [`GREY`] + i the grey of entry i.
+    fn frame(t: &Tile7, flags: u8, add: u8) -> Framebuffer {
+        let mut fb = Framebuffer::new();
+        fb.enable_src();
+        for (i, c) in fb.palette.iter_mut().enumerate().take(32) {
+            *c = Rgb::new(i as u8 * 8, 255 - i as u8 * 5, (i as u8).wrapping_mul(37));
+        }
+        for i in 0..32 {
+            fb.palette[usize::from(GREY) + i] = grey(fb.palette[i]);
+        }
+        for (i, &p) in t.0.iter().enumerate() {
+            let (u, v) = (i % 16, i / 16);
+            let src = Src {
+                ver: 0,
+                id: 7,
+                u: u as u16,
+                v: v as u16,
+                kind: Kind::Tile,
+                flags,
+            };
+            fb.set_src(32 + u, 48 + v, p | add, src);
+        }
+        fb
+    }
+
+    /// The composed words of the tile's place.
+    fn block(c: &Compositor, s: usize) -> Vec<u32> {
+        let ow = WIDTH * s;
+        (48 * s..64 * s)
+            .flat_map(|y| (32 * s..48 * s).map(move |x| y * ow + x))
+            .map(|i| c.rgba()[i])
+            .collect()
+    }
+
+    /// A pixel of the remembered sight shows the grey of the HD block the same pixel shows
+    /// without the flag, at both scales; the grey copy is made once and counted in the cache's
+    /// bytes. With the flag gone the block is the HD block again; an overlay pixel of the
+    /// remembered sight is its classic colour, as a live overlay pixel is.
+    #[test]
+    fn a_remembered_pixel_takes_the_grey_copy_of_its_hd_block() {
+        for scale in [Scale::X2, Scale::X4] {
+            let s = scale.factor();
+            let mut t = tile7();
+            let (mut live, mut grey_c) = (Compositor::new(), Compositor::new());
+            live.compose(&frame(&t, 0, 0), &mut t, scale);
+            grey_c.compose(&frame(&t, FLAG_MEMORY, GREY), &mut t, scale);
+            let want: Vec<u32> = block(&live, s).into_iter().map(grey_word).collect();
+            let fb = frame(&t, FLAG_MEMORY, GREY);
+            let flat: Vec<u32> = (48 * s..64 * s)
+                .flat_map(|y| (32 * s..48 * s).map(move |x| (x / s, y / s)))
+                .map(|(x, y)| word(fb.palette[usize::from(fb.get(x, y).unwrap())]))
+                .collect();
+            assert!(
+                want != flat,
+                "×{s}: the grey HD block is not the grey pixels scaled"
+            );
+            assert!(block(&grey_c, s) == want, "×{s}: the grey of the HD block");
+            let hd_words = 16 * s * 16 * s;
+            assert_eq!(
+                grey_c.cache().bytes(),
+                live.cache().bytes() + hd_words * 4,
+                "×{s}: the grey copy counted"
+            );
+            assert_eq!(grey_c.cache().bytes(), grey_c.cache().entries_bytes());
+            let bytes = grey_c.cache().bytes();
+            grey_c.compose(&frame(&t, 0, 0), &mut t, scale);
+            assert!(block(&grey_c, s) == block(&live, s), "×{s}: live again");
+            grey_c.compose(&frame(&t, FLAG_MEMORY, GREY), &mut t, scale);
+            assert!(block(&grey_c, s) == want && grey_c.cache().bytes() == bytes);
+            grey_c.compose(&frame(&t, FLAG_MEMORY | FLAG_OVERLAY, GREY), &mut t, scale);
+            assert!(block(&grey_c, s) == flat, "×{s}: an overlay pixel classic");
+        }
+    }
+
+    /// The grey of `live`'s block of the tile, composed fresh from `fb` without the flag (its
+    /// pixels named the record unflagged, their colours below [`GREY`]).
+    fn grey_of_live(t: &mut Tile7, fb: &Framebuffer, scale: Scale) -> Vec<u32> {
+        let mut plain = fb.clone();
+        for (i, &p) in t.0.iter().enumerate() {
+            let src = Src {
+                ver: 0,
+                id: 7,
+                u: (i % 16) as u16,
+                v: (i / 16) as u16,
+                kind: Kind::Tile,
+                flags: 0,
+            };
+            plain.set_src(32 + i % 16, 48 + i / 16, p, src);
+        }
+        let mut live = Compositor::new();
+        live.compose(&plain, t, scale);
+        block(&live, scale.factor())
+            .into_iter()
+            .map(grey_word)
+            .collect()
+    }
+
+    /// Once a grey copy exists: new pixels of the image under the same palette, then a new
+    /// palette over the same pixels, each make a new HD image whose grey copy the remembered
+    /// pixel shows. The cache's bytes stay the sum of its entries'.
+    #[test]
+    fn the_grey_copy_follows_the_image_and_the_palette() {
+        let scale = Scale::X2;
+        let s = scale.factor();
+        let mut t = tile7();
+        let mut c = Compositor::new();
+        let fb = frame(&t, FLAG_MEMORY, GREY);
+        c.compose(&fb, &mut t, scale);
+        let first = block(&c, s);
+        t.0[17] = 3;
+        let fb = frame(&t, FLAG_MEMORY, GREY);
+        c.compose(&fb, &mut t, scale);
+        let new_pixels = grey_of_live(&mut t, &fb, scale);
+        assert!(
+            block(&c, s) == new_pixels && new_pixels != first,
+            "the new pixels"
+        );
+        assert_eq!(c.cache().bytes(), c.cache().entries_bytes());
+        let mut fb = frame(&t, FLAG_MEMORY, GREY);
+        fb.palette[1] = Rgb::new(250, 10, 10);
+        fb.palette[usize::from(GREY) + 1] = grey(fb.palette[1]);
+        c.compose(&fb, &mut t, scale);
+        let new_palette = grey_of_live(&mut t, &fb, scale);
+        assert!(
+            block(&c, s) == new_palette && new_palette != new_pixels,
+            "the new palette"
+        );
+        assert_eq!(c.cache().bytes(), c.cache().entries_bytes());
+    }
+
+    /// A bound that holds the HD image but not with its grey copy: a composition with remembered
+    /// pixels shows the grey copy, then evicts the image with it at its end; one without keeps
+    /// the image; the next with them makes the grey copy again. The bytes stay the entries' sum.
+    #[test]
+    fn a_bound_short_of_the_grey_copy_evicts_it_with_its_image() {
+        let scale = Scale::X2;
+        let s = scale.factor();
+        let mut t = tile7();
+        let live = frame(&t, 0, 0);
+        let remembered = frame(&t, FLAG_MEMORY, GREY);
+        let mut probe = Compositor::new();
+        probe.compose(&live, &mut t, scale);
+        let image = probe.cache().bytes();
+        let mut c = Compositor::with_cap(image);
+        for round in 0..2 {
+            c.compose(&remembered, &mut t, scale);
+            let want = grey_of_live(&mut t, &remembered, scale);
+            assert!(block(&c, s) == want, "round {round}: the grey copy shown");
+            assert!(
+                c.cache().is_empty(),
+                "round {round}: evicted with its image"
+            );
+            c.compose(&live, &mut t, scale);
+            assert!(
+                block(&c, s) == block(&probe, s),
+                "round {round}: the image shown"
+            );
+            assert_eq!(c.cache().len(), 1, "round {round}: the image kept");
+            assert_eq!(c.cache().bytes(), image);
+            assert_eq!(c.cache().bytes(), c.cache().entries_bytes());
+        }
+    }
+
+    /// One 16 × 16 tile image under id 2048 (past the game's records, as the remembered sight
+    /// names a copy), version 0 whatever its pixels.
+    struct Copy2048(Vec<u8>);
+
+    impl Images for Copy2048 {
+        fn image(&mut self, kind: Kind, id: u16) -> Option<Image<'_>> {
+            (kind == Kind::Tile && id == 2048).then(|| Image {
+                ver: 0,
+                width: 16,
+                height: 16,
+                pixels: &self.0,
+                transparent: None,
+            })
+        }
+    }
+
+    /// Spec 18 (the review's slot reuse): a copy's id freed and named again for other pixels,
+    /// still at version 0: the compositor shows the new pixels (the memo of the id compares the
+    /// pixels it was reached from: a new HD image), in grey, not the image it held under the id.
+    #[test]
+    fn an_id_named_again_for_other_pixels_at_version_0_shows_them() {
+        let scale = Scale::X2;
+        let s = scale.factor();
+        let at = |t: &Copy2048| {
+            let mut fb = frame(&Tile7(t.0.clone()), FLAG_MEMORY, GREY);
+            for (i, &p) in t.0.iter().enumerate() {
+                let src = Src {
+                    ver: 0,
+                    id: 2048,
+                    u: (i % 16) as u16,
+                    v: (i / 16) as u16,
+                    kind: Kind::Tile,
+                    flags: FLAG_MEMORY,
+                };
+                fb.set_src(32 + i % 16, 48 + i / 16, p | GREY, src);
+            }
+            fb
+        };
+        let grey_of = |t: &Copy2048| {
+            let mut live = Compositor::new();
+            let mut plain = frame(&Tile7(t.0.clone()), 0, 0);
+            for (i, &p) in t.0.iter().enumerate() {
+                let src = Src {
+                    ver: 0,
+                    id: 2048,
+                    u: (i % 16) as u16,
+                    v: (i / 16) as u16,
+                    kind: Kind::Tile,
+                    flags: 0,
+                };
+                plain.set_src(32 + i % 16, 48 + i / 16, p, src);
+            }
+            live.compose(&plain, &mut Copy2048(t.0.clone()), scale);
+            block(&live, s)
+                .into_iter()
+                .map(grey_word)
+                .collect::<Vec<u32>>()
+        };
+        let mut t = Copy2048(tile7().0);
+        let mut c = Compositor::new();
+        c.compose(&at(&t), &mut t, scale);
+        let first = grey_of(&t);
+        assert!(block(&c, s) == first, "the first pixels");
+        let made = c.cache().made();
+        for p in t.0.iter_mut().step_by(5) {
+            *p = 4;
+        }
+        c.compose(&at(&t), &mut t, scale);
+        let second = grey_of(&t);
+        assert!(second != first, "other pixels");
+        assert!(block(&c, s) == second, "the new pixels shown");
+        assert_eq!(c.cache().made(), made + 1, "a new HD image");
+    }
+
+    #[test]
+    fn grey_word_keeps_the_alpha_and_greys_the_colour() {
+        let w = u32::from_le_bytes([200, 100, 50, 128]);
+        let [r, g, b, a] = grey_word(w).to_le_bytes();
+        let c = grey(Rgb::new(200, 100, 50));
+        assert_eq!([r, g, b, a], [c.r, c.g, c.b, 128]);
+        assert_eq!(grey_word(0), 0, "a transparent sub-pixel stays transparent");
     }
 }

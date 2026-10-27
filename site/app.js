@@ -44,6 +44,10 @@
 // either way. The canvas is scaled into its box pixelated, or smoothly when the HD frame has
 // more device pixels than the box.
 //
+// Remembered sight (spec 18; on unless `u6.memory` is kept 'off'): each game the page starts
+// shows the map cells in view that were seen and are out of sight now as they last looked, their
+// ground and still objects in dark grey (Game.set_sight_memory), where the original shows black.
+//
 // The HD layout (spec 10; Settings' "Screen layout", kept in localStorage, HD 16:9 unless
 // Original 16:10 was chosen): with HD on and that layout, the canvas is 1280 × 720 in a 16:9 box
 // (at most 1280 CSS px wide on the page) and the compositor runs at S 4. The ×4 frame is kept on
@@ -1446,6 +1450,18 @@ function storedHd() {
 }
 
 let hdOn = storedHd();
+
+const MEMORY_KEY = 'u6.memory'; // localStorage: 'off' when the remembered sight is switched off
+
+// The stored choice of the remembered sight (spec 18); unreadable storage or any other value is
+// on.
+function storedMemory() {
+  try {
+    return localStorage.getItem(MEMORY_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
 
 // The HD scale for the canvas's box now: 4 when it holds at least 3 device pixels per game
 // pixel each way, else 2 (MMPX doubles; there is no 3x).
@@ -3019,6 +3035,7 @@ async function boot(next, origin) {
   game = next;
   owner = next;
   next.set_voices(voice.ready);
+  next.set_sight_memory(storedMemory());
   voice.newGame();
   old?.free();
   drawnGame = null; // the freed game's frame is not this one's

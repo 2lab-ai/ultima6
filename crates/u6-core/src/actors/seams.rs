@@ -139,17 +139,28 @@ pub enum Arg {
     Word(i16),
     /// The display name of an object (0x10eef8).
     Name(ObjectId),
-    /// A string in the data hunk at A4 + offset.
+    /// A string in the data hunk at A4 + offset. Port (spec 16 item 1, 2026-10-27): as an
+    /// argument (not the format), read for display ([`crate::locale::shown`]).
     Text(i32),
-    /// A string at an absolute image address (PC-relative strings in code hunks).
+    /// A string at an absolute image address (PC-relative strings in code hunks). Port (spec 16
+    /// item 1, 2026-10-27): as an argument (not the format), read for display
+    /// ([`crate::locale::shown`]: a carried item's name in the vanishing line).
     Image(u32),
     /// The string the pointer at A4 + offset points to (a name table entry: the date line's wind
     /// name), as the locale shows it ([`crate::locale::shown`]).
     Pointer(i32),
 }
 
-/// The bytes of a string argument; `None` for a word.
-fn arg_text(s: &State, io: &Io, a: Arg) -> Option<Vec<u8>> {
+/// The bytes of a string argument; `None` for a word. A string at an image address the line
+/// takes as an argument (`field`) is read for display, the format as it is.
+fn arg_text(s: &State, io: &Io, a: Arg, field: bool) -> Option<Vec<u8>> {
+    let shown = |english: Vec<u8>| {
+        if field {
+            crate::locale::shown(s, english)
+        } else {
+            english
+        }
+    };
     Some(match a {
         Arg::PartyName(i) => s
             .actors
@@ -159,10 +170,11 @@ fn arg_text(s: &State, io: &Io, a: Arg) -> Option<Vec<u8>> {
             .map_or_else(Vec::new, |n| n.as_bytes().to_vec()),
         // Port (spec 08, slice K3): printed, so the locale pack's object name when it has one.
         Arg::Name(id) => crate::objects::shown_name(s, id.slot()).into_bytes(),
-        Arg::Text(off) => {
-            crate::main_loop::game_string(io, crate::image::A4.wrapping_add_signed(off))
-        }
-        Arg::Image(at) => crate::main_loop::game_string(io, at),
+        Arg::Text(off) => shown(crate::main_loop::game_string(
+            io,
+            crate::image::A4.wrapping_add_signed(off),
+        )),
+        Arg::Image(at) => shown(crate::main_loop::game_string(io, at)),
         // Port (spec 08, slice K2): printed, so the locale pack's label when it has one.
         Arg::Pointer(off) => crate::locale::shown(
             s,
@@ -180,7 +192,7 @@ pub fn print(s: &mut State, text: i32, args: &[Arg]) {
         let mut args = args.iter();
         let fmt = if text == 0 {
             args.next()
-                .and_then(|&a| arg_text(s, io, a))
+                .and_then(|&a| arg_text(s, io, a, false))
                 .unwrap_or_default()
         } else {
             crate::main_loop::game_string(io, crate::image::A4.wrapping_add_signed(text))
@@ -188,7 +200,7 @@ pub fn print(s: &mut State, text: i32, args: &[Arg]) {
         let rest: Vec<PrintArg> = args
             .map(|&a| match a {
                 Arg::Word(w) => PrintArg::Word(w as u16),
-                other => PrintArg::Str(arg_text(s, io, other).unwrap_or_default()),
+                other => PrintArg::Str(arg_text(s, io, other, true).unwrap_or_default()),
             })
             .collect();
         (fmt, rest)
@@ -337,4 +349,85 @@ pub fn jail_party(s: &mut State, x: u16, y: u16, z: u16) {
 /// when the leader stands on a ladder, stairs or hole.
 pub fn level_transition(s: &mut State) {
     crate::map::travel::after_step(s);
+}
+
+/// Spec 16 item 1 (2026-10-27): [`print`]'s string arguments are read for display, its format as
+/// it is: an `Arg::Text` in a `%s` field takes the Korean pack's form; the format taken from the
+/// first argument (`text` 0) stays the English though the pack holds a form for its bytes. A
+/// synthetic `game` of the test's own bytes.
+#[cfg(test)]
+mod tests_words {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::image::A4;
+    use crate::main_loop::{Pending, PrintArg};
+
+    const FORMAT: i32 = -0x7000;
+    const WORD: i32 = -0x6f00;
+    const LINE: u32 = 0x0012_0000;
+
+    /// The format and arguments [`print`] queues for `args` (format `text`), with a pack holding
+    /// a form for the word and the line, or none.
+    fn queued(text: i32, args: Vec<Arg>, pack: bool) -> (Vec<u8>, Vec<PrintArg>) {
+        let parts: [(u32, &[u8]); 3] = [
+            (A4.wrapping_add_signed(FORMAT), b"Zf1 %s\n"),
+            (A4.wrapping_add_signed(WORD), b"Zt1"),
+            (LINE, b"Zl1 line\n"),
+        ];
+        let mut s = State::empty();
+        let game = crate::locale::strings::test_game(&parts);
+        if pack {
+            // No list names the test's word or line: a catalogue of its own holds them, the word
+            // a label, the line a message.
+            use crate::locale::strings::{Catalogue, Kind};
+            let catalogue = Catalogue::from_entries([
+                (Kind::Label, b"Zt1".to_vec()),
+                (Kind::Message, b"Zl1 line\n".to_vec()),
+            ]);
+            crate::locale::strings::install_test_catalogue(
+                &mut s,
+                &game,
+                &[(b"Zt1", "말"), (b"Zl1 line\n", "줄\n")],
+                catalogue,
+            );
+        }
+        let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game)]));
+        let mut e = crate::engine::Engine::with_game(s, files, move |st, _io| async move {
+            print(&mut st.borrow_mut(), text, &args);
+        });
+        for _ in 0..40 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished());
+        match e.state().main.pending_print.last() {
+            Some(Pending::Print(f, a)) => (f.clone(), a.clone()),
+            _ => panic!("the line queued"),
+        }
+    }
+
+    #[test]
+    fn a_data_hunk_string_in_a_field_is_the_packs_form_and_else_the_english() {
+        let field = |pack| queued(FORMAT, vec![Arg::Text(WORD)], pack).1;
+        assert_eq!(
+            field(true),
+            [PrintArg::Str("말".as_bytes().to_vec())],
+            "the pack's form"
+        );
+        assert_eq!(
+            field(false),
+            [PrintArg::Str(b"Zt1".to_vec())],
+            "the English"
+        );
+    }
+
+    #[test]
+    fn the_format_from_the_first_argument_stays_the_english_with_a_pack() {
+        let (format, args) = queued(0, vec![Arg::Image(LINE)], true);
+        assert_eq!(format, b"Zl1 line\n", "the format as it is");
+        assert!(args.is_empty(), "no argument left");
+    }
 }
