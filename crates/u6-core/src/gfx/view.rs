@@ -13,14 +13,15 @@
 //! Spec 18, port-only ([`Io::set_sight_memory`], off by default): the remembered sight. A cell in
 //! view that the window showed while it was in sight and that is out of sight now (base tile
 //! 0xff, or 0x1bc unlit) is drawn as it was then, its ground and still objects
-//! ([`super::cache::SightMemory`]), in the grey colours [`GREY`].. ([`blit_memory`]); with the
-//! switch off the render is the original's.
+//! ([`super::cache::SightMemory`]), in the grey colours [`GREY`].., fading by the game days
+//! since ([`super::cache::keeps`], [`blit_memory`]); with the switch off the render is the
+//! original's.
 
 use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, TILE_H, TILE_W};
 use u6_render::{FLAG_MEMORY, FLAG_OVERLAY, Framebuffer, GREY, Kind, Rgb, Src, grey};
 
 use super::blit::{blit_back, copy_window_rows, plot, set_plot_colour};
-use super::cache::{BOXES, Layer, SightMemory, WindowKey, cell_box};
+use super::cache::{BOXES, Layer, Shown, SightMemory, WindowKey, cell_box, keeps};
 use super::tables::GameTables;
 use super::{GfxState, anim, cache, seams};
 use crate::actors::Calendar;
@@ -95,14 +96,15 @@ fn load_palette(state: &State, fb: &mut Framebuffer, memory: bool) {
     }
 }
 
-/// Spec 18: draws the remembered layer `layer` at (x, y), the top left of a cell, in grey: each
-/// opaque pixel of its pixels (its record's, or the copy of them it keeps: [`Layer::image`]; of
-/// the first 16 rows) takes their colour plus [`GREY`];
-/// with masktype bit 2, the record's overlay at the frame kept ORs colour bit 3 into the pixels
-/// under it (rows within the cell). The sources are the blitter's (0x153008, [`blit_back`]) with
-/// [`FLAG_MEMORY`]. Every write stays in the cell's box; a map cell is never in the UI's columns
-/// in Wide, so no write is dropped there.
-fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, x: u16, y: u16) {
+/// Spec 18: draws the remembered layer `layer` at (x, y), the top left of a cell, in grey, `fade`
+/// whole days after its last sight: each opaque pixel of its pixels (its record's, or the copy of
+/// them it keeps: [`Layer::image`]; of the first 16 rows) that the fade keeps ([`keeps`]) takes
+/// their colour plus [`GREY`]; with masktype bit 2, the record's overlay at the frame kept ORs
+/// colour bit 3 into the pixels under it that the fade keeps (rows within the cell). A pixel the
+/// fade does not keep is not written. The sources are the blitter's (0x153008, [`blit_back`])
+/// with [`FLAG_MEMORY`]. Every write stays in the cell's box; a map cell is never in the UI's
+/// columns in Wide, so no write is dropped there.
+fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16, u16), fade: u8) {
     let r = usize::from(layer.record);
     let (Some((pixels, transparent, id, ver)), Some(overlay)) =
         (layer.image(gfx), gfx.overlays.get(r))
@@ -121,7 +123,7 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, x: u16, y: u1
     let pixels = pixels.iter().zip(transparent).take(TILE_W * TILE_H);
     for (i, (&p, &clear)) in pixels.enumerate() {
         let (row, c) = (i / TILE_W, i % TILE_W);
-        if !clear {
+        if !clear && keeps(fade, c, row) {
             fb.set_src(x + c, y + row, p | GREY, src(c, row, 0));
         }
     }
@@ -134,7 +136,8 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, x: u16, y: u1
             if row >= TILE_H {
                 break;
             }
-            for c in (0..TILE_W).filter(|c| bits & (0x8000 >> c) != 0) {
+            let drawn = |&c: &usize| bits & (0x8000 >> c) != 0 && keeps(fade, c, row);
+            for c in (0..TILE_W).filter(drawn) {
                 let p = fb.get(x + c, y + row).unwrap_or(0);
                 fb.set_src(
                     x + c,
@@ -147,11 +150,28 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, x: u16, y: u1
     }
 }
 
-/// Spec 18: draws view cell (col, row)'s remembered sight into `back` in grey ([`blit_memory`]),
-/// the layers the window render shows there now ([`SightMemory::shown`]); false, drawing
-/// nothing, when it shows none (a cell outside the view included). For the flights' redraw over
-/// the missiles (0x1325e4, [`crate::combat::present::redraw_over`]), which draws darkness there
-/// otherwise; the caller checks the switch ([`Io::sight_memory`]).
+/// Spec 18: draws a remembered cell at (x, y) as the window render does: its own tile (black:
+/// 0xff or 0x1bc) under the pixels the fade leaves out, then its remembered layers in grey
+/// ([`blit_memory`]).
+fn draw_remembered(
+    gfx: &GfxState,
+    fb: &mut Framebuffer,
+    tile: u16,
+    at: (u16, u16),
+    shown: (u8, &[Layer]),
+) {
+    let (fade, layers) = shown;
+    blit_back(gfx, fb, tile, at.0, at.1);
+    for &layer in layers {
+        blit_memory(gfx, fb, layer, at, fade);
+    }
+}
+
+/// Spec 18: draws view cell (col, row)'s remembered sight into `back` ([`draw_remembered`]), what
+/// the window render shows there now ([`SightMemory::shown`]); false, drawing nothing, when it
+/// shows none (a cell outside the view included). For the flights' redraw over the missiles
+/// (0x1325e4, [`crate::combat::present::redraw_over`]), which draws darkness there otherwise; the
+/// caller checks the switch ([`Io::sight_memory`]).
 pub(crate) fn blit_remembered(state: &State, back: &mut Framebuffer, col: i16, row: i16) -> bool {
     let (Ok(col), Ok(row)) = (usize::try_from(col), usize::try_from(row)) else {
         return false;
@@ -160,12 +180,11 @@ pub(crate) fn blit_remembered(state: &State, back: &mut Framebuffer, col: i16, r
         return false;
     }
     let base = state.objects.draw.base[row * VIEW_W + col];
-    let layers = state.gfx.cache.memory.shown(state, (col, row), base);
-    let (x, y) = cell_pixel(col, row);
-    for &layer in layers {
-        blit_memory(&state.gfx, back, layer, x, y);
-    }
-    !layers.is_empty()
+    let Some(shown) = state.gfx.cache.memory.shown(state, (col, row), base) else {
+        return false;
+    };
+    draw_remembered(&state.gfx, back, base, cell_pixel(col, row), shown);
+    true
 }
 
 /// Original: 0x102bf2 (clock hands: three pixels on a clock tile drawn at (x, y))
@@ -275,7 +294,7 @@ struct WindowInputs {
     window: ViewWindow,
     clock: Option<u16>,
     cursor: Option<(u16, u16, u16)>,
-    memory: Vec<Vec<Layer>>,
+    memory: Vec<Shown>,
 }
 
 fn window_inputs(state: &mut State, io: &Io, framed: bool) -> WindowInputs {
@@ -346,12 +365,11 @@ fn draw_boxes(
                     continue;
                 }
                 let (x, y) = cell_pixel(col, row);
-                match memory.get(row * VIEW_W + col).filter(|m| !m.is_empty()) {
-                    Some(layers) => {
-                        for &layer in layers {
-                            blit_memory(gfx, fb, layer, x, y);
-                        }
-                    }
+                match memory
+                    .get(row * VIEW_W + col)
+                    .filter(|m| !m.layers.is_empty())
+                {
+                    Some(m) => draw_remembered(gfx, fb, tile, (x, y), (m.fade, &m.layers)),
                     None => blit_back(gfx, fb, tile, x, y),
                 }
                 for &word in &window.objects[row * VIEW_W + col] {
@@ -833,11 +851,12 @@ mod sight_memory_tests {
         gone.into_iter().find(|&w| hidden_after(&s, w))
     }
 
-    /// Spec 18: a cell out of sight that leaves the view is forgotten. Two steps take it out of
-    /// sight, then off the view; one step back brings it into the view again, still out of
-    /// sight: it shows black, as with the remembered sight off. Before it left it showed grey.
+    /// Spec 18 (the owner's follow-up: "한번이라도 본 지형은 계속 기억"): a cell out of sight that
+    /// leaves the view stays remembered. Two steps take it out of sight, then off the view; one
+    /// step back brings it into the view again, still out of sight: it shows the grey look it
+    /// had before it left (the same game time: no fade), not black.
     #[test]
-    fn real_a_cell_that_leaves_the_view_is_black_after_one_step_back() {
+    fn real_a_cell_that_leaves_the_view_shows_grey_after_one_step_back() {
         let Some(files) = files() else { return };
         let start = start(&files);
         let found = places(&start).find_map(|place| {
@@ -854,62 +873,27 @@ mod sight_memory_tests {
         let at = cell_of(&s, x).quiet();
         let grey = box_of(io, at);
         assert!(
-            grey != box_off(&mut s, io, at) && s.gfx.cache.memory.holds(x.0, x.1),
-            "out of sight in the view: remembered, grey"
+            grey != box_off(&mut s, io, at),
+            "out of sight in the view: grey"
         );
         assert!(walk(&mut s, d));
         render(&mut s, io);
+        assert!(cell_of(&s, x).is_none(), "off the view");
         assert!(
-            !s.gfx.cache.memory.holds(x.0, x.1),
-            "off the view: forgotten"
+            s.gfx.cache.memory.holds(x.0, x.1),
+            "off the view: remembered"
         );
         assert!(walk(&mut s, (d + 4) % 8));
         render(&mut s, io);
         let at = cell_of(&s, x).quiet();
         assert!(!in_sight(&s, at));
-        let shown = box_of(io, at);
-        assert_same!(shown, box_off(&mut s, io, at), "back in the view: black");
+        assert_same!(box_of(io, at), grey, "back in the view: its grey look");
     }
 
-    /// Spec 18: another level forgets the remembered sight: a render on another level holds none
-    /// of it, and back on the first level the cell out of sight is black.
+    /// Spec 18 (the owner's follow-up): the party teleported (0x1092fc) to the level below and
+    /// back: the surface cell out of sight is remembered all along and shows its grey look again.
     #[test]
-    fn real_another_level_forgets_the_remembered_sight() {
-        let Some(files) = files() else { return };
-        let start = start(&files);
-        let (place, d, h, _, at1) = hiding_step(&start, |_, _| true, |_, _| true)
-            .expect("a step takes a cell out of sight");
-        let e = engine();
-        let io = e.io();
-        io.set_sight_memory(true);
-        let mut s = place;
-        render(&mut s, io);
-        assert!(walk(&mut s, d));
-        render(&mut s, io);
-        assert!(s.gfx.cache.memory.holds(h.0, h.1));
-        assert!(
-            box_of(io, at1) != box_off(&mut s, io, at1),
-            "grey on its level"
-        );
-        let z = s.map.centre.z;
-        s.map.centre.z = (z + 1) % 6;
-        render(&mut s, io);
-        assert!(
-            !s.gfx.cache.memory.holds(h.0, h.1),
-            "another level: forgotten"
-        );
-        s.map.centre.z = z;
-        render(&mut s, io);
-        let shown = box_of(io, at1);
-        assert_same!(shown, box_off(&mut s, io, at1), "back on its level: black");
-    }
-
-    /// Spec 18: the window reset (0x133a96, which the full redraw 0x133b0e dissolves in before the
-    /// view is rebuilt: the party's darkness, an arrest) forgets the remembered sight: the reset
-    /// window is the original's black, and the view rebuilt after it (in part in sight) shows
-    /// none of what was remembered before the reset.
-    #[test]
-    fn real_the_window_reset_forgets_the_remembered_sight() {
+    fn real_another_level_keeps_the_remembered_sight() {
         let Some(files) = files() else { return };
         let start = start(&files);
         let (place, d, h, _, at1) = hiding_step(&start, |_, _| true, |_, at| inner(at))
@@ -921,29 +905,253 @@ mod sight_memory_tests {
         render(&mut s, io);
         assert!(walk(&mut s, d));
         render(&mut s, io);
-        assert!(
-            box_of(io, at1) != box_off(&mut s, io, at1),
-            "grey before the reset"
+        let grey = box_of(io, at1);
+        assert!(grey != box_off(&mut s, io, at1), "grey on its level");
+        let (c, z) = (s.map.centre, s.map.centre.z);
+        let (x, y) = (
+            (c.x & 7) + ((c.x >> 2) & 0xf8),
+            (c.y & 7) + ((c.y >> 2) & 0xf8),
         );
+        crate::map::travel::teleport(&mut s, x, y, u16::from(z) + 1, 0);
+        render(&mut s, io);
+        assert!(s.map.centre.z != z, "another level");
+        assert!(
+            s.gfx.cache.memory.holds_on(z, h.0, h.1),
+            "another level: still remembered"
+        );
+        crate::map::travel::teleport(&mut s, c.x, c.y, u16::from(z), 0);
+        render(&mut s, io);
+        let at = cell_of(&s, h).quiet();
+        assert!(
+            at == at1 && !in_sight(&s, at),
+            "back where it stood, the cell out of sight"
+        );
+        assert_same!(box_of(io, at), grey, "back on its level: its grey look");
+    }
+
+    /// Spec 18 (the owner's follow-up): the window reset (0x133a96, which the full redraw 0x133b0e
+    /// dissolves in before the view is rebuilt: the party's darkness, an arrest, the healer)
+    /// keeps the remembered sight: the reset window shows the remembered cell's grey look, and so
+    /// does the view rebuilt after it. A restore 0x1052c8 (its load state 0x105350) forgets it.
+    #[test]
+    fn real_the_window_reset_keeps_the_remembered_sight_and_load_state_forgets_it() {
+        let Some(files) = files() else { return };
+        let start = start(&files);
+        let (place, d, h, _, at1) = hiding_step(&start, |_, _| true, |_, at| inner(at))
+            .expect("a step takes a cell out of sight");
+        let e = Engine::with_game(State::empty(), files.clone(), |_, _| async {});
+        let io = e.io();
+        io.set_sight_memory(true);
+        let mut s = place;
+        render(&mut s, io);
+        assert!(walk(&mut s, d));
+        render(&mut s, io);
+        let grey = box_of(io, at1);
+        assert!(grey != box_off(&mut s, io, at1), "grey before the reset");
+        let n = s.gfx.cache.memory.len();
         crate::ui::effects::reset_window(&mut s);
         render(&mut s, io);
-        assert!(
-            io.peek_back(|b| b.pixels().iter().all(|&p| p < GREY)),
-            "no grey after the reset"
-        );
-        let shown = box_of(io, at1);
-        assert_same!(shown, box_off(&mut s, io, at1), "the reset window: black");
-        assert!(s.gfx.cache.memory.len() == 0, "nothing remembered");
+        assert!(s.gfx.cache.memory.len() == n, "nothing forgotten");
+        assert_same!(box_of(io, at1), grey, "the reset window: its grey look");
         crate::map::view::update_view(&mut s);
-        assert!(!in_sight(&s, at1) && cells().any(|at| in_sight(&s, at)));
         render(&mut s, io);
-        assert!(!s.gfx.cache.memory.holds(h.0, h.1), "the old entry gone");
-        let shown = box_of(io, at1);
-        assert_same!(
-            shown,
-            box_off(&mut s, io, at1),
-            "the view rebuilt: black there"
+        assert!(s.gfx.cache.memory.holds(h.0, h.1), "still remembered");
+        assert_same!(box_of(io, at1), grey, "the view rebuilt: its grey look");
+        crate::saveload::restore(&mut s, io).quiet();
+        assert!(
+            s.gfx.cache.memory.len() == 0,
+            "a restore (load state): forgotten"
         );
+    }
+
+    /// The calendar `n` whole days after `cal` (the original's: days 1..=28, months 1..=12).
+    fn days_after(cal: crate::actors::Calendar, n: u8) -> crate::actors::Calendar {
+        let mut c = cal;
+        for _ in 0..n {
+            c.day += 1;
+            if c.day > 28 {
+                c.day = 1;
+                c.month += 1;
+                if c.month > 12 {
+                    c.month = 1;
+                    c.year += 1;
+                }
+            }
+        }
+        c
+    }
+
+    /// The cell `at`'s pixels the remembered sight drew in grey (index past the game's 32), as a
+    /// 256-flag mask.
+    fn grey_mask(io: &Io, at: Cell) -> Vec<bool> {
+        box_of(io, at).iter().map(|&p| p >= GREY).collect()
+    }
+
+    /// Spec 18 (the owner's follow-up: fading by game days): a cell of plain ground with a fully
+    /// opaque record, out of sight after a step, the calendar set 1, 2, 3, 4 and 5 whole days
+    /// later (across a month's and a year's end: the last day of the year at the sight): its
+    /// grey pixels are exactly 256, 128, 64, 32, 16 on days 0..4, each day's a subset of the day
+    /// before's, and the 50 % a checkerboard; on day 5 none (its tile's black), and the sweep
+    /// forgets it. A day less one minute is still the day before. The renders up to day 5 go
+    /// through the window cache ([`super::render_window_cached`], each after the one before with
+    /// nothing else drawn in between): only the fade changes the box's draw, so a key without it
+    /// would leave the box as it was.
+    #[test]
+    fn real_a_remembered_cell_fades_by_whole_game_days() {
+        let Some(files) = files() else { return };
+        let start = start(&files);
+        let opaque = |s: &State, at: Cell| {
+            let t = usize::from(base(s, at) & 0x7ff);
+            let rec = &s.gfx.records[usize::from(s.gfx.record_of[t])];
+            inner(at) && nodes(s, at).is_empty() && rec.transparent.iter().all(|&c| !c)
+        };
+        let (place, d, h, _, at1) = hiding_step(&start, opaque, |_, at| inner(at))
+            .expect("a step hides a cell of opaque ground");
+        let e = engine();
+        let io = e.io();
+        io.set_sight_memory(true);
+        let mut s = place;
+        let year_end = crate::actors::Calendar {
+            minute: 30,
+            hour: 23,
+            day: 28,
+            month: 12,
+            year: s.actors.calendar.year,
+        };
+        s.actors.calendar = year_end;
+        let cached = |s: &mut State| super::render_window_cached(s, io);
+        cached(&mut s);
+        assert!(walk(&mut s, d));
+        cached(&mut s);
+        let mut before = grey_mask(io, at1);
+        assert!(before.iter().all(|&g| g), "day 0: every pixel");
+        let (skips, partial) = (s.gfx.cache.window_skips, s.gfx.cache.window_partial);
+        for day in 1..=4u8 {
+            let mut almost = days_after(year_end, day);
+            almost.minute -= 1;
+            s.actors.calendar = almost;
+            cached(&mut s);
+            assert!(
+                grey_mask(io, at1) == before,
+                "day {day} less a minute: the day before"
+            );
+            s.actors.calendar = days_after(year_end, day);
+            cached(&mut s);
+            let now = grey_mask(io, at1);
+            let n = now.iter().filter(|&&g| g).count();
+            assert_eq!(n, 256 >> day, "day {day}: kept pixels");
+            assert!(
+                now.iter().zip(&before).all(|(&a, &b)| !a || b),
+                "day {day}: a subset"
+            );
+            if day == 1 {
+                let checker = (0..256).all(|i| now[i] == ((i % 16 + i / 16) % 2 == 0));
+                assert!(checker, "day 1: a checkerboard");
+            }
+            before = now;
+        }
+        let c = &s.gfx.cache;
+        assert!(
+            c.window_skips + c.window_partial > skips + partial,
+            "the cache drew the days (whole renders left out, or boxes of them)"
+        );
+        s.actors.calendar = days_after(year_end, 5);
+        cached(&mut s);
+        assert!(grey_mask(io, at1).iter().all(|&g| !g), "day 5: none");
+        assert_same!(box_of(io, at1), box_off(&mut s, io, at1), "day 5: black");
+        assert!(!s.gfx.cache.memory.holds(h.0, h.1), "day 5: forgotten");
+    }
+
+    /// Spec 18: the age in minutes counts the original clock's rollover (0x10368a: 60 minutes, 24
+    /// hours, days 1..=28, months 1..=12): one minute past the year's last, by the clock itself,
+    /// is one minute later; a whole day across a month's end is 1440.
+    #[test]
+    fn the_age_counts_the_calendars_rollover() {
+        use crate::actors::Calendar;
+        use crate::gfx::cache::minutes;
+        let mut s = State::empty();
+        let end = Calendar {
+            minute: 59,
+            hour: 23,
+            day: 28,
+            month: 12,
+            year: 161,
+        };
+        s.actors.calendar = end;
+        crate::actors::clock::tick(&mut s, 1);
+        let next = s.actors.calendar;
+        assert!(
+            (next.day, next.month, next.year) == (1, 1, 162),
+            "the clock rolled over"
+        );
+        assert_eq!(minutes(&next) - minutes(&end), 1);
+        let month_end = Calendar { month: 5, ..end };
+        assert_eq!(
+            minutes(&days_after(month_end, 1)) - minutes(&month_end),
+            1440
+        );
+    }
+
+    /// Spec 18: a cell at 50 % (one game day old) in the HD frame at ×2: each pixel the fade keeps
+    /// shows grey sub-pixels and names the remembered sight, each other pixel is black in both
+    /// frames (its tile's: the classic black and its HD block).
+    #[test]
+    fn real_a_half_faded_cell_in_hd_is_grey_on_kept_pixels_and_black_elsewhere() {
+        let Some(files) = files() else { return };
+        let start = start(&files);
+        let opaque = |s: &State, at: Cell| {
+            let t = usize::from(base(s, at) & 0x7ff);
+            let rec = &s.gfx.records[usize::from(s.gfx.record_of[t])];
+            inner(at) && nodes(s, at).is_empty() && rec.transparent.iter().all(|&c| !c)
+        };
+        let (place, d, _, _, at1) = hiding_step(&start, opaque, |_, at| inner(at))
+            .expect("a step hides a cell of opaque ground");
+        let e = engine();
+        let io = e.io();
+        io.set_sight_memory(true);
+        io.enable_src_plane();
+        let mut s = place;
+        let day0 = s.actors.calendar;
+        render(&mut s, io);
+        assert!(walk(&mut s, d));
+        s.actors.calendar = days_after(day0, 1);
+        render(&mut s, io);
+        let mut c = u6_render::hd::Compositor::new();
+        let hd = hd_box(&mut c, &s, io, at1);
+        let (x0, y0) = cell_pixel(at1.0, at1.1);
+        let (x0, y0) = (usize::from(x0), usize::from(y0));
+        let (mut kept, mut black) = (0, 0);
+        for i in 0..256 {
+            let (u, v) = (i % 16, i / 16);
+            let (p, src) = io.draw(|f| (f.get(x0 + u, y0 + v).quiet(), f.src_at(x0 + u, y0 + v)));
+            let subs: Vec<[u8; 4]> = (0..4)
+                .map(|k| hd[(v * 2 + k / 2) * 32 + u * 2 + k % 2].to_le_bytes())
+                .collect();
+            let memory = src.is_some_and(|s| s.flags & u6_render::FLAG_MEMORY != 0);
+            if crate::gfx::cache::keeps(1, u, v) {
+                assert!(
+                    p >= GREY && memory,
+                    "a kept pixel: grey, the remembered sight"
+                );
+                assert!(
+                    subs.iter().all(|w| w[0] == w[1] && w[1] == w[2]),
+                    "kept: grey in HD"
+                );
+                kept += 1;
+            } else {
+                let rgb = io.draw(|f| f.palette[usize::from(p)]);
+                assert!(
+                    !memory && (rgb.r, rgb.g, rgb.b) == (0, 0, 0),
+                    "a left-out pixel: black"
+                );
+                assert!(
+                    subs.iter().all(|w| w[..3] == [0, 0, 0]),
+                    "left out: black in HD"
+                );
+                black += 1;
+            }
+        }
+        assert_eq!((kept, black), (128, 128));
     }
 
     /// Spec 18: with the remembered sight off (the engine's default) nothing is remembered, a
@@ -1433,8 +1641,8 @@ mod sight_memory_tests {
     /// cell of the moat round the start, open water). Then the animation runs on (0x10202e)
     /// until the merge changed that record: the cell shows the pixels of its last sight in grey,
     /// on the screen (through the window cache, and the whole render) and in the HD frame at ×2,
-    /// unchanged; the record itself did change. The look is kept as one copy per merged record
-    /// and version a remembered cell names.
+    /// unchanged; the record itself did change. The look is kept as one copy per record and
+    /// content a remembered cell names.
     #[test]
     fn real_a_shore_cell_keeps_the_look_of_its_last_sight() {
         let Some(files) = files() else { return };
@@ -1591,6 +1799,164 @@ mod sight_memory_tests {
         rewrite(&mut s);
         super::render_window_cached(&mut s, io);
         assert_same!(box_of(io, at1), shown, "the last sight's look");
+    }
+
+    /// Spec 18 (the review's item 1: no live record in the remembered sight): the copy store full
+    /// ([`crate::gfx::cache::MAX_COPIES`]), a cell of plain ground whose record was rewritten
+    /// (its version not 0: kept as a copy) is seen with a copy, then its record is rewritten
+    /// again while it is in sight (a new content, which the full store cannot take), then a step
+    /// hides it and the record is rewritten once more: the cell is forgotten, the original's
+    /// black out of sight, never the record's pixels now (the look of its last sight cannot be
+    /// kept, and the older look is not its last sight). Through the window cache.
+    #[test]
+    fn real_a_full_copy_store_forgets_the_cell_and_never_shows_a_rewrite() {
+        let Some(files) = files() else { return };
+        let start = start(&files);
+        let ground = |s: &State, at: Cell| {
+            let r = s.gfx.record_of[usize::from(base(s, at) & 0x7ff)];
+            inner(at) && !merged(s).contains(&r) && nodes(s, at).is_empty()
+        };
+        let (place, d, h, at0, at1) = hiding_step(&start, ground, |_, at| inner(at))
+            .expect("a step hides a cell of plain ground");
+        let e = engine();
+        let io = e.io();
+        io.set_sight_memory(true);
+        let mut s = place;
+        let r = usize::from(s.gfx.record_of[usize::from(base(&s, at0) & 0x7ff)]);
+        let rewrite = |s: &mut State, bit: u8| {
+            for p in s.gfx.records[r].pixels.iter_mut() {
+                *p ^= bit;
+            }
+            s.gfx.cache.record_changed(r);
+        };
+        let cached = |s: &mut State| super::render_window_cached(s, io);
+        rewrite(&mut s, 1);
+        cached(&mut s);
+        let layer = s.gfx.cache.memory.at(h.0, h.1).quiet()[0];
+        assert!(layer.frozen.is_some(), "seen with a copy");
+        s.gfx
+            .cache
+            .memory
+            .fill_copies(crate::gfx::cache::MAX_COPIES, 0);
+        rewrite(&mut s, 2);
+        cached(&mut s);
+        assert!(walk(&mut s, d));
+        let black = box_off(&mut s, io, at1);
+        cached(&mut s);
+        assert_same!(box_of(io, at1), black, "out of sight: the original's black");
+        rewrite(&mut s, 4);
+        cached(&mut s);
+        assert_same!(box_of(io, at1), black, "rewritten again: still black");
+        assert!(
+            !s.gfx.cache.memory.holds(h.0, h.1),
+            "a new content, the store full: forgotten"
+        );
+    }
+
+    /// Spec 18 (the review's faded overlay): a remembered layer drawn with its record's overlay
+    /// (masktype bit 2: the overlay ORs colour bit 3 into the pixels under it), 1..4 days after
+    /// its last sight, over a box that held other pixels: each pixel the fade leaves out is the
+    /// cell's own black, as the window render draws the cell ([`super::draw_remembered`]) and as
+    /// the flights' redraw over the missiles (0x1325e4, [`super::blit_remembered`]) does, and the
+    /// overlay ORs into kept pixels only. On the user's game: the tile drawn with the overlay that
+    /// covers the most pixels, at an out-of-sight cell of a place's view.
+    #[test]
+    fn real_a_faded_overlay_leaves_the_pixels_it_drops_black() {
+        use crate::gfx::cache::{keeps, minutes};
+        use u6_formats::gfx::{ANIM_PLANE, TILE_COUNT};
+        let Some(files) = files() else { return };
+        let start = start(&files);
+        let g = &start.gfx;
+        let covers = |t: usize| {
+            let ov = g.overlays[usize::from(g.record_of[t])].as_ref();
+            g.masktype[t] & 4 != 0 && ov.is_some_and(|ov| ov.frames[0].iter().any(|&b| b != 0))
+        };
+        let bits = |t: usize| {
+            let ov = g.overlays[usize::from(g.record_of[t])].as_ref();
+            ov.map_or(0, |ov| {
+                ov.frames[0].iter().map(|b| b.count_ones()).sum::<u32>()
+            })
+        };
+        let t = (0..TILE_COUNT)
+            .filter(|&t| covers(t))
+            .max_by_key(|&t| bits(t))
+            .expect("a tile drawn with an overlay");
+        let layer = super::Layer {
+            record: g.record_of[t],
+            masktype: g.masktype[t],
+            frame: 0,
+            frozen: None,
+        };
+        let (mut s, at) = places(&start)
+            .find_map(|p| {
+                let at = cells().find(|&at| inner(at) && base(&p, at) == 0xff)?;
+                Some((p, at))
+            })
+            .expect("an out-of-sight cell");
+        let (w, now) = (world(&s, at), minutes(&s.actors.calendar));
+        let ov = s.gfx.overlays[usize::from(layer.record)].clone().quiet();
+        let under = |c: usize, row: usize| {
+            let k = row.wrapping_sub(usize::from(ov.first_row));
+            ov.frames[0]
+                .get(k)
+                .is_some_and(|&bits| bits & (0x8000 >> c) != 0)
+        };
+        let (x0, y0) = cell_pixel(at.0, at.1);
+        let (x, y) = (usize::from(x0), usize::from(y0));
+        // A game colour, not the cell's black: what the box held before.
+        let fill = 0x0e;
+        let filled = || {
+            let mut fb = Framebuffer::new();
+            for i in 0..256 {
+                fb.set(x + i % 16, y + i / 16, fill);
+            }
+            fb
+        };
+        let pixels = |fb: &Framebuffer| -> Vec<u8> {
+            (0..256)
+                .map(|i| fb.get(x + i % 16, y + i / 16).quiet())
+                .collect()
+        };
+        let mut fb = filled();
+        blit_back(&s.gfx, &mut fb, 0xff, x0, y0);
+        let black = pixels(&fb);
+        assert!(
+            black.iter().all(|&p| p != fill),
+            "the cell's own tile covers its box"
+        );
+        let (mut dropped, mut ored) = (0, 0);
+        for day in 1..=4u8 {
+            let seen = now - u64::from(day) * 1440;
+            let key = (s.map.centre.z, w.0, w.1);
+            s.gfx.cache.memory.remember(key, vec![layer], seen);
+            let mut drawn = filled();
+            super::draw_remembered(&s.gfx, &mut drawn, 0xff, (x0, y0), (day, &[layer]));
+            let mut redrawn = filled();
+            let col_row = (at.0 as i16, at.1 as i16);
+            assert!(
+                super::blit_remembered(&s, &mut redrawn, col_row.0, col_row.1),
+                "the redraw over the missiles draws the cell"
+            );
+            for (name, fb) in [("the window render", &drawn), ("the redraw", &redrawn)] {
+                let got = pixels(fb);
+                for (i, &p) in got.iter().enumerate() {
+                    let (c, row) = (i % 16, i / 16);
+                    if !keeps(day, c, row) {
+                        assert!(p == black[i], "{name}, day {day}: a dropped pixel black");
+                        dropped += usize::from(under(c, row));
+                    } else if under(c, row) {
+                        assert!(
+                            p & 1 << ANIM_PLANE != 0,
+                            "{name}, day {day}: the overlay on a kept pixel"
+                        );
+                        ored += 1;
+                    }
+                }
+            }
+        }
+        println!("{dropped} dropped pixels under the overlay, {ored} kept pixels ORed");
+        assert!(dropped > 0, "the overlay covers dropped pixels");
+        assert!(ored > 0, "the overlay ORs kept pixels");
     }
 
     /// The parity driver (spec 18 review): the same text runs on the renderer before spec 18
@@ -1761,6 +2127,120 @@ mod sight_memory_tests {
         assert!(on > 0, "while on, frames differ");
         for i in off_at..frames.len() {
             assert!(frames[i].1 == PINNED[i].1, "render {i}: the base frame");
+        }
+    }
+
+    /// Spec 18 cost receipt (run alone, `--ignored`; prints numbers only): the game from the start,
+    /// the party ten cells south and the door south of it used twice (the remembered sight on
+    /// screen), on four engines with the source plane (as the page with HD): the remembered
+    /// sight off; on; on with 50 000 more cells remembered off the view (one layer each, seen
+    /// now, injected after the scenario); and that at night (also injected: the hour 23, the
+    /// ambient light 0 as the clock sets it then, the view flags recomputed), where the unlit
+    /// cells in sight that the scenario remembered draw their remembered sight too (darkness
+    /// on; not every cell of the window: those never seen stay black). Then 600 idle ticks of
+    /// each, alternating: the median and the 95th percentile of a tick, the cells, the memory's
+    /// heap bytes ([`SightMemory::heap_bytes`]) and the grey pixels of the last frame.
+    #[test]
+    #[ignore = "a cost receipt, run alone"]
+    #[allow(clippy::disallowed_types)] // a test may read the clock
+    fn receipt_the_tick_with_50k_remembered_cells() {
+        use crate::Key::{Char, Down, Enter};
+        use std::cell::Cell as Flag;
+        use std::future::Future;
+        let Some(files) = files() else { return };
+        let fills = [(); 2].map(|_| std::rc::Rc::new(Flag::new(false)));
+        let engine_of = |memory: bool, fill: Option<std::rc::Rc<Flag<bool>>>, night: bool| {
+            let mut state = State::new_game(&files).quiet();
+            state.rng.seed(0);
+            let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
+                let mut game = Box::pin(crate::main_loop::game_first(st.clone(), io));
+                std::future::poll_fn(move |cx| {
+                    if let Some(f) = &fill
+                        && f.replace(false)
+                    {
+                        let mut s = st.borrow_mut();
+                        let now = crate::gfx::cache::minutes(&s.actors.calendar);
+                        let z = s.map.centre.z;
+                        s.gfx.cache.memory.fill_synthetic(50_000, z, 600, 0x40, now);
+                        if night {
+                            s.actors.calendar.hour = 23;
+                            s.actors.objlist_tail[AMBIENT] = 0;
+                            crate::map::view::update_view(&mut s);
+                        }
+                    }
+                    game.as_mut().poll(cx)
+                })
+                .await;
+            });
+            e.io().set_sight_memory(memory);
+            e.enable_src_plane();
+            e
+        };
+        let mut engines = [
+            engine_of(false, None, false),
+            engine_of(true, None, false),
+            engine_of(true, Some(fills[0].clone()), false),
+            engine_of(true, Some(fills[1].clone()), true),
+        ];
+        let mut commands: Vec<&[crate::Key]> = vec![&[Down]; 10];
+        commands.extend([&[Char('u'), Down, Enter][..], &[Char('u'), Down, Enter]]);
+        let prompt = |e: &Engine| e.state().main.reading == 1 && e.io().pending_events() == 0;
+        for e in engines.iter_mut() {
+            for keys in &commands {
+                let mut ready = 0;
+                for _ in 0..3000 {
+                    e.tick(&[], 20);
+                    ready = if prompt(e) { ready + 1 } else { 0 };
+                    if ready == 3 {
+                        break;
+                    }
+                }
+                for &k in *keys {
+                    e.tick(&[crate::InputEvent::Key(k)], 20);
+                    for _ in 0..30 {
+                        e.tick(&[], 20);
+                    }
+                }
+            }
+        }
+        for f in &fills {
+            f.set(true);
+        }
+        let mut times = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for _ in 0..600 {
+            for (i, e) in engines.iter_mut().enumerate() {
+                let t = std::time::Instant::now();
+                e.tick(&[], 20);
+                times[i].push(t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        let names = [
+            "off",
+            "on",
+            "on, 50k more cells",
+            "on, 50k more cells, night",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let t = &mut times[i];
+            t.sort_by(f64::total_cmp);
+            let m = &engines[i].state().gfx.cache.memory;
+            let grey = engines[i]
+                .frame()
+                .pixels()
+                .iter()
+                .filter(|&&p| p >= GREY)
+                .count();
+            let light = engines[i].state().actors.objlist_tail[AMBIENT];
+            println!(
+                "{}x{} memory {name}: tick median {:.3} ms, p95 {:.3} ms; {} cells, {} heap \
+                 bytes, {grey} grey pixels, light {light}",
+                u6_render::WIDTH,
+                u6_render::HEIGHT,
+                t[t.len() / 2],
+                t[t.len() * 95 / 100],
+                m.len(),
+                m.heap_bytes()
+            );
         }
     }
 }
