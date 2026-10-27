@@ -349,6 +349,24 @@ impl Io {
         self.pointer.get()
     }
 
+    /// Port-only (spec 22 Contract 5): whether the next queued event is a pointer event.
+    pub(crate) fn pointer_ready(&self) -> bool {
+        matches!(
+            self.events.borrow().front(),
+            Some(InputEvent::Pointer { .. })
+        )
+    }
+
+    /// Port-only (spec 22 Contract 5): queues `events` ahead of everything queued, in their
+    /// order, so the next reader takes them first: a click on a conversation button or keyword
+    /// types its word as these keys, which the line editor then takes as typed ones.
+    pub(crate) fn push_front(&self, events: &[InputEvent]) {
+        let mut queue = self.events.borrow_mut();
+        for &e in events.iter().rev() {
+            queue.push_front(e);
+        }
+    }
+
     /// Resolves once the tick clock reaches now + `ms` (deadline fixed at the call).
     pub fn sleep(&self, ms: u32) -> Sleep<'_> {
         Sleep {

@@ -26,12 +26,23 @@ fn is_lower(c: i32) -> bool {
 }
 
 /// Draws `c` at window-relative cell (`col`, `row`) of the current window, in its colours.
+/// Port (spec 22 Contract 4): in the message window the keyword the cell is drawn over is
+/// forgotten, and a cell in the alert colour is recorded.
 fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
     let ui = &s.ui;
     let w = *ui.text.win();
     let x = u16::from(w.x) + u16::from(col);
     let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
     io.draw(|fb| text::draw_char(fb, font, hangul, &w, c, x, row));
+    if ui.text.current == WindowId::Messages {
+        let alert = ui.tables.colours.alert;
+        let keys = &mut s.ui.text.keys;
+        let r = row.saturating_sub(u16::from(w.y)) as u8;
+        keys.forget(r, col);
+        if w.fg == alert {
+            keys.draw(r, col, c, w.fg);
+        }
+    }
 }
 
 /// The code a line cell holds for `c` (codes past `u16` are blank cells; none is put).
@@ -272,6 +283,9 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
         } else if w.flags & SCROLL != 0 {
             let w = *w;
             t.drawn = true;
+            if t.current == WindowId::Messages {
+                t.keys.scroll();
+            }
             let paper = s.ui.paper.as_ref();
             io.draw(|fb| text::scroll_window(fb, &w, paper));
         }

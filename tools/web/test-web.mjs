@@ -12073,6 +12073,87 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
 }, { needs: h.haveHfes });
 
+// Spec 22 (conversation by click): koFixture's archive with the player's words after the
+// greeting (`f7`), a keyword block `name` whose answer ends the conversation, and a line for no
+// match. All of it the test's own.
+const CLICK_ANSWER = '"Named, and so answered."';
+const CLICK_NOPE = '"No such thing."';
+async function clickTalkFixture() {
+  const { latin1 } = await import('../i18n/translate.mjs');
+  const script = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET), 0xf7, 0xef, ...latin1('name'), 0xf6, ...latin1(CLICK_ANSWER), 0xb6, 0xee, ...latin1(CLICK_NOPE), 0xb6];
+  const items = 0x63;
+  const table = [];
+  const body = [];
+  for (let i = 0; i < items; i += 1) {
+    const at = i === 0 ? 0 : items * 4 + body.length;
+    if (i > 0) body.push(0, 0, 0, 0, ...script);
+    table.push(at & 255, (at >> 8) & 255, (at >> 16) & 255, 0);
+  }
+  return [...table, ...body];
+}
+
+// The Name button's middle (spec 22 Contract 2: Job then Name, each its word between blank cells,
+// centred on the Status window's last row, cols 0x16..0x26, row 12, one cell between them).
+const NAME_BUTTON = [33 * 8 + 4, 12 * 8 + 4];
+
+for (const layout of ['original', 'wide']) {
+  test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels, and no key was sent for the press`, async (env) => {
+    const { page } = layout === 'wide' ? await h.openWide(env) : await h.openPage(env);
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await h.waitPrompt(page);
+    assert.equal(await h.replaceKept(page, 'converse.a', await clickTalkFixture()), 1, 'one archive replaced');
+    // Pixels of the game's frame (the 320 x 200 UI at its top left in both builds), as a list:
+    // compared, never printed. The message window's rows but its last, where the prompt's
+    // cursor turns.
+    const region = (x0, y0, x1, y1) => page.evaluate(([a, b, c, d]) => {
+      const g = globalThis.__shownGame;
+      const w = g.width();
+      const rgba = g.frame_rgba();
+      const out = [];
+      for (let y = b; y < d; y += 1) for (let x = a; x < c; x += 1) out.push(rgba.slice((y * w + x) * 4, (y * w + x) * 4 + 3).join(','));
+      return out;
+    }, [x0, y0, x1, y1]);
+    const messages = async () => (await region(0x16 * 8, 0x0e * 8, 0x27 * 8, 0x17 * 8)).join(';');
+    // Talk to member 2 up to the player's words, the pointer at rest over the Name button.
+    const talkTo2 = async () => {
+      await page.reload();
+      await h.waitSettled(page);
+      await h.waitPrompt(page);
+      await page.focus('#screen');
+      await page.keyboard.press('t');
+      await h.waitTaken(page);
+      await page.keyboard.press('2');
+      await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+      await h.waitFrames(page, 2);
+      const cells = await region(30 * 8, 12 * 8, 36 * 8, 13 * 8);
+      await page.mouse.move(...(await h.screenPoint(page, ...NAME_BUTTON)));
+      await h.waitTaken(page);
+      await h.waitFrames(page, 2);
+      return cells;
+    };
+    const cells = await talkTo2();
+    assert.ok(new Set(cells).size >= 2, 'the Name button drawn in the frame (its cells of two colours, the pointer elsewhere)');
+    await keepFrame(page.locator('#screen'), `talk-click-${layout}-hover.png`);
+    await page.evaluate(() => { globalThis.__sent.length = 0; });
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+    await h.waitPrompt(page);
+    assert.deepEqual(await page.evaluate(() => globalThis.__sent.length), 0, 'no key sent for the press');
+    const pressed = await messages();
+    await talkTo2();
+    await page.keyboard.type('name');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+    await h.waitPrompt(page);
+    const typed = await messages();
+    assert.ok(pressed === typed, 'the press answered as typing name and Enter: the same message window');
+    console.log(`  receipt: ${layout}: Name pressed in the canvas answered as typed: pass`);
+  }, { needs: h.haveHfes });
+}
+
 const filter = process.argv[2];
 const env = await h.setup();
 let failed = 0;

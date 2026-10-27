@@ -1,6 +1,7 @@
 //! The text layer's globals: windows, the line being assembled, the escape state.
 
 use super::tables::UiTables;
+use super::talk::KeySpans;
 use super::text::{CAPITALISE, SCROLL, TextWindow, WRAP, WindowId};
 use super::wide::{Josa, Language, Tail, Utf8};
 
@@ -72,6 +73,9 @@ pub struct TextState {
     pub after_at: bool,
     /// Port-only: the last cell put into the line, for the josa resolver.
     pub tail: Tail,
+    /// Port-only (spec 22 Contract 4): the keywords the message window shows in the alert
+    /// colour, as the line assembler drew them.
+    pub keys: KeySpans,
 }
 
 impl Default for TextState {
@@ -102,6 +106,7 @@ impl Default for TextState {
             braces: 0,
             after_at: false,
             tail: Tail::default(),
+            keys: KeySpans::default(),
         }
     }
 }
@@ -156,6 +161,9 @@ impl TextState {
         let (fg, bg, f) = (t.colours.text, t.colours.paper, t.initial.window_flags);
         self.windows[id.index()] = TextWindow::new(x0, y0, x1, y1, fg, bg, f);
         self.current = id;
+        if id == WindowId::Messages {
+            self.keys.clear();
+        }
     }
 
     /// The three windows main sets up (0x1351d8 at 0x13533a..0x1353b6, three calls of 0x107d7c

@@ -78,6 +78,13 @@ pub(crate) async fn read_line(cx: &Cx<'_>, max: usize) -> Vec<u8> {
     if n < 0 { Vec::new() } else { line }
 }
 
+/// Port-only (spec 22): [`read_line`] after "you say" (op `f7`): with the conversation's
+/// buttons and keywords to press ([`crate::ui::keyread::read_said`]).
+pub(crate) async fn read_said(cx: &Cx<'_>, max: usize) -> Vec<u8> {
+    let (n, line) = Box::pin(crate::ui::keyread::read_said(cx.state, cx.io, max as i16)).await;
+    if n < 0 { Vec::new() } else { line }
+}
+
 /// 0x10790a: one key, as the game's key code (letters upper case, CR 0x0d, Esc 0x1b).
 pub(crate) async fn read_key(cx: &Cx<'_>) -> u16 {
     Box::pin(crate::ui::wait::read_key(cx.state, cx.io)).await
