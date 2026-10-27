@@ -46,9 +46,9 @@ Panel: Look, Drop, Move, Use, and the slot's own left-press action (ready, open,
 when there is one, is the first entry. Rest and Combat appear only as that first entry.
 
 **Tiers** (M1 §2): a condition of the target's kind hides the entry (no Use on a type outside the 85, no Talk to
-oneself, no Get of an actor). A situational, pure condition (a read of the current state: out of reach, too heavy,
+oneself, no Get of an actor, no Move or Drop of type 0x4c, which the object move refuses at objects/moves.rs:11). A situational, pure condition (a read of the current state: out of reach, too heavy,
 aboard, outside Wide's window, no free hand, no book, negate timer, no spells, level, points, reagents, solo, a blocked
-door, readied by another member, a case's own refusal) disables it with a reason code the page words. A random draw
+door, a locked door or chest (Use, reason Locked), readied by another member, a case's own refusal) disables it with a reason code the page words. A random draw
 or a later prompt never disables. Get of what is not the party's is marked as theft. An invisible selection gets no
 section (the cell shows as its tile with Look only); a cover keeps its section.
 
@@ -78,7 +78,9 @@ at run time. Disabled entries are greyed with the reason under the label (`aria-
 1. Right press on a closed door next to the leader → a menu with the door's name, Look and Use enabled (Attack last);
    choosing Use opens the door exactly as `U` then a left press on it does (same state after, same RNG).
 2. Right press on a door three cells away → Use shown, disabled, reason "far"; nothing is printed and no turn passes.
-3. Right press on a villager on a chair → two sections: the villager (Talk, Look, Move, Attack), the chair (Use, Get).
+3. Right press on a villager on a chair → two sections: the villager (Talk, Look, Move, Attack), the chair (Get). The
+   chair has no Use: its type (0xfc) is not among Use's 85, a condition of the kind, so the tier rule hides it
+   (amended 2026-10-27 after M2 r3 measured the real chair; the first draft listed Use against its own rule).
 4. Right press on an inventory object → the panel menu with its ready/open/take-off action, Look, Drop, Move, Use.
 5. Cast without a book: the entry is disabled; if forced through the engine, the target press is dropped and the
    party does not walk.
