@@ -2327,7 +2327,8 @@ mod sight_memory_tests {
 
     /// A scripted walk ([`receipt_five_days_of_a_wide_walk_fit_the_remembered_cells`]): the cells
     /// seen so far, the route to the nearest one not yet seen, the cells a step was refused into,
-    /// the party's hit points at the start, whether a light burns, and the next step asked for.
+    /// the party's hit points at the start, whether a light burns, whether it stays in the town
+    /// round its start, and the next step asked for.
     #[cfg(feature = "wide")]
     #[derive(Default)]
     struct Explorer {
@@ -2336,6 +2337,7 @@ mod sight_memory_tests {
         refused: std::collections::HashSet<(u16, u16)>,
         hp: Vec<u8>,
         light: bool,
+        town: bool,
         plan: bool,
         next: Option<usize>,
         teleports: usize,
@@ -2370,9 +2372,10 @@ mod sight_memory_tests {
 
     /// The explorer's next step ([`Explorer::next`]): along its route, else the route (by
     /// breadth-first search over the cells the leader may stand on, [`crate::actors::walk::
-    /// can_move_to`], within 48, 160, then 511 cells) to the nearest cell not yet seen; with none
-    /// in reach, the party put (0x1092fc) on the first cell of a 32-cell grid of the surface that
-    /// is not yet seen and that the leader may stand on, and the search again.
+    /// can_move_to`], within 48, 160, then 511 cells; in the town within 48 only) to the nearest
+    /// cell not yet seen; with none in reach, the party put (0x1092fc) on the first cell of a
+    /// 32-cell grid of the surface that is not yet seen and that the leader may stand on, and the
+    /// search again (in the town: none, the walk ends).
     #[cfg(feature = "wide")]
     fn explore(s: &mut State, w: &mut Explorer) {
         use std::collections::VecDeque;
@@ -2383,7 +2386,8 @@ mod sight_memory_tests {
                 let x = c.x.wrapping_add_signed(dx as i16) & m;
                 (x, c.y.wrapping_add_signed(dy as i16) & m)
             };
-            for r in [48i32, 160, 511] {
+            let radii: &[i32] = if w.town { &[48] } else { &[48, 160, 511] };
+            for &r in radii {
                 if !w.route.is_empty() {
                     break;
                 }
@@ -2423,7 +2427,7 @@ mod sight_memory_tests {
                     }
                 }
             }
-            if !w.route.is_empty() {
+            if !w.route.is_empty() || w.town {
                 break;
             }
             let grid = (0..32u16).flat_map(|k| (0..32u16).map(move |j| (k, j)));
@@ -2447,13 +2451,16 @@ mod sight_memory_tests {
     /// with the view open, played by its own keys for five game days, the arrow key of each step
     /// pressed at the prompt, the next step [`explore`]'s: the walk stays over unseen ground. The
     /// party's hit points are kept at their start, and the other actors kept off ([`keep_off`]):
-    /// the walk is not stopped by a fight. Twice: without a
-    /// light, then with one burning (the light spell's timer, timer 0, kept up: at night the
-    /// clock's light level is 4, not 0). Per game hour the cells remembered; the minute the old
-    /// bound 131 072 was passed; at the end the cells, those with more than one layer, the most
-    /// held after a step, the walk's geometric bound (a step shows at most a new row of
-    /// [`VIEW_W`] cells, a teleport a new view) and the heap bytes. Five days fit: the cap forgot
-    /// no cell over the whole run.
+    /// the walk is not stopped by a fight. Twice: without a light, then with one burning (the
+    /// light spell's timer, timer 0, kept up: at night the clock's light level is 4, not 0). Then
+    /// a town walk: from the place round the start (the castle and the town by it) whose view
+    /// shows the most cells with still objects, within 48 cells of the party, for a game day or
+    /// until nothing unseen is in reach. Per game hour the cells
+    /// remembered; the minute the old bound 131 072 was passed; at the end the cells, those with
+    /// more than one layer and their share, the most held after a step, the walk's geometric
+    /// bound (the start's view, then at most a new row of [`VIEW_W`] cells a step and a new view
+    /// a teleport) and the heap bytes. The cells held stay within the geometric bound, and the
+    /// cap forgot no cell over any run: five days fit.
     #[cfg(feature = "wide")]
     #[test]
     #[ignore = "a cost receipt, run alone"]
@@ -2469,13 +2476,32 @@ mod sight_memory_tests {
             .filter(|p| p.map.centre.z == 0)
             .find(|p| open(p) * 10 >= VIEW_W * VIEW_H * 7)
             .expect("a place on the land with the view open");
-        for light in [false, true] {
+        // The town: of the places round the start (the castle and the town by it), the one whose
+        // view shows the most cells in sight with still objects.
+        let furnished = |p: &State| {
+            let objects = |at: Cell| nodes(p, at).iter().any(|&(_, still)| still);
+            cells().filter(|&at| in_sight(p, at) && objects(at)).count()
+        };
+        let town_place = places_at(&start, (4..64).step_by(4))
+            .max_by_key(|p| furnished(p))
+            .quiet();
+        let runs = [
+            ("land, no light", false, false),
+            ("land, a light", true, false),
+            ("town", false, true),
+        ];
+        for (name, light, town) in runs {
             let explorer = Rc::new(RefCell::new(Explorer {
                 light,
+                town,
                 ..Explorer::default()
             }));
             let hook = explorer.clone();
-            let mut state = place.clone();
+            let mut state = if town {
+                town_place.clone()
+            } else {
+                place.clone()
+            };
             state.rng.seed(0);
             let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
                 let mut game = Box::pin(crate::main_loop::game_first(st.clone(), io));
@@ -2518,7 +2544,8 @@ mod sight_memory_tests {
             let minute = |e: &Engine| minutes(&e.state().actors.calendar);
             let m0 = minute(&e);
             let (mut hours, mut steps, mut passed, mut most) = (Vec::new(), 0usize, None, 0);
-            while minute(&e) - m0 < 5 * 1440 {
+            let days = if town { 1 } else { 5 };
+            while minute(&e) - m0 < days * 1440 {
                 let mut ready = 0;
                 for _ in 0..600 {
                     e.tick(&[], 200);
@@ -2571,15 +2598,16 @@ mod sight_memory_tests {
                 .map(|h| h[1].0 - h[0].0)
                 .collect();
             println!(
-                "light {light}: {} game hours, {steps} steps, {} teleports; cells per hour (n: not \
-                 full daylight): {}",
-                hours.len() - 1,
+                "{name}: {} game hours, {steps} steps, {} teleports; cells per hour (n: not full \
+                 daylight): {}",
+                hours.len().saturating_sub(1),
                 w.teleports,
                 per_hour.join(" ")
             );
-            let bound = VIEW_W * steps + VIEW_W * VIEW_H * w.teleports;
+            let bound = VIEW_W * VIEW_H * (1 + w.teleports) + VIEW_W * steps;
+            let share = m.stacked() as f64 * 100.0 / m.len().max(1) as f64;
             println!(
-                "light {light}: {} cells after five days, {} with more than one layer, at most \
+                "{name}: {} cells at the end, {} with more than one layer ({share:.2} %), at most \
                  {most} held, {} forgotten by the cap, {} teleports, geometric bound {bound}, {} \
                  heap bytes; {:.0} cells per full daylight hour; 131072 passed at minute \
                  {passed:?}",
@@ -2590,9 +2618,12 @@ mod sight_memory_tests {
                 m.heap_bytes(),
                 day.iter().sum::<usize>() as f64 / day.len().max(1) as f64
             );
-            assert!(minute(&e) - m0 >= 5 * 1440, "five game days walked");
-            assert_eq!(m.evicted(), 0, "five days fit: the cap forgot no cell");
-            assert!(most < MAX_CELLS, "five days fit: under the cap all along");
+            if !town {
+                assert!(minute(&e) - m0 >= 5 * 1440, "five game days walked");
+            }
+            assert!(most <= bound, "within the walk's geometric bound");
+            assert_eq!(m.evicted(), 0, "the cap forgot no cell");
+            assert!(most < MAX_CELLS, "under the cap all along");
         }
     }
 }
