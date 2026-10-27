@@ -24,8 +24,11 @@
 // map covering the 1920 x 1080 canvas, the framed windows over it, the pointer through them, the
 // letterbox, fullscreen, the compositor's time and scale, the setting across the builds; spec 14:
 // the actor windows, the active one marked, the side panel's own window in another mode or a
-// conversation), and the remembered sight (spec 18: on in the page, off in the harness, grey on
-// the canvas where the engine's frame remembers a cell out of sight).
+// conversation), the remembered sight (spec 18: on in the page, off in the harness, grey on
+// the canvas where the engine's frame remembers a cell out of sight), and the system's pointer
+// (hidden over the canvas while a game runs where the game draws its own at the mouse, in every
+// layout, windowed and fullscreen; kept on the page before a game runs, in the launcher, on the
+// context menu, over the speed badge and in the layouts' gaps; right again under a still mouse).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
@@ -12071,6 +12074,280 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   await fresh.reload();
   await started(fresh, FILES);
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
+}, { needs: h.haveHfes });
+
+// The system's pointer over the game screen: the game draws its own (the engine's sprite over
+// the frame; with HD on the page draws it over the HD frame, spec 11 Design 7), so while a game
+// runs the stylesheet hides the system's over the canvas where the game's is under it
+// (index.html, data-pointer). What the page shows: the body's state, the canvas's computed cursor
+// and data-pointer, and the computed cursor of the first element each selector of `selectors`
+// names.
+const cursorOn = (page, ...selectors) => page.evaluate((list) => {
+  const c = document.getElementById('screen');
+  return {
+    state: document.body.dataset.state,
+    canvas: getComputedStyle(c).cursor,
+    pointer: c.dataset.pointer ?? null,
+    of: list.map((s) => getComputedStyle(document.querySelector(s)).cursor),
+  };
+}, selectors);
+
+// The mouse moved to game pixel (gx, gy) (`h.screenPoint`: through the layout in effect), once
+// the game's pointer moved (Game.hd_pointer's version) and frames drew it: its box (frame pixels)
+// and pixels, of those the layout shows the ones the canvas shows in their own colour
+// (`keepPointer`, `pointerColours`), and the cursor (`cursorOn`).
+async function mouseTo(page, gx, gy) {
+  const was = await page.evaluate(() => globalThis.__shownGame.hd_pointer()[4]);
+  await page.mouse.move(...(await h.screenPoint(page, gx, gy)));
+  await page.waitForFunction((v) => globalThis.__shownGame.hd_pointer()[4] !== v, was, { timeout: 10_000 });
+  await h.waitFrames(page, 2);
+  const kept = await keepPointer(page);
+  const colours = await pointerColours(page);
+  const { box, rgba } = await page.evaluate(() => window.__pointer);
+  return { kept, colours, box, rgba, cursor: await cursorOn(page) };
+}
+
+// The game's pointer drawn at the mouse at game pixel `a`, then `b` (`mouseTo`), the system's
+// hidden over the canvas at each: a box at each holding the mouse's pixel, the second the first
+// moved by the mouse's own move, every pixel of it the layout shows on the canvas in its own
+// colour. Returns the second reading.
+async function pointerFollows(page, a, b, label) {
+  const first = await mouseTo(page, ...a);
+  const second = await mouseTo(page, ...b);
+  for (const [r, [gx, gy], at] of [[first, a, 'first'], [second, b, 'second']]) {
+    assert.ok(r.cursor.state === 'running' && r.cursor.canvas === 'none' && r.cursor.pointer === 'game', `${label}, ${at} point: the system's pointer hidden over the canvas`);
+    const [x, y, w, hh] = r.box;
+    assert.ok(w > 0 && hh > 0 && gx >= x && gx < x + w && gy >= y && gy < y + hh, `${label}, ${at} point: the game's pointer at the mouse`);
+    assert.ok(r.kept.area && r.colours.seen > 0 && r.colours.same === r.colours.seen, `${label}, ${at} point: the canvas shows the game's pointer there`);
+  }
+  const moved = [second.box[0] - first.box[0], second.box[1] - first.box[1]];
+  assert.ok(moved[0] === b[0] - a[0] && moved[1] === b[1] - a[1] && second.box[2] === first.box[2], `${label}: the game's pointer moved as the mouse did`);
+  return second;
+}
+
+// Two game pixels in the message scroll (spec 10's region, a window in Wide; out of the map, so
+// the arrow shows at both), and one more for fullscreen.
+const SCROLL_POINTS = [[200, 140], [260, 170]];
+const FULL_POINT = [220, 150];
+
+// Fullscreen (the browser's): the system's pointer still hidden over the canvas, the game's at the
+// mouse; the letterbox round the canvas (the screen box) and the Exit button keep the system's.
+async function fullscreenCursor(page, label) {
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  await h.waitFrames(page, 2);
+  const r = await mouseTo(page, ...FULL_POINT);
+  const [x, y, w, hh] = r.box;
+  const [gx, gy] = FULL_POINT;
+  assert.ok(r.cursor.canvas === 'none' && r.cursor.pointer === 'game', `${label} fullscreen: the system's pointer hidden over the canvas`);
+  assert.ok(w > 0 && gx >= x && gx < x + w && gy >= y && gy < y + hh && r.colours.seen > 0 && r.colours.same === r.colours.seen, `${label} fullscreen: the game's pointer at the mouse`);
+  const c = await cursorOn(page, '#screen-box', '#fullscreen-exit');
+  assert.ok(c.of[0] === 'auto' && c.of[1] !== 'none', `${label} fullscreen: the letterbox and the Exit button keep the system's pointer`);
+  await page.evaluate(() => document.exitFullscreen());
+  await waitFull(page, 'off');
+}
+
+test('the system\'s pointer: before a game runs the page keeps it everywhere: on a first visit the chooser shows and nothing runs, and the canvas, the chooser and the toolbar have the default cursor', async (env) => {
+  const { page } = await h.openPage(env, { setup: null });
+  await h.load(page, env);
+  const c = await cursorOn(page, '#setup', '#setup-ok', '#playback');
+  assert.ok(!(await page.evaluate(() => document.getElementById('setup').hidden)), 'the chooser shows');
+  assert.notEqual(c.state, 'running', 'no game runs');
+  assert.equal(c.canvas, 'auto', 'the canvas: the default cursor');
+  assert.ok(c.of[0] === 'auto' && c.of[1] !== 'none' && c.of[2] === 'auto', 'the chooser and the toolbar: the default cursor');
+  console.log('  receipt: before a game runs, the canvas, the chooser, its OK and the toolbar keep the system\'s pointer: pass');
+});
+
+test('the system\'s pointer (the launcher): kept over the canvas while `u` runs, in the opening and in the menu: `u` takes no mouse (its pointer stays where it is) and the game\'s own is not drawn over it (no HD pointer at either of two mouse places)', async (env) => {
+  const { page } = await h.openPage(env, { gameFirst: false });
+  await h.load(page, env);
+  await h.dropFiles(page, [h.ZIP]);
+  await started(page);
+  await h.waitProgram(page, 'u');
+  await h.waitVisible(page);
+  await page.focus('#screen');
+  const check = async (label) => {
+    for (const [gx, gy] of SCROLL_POINTS) {
+      await page.mouse.move(...(await h.screenPoint(page, gx, gy)));
+      await h.waitTicks(page, 2);
+      await h.waitFrames(page, 1);
+      const c = await cursorOn(page);
+      const [program, box] = await page.evaluate(() => [document.getElementById('screen').dataset.program, [...globalThis.__shownGame.hd_pointer()]]);
+      assert.ok(c.state === 'running' && program === 'u', `${label}: \`u\` runs`);
+      assert.equal(box[2], 0, `${label}: no game pointer drawn at the mouse`);
+      assert.equal(c.canvas, 'auto', `${label}: the canvas keeps the system's pointer`);
+    }
+  };
+  await check('the opening');
+  await h.press(page, 'Escape', 120);
+  await check('the menu');
+  console.log(`  receipt: the launcher: the system's pointer kept over the canvas at ${2 * SCROLL_POINTS.length} mouse places in the opening and the menu: pass`);
+}, { needs: h.haveZip });
+
+test('the system\'s pointer (Original layout): hidden over the canvas while the game runs, where the game draws its own at the mouse (read from the HD pointer, and with HD off from the classic frame), windowed and fullscreen; the context menu keeps it, and so does the canvas while the press that opened the menu is held (the game\'s pointer stays there); a move after it closed hides it again', async (env) => {
+  const { page } = await menuPage(env);
+  let c = await cursorOn(page);
+  assert.equal(c.state, 'running', 'the game runs');
+  const r = await pointerFollows(page, ...SCROLL_POINTS, 'Original, HD on');
+  // HD off: the classic frame (the engine's sprite over it) and the canvas hold the game's
+  // pointer at the same box, in the colours the HD pointer gave; the system's still hidden.
+  await page.evaluate(() => document.getElementById('hd').click());
+  await page.waitForFunction(() => !globalThis.__shownGame.hd_on(), null, { timeout: 10_000 });
+  await h.waitFrames(page, 2);
+  const off = await page.evaluate(([[x, y, w, hh], rgba]) => {
+    const g = globalThis.__shownGame;
+    const f = g.frame_rgba();
+    const c = document.getElementById('screen');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let [seen, frame, canvas] = [0, 0, 0];
+    for (let i = 0; i < w * hh; i += 1) {
+      if (rgba[4 * i + 3] === 0) continue;
+      seen += 1;
+      const j = ((y + Math.floor(i / w)) * g.width() + x + (i % w)) * 4;
+      if ([0, 1, 2].every((k) => f[j + k] === rgba[4 * i + k])) frame += 1;
+      if ([0, 1, 2].every((k) => d[j + k] === rgba[4 * i + k])) canvas += 1;
+    }
+    return { seen, frame, canvas, size: [c.width, c.height], cursor: getComputedStyle(c).cursor };
+  }, [r.box, r.rgba]);
+  assert.deepEqual(off.size, [320, 200], 'HD off: the canvas is the classic frame');
+  assert.ok(off.seen > 0 && off.frame === off.seen && off.canvas === off.seen, 'HD off: the classic frame and the canvas show the game\'s pointer at the mouse');
+  assert.equal(off.cursor, 'none', 'HD off: the system\'s pointer hidden over the canvas');
+  await page.evaluate(() => document.getElementById('hd').click());
+  await page.waitForFunction(() => globalThis.__shownGame.hd_on(), null, { timeout: 10_000 });
+  await fullscreenCursor(page, 'Original');
+  // The context menu: a right press on the map opens it; while the press is held the game's
+  // pointer stays where it was, so the canvas shows the system's, and the menu has its own.
+  await h.waitPrompt(page);
+  await h.rightPress(page, 88, 88);
+  c = await cursorOn(page, '#context-menu', '#context-menu [role="menuitem"]');
+  assert.ok(c.pointer === 'page' && c.canvas === 'auto', 'the press that opened the menu: the canvas shows the system\'s pointer');
+  assert.ok(c.of[0] === 'auto' && c.of[1] !== 'none', 'the menu and its entries: the system\'s pointer');
+  await page.mouse.move(...(await h.screenPoint(page, 120, 104)), { steps: 3 });
+  c = await cursorOn(page);
+  assert.ok(c.pointer === 'page' && c.canvas === 'auto', 'held and moved: the canvas shows the system\'s pointer');
+  await page.mouse.up({ button: 'right' });
+  await page.keyboard.press('Escape');
+  await page.locator('#context-menu').waitFor({ state: 'hidden', timeout: 10_000 });
+  await pointerFollows(page, ...SCROLL_POINTS.toReversed(), 'Original, after the menu');
+  console.log('  receipt: Original: the system\'s pointer hidden over the canvas at 6 points (2 with HD on, 1 with it off, 1 fullscreen, 2 after the menu), the game\'s at the mouse at each; the menu, its press held, the letterbox and the Exit button keep it: pass');
+}, { needs: h.haveHfes });
+
+test('the system\'s pointer (HD layout): hidden over the canvas where a region of the game shows the game\'s own pointer at the mouse, windowed and fullscreen; in a gap between the regions and on the paper round them (the game\'s pointer at the nearest edge there) the canvas keeps it', async (env) => {
+  const { page } = await bootLayout(env);
+  assert.equal((await layoutShown(page)).view, 'game', 'the HD layout shows the game\'s regions');
+  await pointerFollows(page, ...SCROLL_POINTS, 'HD layout');
+  const gaps = [[670, 300, 'between the map and the side panel'], [2, 360, 'the paper at the left edge']];
+  for (const [cx, cy, label] of gaps) {
+    await page.mouse.move(...(await h.canvasPoint(page, cx + 0.5, cy + 0.5)));
+    await page.waitForFunction(() => document.getElementById('screen').dataset.pointer === 'page', null, { timeout: 10_000 });
+    assert.equal((await cursorOn(page)).canvas, 'auto', `${label}: the system's pointer`);
+  }
+  await pointerFollows(page, ...SCROLL_POINTS.toReversed(), 'HD layout, back from the gaps');
+  await fullscreenCursor(page, 'HD layout');
+  console.log(`  receipt: HD layout: the system's pointer hidden at 5 points with the game's at the mouse, kept at ${gaps.length} gaps: pass`);
+}, { needs: h.haveHfes });
+
+test('the system\'s pointer (Wide layout): hidden over the canvas where the map or a window\'s content shows the game\'s own pointer at the mouse, windowed and fullscreen; on a window\'s frame and title strip, and while a window is dragged by it (the game\'s pointer off screen then), the canvas keeps it', async (env) => {
+  const { page } = await bootWide(env);
+  assert.equal((await wideShown(page)).view, 'game', 'the Wide layout shows the map and the windows');
+  await pointerFollows(page, ...SCROLL_POINTS, 'Wide');
+  const w = (await wideShown(page)).windows.find((win) => win.name === 'messages');
+  const gaps = [
+    [w.bar[0] + Math.floor(w.bar[2] / 2), w.bar[1] + Math.floor(w.bar[3] / 2), 'the message scroll\'s title strip'],
+    [w.outer[0] + w.outer[2] - 2, w.to[1] + 29, 'the message scroll\'s right border'],
+  ];
+  for (const [cx, cy, label] of gaps) {
+    await page.mouse.move(...(await h.canvasPoint(page, cx + 0.5, cy + 0.5)));
+    await page.waitForFunction(() => document.getElementById('screen').dataset.pointer === 'page', null, { timeout: 10_000 });
+    assert.equal((await cursorOn(page)).canvas, 'auto', `${label}: the system's pointer`);
+  }
+  // A drag by the title strip (out over the map): the system's pointer throughout.
+  const [sx, sy] = gaps[0];
+  await page.mouse.move(...(await h.canvasPoint(page, sx + 0.5, sy + 0.5)));
+  await page.mouse.down();
+  await page.mouse.move(...(await h.canvasPoint(page, sx - 119.5, sy - 79.5)), { steps: 4 });
+  const held = await cursorOn(page);
+  await page.mouse.up();
+  const after = await cursorOn(page);
+  assert.ok(held.pointer === 'page' && held.canvas === 'auto' && after.pointer === 'page', 'a window dragged: the system\'s pointer');
+  await pointerFollows(page, ...SCROLL_POINTS.toReversed(), 'Wide, after the drag');
+  await fullscreenCursor(page, 'Wide');
+  console.log(`  receipt: Wide: the system's pointer hidden at 5 points with the game's at the mouse, kept at ${gaps.length} gaps and through a drag: pass`);
+}, { needs: h.haveHfes });
+
+// Waits until the canvas's data-pointer is `want` (`showGamePointer`), then `frames` frames more
+// (it holds there), with no pointer event; returns the cursor then (`cursorOn`).
+async function settledCursor(page, want, frames = 3) {
+  await page.waitForFunction((w) => document.getElementById('screen').dataset.pointer === w, want, { timeout: 10_000 });
+  await h.waitFrames(page, frames);
+  return cursorOn(page);
+}
+
+test('the system\'s pointer (the speed badge): over the badge, which lets the pointer through to the canvas but covers the game\'s pointer there, the canvas shows it, the game still given the move; off the badge it is hidden again; the badge hidden under a still mouse (back at 1x) hides it with no move', async (env) => {
+  const { page } = await menuPage(env);
+  await pointerFollows(page, ...SCROLL_POINTS, 'before the badge');
+  await page.keyboard.press('NumpadAdd');
+  await page.locator('#speed-badge').waitFor({ state: 'visible', timeout: 10_000 });
+  const b = await page.locator('#speed-badge').boundingBox();
+  const at = [b.x + b.width / 2, b.y + b.height / 2];
+  const was = await page.evaluate(() => globalThis.__shownGame.hd_pointer()[4]);
+  await page.mouse.move(...at);
+  await page.waitForFunction((v) => globalThis.__shownGame.hd_pointer()[4] !== v, was, { timeout: 10_000 });
+  let c = await settledCursor(page, 'page');
+  const under = await page.evaluate(([x, y]) => {
+    const cv = document.getElementById('screen');
+    const box = cv.getBoundingClientRect();
+    const [px, py] = [Math.floor(((x - box.left) * 320) / box.width), Math.floor(((y - box.top) * 200) / box.height)];
+    const [bx, by, bw, bh] = globalThis.__shownGame.hd_pointer();
+    return { canvasHit: document.elementFromPoint(x, y) === cv, given: bw > 0 && px >= bx && px < bx + bw && py >= by && py < by + bh };
+  }, at);
+  assert.ok(under.canvasHit, 'the badge lets the pointer through: the canvas is under the mouse');
+  assert.ok(under.given, 'the game was given the move: its pointer under the badge');
+  assert.equal(c.canvas, 'auto', 'over the badge: the system\'s pointer');
+  await pointerFollows(page, ...SCROLL_POINTS, 'off the badge');
+  await page.mouse.move(...at);
+  await settledCursor(page, 'page');
+  await page.keyboard.press('NumpadSubtract');
+  await page.locator('#speed-badge').waitFor({ state: 'hidden', timeout: 10_000 });
+  c = await settledCursor(page, 'game');
+  assert.equal(c.canvas, 'none', 'the badge hidden under the still mouse: the system\'s pointer hidden, no move');
+  console.log('  receipt: the speed badge: the system\'s pointer over it, the game given the move under it; hidden off it, and again once the badge hid under a still mouse: pass');
+}, { needs: h.haveHfes });
+
+test('the system\'s pointer under a still mouse (HD layout): the context menu closed by Escape hides it again with no move (the game\'s pointer under the mouse); HD switched off moves what the mouse is over (the Original layout\'s box), so the canvas shows it, and on again hides it, with no move either time', async (env) => {
+  const { page } = await bootLayout(env);
+  const press = await h.screenPoint(page, 88, 88);
+  await h.rightPress(page, 88, 88);
+  await page.mouse.up({ button: 'right' });
+  let c = await settledCursor(page, 'page');
+  const overMenu = await page.evaluate(([x, y]) => {
+    const r = document.getElementById('context-menu').getBoundingClientRect();
+    return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+  }, press);
+  assert.ok(overMenu, 'precondition: the menu open under the mouse');
+  await page.keyboard.press('Escape');
+  await page.locator('#context-menu').waitFor({ state: 'hidden', timeout: 10_000 });
+  c = await settledCursor(page, 'game');
+  assert.equal(c.canvas, 'none', 'the menu closed by Escape, no move: the system\'s pointer hidden');
+  const hd = (on) => page.evaluate((want) => {
+    if (globalThis.__shownGame.hd_on() !== want) document.getElementById('hd').click();
+  }, on);
+  const at = await h.screenPoint(page, ...SCROLL_POINTS[0]);
+  await pointerFollows(page, SCROLL_POINTS[1], SCROLL_POINTS[0], 'HD layout');
+  await hd(false);
+  await page.waitForFunction(() => document.body.dataset.layout === 'original', null, { timeout: 10_000 });
+  const moved = await page.evaluate(([x, y]) => {
+    const box = document.getElementById('screen').getBoundingClientRect();
+    return [Math.floor(((x - box.left) * 320) / box.width), Math.floor(((y - box.top) * 200) / box.height)];
+  }, at);
+  assert.notDeepEqual(moved, SCROLL_POINTS[0], 'precondition: HD off, the mouse over another game pixel');
+  c = await settledCursor(page, 'page');
+  assert.equal(c.canvas, 'auto', 'HD off, no move: the system\'s pointer (the game\'s is not under it)');
+  await hd(true);
+  await page.waitForFunction(() => document.body.dataset.layout === 'hd', null, { timeout: 10_000 });
+  c = await settledCursor(page, 'game');
+  assert.equal(c.canvas, 'none', 'HD on again, no move: the system\'s pointer hidden (the game\'s under it again)');
+  console.log('  receipt: under a still mouse: the menu closed by Escape, HD off and on again, each the cursor it needs by the next frames: pass');
 }, { needs: h.haveHfes });
 
 const filter = process.argv[2];

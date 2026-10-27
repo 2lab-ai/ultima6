@@ -41,6 +41,16 @@
     /* The ring says the game has the keyboard (also after a scripted focus, so not :focus-visible),
        and so while a line is typed in the hidden input that takes Korean (spec 08 K5a). */
     canvas:focus, #screen-box:focus-within canvas { outline-color: #ffd166; }
+    /* The game draws its own pointer over its screen at the mouse (the engine's sprite; with HD
+       the page draws it over the HD frame), so while a game runs `game` (data-program; `u`, the
+       opening and the menu, takes no mouse and leaves its pointer where it is) the system's
+       pointer is hidden over the canvas where the game's is under it (data-pointer="game", app.js
+       `gameUnder`); elsewhere it shows: a gap or a margin of the HD layout, a Wide window's frame
+       or title strip, a window dragged, a press the context menu takes, the speed badge (it lets
+       the pointer through to the canvas but covers the game's), a layout changed under a still
+       mouse until it moves. The page's own controls over the screen box (the context menu, the
+       Exit button) and the fullscreen letterbox round the canvas are not the canvas, and keep it. */
+    body[data-state="running"] #screen[data-program="game"][data-pointer="game"] { cursor: none; }
     /* That input: on the canvas, unseen and out of the pointer's way, but able to take focus. */
     #ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0;
            opacity: 0; pointer-events: none; }
