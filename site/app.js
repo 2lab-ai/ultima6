@@ -3947,11 +3947,12 @@ function pointerPixel(e) {
 // own is under it): the mouse's last place (`mouseAt`), from the mouse's own pointer events only
 // (a touch or a pen moves the game's pointer, never the mouse); forgotten when the mouse leaves
 // the window, the window loses the focus or the page is hidden (it may come back elsewhere).
-// The page's elements that lie over the canvas and let the pointer through to it, so the canvas's
-// cursor shows over them while they cover the game's pointer: the speed badge (the hidden input
-// never covers it: opacity 0; the Exit button and the context menu take the pointer and show
-// their own).
-const OVER_CANVAS = [badge];
+// The page's elements over the canvas that cover the game's pointer while the canvas's cursor
+// shows over them: the speed badge, which lets the pointer through to the canvas, and the Exit
+// button, under which a press held on the canvas (captured: every press is, `pointerdown`) moves
+// on, the canvas's cursor shown and the game given each move (the hidden input never covers it:
+// opacity 0; the context menu takes the pointer, a press on the canvas closes it first).
+const OVER_CANVAS = [badge, fullscreenExit];
 for (const kind of ['pointerdown', 'pointermove', 'pointerup']) {
   window.addEventListener(kind, (e) => {
     if (e.pointerType === 'mouse') mouseAt = [e.clientX, e.clientY];
@@ -3975,7 +3976,10 @@ document.addEventListener('visibilitychange', () => {
 // game (not a gap or a margin of the HD layout, a letterbox side, a Wide window's frame or title
 // strip: `pointerGap`), and no press the context menu takes held; `hold`, the same but for a
 // pointer event at that pixel queued for the next step (the mouse's own move, which the sprite
-// takes at that step: the cursor stays as it is, so a move never flickers it); else `page`. The
+// takes at that step: the cursor stays as it is, so a move never flickers it), for one frame at
+// most: the frame's end decides again from where the step put the sprite (where a context-menu
+// entry's target press, queued at that step after the move, put it elsewhere, `page` from
+// then; the cursor was hidden over the sprite's old place for that one frame); else `page`. The
 // engine decides where the sprite is, whatever moved it (the page's moves, a context-menu entry's
 // presses, a window dragged: the rest of the screen), so a layout, a view or a box changed under
 // a still mouse shows the system's pointer until the mouse moves again.

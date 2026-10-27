@@ -1099,7 +1099,10 @@ impl Game {
     /// 0x1622d6 parks a hidden one below the frame), else 0, in any program and with HD on or
     /// off. `queued` 1 while a pointer event waits for the next step (the page's
     /// [`Game::pointer`], a context-menu entry's [`Game::command_at`]), (qx, qy) the last one's
-    /// pixel as queued; else 0, 0, 0. All 0 before a start.
+    /// pixel as queued; else 0, 0, 0. The queue is as of now: a context-menu entry's target
+    /// press joins it only at the step that runs it ([`Game::step`]), after what was queued
+    /// before, so (qx, qy) is where the sprite goes at the next step but for that press, which
+    /// the next read after that step shows. All 0 before a start.
     pub fn game_pointer(&self) -> Vec<i32> {
         let Some(e) = &self.engine else {
             return vec![0; 6];
@@ -4133,9 +4136,9 @@ mod tests {
     }
 
     /// [`Game::game_pointer`]: where the engine placed its sprite in the last step and whether
-    /// it is drawn, with HD off and on; a pointer queued since is given apart (the last one) and
-    /// moves the place only at the next step; a context-menu entry's presses are queued like the
-    /// page's; hidden, not shown. All 0 before a start.
+    /// it is drawn, with HD off and on; a pointer queued since is given apart (the last one, a
+    /// press and its release too) and moves the place only at the next step; hidden, not shown.
+    /// All 0 before a start.
     #[test]
     fn the_game_pointer_is_where_the_engine_placed_its_sprite() {
         let mut game = Game::new();
