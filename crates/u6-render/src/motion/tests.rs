@@ -187,9 +187,14 @@ const WALL_PART: u16 = 0x1a2;
 
 /// The plan at `t` painted over a cleared frame ([`look`]).
 fn frame_at(p: &Presenter<Scene>, t: f64) -> Framebuffer {
-    let mut fb = Framebuffer::new();
     let view = p.view(t).expect("a slide");
-    for op in p.plan(&view) {
+    painted(&p.plan(&view))
+}
+
+/// `ops` painted over a cleared frame ([`look`]).
+fn painted(ops: &[Op]) -> Framebuffer {
+    let mut fb = Framebuffer::new();
+    for &op in ops {
         let (colour, rows) = match op.draw {
             Draw::Base { .. } => (BASE, 16),
             Draw::Word(w) => look(w),
@@ -817,7 +822,8 @@ fn the_movers_are_placed_where_their_cells_put_them_crossing_under_a_sliding_cam
     let p = two(a.clone(), b.clone(), 0.0);
     let layers = p.layers();
     let half = (SIDE / 2) as i32;
-    let mut crossed = [false; 2];
+    // Per crossing pair: seen in the first order before the crossing, in the other after it.
+    let mut crossed = [[false; 2]; 2];
     for k in 0..=8 {
         let f = f64::from(k) / 8.0;
         let at = |from: i32, to: i32| f64::from(16 * from) + f * f64::from(16 * (to - from));
@@ -881,8 +887,182 @@ fn the_movers_are_placed_where_their_cells_put_them_crossing_under_a_sliding_cam
             .position(|&(part, _)| matches!(part, Part::Mover(i) if layers.movers[i].slot == slot))
             .unwrap()
             };
-        crossed[0] |= k < 4 && index(2) < index(3) || k > 4 && index(2) > index(3);
-        crossed[1] |= k < 4 && index(4) < index(5) || k > 4 && index(4) > index(5);
+        for (pair, (a, b)) in crossed.iter_mut().zip([(2, 3), (4, 5)]) {
+            pair[0] |= k < 4 && index(a) < index(b);
+            pair[1] |= k > 4 && index(a) > index(b);
+        }
     }
-    assert!(crossed == [true, true], "the crossings change the order");
+    assert!(
+        crossed == [[true, true], [true, true]],
+        "each crossing: one order before it, the other after: {crossed:?}"
+    );
+}
+
+/// Spec 20 Design 5: a row clear in both layers is unchanged whatever colours and sources its
+/// clear pixels hold (the cursor and border layer is mostly such rows), and a drawn pixel's
+/// change in the same block still changes it.
+#[test]
+fn a_row_clear_in_both_layers_is_unchanged_and_a_drawn_change_in_its_block_counts() {
+    let mut old = LayerPixels::clear(0, 0, 48, 32);
+    for i in 0..48 * 32 {
+        old.pixels[i] = (i % 7) as u8;
+        old.src[i].id = (i % 5) as u16;
+    }
+    // Block (1, 0): rows 0..8 drawn, rows 8..16 clear in both.
+    for y in 0..8 {
+        for x in 16..32 {
+            old.drawn[y * 48 + x] = true;
+        }
+    }
+    let mut new = old.clone();
+    for y in 8..16 {
+        for x in 0..48 {
+            new.pixels[y * 48 + x] ^= 0x20;
+            new.src[y * 48 + x].id ^= 0x40;
+        }
+    }
+    assert_eq!(
+        new.changed_since(&old, (0, 0)),
+        Some(vec![]),
+        "clear rows: unchanged"
+    );
+    new.pixels[3 * 48 + 20] ^= 1;
+    assert_eq!(
+        new.changed_since(&old, (0, 0)),
+        Some(vec![[16, 0, 16, 16]]),
+        "a drawn pixel of the block"
+    );
+}
+
+/// `layers` placed for `view` as [`Presenter::plan`] places its own.
+fn placed_ops(layers: &Layers, view: &View) -> Vec<Op> {
+    let mut ops = Vec::new();
+    for (part, (dx, dy)) in layers.placed(view) {
+        let from = match part {
+            Part::Static => &layers.statics,
+            Part::Mover(i) => &layers.movers[i].ops,
+            Part::Over(i) => &layers.movers[i].over,
+        };
+        ops.extend(from.iter().map(|op| Op {
+            x: op.x + dx,
+            y: op.y + dy,
+            ..*op
+        }));
+    }
+    ops
+}
+
+/// Spec 20 Design 5: the layers of a generation stay right when slides end at other times. The
+/// leader (the camera) and mover 2 step at 0; mover 3 steps at 200 (a new generation, the others
+/// running on); at 360 the first two end (dropped as the platform drops them each frame) while 3
+/// slides on, and an unchanged publication at 400 keeps the generation. The layers made at 200,
+/// placed for the slides at every sampled time from 200 to 560, paint what the plan split afresh
+/// paints.
+#[test]
+fn layers_kept_while_some_slides_end_paint_what_a_fresh_split_paints() {
+    let at = |leader: i32, two: i32, three: i32| {
+        scene(
+            (leader, 100),
+            0,
+            &[
+                (LEADER, (leader, 100), 0x180),
+                (2, (two, 102), 0x181),
+                (3, (three, 98), 0x182),
+            ],
+        )
+    };
+    let mut p = two(at(100, 97, 103), at(101, 98, 103), 0.0);
+    p.publish(Rc::new(at(101, 98, 104)), 200.0, true);
+    let (kept, g) = (p.layers(), p.generation());
+    assert_eq!(
+        kept.movers.len(),
+        3,
+        "three movers in the layers made at 200"
+    );
+    let mut sampled = 0;
+    for k in 0..=36 {
+        let t = 200.0 + 10.0 * f64::from(k);
+        if k == 20 {
+            p.publish(Rc::new(at(101, 98, 104)), t, true);
+            assert_eq!(
+                p.generation(),
+                g,
+                "an unchanged publication keeps the generation"
+            );
+        }
+        let Some(view) = p.view(t) else { continue };
+        if t > 360.0 {
+            assert_eq!(view.movers.len(), 1, "at {t}: mover 3 alone slides on");
+        }
+        let fresh = painted(&p.plan(&view));
+        assert!(
+            painted(&placed_ops(&kept, &view)).pixels() == fresh.pixels(),
+            "at {t}: the kept layers paint the fresh split"
+        );
+        sampled += 1;
+        // As the platform does each display frame: the slides ended by now dropped.
+        p.end(t);
+    }
+    assert!(sampled > 30, "sampled through the staggered ends");
+}
+
+/// Spec 20 Design 3: a restart's occluders are every cell its draws cover from where it is drawn
+/// to its new cell, as whole pixels: a top tile there stays over it at the restart. A reverse
+/// (half way from 96 to 97, back to 96), a diagonal (half way from (96, 95) to (97, 96), on to
+/// (98, 97): the cell (96, 96) off the way's last cells), and a start a fraction of a pixel past a
+/// cell (from 97 toward 96, at 31/32 of the way, on to 95: drawn a pixel into cell 97).
+#[test]
+fn a_restart_stays_under_the_top_tiles_of_its_swept_cells_reversed_diagonal_and_fractional() {
+    let case = |cells: [(i32, i32); 3], at: f64, wall: (i32, i32)| {
+        let s = |cell: (i32, i32)| {
+            let mut s = scene(
+                (100, 100),
+                0,
+                &[(LEADER, (100, 100), 0x180), (2, cell, 0x181)],
+            );
+            add(&mut s, wall, WALL, Some(10), Rank::Top);
+            place(&mut s, 10, wall, 0x20);
+            s
+        };
+        let mut p = two(s(cells[0]), s(cells[1]), 0.0);
+        p.publish(Rc::new(s(cells[2])), at, true);
+        assert!(p.view(at).is_some_and(|v| v.movers.len() == 1), "restarted");
+        (frame_at(&p, at), s(cells[2]))
+    };
+    let px = |fb: &Framebuffer, s: &Scene, cell, (col, row): (i32, i32)| {
+        let (x, y) = s.pixel(cell);
+        fb.get((x + col) as usize, (y + row) as usize)
+    };
+    // Reverse: drawn at 96.5, so over cell 97's left half, under its top tile.
+    let (fb, s) = case([(96, 95), (97, 95), (96, 95)], 180.0, (97, 95));
+    assert_eq!(
+        px(&fb, &s, (97, 95), (4, 8)),
+        Some(4),
+        "reverse: under the tile"
+    );
+    assert_eq!(px(&fb, &s, (96, 95), (12, 8)), Some(BODY), "reverse: drawn");
+    // Diagonal: drawn at (96.5, 95.5), over cell (96, 96)'s top right.
+    let (fb, s) = case([(96, 95), (97, 96), (98, 97)], 180.0, (96, 96));
+    assert_eq!(
+        px(&fb, &s, (96, 96), (12, 4)),
+        Some(4),
+        "diagonal: under the tile"
+    );
+    assert_eq!(px(&fb, &s, (97, 96), (4, 4)), Some(BODY), "diagonal: drawn");
+    // Fractional: drawn at 96 + 1/32 of a cell, rounded a whole pixel into cell 97.
+    let (fb, s) = case(
+        [(97, 95), (96, 95), (95, 95)],
+        SLIDE_MS * 31.0 / 32.0,
+        (97, 95),
+    );
+    assert_eq!(
+        px(&fb, &s, (97, 95), (0, 8)),
+        Some(4),
+        "fractional: under the tile"
+    );
+    assert_eq!(
+        px(&fb, &s, (96, 95), (8, 8)),
+        Some(BODY),
+        "fractional: drawn"
+    );
 }

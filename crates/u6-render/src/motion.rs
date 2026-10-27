@@ -49,8 +49,10 @@ pub const CELL: i32 = 16;
 /// The fewest display frames a slide is shown in; at a speed that would show it in fewer it snaps.
 pub const MIN_FRAMES: f64 = 2.0;
 /// A move during a slide restarts from where the object is drawn when that is at most this far
-/// (Chebyshev, in pixels) from its new cell: 1.5 cells.
-const SNAP_PX: f64 = 1.5 * CELL as f64;
+/// (Chebyshev, in pixels) from its new cell: 1.5 cells. So the camera is never drawn farther than
+/// this from rest: a slide starts one cell off (a step of the leader, [`Presenter::publish`]'s
+/// `follows`) and a restart at most this far (its `far` check), else it snaps.
+pub const SNAP_PX: f64 = 1.5 * CELL as f64;
 /// Scenes kept for the cells a slide shows and the newest scene lacks (the strip leaving the view).
 const HISTORY: usize = 3;
 /// How long a preview ([`Presenter::preview`]) is held, on the presentation clock, when no
@@ -502,12 +504,13 @@ impl<T: AsRef<Scene>> Presenter<T> {
                 continue;
             };
             // The pixels the mover is drawn from its place, start to end: each cell it covers on
-            // the way, a restart's start up to 1.5 cells off and a diagonal's side cells included.
+            // the way, a restart's start up to 1.5 cells off and a diagonal's side cells included;
+            // drawn at whole pixels (`Track::offset` rounds), so from the way's floor to its ceil.
             let way = (track.from.0 - track.to.0, track.from.1 - track.to.1);
             let swept = |c: i32, d: f64| {
                 let (lo, hi) = (
-                    f64::from(c * CELL) + d.min(0.0),
-                    f64::from(c * CELL) + d.max(0.0),
+                    (f64::from(c * CELL) + d.min(0.0)).floor(),
+                    (f64::from(c * CELL) + d.max(0.0)).ceil(),
                 );
                 let first = (lo / f64::from(CELL)).floor() as i32;
                 let last = ((hi + f64::from(CELL) - 1.0) / f64::from(CELL)).floor() as i32;
@@ -685,14 +688,20 @@ impl LayerPixels {
                 let (i, o) = (y * self.width + x0, oy as usize * old.width + ox as usize);
                 let n = x1 - x0;
                 let (drawn, was) = (&self.drawn[i..i + n], &old.drawn[o..o + n]);
+                if drawn != was {
+                    return false;
+                }
+                // A row clear in both (most of the cursor and border layer): nothing to compare.
+                if !drawn.contains(&true) {
+                    return true;
+                }
                 let (pixels, src) = (&self.pixels[i..i + n], &self.src[i..i + n]);
                 let (old_pixels, old_src) = (&old.pixels[o..o + n], &old.src[o..o + n]);
                 // Equal as stored, or equal where drawn (a clear pixel's colour is no one's).
-                drawn == was
-                    && (pixels == old_pixels && src == old_src
-                        || (drawn.iter().zip(pixels.iter().zip(src)))
-                            .zip(old_pixels.iter().zip(old_src))
-                            .all(|((&d, (p, s)), (q, t))| !d || p == q && s == t))
+                pixels == old_pixels && src == old_src
+                    || (drawn.iter().zip(pixels.iter().zip(src)))
+                        .zip(old_pixels.iter().zip(old_src))
+                        .all(|((&d, (p, s)), (q, t))| !d || p == q && s == t)
             })
         };
         let mut rects = Vec::new();

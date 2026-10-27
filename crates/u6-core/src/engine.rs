@@ -1685,12 +1685,16 @@ mod tests {
     }
     /// A game that draws pixel `n` of the shown map's first row in colour 1 and presents, once a
     /// tick, `n` counting up: every publication changes the shown map.
-    fn painting_game() -> Engine {
+    /// A game that paints a new pixel of the shown map in each of its first `paints` frames, then
+    /// presents the same picture every frame.
+    fn painting_game(paints: usize) -> Engine {
         engine_with(move |_state, io| async move {
             let (x0, y0, _, _) = crate::geom::SHOWN;
             let mut n = 0;
             loop {
-                io.draw(|fb| fb.set(usize::from(x0) + n, usize::from(y0), 1));
+                if n < paints {
+                    io.draw(|fb| fb.set(usize::from(x0) + n, usize::from(y0), 1));
+                }
                 io.present();
                 n += 1;
                 io.vblank().await;
@@ -1698,26 +1702,34 @@ mod tests {
         })
     }
 
-    /// Spec 20: the switch off drops what the engine held for the platform: a publication queued
-    /// before it is not handed over after it, and on again the next one is reported even when its
-    /// shown map hashes as the last one published did.
+    /// Spec 20: the switch off drops what the engine held for the platform: the publications
+    /// queued before it are not handed over after it; on again the next publication is reported
+    /// though its picture is the one reported last before the switch went off, and the same
+    /// picture after it is not.
     #[test]
     fn smooth_motion_off_drops_the_queued_publications_and_on_reports_afresh() {
-        let mut e = painting_game();
+        let mut e = painting_game(2);
         e.set_motion(true);
         e.tick(&[], 20);
         e.tick(&[], 20);
+        assert_eq!(e.motion.len(), 2, "two pictures queued");
         e.set_motion(false);
         assert!(
             e.take_motion().is_empty(),
-            "queued before the switch went off"
+            "queued before the switch went off: dropped"
         );
         e.tick(&[], 20);
         assert!(e.take_motion().is_empty(), "off: nothing");
         e.set_motion(true);
         assert!(e.motion_map.is_none(), "the last picture forgotten");
         e.tick(&[], 20);
-        assert_eq!(e.take_motion().len(), 1, "on again: the next publication");
+        assert_eq!(
+            e.take_motion().len(),
+            1,
+            "on again: the unchanged picture reported afresh"
+        );
+        e.tick(&[], 20);
+        assert!(e.take_motion().is_empty(), "then the same picture: nothing");
     }
 
     /// Spec 20: a publication takes the oldest render kept of its picture, with the renders kept

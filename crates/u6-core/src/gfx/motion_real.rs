@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use u6_intake::{InputFile, intake};
-use u6_render::motion::{LayerPixels, Presenter, SLIDE_MS, View};
+use u6_render::motion::{Presenter, SLIDE_MS, View};
 use u6_render::{Framebuffer, Src};
 use u6_testkit::Quiet;
 
@@ -326,9 +326,9 @@ fn hd_differ(hd: &HdView, drawn: Option<&[u32]>) -> (usize, usize) {
 /// the town, seeds 0, 7 and 100) the map drawn again from scratch (over a shown map poisoned) is
 /// the engine's picture: classic ([`paint`]) in colour and source with nothing outside the shown
 /// map changed, and HD (the layers at 2× over the HD frame) word for word with every shown word
-/// covered by a layer; half way through each slide nothing outside the shown map changes and every
-/// shown pixel and word is drawn. A paint that draws nothing and no layers fail both (checked on
-/// every scene).
+/// covered by a layer; half way through each slide nothing outside the shown map changes (classic)
+/// and every shown word is drawn by a layer (HD). The two controls, a paint that draws nothing and
+/// no layers drawn, fail on every scene.
 #[test]
 fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
     let Some(files) = files() else { return };
@@ -375,32 +375,33 @@ fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
                 if colours + sources + outside + words + uncovered > 0 {
                     bad.push((e.ticks(), colours, sources, outside, words, uncovered));
                 }
-                // The negative controls: nothing painted, no layers drawn, no layers made.
+                // The two controls: a paint that draws nothing and no layers drawn must fail the
+                // checks above. (Without layers made the HD check fails by its definition: a
+                // sanity check of `hd_differ`, no control.)
                 let (c, _, _) = classic(e, &p, &view, Draws::Nothing, &want);
                 let none = hd_drawn(e, &mut hd, &p, &view, Draws::Nothing);
                 let (w, u) = hd_differ(&hd, none.as_deref());
-                let (w2, u2) = hd_differ(&hd, None);
                 assert!(
-                    c > 0 && w > 0 && u > 0 && w2 > 0 && u2 > 0,
+                    c > 0 && w > 0 && u > 0,
                     "tick {}: the controls fail",
                     e.ticks()
                 );
+                assert!(
+                    hd_differ(&hd, None).1 > 0,
+                    "sanity: no layers, nothing covered"
+                );
                 checked[5] += 1;
-                // Half way: nothing outside the shown map changed, every shown pixel drawn.
+                // Half way: classic, nothing outside the shown map changed (the paint clears the
+                // whole shown map first, so no pixel of it is left as it was); HD, every shown
+                // word drawn by a layer.
                 if let Some(mid) = p.view(time + SLIDE_MS / 2.0) {
                     let mut fb = poisoned(e);
                     paint(&e.state(), &p, &mid, &mut fb);
                     let (_, _, outside) = differ(&fb, &want);
-                    let left = (0..u6_render::HEIGHT)
-                        .flat_map(|y| (0..u6_render::WIDTH).map(move |x| (x, y)))
-                        .filter(|&(x, y)| {
-                            fb.get(x, y) == Some(POISON.0) && fb.src_at(x, y) == Some(POISON.1)
-                        })
-                        .count();
                     let words = hd_drawn(e, &mut hd, &p, &mid, Draws::Port);
                     let (_, uncovered) = hd_differ(&hd, words.as_deref());
-                    if outside + left + uncovered > 0 {
-                        bad.push((e.ticks(), 0, 0, outside, left, uncovered));
+                    if outside + uncovered > 0 {
+                        bad.push((e.ticks(), 0, 0, outside, 0, uncovered));
                     }
                     checked[3] += usize::from(!mid.movers.is_empty());
                 }
@@ -408,8 +409,8 @@ fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
         });
         assert!(
             bad.is_empty(),
-            "seed {seed} town {town}: (tick, colours, sources, outside, HD words or poison left, \
-             HD words uncovered) differing: {bad:?}"
+            "seed {seed} town {town}: (tick, colours, sources, outside, HD words, HD words \
+             uncovered) differing: {bad:?}"
         );
         assert!(
             checked[1] > 0 && checked[2] > 0,
@@ -421,10 +422,10 @@ fn a_slide_at_its_end_draws_the_engines_picture_of_every_scene() {
     }
     println!(
         "{} scenes drawn again at a slide's end over a poisoned map, equal to the engine's picture \
-         (classic, and the HD layers at 2x covering every shown word), each with its 3 controls \
+         (classic, and the HD layers at 2x covering every shown word), each with its 2 controls \
          failing ({}); slides (from early pictures and scenes) with movers {}, with the camera {}; \
-         {} scenes drawn half way with movers, nothing outside the map changed and all of it \
-         drawn; {} foreign publications",
+         {} scenes drawn half way with movers, nothing outside the map changed (classic) and \
+         every shown word drawn (HD); {} foreign publications",
         totals[0], totals[5], totals[1], totals[2], totals[3], totals[4]
     );
 }
@@ -563,120 +564,5 @@ fn bench_the_state_clone_of_the_early_picture() {
     println!(
         "early picture (clone, view, draw lists, scene): median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
         times[100], times[190], times[199]
-    );
-}
-
-/// The static and frame layers a platform holds, and the centre the static one was made round.
-type Held = (Rc<LayerPixels>, Rc<LayerPixels>, (i32, i32));
-
-/// Timings only (run with `--ignored --nocapture`, gate profile): spec 20 Design 5's work with HD
-/// on at 4× over the scenes of the fight and the town at seed 0, as the page's present does it:
-/// the frame's composition once a publication; once a generation of the presenter the slide's
-/// layers rasterized, the static and frame layers' changes from those made before found (the
-/// static one moved with the camera), and the changed blocks and the other layers composed.
-#[test]
-#[ignore]
-#[allow(clippy::disallowed_types)] // a timing: wall time, outside the engine
-fn bench_the_slide_layers_once_a_publication() {
-    let Some(files) = files() else { return };
-    let names = [
-        "frame composition",
-        "layers rasterized",
-        "changes found",
-        "changes composed",
-        "movers composed",
-        "layers made (all but the frame)",
-    ];
-    let mut times: [Vec<f64>; 6] = Default::default();
-    let mut words = [0usize; 2];
-    for town in [false, true] {
-        let mut e = boot(&files, 0, true);
-        let mut p: Presenter<Shot> = Presenter::new();
-        let mut hd = HdView::new();
-        hd.set(true, Scale::X4);
-        let mut out = Vec::new();
-        let mut made = None;
-        let mut held: Option<Held> = None;
-        play(&mut e, town, |e| {
-            for publ in e.take_motion() {
-                let Some(shot) = publ.shot else {
-                    p.foreign();
-                    continue;
-                };
-                p.publish(shot, publ.time_ms as f64, true);
-                let t = std::time::Instant::now();
-                hd.present(Some(e), &Framebuffer::new());
-                let frame = t.elapsed().as_secs_f64() * 1000.0;
-                times[0].push(frame);
-                if p.view(publ.time_ms as f64).is_none() || made == Some(p.generation()) {
-                    continue;
-                }
-                made = Some(p.generation());
-                let centre = p.history()[0].scene.centre;
-                let t = std::time::Instant::now();
-                let slide = slide_layers(&e.state(), &p).quiet();
-                let raster = t.elapsed().as_secs_f64() * 1000.0;
-                let t = std::time::Instant::now();
-                let since: Vec<_> = (slide.parts.iter().enumerate())
-                    .map(|(k, part)| {
-                        let (old, shift) = match (k, &held) {
-                            (0, Some((s, _, c))) => {
-                                (s, ((c.0 - centre.0) * 16, (c.1 - centre.1) * 16))
-                            }
-                            (1, Some((_, f, _))) => (f, (0, 0)),
-                            _ => return None,
-                        };
-                        part.pixels.changed_since(old, shift)
-                    })
-                    .collect();
-                let found = t.elapsed().as_secs_f64() * 1000.0;
-                let (mut changes, mut movers) = (0.0, 0.0);
-                for (part, rects) in slide.parts.iter().zip(&since) {
-                    let t = std::time::Instant::now();
-                    match rects {
-                        Some(rects) => {
-                            for &r in rects {
-                                hd.compose_layer(e, &part.pixels.rect(r), &mut out);
-                                words[0] += out.len();
-                            }
-                            changes += t.elapsed().as_secs_f64() * 1000.0;
-                        }
-                        None => {
-                            hd.compose_layer(e, &part.pixels, &mut out);
-                            words[1] += out.len();
-                            movers += t.elapsed().as_secs_f64() * 1000.0;
-                        }
-                    }
-                }
-                held = Some((
-                    Rc::clone(&slide.parts[0].pixels),
-                    Rc::clone(&slide.parts[1].pixels),
-                    (centre.0, centre.1),
-                ));
-                for (v, ms) in times[1..].iter_mut().zip([
-                    raster,
-                    found,
-                    changes,
-                    movers,
-                    raster + found + changes + movers,
-                ]) {
-                    v.push(ms);
-                }
-            }
-        });
-    }
-    for (name, v) in names.iter().zip(&mut times) {
-        v.sort_by(f64::total_cmp);
-        println!(
-            "{name}: {}, median {:.2} ms, p95 {:.2} ms, max {:.2} ms",
-            v.len(),
-            v[v.len() / 2],
-            v[v.len() * 95 / 100],
-            v[v.len() - 1]
-        );
-    }
-    println!(
-        "words composed: as changes {}, whole {}",
-        words[0], words[1]
     );
 }

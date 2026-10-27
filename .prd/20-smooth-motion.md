@@ -98,17 +98,37 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
        scenes hold; over colour 0, every pixel drawn), the cursor and border, and per mover its own words and the words
        over it. A layer pixel that the frame's composition wrote from the same colour and source takes that
        composition's block.
+     - The static layer covers the shown map wherever the camera is drawn: the shown map lies half a cell inside the
+       view and the layer reaches a cell past it, 24 px each side, and the camera is drawn at most 1.5 cells (24 px,
+       `SNAP_PX`, `u6-render` `motion.rs`) from rest, since a slide starts one cell off and a restart farther than that
+       snaps. `slide_layers` (`gfx/motion.rs`) asserts the bound at compile time.
      - The words over a mover are drawn over the static layer's pixels: where one ORs into the pixel under it (an
        animated overlay), the pixel takes the ground's colour, not the mover's, for the slide; its end shows the
        engine's frame.
-     - The layers are made again when what slides changes (see the edge case "Animation during a slide"), when the
-       HD view changes (its switch, scale or pack) and when the palette changes.
+     - The layers are made again on a new generation of the slides (see the edge case "Animation during a slide")
+       and when the HD view's version moves (its switch, scale, pack or font; `u6-web` `place_slide`). A palette change
+       alone makes nothing again: the layers of a running slide keep their colours until the next generation, and
+       the slide's end shows the engine's frame.
      - The static and the frame layers go to the page as their changes from the ones the page holds: moved with the
        camera, then the 16 × 16 blocks that differ (a run of blocks under one of the same columns merged into it).
-       The page reports the version it holds, applies changes only to that version, and asks for whole layers when it
-       holds none (a new canvas, a pack, a scale or a layout change); a report of layers made before the last ones,
-       or made before such a reset, holds nothing.
+       Changes are made only against layers composed under the same HD view version and in the same palette
+       (`SlideImages::make`); otherwise the game makes the layers whole, as after a pack, a scale or a switch change.
+       The page reports the version it holds and applies changes only to that version; a page that holds none (a
+       new canvas) asks for whole layers (`slide_reset`), and a report of layers made before the last ones, or
+       before such a reset, holds nothing.
      - The HD frame itself stays the engine's; at a slide's end the page puts its map back.
+     - **Cost in Wide (a measured deviation: the 8 ms target is not met).** At S 4 in the browser test (2026-10-28,
+       load 24–28 on 18 cores; 20 frames each), a display frame that makes the layers as changes costs 10.7 ms median
+       and 16.6 ms p95 in the fight and 8.9 / 9.5 ms out of combat (2026-10-27 at load 30–100: 10.5 / 14.8 and
+       9.4 / 12.1). The first make after the page took none (a start, a pack) is whole: 35.9 ms (31.6). A frame that
+       only draws the slide costs the page 2.6 / 3.4 ms in the fight and 2.5 / 3.0 ms out of combat. The timer leaves
+       out the engine's step (1.35–1.70 ms a step in Wide's wasm), and p95 here is the 19th of 20 frames, not a
+       maximum nor a whole frame's time. On main, without smooth motion, the Wide layout's compositor test (a whole
+       composition of the Wide frame at S 4) measures 10.3–10.6 ms against the same 8 ms limit.
+       It is accepted because it falls once a step, on the slide's first frame, and a 360 ms slide moves about
+       0.74 game pixel per 16.7 ms display frame, so a late frame shifts the picture by less than a game pixel. A
+       later option is to rasterize only the cells whose draw lists changed (at most about 2.5 ms natively: the
+       static layer's raster and its change scan).
    - **Page:** `draw()` also runs while a slide is active. The wasm exports the presentation clock.
 6. **Switch.** Smooth motion on by default in the page, off in the engine and the web harness by default (as spec 18's
    switch). Off is today's picture exactly.

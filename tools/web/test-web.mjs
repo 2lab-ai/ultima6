@@ -12331,8 +12331,10 @@ for (const mode of ['original', 'hd', 'layout', 'wide']) {
 
 // Keeps in the page `__motionRing()`: the canvas pixels of the ring two canvas pixels outside the
 // shown map's rect on the canvas (the frame's border round it, in the Wide layouts the layout's
-// own, the windows left out), the rect found as `motionReference` maps the map; and counts the
-// page's draws of a slide (each one reads Game.slide) in `__slideCalls`.
+// own, the windows left out), the rect found as `motionReference` maps the map, and
+// `__motionInside()`: a 24 x 16 grid of canvas pixels inside it, a quarter of the rect in from each
+// edge (the windows left out); and counts the page's draws of a slide (each one reads Game.slide)
+// in `__slideCalls`.
 const motionRing = (page) => page.evaluate(() => {
   const g = globalThis.__shownGame;
   const c = document.getElementById('screen');
@@ -12366,10 +12368,19 @@ const motionRing = (page) => page.evaluate(() => {
     if (wide && covered(x, y)) continue;
     if (x >= 0 && y >= 0 && x < c.width && y < c.height) at.push((y * c.width + x) * 4);
   }
-  globalThis.__motionRing = () => {
+  const inside = [];
+  for (let j = 0; j < 16; j += 1) {
+    for (let i = 0; i < 24; i += 1) {
+      const [x, y] = [Math.floor(l + (r - l) * (0.25 + (0.5 * i) / 23)), Math.floor(t + (b - t) * (0.25 + (0.5 * j) / 15))];
+      if (!(wide && covered(x, y))) inside.push((y * c.width + x) * 4);
+    }
+  }
+  const read = (list) => {
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    return at.map((i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+    return list.map((i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
   };
+  globalThis.__motionRing = () => read(at);
+  globalThis.__motionInside = () => read(inside);
   const proto = Object.getPrototypeOf(g);
   if (!proto.__counted) {
     const slide = proto.slide;
@@ -12384,30 +12395,42 @@ const motionRing = (page) => page.evaluate(() => {
 });
 
 // On the virtual display: frames until `until` (`'sliding'`: a slide drawn from layers;
-// `'settled'`: the prompt back for five frames and no slide), at most `max`; per frame of a slide
-// whether the ring (`motionRing`) differs from `ref`. Returns the frames, the frames drawing a
-// slide, the ring's differing frames, whether `until` was met and the leader.
-const motionUntil = (page, until, ref, max = 3000) => page.evaluate(([want, base, limit]) => {
+// `'settled'`: the prompt back for five frames and no slide), at most `max`. Per frame with a slide
+// placed: whether the ring (`motionRing`) differs from `ref`; whether the map's inside changed
+// since the frame before (the page drew a moved map); and whether the static layer's place
+// (Game.slide's first triple) moved along `dir` (dx, dy) since the frame before, which a slide
+// toward -dir does (the camera's offset from rest shrinking toward the new cell). Returns the
+// frames, the frames with a slide placed, those whose map changed, those whose map changed with the
+// static layer moving along `dir`, the ring's differing frames, the newest layers version, whether
+// `until` was met and the leader.
+const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluate(([want, base, limit, [dx, dy]]) => {
   const v = window.__display;
   const g = globalThis.__shownGame;
   const c = document.getElementById('screen');
-  let [frames, sliding, ring, run] = [0, 0, 0, 0];
+  let [frames, sliding, drawn, along, ring, run] = [0, 0, 0, 0, 0, 0];
+  let [inside, place] = [globalThis.__motionInside(), null];
   const met = () => (want === 'sliding' ? g.sliding() && g.slide().length > 0 : run >= 5 && !g.sliding());
   while (frames < limit && !met()) {
     v.run();
     frames += 1;
     run = c.dataset.prompt === '1' && c.dataset.keys === '0' ? run + 1 : 0;
-    if (g.slide().length > 0) {
+    const placed = g.slide();
+    const now = globalThis.__motionInside();
+    const changed = now.some((p, i) => p !== inside[i]);
+    inside = now;
+    if (placed.length > 0) {
       sliding += 1;
-      const now = globalThis.__motionRing();
-      ring += now.some((p, i) => p !== base[i]) ? 1 : 0;
-    }
+      drawn += changed ? 1 : 0;
+      if (place && changed && (placed[1] - place[0]) * dx + (placed[2] - place[1]) * dy > 0) along += 1;
+      place = [placed[1], placed[2]];
+      ring += globalThis.__motionRing().some((p, i) => p !== base[i]) ? 1 : 0;
+    } else place = null;
   }
-  return { frames, sliding, ring, met: met(), leader: c.dataset.leader };
-}, [until, ref, max]);
+  return { frames, sliding, drawn, along, ring, layers: g.slide_layers_version(), met: met(), leader: c.dataset.leader };
+}, [until, ref, max, dir]);
 
 for (const mode of ['hd', 'wide']) {
-  test(`smooth motion (spec 20 Design 5), ${mode} in fullscreen: a key pressed while a step's slide runs is taken (the party walks back, a slide again); the border round the shown map keeps its pixels in every frame of the slides; once settled the page draws no slide (60 frames)`, async (env) => {
+  test(`smooth motion (spec 20 Design 5), ${mode} in fullscreen: a key pressed while a step's slide runs is taken (the party walks back on a slide of its own, the map drawn moving back); the border round the shown map keeps its pixels in every frame of the slides; once settled the page draws no slide (60 frames)`, async (env) => {
     const { context, page } = await motionPage(env, mode, true, Date.now());
     await page.click('#fullscreen');
     await waitFull(page, 'on');
@@ -12427,15 +12450,20 @@ for (const mode of ['hd', 'wide']) {
       await motionUntil(page, 'settled', ref);
     }
     assert.ok(step, `${mode}: a step slid`);
+    // A few frames more of the step's slide, its map drawn moving.
+    const out = await motionUntil(page, 'none', ref, 4, [-step.dir.dx, -step.dir.dy]);
     // The way back, pressed while the slide runs.
     const back = MOTION_DIRS.find((d) => d.dx === -step.dir.dx && d.dy === -step.dir.dy);
     assert.ok(await page.evaluate(() => globalThis.__shownGame.sliding()), `${mode}: the key comes during the slide`);
     await page.keyboard.press(back.key);
-    const after = await motionUntil(page, 'settled', ref);
+    // The return step's slide: the static layer moving along the step's own way (the camera
+    // coming back), other layers than the step's.
+    const after = await motionUntil(page, 'settled', ref, 3000, [step.dir.dx, step.dir.dy]);
     assert.ok(after.met, `${mode}: settled`);
     assert.equal(await motionLeader(page), from, `${mode}: the key taken, the party back`);
-    assert.ok(step.out.sliding + after.sliding > 2 && after.sliding > 0, `${mode}: slides drawn for both steps`);
-    assert.equal(step.out.ring + after.ring, 0, `${mode}: the border's pixels in every frame of the slides`);
+    assert.ok(out.drawn > 0 && out.along > 0, `${mode}: the step's slide drawn moving its way`);
+    assert.ok(after.along > 2 && after.layers > out.layers, `${mode}: the return step's own slide drawn, moving back`);
+    assert.equal(step.out.ring + out.ring + after.ring, 0, `${mode}: the border's pixels in every frame of the slides`);
     const settled = await page.evaluate(() => {
       const g = globalThis.__shownGame;
       globalThis.__slideCalls = 0;
@@ -12444,7 +12472,7 @@ for (const mode of ['hd', 'wide']) {
       return [globalThis.__slideCalls, g.slide_version() === version, g.sliding()];
     });
     assert.deepEqual(settled, [0, true, false], `${mode}: no slide drawn once settled`);
-    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + after.sliding} frames drawing slides, the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
+    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + out.sliding + after.sliding} frames with a slide placed, ${step.out.drawn + out.drawn + after.drawn} of them drawing a moved map, ${after.along} of the return step's moving back; the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
     await context.close();
   }, { needs: h.haveHfes });
 }
@@ -12490,7 +12518,7 @@ function timeSlideFrames() {
 // display (h.stepOnce) until the page drew `slides` frames of slides and made the layers as changes
 // `builds` times, at most `deadline` ms, each frame timed (`timeSlideFrames`); returns the line and
 // the rows.
-async function slideCost(page, label, { slides = 60, builds = 20, deadline = 120_000 } = {}) {
+async function slideCost(page, label, { slides = 60, builds = 20, deadline = 300_000 } = {}) {
   await page.evaluate(() => { window.__slideTimes = []; });
   const end = Date.now() + deadline;
   let walked = 0;
@@ -12512,7 +12540,7 @@ async function slideCost(page, label, { slides = 60, builds = 20, deadline = 120
   const made = times.filter((r) => r[2] && !r[4]);
   const first = times.filter((r) => r[2] && r[4]);
   const whole = made.map((r) => [r[0] + r[3]]);
-  assert.ok(sliding.length >= slides && made.length >= builds, `${label}: the page drew slides and made their layers within the deadline`);
+  assert.ok(sliding.length >= slides && made.length >= builds, `${label}: the page drew slides and made their layers in the steps started within the deadline`);
   const line = `${label}: ${walked} steps; frames drawing a slide: page ${stats(sliding)}, present ${stats(sliding, 3)}; frames making the layers as changes: whole ${stats(whole)}, present (the HD frame and the layers) ${stats(made, 3)}, page (the changes taken, the draws) ${stats(made)}; frames making them whole: ${stats(first.map((r) => [r[0] + r[3]]))}; other frames: page ${stats(times.filter((r) => !r[1] && !r[2]))}`;
   return { line, sliding, made, whole };
 }

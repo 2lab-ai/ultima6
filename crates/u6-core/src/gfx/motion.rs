@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, Span, TILE_H, TILE_W, TileKind};
 use u6_render::motion::{
-    Cell, Draw, LayerPixels, Layers, Node, Op, Part, Placed, Presenter, Rank, Scene, View,
+    Cell, Draw, LayerPixels, Layers, Node, Op, Part, Placed, Presenter, Rank, SNAP_PX, Scene, View,
 };
 use u6_render::{FLAG_MEMORY, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, GREY, Kind, Src};
 
@@ -59,9 +59,9 @@ pub struct Shot {
 }
 
 impl Shot {
-    /// Port-only (a platform's synthetic scenes, tests): a shot of `scene` with no remembered
-    /// sight, cursor or clock, its animated tiles in overlay frame 0.
-    pub fn of_scene(scene: Scene) -> Shot {
+    /// A shot of `scene` with no remembered sight, cursor or clock, its animated tiles in overlay
+    /// frame 0.
+    fn of_scene(scene: Scene) -> Shot {
         Shot {
             scene,
             memory: Vec::new(),
@@ -156,6 +156,21 @@ pub(super) fn record(
         hash,
     };
     io.keep_shot(Rc::new(shot));
+}
+
+/// Port-only (a platform's synthetic scenes, tests): keeps `scene` as the shot of the render just
+/// presented, as [`record`] keeps a framed render's (its picture the shown map of the back buffer
+/// now), with no remembered sight, cursor or clock; nothing with the switch off. The engine then
+/// hands it over with the publication of that picture ([`crate::Engine::take_motion`]).
+pub fn keep_scene(io: &Io, scene: Scene) {
+    if !io.motion() {
+        return;
+    }
+    let hash = io.draw(|fb| shown_hash(fb));
+    io.keep_shot(Rc::new(Shot {
+        hash,
+        ..Shot::of_scene(scene)
+    }));
 }
 
 /// Spec 20 Design 4: the early picture of the leader's step just made: on a copy of `state`, the
@@ -540,6 +555,16 @@ pub struct Slide {
 /// over it drawn over the static layer's pixels there (an overlay's OR takes the colour under it),
 /// only those words' pixels kept. None without a scene.
 pub fn slide_layers(state: &State, presenter: &Presenter<Shot>) -> Option<Slide> {
+    // The static layer covers the shown map wherever the camera is drawn: it reaches a cell past
+    // the view, and the shown map lies half a cell inside the view ([`SHOWN`]), against a camera
+    // drawn at most [`SNAP_PX`] from rest.
+    const _: () = assert!(
+        SNAP_PX <= (SHOWN.0 - MAP_X + 16) as f64
+            && SNAP_PX <= (SHOWN.1 - MAP_Y + 16) as f64
+            && SNAP_PX <= (MAP_X as usize + VIEW_W * 16 + 15 - SHOWN.2 as usize) as f64
+            && SNAP_PX <= (MAP_Y as usize + VIEW_H * 16 + 15 - SHOWN.3 as usize) as f64,
+        "the static layer covers the shown map at the camera's farthest"
+    );
     let newest = presenter.history().first()?;
     let layers = presenter.layers();
     let n = &newest.scene;
