@@ -48,6 +48,11 @@
 // shows the map cells in view that were seen and are out of sight now as they last looked, their
 // ground and still objects in dark grey (Game.set_sight_memory), where the original shows black.
 //
+// Smooth motion (spec 20; on unless `u6.motion` is kept 'off'): in each game the page starts the
+// leader's step and every object that moved one cell slide there over 18 PAL frames of the game's
+// clock (Game.set_motion), where the original jumps; while a slide runs the page presents and
+// draws every display frame, with no step too (Game.sliding).
+//
 // The HD layout (spec 10; Settings' "Screen layout", kept in localStorage, HD 16:9 unless
 // Original 16:10 was chosen): with HD on and that layout, the canvas is 1280 × 720 in a 16:9 box
 // (at most 1280 CSS px wide on the page) and the compositor runs at S 4. The ×4 frame is kept on
@@ -1451,12 +1456,22 @@ function storedHd() {
 let hdOn = storedHd();
 
 const MEMORY_KEY = 'u6.memory'; // localStorage: 'off' when the remembered sight is switched off
+const MOTION_KEY = 'u6.motion'; // localStorage: 'off' when smooth motion is switched off
 
 // The stored choice of the remembered sight (spec 18); unreadable storage or any other value is
 // on.
 function storedMemory() {
   try {
     return localStorage.getItem(MEMORY_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+// The stored choice of smooth motion (spec 20); unreadable storage or any other value is on.
+function storedMotion() {
+  try {
+    return localStorage.getItem(MOTION_KEY) !== 'off';
   } catch {
     return true;
   }
@@ -2935,8 +2950,8 @@ function toggleHd() {
 // One display frame: the steps its wall time is worth at the chosen speed (`pace`; the first
 // frame's time can precede `last`, which counts 0), run while the frame's budget lasts (half the
 // display's interval, at least 3 ms; the first always) and until the sequence ends, then
-// reported (`ran`). If any ran, the frame is converted and drawn once, when they changed it;
-// the sound, a Save to store and the reflected state once per frame.
+// reported (`ran`). If any ran, or a slide runs (spec 20), the frame is converted and drawn once,
+// when they changed it; the sound, a Save to store and the reflected state once per frame.
 function frame(now) {
   if (leaving) {
     looping = false;
@@ -2965,7 +2980,7 @@ function frame(now) {
     const log = game.take_log();
     if (log) console.info(log);
     if (voice.ready) hearSpeech();
-    if (k > 0) {
+    if (k > 0 || game.sliding()) {
       game.present();
       draw();
     }
@@ -3035,6 +3050,7 @@ async function boot(next, origin) {
   owner = next;
   next.set_voices(voice.ready);
   next.set_sight_memory(storedMemory());
+  next.set_motion(storedMotion());
   voice.newGame();
   old?.free();
   drawnGame = null; // the freed game's frame is not this one's

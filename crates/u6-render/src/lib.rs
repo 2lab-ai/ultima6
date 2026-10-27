@@ -16,6 +16,7 @@
 //! reads a plane ([`Framebuffer::src`]), never syncs from one.
 
 pub mod hd;
+pub mod motion;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

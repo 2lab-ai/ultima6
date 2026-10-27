@@ -43,6 +43,14 @@
 //! in view that were seen and are out of sight now in dark grey ([`u6_core::Io::set_sight_memory`]);
 //! off (the default, the original's black), the frames are those without it.
 //!
+//! Smooth motion (spec 20): with [`Game::set_motion`] on, the engine hands over the scene of each
+//! picture of the map window it publishes ([`u6_core::Io::set_motion`]) and each present while a
+//! slide runs draws the map as the slides have it at the presentation clock
+//! ([`Game::presentation_ms`]: the engine's time and the pacer's carried fraction): the leader's
+//! step and every object one cell from where it was move there over 18 PAL frames of that clock
+//! (`u6_render::motion`). The page presents every display frame while [`Game::sliding`]. Off (the
+//! default), the frames are the engine's.
+//!
 //! Korean (spec 08, slice K1): the page loads a dropped `ko.u6lp` once as a [`LocalePack`]
 //! (the engine's strict reader: at most [`max_locale_pack_bytes`]) and, in Korean mode, sets it
 //! on each game it starts ([`Game::set_locale`]): checked against that game's files, then its
@@ -76,6 +84,7 @@ use std::collections::BTreeMap;
 
 use std::rc::Rc;
 
+use u6_core::gfx::motion::Shot;
 use u6_core::hd::{HdView, PackCounts};
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::pacer::{self, Pacer, Speed};
@@ -84,6 +93,7 @@ use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
 use u6_render::hd::{self, Scale};
+use u6_render::motion::{Presenter, Scene, View, slides_shown};
 use wasm_bindgen::prelude::*;
 
 /// The dropped files together, as copied into wasm: a file read whole counts its size; a zip
@@ -515,6 +525,8 @@ pub struct Game {
     held: Vec<(String, Key)>,
     /// Spec 18: the remembered sight on ([`Game::set_sight_memory`]).
     sight_memory: bool,
+    /// Spec 20: smooth motion ([`Game::set_motion`]).
+    motion: Motion<Shot>,
 }
 
 impl Default for Game {
@@ -558,6 +570,7 @@ impl Game {
             voices: false,
             held: Vec::new(),
             sight_memory: false,
+            motion: Motion::new(),
         };
         game.redraw();
         game
@@ -913,7 +926,14 @@ impl Game {
     /// colours or sources changed since the last composition (a move of the pointer sprite alone
     /// composes nothing, spec 11 Design 7), and takes the pointer the page draws over it
     /// ([`Game::hd_pointer`]).
+    ///
+    /// Spec 20: with smooth motion on, while a slide runs it shows the slide's picture instead
+    /// ([`Game::present_slide`]); the present after the last one shows the engine's frame again.
     pub fn present(&mut self) {
+        if self.present_slide() {
+            self.track_pointer();
+            return;
+        }
         let version = self.engine.as_ref().map(Engine::frame_version);
         if version.is_some() && version != self.rgba_holds {
             self.redraw();
@@ -1196,6 +1216,7 @@ impl Game {
     /// ([`u6_core::pacer::Pacer::due`]); nothing is taken off until [`Game::ran`].
     pub fn pace(&mut self, dt: f64) -> u32 {
         let held = self.pointer_held();
+        self.motion.frame(dt);
         self.pacer.due(dt, held)
     }
 
@@ -1333,6 +1354,39 @@ impl Game {
     /// Whether the remembered sight is on ([`Game::set_sight_memory`]).
     pub fn sight_memory(&self) -> bool {
         self.sight_memory
+    }
+
+    /// Spec 20: smooth motion on or off: while on, the leader's step and every object that moved
+    /// one cell slide there over 18 PAL frames of the presentation clock ([`Game::present`]); off
+    /// (the default), the frames are the engine's. Applies to the game running (from its next
+    /// picture of the map) and to every game started after.
+    pub fn set_motion(&mut self, on: bool) {
+        self.motion.on = on;
+        self.motion.presenter.clear();
+        if let Some(engine) = &mut self.engine {
+            engine.io().set_motion(on);
+            engine.take_motion();
+        }
+    }
+
+    /// Whether smooth motion is on ([`Game::set_motion`]).
+    pub fn motion(&self) -> bool {
+        self.motion.on
+    }
+
+    /// Spec 20: the presentation clock: the engine's milliseconds and the steps' time the wall
+    /// clock is ahead of them at the speed ([`u6_core::pacer::Pacer::carried_ms`]); 0 before a
+    /// start.
+    pub fn presentation_ms(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.io().now_ms() as f64 + self.pacer.carried_ms())
+    }
+
+    /// Spec 20: whether the next present draws a slide, or ends one (the page presents then with
+    /// no step too).
+    pub fn sliding(&self) -> bool {
+        self.motion.drawn || self.motion.presenter.active(self.presentation_ms())
     }
 
     /// Spec 09 Design 1: the utterances NPCs said since the previous call, as a JSON array of
@@ -1577,6 +1631,10 @@ impl Game {
     fn put_on_screen(&mut self, mut engine: Engine) {
         engine.set_speech(self.voices);
         engine.io().set_sight_memory(self.sight_memory);
+        engine.io().set_motion(self.motion.on);
+        self.motion.presenter.clear();
+        self.motion.drawn = false;
+        self.motion.shown = None;
         self.saved_gen = 0;
         self.save_out = Vec::new();
         self.save_whole = false;
@@ -1616,6 +1674,49 @@ impl Game {
         }
     }
 
+    /// Spec 20: hands the presenter the engine's publications since the last present, then, while
+    /// a slide runs at the presentation clock, puts the published frame with the map as the slides
+    /// have it ([`u6_core::gfx::motion::paint`]) on screen: composed into the HD frame with HD on,
+    /// else with the pointer sprite over it into the RGBA frame. Returns whether it did; the first
+    /// present after the last slide converts the engine's frame again.
+    fn present_slide(&mut self) -> bool {
+        let Some(engine) = &mut self.engine else {
+            return false;
+        };
+        let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
+        let Some(view) = self.motion.take(engine, self.pacer.pace_rate(), t) else {
+            if std::mem::take(&mut self.motion.drawn) {
+                self.rgba_holds = None;
+                self.motion.shown = None;
+            }
+            return false;
+        };
+        // The same slide picture over the same frame (a preview held at rest), at the same HD
+        // setting: drawn already.
+        let newest = self.motion.presenter.history().first().map(Rc::as_ptr);
+        let hd = (self.hd.on(), self.hd.scale().factor());
+        let shown = (view.clone(), newest, engine.frame_version(), hd);
+        if self.motion.drawn && self.motion.shown.as_ref() == Some(&shown) {
+            return true;
+        }
+        self.motion.shown = Some(shown);
+        let fb = &mut self.motion.frame;
+        fb.clone_from(&engine.published_frame());
+        u6_core::gfx::motion::paint(&engine.state(), &self.motion.presenter, &view, fb);
+        if self.hd.on() {
+            self.conversions += u64::from(self.hd.present_frame(engine, fb));
+        } else {
+            if let Some(sprite) = engine.sprite() {
+                sprite.draw(fb);
+            }
+            fb.write_rgba(&mut self.rgba);
+            self.rgba_holds = None;
+            self.conversions += 1;
+        }
+        self.motion.drawn = true;
+        true
+    }
+
     /// With HD on: composes the HD frame from the engine's published frame (black before a start)
     /// when it does not hold that frame's colours and sources at the HD setting now
     /// ([`HdView::present`]).
@@ -1635,6 +1736,80 @@ impl Game {
         fb.write_rgba(&mut self.rgba);
         self.rgba_holds = self.engine.as_ref().map(Engine::frame_version);
         self.conversions += u64::from(!self.hd.on());
+    }
+}
+
+/// Spec 20: what a present drew of a slide: the slides, the newest scene, the engine frame's
+/// version and the HD setting (on, scale).
+type Drawn<T> = (View, Option<*const T>, u64, (bool, usize));
+
+/// Spec 20: smooth motion's side of the page: the switch, the presenter of the engine's scenes,
+/// the display's frame interval and the frame a slide is drawn in.
+struct Motion<T> {
+    on: bool,
+    presenter: Presenter<T>,
+    /// The display's frame interval in wall ms, smoothed over the frames ([`Motion::frame`]).
+    interval: f64,
+    /// The last present drew a slide.
+    drawn: bool,
+    /// What it drew ([`Drawn`]).
+    shown: Option<Drawn<T>>,
+    frame: Framebuffer,
+}
+
+impl<T: AsRef<Scene>> Motion<T> {
+    fn new() -> Self {
+        Self {
+            on: false,
+            presenter: Presenter::new(),
+            interval: 1000.0 / 60.0,
+            drawn: false,
+            shown: None,
+            frame: Framebuffer::new(),
+        }
+    }
+
+    /// A display frame `dt` wall ms after the previous one: the interval follows it, as the
+    /// page's own does (a frame past the pacer's cap is a stall, not the display's interval).
+    fn frame(&mut self, dt: f64) {
+        if dt > 0.0 && dt <= pacer::CAP_MS {
+            self.interval += (dt - self.interval) / 8.0;
+        }
+    }
+
+    /// Hands the presenter `publications` (a scene, or none for a foreign picture, at an engine
+    /// time; a preview of the leader's step flagged), slides shown at the pace `rate` the frame
+    /// ran at ([`slides_shown`]), then the slides as drawn at presentation time `t` while one runs;
+    /// the slides ended at `t` are dropped.
+    fn publish(
+        &mut self,
+        publications: impl IntoIterator<Item = (Option<Rc<T>>, f64, bool)>,
+        rate: Option<f64>,
+        t: f64,
+    ) -> Option<View> {
+        let slides = slides_shown(rate, self.interval);
+        for (shot, time, preview) in publications {
+            match shot {
+                Some(shot) if preview => self.presenter.preview(shot, time, slides),
+                Some(shot) => self.presenter.publish(shot, time, slides),
+                None => self.presenter.foreign(),
+            }
+        }
+        let view = self.presenter.view(t).filter(|_| self.presenter.active(t));
+        self.presenter.end(t);
+        view
+    }
+}
+
+impl Motion<Shot> {
+    /// [`Motion::publish`] of `engine`'s publications ([`Engine::take_motion`]).
+    fn take(&mut self, engine: &mut Engine, rate: Option<f64>, t: f64) -> Option<View> {
+        let taken = engine.take_motion().into_iter();
+        self.publish(
+            taken.map(|p| (p.shot, p.time_ms as f64, p.preview)),
+            rate,
+            t,
+        )
     }
 }
 
@@ -4547,5 +4722,266 @@ mod tests {
         game.set_hd(true, 4);
         assert_eq!(game.hd_frame_len(), frame_bytes(4));
         assert!(game.hd_frame_rgba().chunks(4).all(|p| p == [0, 0, 0, 255]));
+    }
+    /// The horizontal shift in -16..=16 pixels that best maps the shown map of RGBA frame `a`
+    /// onto `b` (most equal pixels over every other row and column; the smallest shift first).
+    fn map_shift(a: &[u8], b: &[u8]) -> i32 {
+        let (x0, y0, x1, y1) = u6_core::geom::SHOWN;
+        let (x0, y0, x1, y1) = (i32::from(x0), i32::from(y0), i32::from(x1), i32::from(y1));
+        let w = u6_render::WIDTH as i32;
+        let score = |dx: i32| {
+            let mut same = 0;
+            for y in (y0..=y1).step_by(2) {
+                for x in (x0 + 16..=x1 - 16).step_by(2) {
+                    let (i, j) = (((y * w + x - dx) * 4) as usize, ((y * w + x) * 4) as usize);
+                    same += usize::from(a[i..i + 3] == b[j..j + 3]);
+                }
+            }
+            same
+        };
+        let mut best = (score(0), 0);
+        for d in 1..=16 {
+            for dx in [-d, d] {
+                let s = score(dx);
+                if s > best.0 {
+                    best = (s, dx);
+                }
+            }
+        }
+        best.1
+    }
+
+    /// A synthetic scene for the motion tests: an 11 × 11 view round (x, 0), the leader (slot 1)
+    /// drawn on its centre.
+    fn walker_scene(x: i32) -> Scene {
+        use u6_render::motion::{Cell, Node, Placed, Rank};
+        let mut cells = vec![Cell::default(); 121];
+        cells[60].nodes.push(Node {
+            word: 0x180,
+            slot: Some(1),
+            rank: Rank::Own,
+        });
+        Scene {
+            leader: Some(1),
+            centre: (x, 0, 0),
+            origin: (x - 5, -5),
+            cols: 11,
+            rows: 11,
+            corner: (0, 0),
+            cells,
+            placed: vec![Placed {
+                slot: 1,
+                cell: (x, 0),
+                kind: 0x180,
+            }],
+            snap: false,
+        }
+    }
+
+    /// Spec 20 receipt (timing): a step published at an engine step slides for 360 / s wall ms at
+    /// 1×, 2× and 8× on a 60 Hz and a 144 Hz display, within one display frame, measured as the
+    /// display frames whose present draws it; a pointer button held runs it at 1×; at Max, and
+    /// where 360 / s is under two display frames, no slide.
+    #[test]
+    fn a_slide_lasts_360_ms_over_the_speed_within_a_display_frame_and_none_at_max() {
+        for hz in [60.0, 144.0] {
+            let dt = 1000.0 / hz;
+            for (speed, held, want) in [
+                (Speed::Finite(1.0), false, Some(360.0)),
+                (Speed::Finite(2.0), false, Some(180.0)),
+                (Speed::Finite(8.0), false, Some(45.0)),
+                (Speed::Finite(8.0), true, Some(360.0)),
+                (Speed::Finite(12.0), false, (hz > 100.0).then_some(30.0)),
+                (Speed::Max, false, None),
+            ] {
+                let mut pacer = Pacer::new();
+                pacer.set_speed(speed);
+                let mut motion = Motion::<Scene>::new();
+                motion
+                    .presenter
+                    .publish(Rc::new(walker_scene(0)), 0.0, true);
+                let (mut now, mut published, mut drawn) = (0u64, false, 0u32);
+                for _ in 0..600 {
+                    let k = pacer.due(dt, held).min(8);
+                    let mut publications = Vec::new();
+                    for _ in 0..k {
+                        now += u64::from(pacer::STEP_MS);
+                        if !published && now >= 2000 {
+                            publications.push((Some(Rc::new(walker_scene(1))), now as f64, false));
+                            published = true;
+                        }
+                    }
+                    pacer.ran(k);
+                    motion.frame(dt);
+                    let t = now as f64 + pacer.carried_ms();
+                    let rate = pacer.pace_rate();
+                    drawn += u32::from(motion.publish(publications, rate, t).is_some());
+                }
+                assert!(published, "{speed:?}: the step was published");
+                let shown = f64::from(drawn) * dt;
+                let label = format!("{hz} Hz, {speed:?}, held {held}");
+                match want {
+                    Some(ms) => assert!(
+                        (shown - ms).abs() <= dt,
+                        "{label}: {shown} ms shown, {ms} wanted"
+                    ),
+                    None => assert_eq!(drawn, 0, "{label}: no slide"),
+                }
+            }
+        }
+    }
+
+    /// Spec 20 on the user's zip (skipped when absent): with smooth motion on, a step east at 1×
+    /// on a 60 Hz display draws in-between pictures (the page's RGBA frame neither the frame
+    /// before nor the one after), on presents with no step too ([`Game::sliding`]), each one
+    /// frame; the present after the slide shows the engine's frame; and the engine's frames are
+    /// those of the same run with it off.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_step_slides_in_the_page_and_ends_on_the_engines_frame() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        let ticks = |game: &Game| game.engine.as_ref().map_or(0, Engine::ticks);
+        let run = |motion: bool| {
+            let mut game = Game::new();
+            game.collect("ultima-vi.zip", data.clone()).quiet();
+            game.set_motion(motion);
+            game.boot(3, true).quiet();
+            let dt = 1000.0 / 60.0;
+            let mut frames = Vec::new();
+            let mut engine_frames = Vec::new();
+            let mut sliding = 0;
+            let mut no_step = 0;
+            let mut frame = |game: &mut Game| {
+                let k = game.pace(dt);
+                for _ in 0..k {
+                    game.step(pacer::STEP_MS);
+                }
+                game.ran(k);
+                let slide = game.sliding();
+                if k > 0 || slide {
+                    let before = game.frame_version();
+                    game.present();
+                    no_step += u32::from(k == 0 && game.frame_version() != before);
+                }
+                sliding += u32::from(slide);
+                let e = game.engine.as_ref().quiet();
+                engine_frames.push(e.frame().pixels().to_vec());
+                frames.push(game.frame_rgba());
+            };
+            let mut start = None;
+            for i in 0..6600 {
+                if start.is_none() && (i == 6000 || game.at_prompt() && ticks(&game) > 3000) {
+                    game.key_down("ArrowRight", "ArrowRight", false);
+                    start = Some(i);
+                }
+                if start.is_some_and(|s| i >= s + 600) {
+                    break;
+                }
+                frame(&mut game);
+            }
+            let start = start.quiet();
+            (
+                frames.split_off(start),
+                engine_frames,
+                sliding,
+                no_step,
+                game,
+            )
+        };
+        let (on, on_engine, sliding, no_step, game) = run(true);
+        let (off, off_engine, _, _, _) = run(false);
+        assert_same!(on_engine, off_engine, "the engine's frames");
+        // The horizontal shift (pixels) that best maps the shown map of the frame before the key
+        // onto each frame; in between: neither 0 nor a whole cell.
+        let in_between = |frames: &[Vec<u8>]| {
+            let shifts: Vec<i32> = frames.iter().map(|f| map_shift(&frames[0], f)).collect();
+            let between = shifts.iter().filter(|d| d.abs() % 16 != 0).count();
+            (between, shifts)
+        };
+        let ((between, shifts), (between_off, shifts_off)) = (in_between(&on), in_between(&off));
+        assert!(
+            shifts.contains(&-16) && shifts_off.contains(&-16),
+            "a step east"
+        );
+        let last = on.last().quiet();
+        assert!(
+            sliding > 0 && no_step > 0,
+            "presents with no step drew the slide"
+        );
+        assert!(
+            between > 0 && between_off == 0,
+            "in-between pictures: {between}, off {between_off}"
+        );
+        let mut rgba = Vec::new();
+        game.engine.as_ref().quiet().frame().write_rgba(&mut rgba);
+        assert_same!(*last, rgba, "the slide ended on the engine's frame");
+        assert!(!game.sliding(), "no slide left");
+        let mut seen = shifts.clone();
+        seen.dedup();
+        println!(
+            "a step east at 1x: {between} frames in between (off {between_off}), {sliding} \
+             presents sliding, {no_step} with no step; the map's shift by frame: {seen:?}"
+        );
+    }
+    /// Timings only (run with `--ignored --nocapture`, gate profile; native, not wasm): with
+    /// smooth motion on and HD on at 4×, the wall time of each present while a step east slides
+    /// (the slide's picture composed into the HD frame every display frame), against the presents
+    /// of the same frames with smooth motion off.
+    #[test]
+    #[ignore]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // reads the zip; a timing
+    fn bench_the_presents_of_a_slide_at_hd_4x() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        for motion in [true, false] {
+            let mut game = Game::new();
+            game.collect("ultima-vi.zip", data.clone()).quiet();
+            game.set_motion(motion);
+            game.set_hd(true, 4);
+            game.boot(3, true).quiet();
+            let dt = 1000.0 / 60.0;
+            let mut times = Vec::new();
+            let mut pressed = None;
+            for i in 0..6600 {
+                let ticks = game.engine.as_ref().map_or(0, Engine::ticks);
+                if pressed.is_none() && (i == 6000 || game.at_prompt() && ticks > 3000) {
+                    game.key_down("ArrowRight", "ArrowRight", false);
+                    pressed = Some(i);
+                }
+                if pressed.is_some_and(|p| i >= p + 120) {
+                    break;
+                }
+                let k = game.pace(dt);
+                for _ in 0..k {
+                    game.step(pacer::STEP_MS);
+                }
+                game.ran(k);
+                if k > 0 || game.sliding() {
+                    let slide = game.sliding();
+                    let t = std::time::Instant::now();
+                    game.present();
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    if pressed.is_some() && (slide || !motion) {
+                        times.push(ms);
+                    }
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+            println!(
+                "motion {motion}: {} presents after the key, median {:.2} ms, p95 {:.2} ms, max {:.2} ms",
+                times.len(),
+                at(0.5),
+                at(0.95),
+                at(1.0)
+            );
+        }
     }
 }

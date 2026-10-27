@@ -166,6 +166,15 @@ pub struct Io {
     window_cache: Cell<bool>,
     /// Port-only: [`Io::set_sight_memory`].
     sight_memory: Cell<bool>,
+    /// Port-only: [`Io::set_motion`].
+    motion: Cell<bool>,
+    /// Port-only (spec 20): the framed renders kept since the last one a publication showed,
+    /// oldest first, at most [`SHOTS`] ([`crate::gfx::motion`]).
+    shots: RefCell<VecDeque<Rc<crate::gfx::motion::Shot>>>,
+    /// Port-only (spec 20): the framed render kept last.
+    last_shot: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
+    /// Port-only (spec 20 Design 4): the early picture of the leader's step made in this poll.
+    preview: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
 }
 
 impl Io {
@@ -187,6 +196,10 @@ impl Io {
             back_writes: Cell::new(0),
             window_cache: Cell::new(true),
             sight_memory: Cell::new(false),
+            motion: Cell::new(false),
+            shots: RefCell::new(VecDeque::new()),
+            last_shot: RefCell::new(None),
+            preview: RefCell::new(None),
         }
     }
 
@@ -429,6 +442,56 @@ impl Io {
         self.sight_memory.get()
     }
 
+    /// Port-only (spec 20): with `on` each framed render of the map window keeps its scene
+    /// ([`crate::gfx::motion::Shot`]), and the engine hands a platform, with each publication
+    /// whose shown map changed, the scene it shows ([`Engine::take_motion`]); off (the default)
+    /// nothing is kept. Either way the state, the RNG and the frames published are the same: the
+    /// page turns it on and slides between the scenes; the tests, the oracle comparisons and the
+    /// receipts run with it off.
+    pub fn set_motion(&self, on: bool) {
+        self.motion.set(on);
+        if !on {
+            self.shots.borrow_mut().clear();
+            self.last_shot.borrow_mut().take();
+            self.preview.borrow_mut().take();
+        }
+    }
+
+    /// [`Io::set_motion`].
+    pub fn motion(&self) -> bool {
+        self.motion.get()
+    }
+
+    /// Port-only (spec 20): keeps the shot of a framed render just presented, the oldest dropped
+    /// past [`SHOTS`].
+    pub(crate) fn keep_shot(&self, shot: Rc<crate::gfx::motion::Shot>) {
+        *self.last_shot.borrow_mut() = Some(Rc::clone(&shot));
+        let mut shots = self.shots.borrow_mut();
+        shots.push_back(shot);
+        while shots.len() > SHOTS {
+            shots.pop_front();
+        }
+    }
+
+    /// Port-only (spec 20): the framed render kept last ([`Io::keep_shot`]).
+    pub(crate) fn last_shot(&self) -> Option<Rc<crate::gfx::motion::Shot>> {
+        self.last_shot.borrow().clone()
+    }
+
+    /// Port-only (spec 20 Design 4): keeps the early picture of the leader's step
+    /// ([`crate::gfx::motion::preview`]) for the engine to hand over after this poll.
+    pub(crate) fn keep_preview(&self, shot: Rc<crate::gfx::motion::Shot>) {
+        *self.preview.borrow_mut() = Some(shot);
+    }
+
+    /// Port-only (spec 20): the newest shot kept whose shown map hashes to `hash`, taken with
+    /// the shots kept before it (a publication shows the renders in their order).
+    fn take_shot(&self, hash: u64) -> Option<Rc<crate::gfx::motion::Shot>> {
+        let mut shots = self.shots.borrow_mut();
+        let i = shots.iter().rposition(|s| s.hash == hash)?;
+        shots.drain(..=i).next_back()
+    }
+
     /// Port-only (spec 07 HD0): every pixel of the back buffer's, the screen's and the published
     /// frame's source planes classic, the colours untouched ([`Framebuffer::reset_src`]; the
     /// shown frame follows at its next sync from the published one). It counts as a write of the
@@ -662,6 +725,26 @@ pub(crate) const KEY_RING: usize = 49;
 /// keys: more than a line of the conversation takes ([`crate::converse::INPUT_MAX`] bytes).
 const TEXT_RING: usize = KEY_RING;
 
+/// Port-only (spec 20): the framed renders an [`Io`] keeps at most until a publication shows one
+/// of them: more than a fight's turn records before its playback shows them.
+const SHOTS: usize = 64;
+
+/// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most.
+const PUBLISHED: usize = 256;
+
+/// Port-only (spec 20): a publication whose shown map changed ([`Engine::take_motion`]).
+#[derive(Clone, Debug)]
+pub struct Published {
+    /// The engine time it was published at ([`Io::now_ms`] at the end of its tick).
+    pub time_ms: u64,
+    /// The framed render whose picture it shows; `None` for a foreign picture (a missile, a
+    /// flash, a quake, a frame a fight plays back of no render kept, the map overview).
+    pub shot: Option<Rc<crate::gfx::motion::Shot>>,
+    /// Spec 20 Design 4: no publication but the early picture of the leader's step
+    /// ([`crate::gfx::motion::preview`]): its scene, ahead of the engine's own picture.
+    pub preview: bool,
+}
+
 /// The game future type the engine retains.
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -692,6 +775,10 @@ pub struct Engine {
     src_shows: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
+    /// Port-only (spec 20): the hash of the shown map last published with the switch on.
+    motion_map: Option<u64>,
+    /// Port-only (spec 20): [`Engine::take_motion`]'s publications.
+    motion: Vec<Published>,
 }
 
 impl Engine {
@@ -763,6 +850,8 @@ impl Engine {
             src_shows: 0,
             sprite: None,
             stubs,
+            motion_map: None,
+            motion: Vec::new(),
         }
     }
 
@@ -824,6 +913,13 @@ impl Engine {
         }
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
+        if let Some(shot) = self.io.preview.borrow_mut().take() {
+            self.motion.push(Published {
+                time_ms: self.io.now_ms(),
+                shot: Some(shot),
+                preview: true,
+            });
+        }
         let version = self.io.front_version.get();
         let presented = version != self.published_front;
         // The published frame is the one buffer synced from the screen, and the shown frame the
@@ -840,6 +936,9 @@ impl Engine {
                 .sync_from(&mut self.io.front.borrow_mut());
             self.published_front = version;
             self.published_version += 1;
+            if self.io.motion() {
+                self.match_motion();
+            }
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
@@ -883,6 +982,31 @@ impl Engine {
                 self.src_shows += 1;
             }
         }
+    }
+
+    /// Port-only (spec 20): the publication just made, when its shown map changed: with the shot
+    /// whose picture it is ([`Io::take_shot`]), or foreign.
+    fn match_motion(&mut self) {
+        let hash = crate::gfx::motion::shown_hash(&self.io.published.borrow());
+        if self.motion_map == Some(hash) {
+            return;
+        }
+        self.motion_map = Some(hash);
+        self.motion.push(Published {
+            time_ms: self.io.now_ms(),
+            shot: self.io.take_shot(hash),
+            preview: false,
+        });
+        if self.motion.len() > PUBLISHED {
+            self.motion.drain(..self.motion.len() - PUBLISHED);
+        }
+    }
+
+    /// Port-only (spec 20): the publications since the previous call whose shown map changed, in
+    /// order, with the scene each shows (with [`Io::set_motion`] on; none with it off). A
+    /// platform's presenter slides between them ([`u6_render::motion::Presenter`]).
+    pub fn take_motion(&mut self) -> Vec<Published> {
+        std::mem::take(&mut self.motion)
     }
 
     /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at

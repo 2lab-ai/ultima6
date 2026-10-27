@@ -22,7 +22,7 @@ use u6_render::{FLAG_MEMORY, FLAG_OVERLAY, Framebuffer, GREY, Kind, Rgb, Src, gr
 use super::blit::{blit_back, copy_window_rows, plot, set_plot_colour};
 use super::cache::{BOXES, Layer, SightMemory, WindowKey, cell_box};
 use super::tables::GameTables;
-use super::{GfxState, anim, cache, seams};
+use super::{GfxState, anim, cache, motion, seams};
 use crate::actors::Calendar;
 use crate::engine::Io;
 use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
@@ -263,7 +263,10 @@ fn border_of_boxes() -> [Option<u16>; BOXES] {
 /// otherwise.
 pub fn render_window(state: &mut State, io: &Io, framed: bool) {
     let inputs = window_inputs(state, io, framed);
-    draw_window(state, io, framed, &inputs);
+    let snap = draw_window(state, io, framed, &inputs);
+    if let Some(snap) = snap {
+        keep_scene(state, io, inputs, snap, false);
+    }
 }
 
 /// What 0x102c90 takes before it draws: the window contents, the clock's tile word, and with
@@ -302,20 +305,31 @@ fn window_inputs(state: &mut State, io: &Io, framed: bool) -> WindowInputs {
 }
 
 /// The rest of 0x102c90: the palettes, the cells into the back buffer, the sparkle, with
-/// `framed` the cursor, the border and the present.
-fn draw_window(state: &mut State, io: &Io, framed: bool, inputs: &WindowInputs) {
+/// `framed` the cursor, the border and the present. Port (spec 20): framed, whether its scene can
+/// slide for smooth motion ([`keep_scene`]): not dissolved, nor with the sparkle's XOR plots.
+fn draw_window(state: &mut State, io: &Io, framed: bool, inputs: &WindowInputs) -> Option<bool> {
     let memory = io.sight_memory();
     io.draw(|fb| load_palette(state, fb, memory));
     io.draw_back(|fb| load_palette(state, fb, memory));
+    let sparkle = state.gfx.sparkle != 0;
     draw_boxes(state, io, framed, inputs, None);
-    if framed {
-        let gfx = &mut state.gfx;
-        let dissolve = gfx.dissolve != 0;
-        seams::present_window(io, gfx, dissolve);
-        if dissolve {
-            gfx.dissolve = 0;
-        }
+    if !framed {
+        return None;
     }
+    let gfx = &mut state.gfx;
+    let dissolve = gfx.dissolve != 0;
+    seams::present_window(io, gfx, dissolve);
+    if dissolve {
+        gfx.dissolve = 0;
+    }
+    Some(dissolve || sparkle)
+}
+
+/// Port (spec 20): the framed render of `inputs` just presented keeps its scene for smooth motion
+/// ([`motion::record`]), `snap` when it cannot slide; `same` when the window cache drew no box.
+fn keep_scene(state: &State, io: &Io, inputs: WindowInputs, snap: bool, same: bool) {
+    let cursor = (inputs.cursor, inputs.clock);
+    motion::record(state, io, inputs.memory, cursor, snap, same);
 }
 
 /// The back-buffer draws of 0x102c90: the cells (rows, then columns), the sparkle, with `framed`
@@ -455,14 +469,20 @@ fn render_window_cached(state: &mut State, io: &Io) {
             }
             io.with_buffers(copy_window_rows);
             io.present();
+            let gfx = &mut state.gfx;
             if redrawn == 0 {
                 gfx.cache.window_skips += 1;
             } else {
                 gfx.cache.window_partial += 1;
                 gfx.cache.boxes_redrawn += redrawn as u64;
             }
+            keep_scene(state, io, inputs, false, redrawn == 0);
         }
-        _ => draw_window(state, io, true, &inputs),
+        _ => {
+            if let Some(snap) = draw_window(state, io, true, &inputs) {
+                keep_scene(state, io, inputs, snap, false);
+            }
+        }
     }
     let memo = key.map(|key| (key, io.back_mark()));
     cache::remember_window(&mut state.gfx, memo);

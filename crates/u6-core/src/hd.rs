@@ -168,6 +168,21 @@ impl HdView {
         wrote
     }
 
+    /// Port-only (spec 20): with HD on, composes `frame` (a slide's picture of the map over a
+    /// copy of `engine`'s published frame) from the engine's images. The HD frame then holds no
+    /// published frame, so the next [`HdView::present`] composes the published one again. Returns
+    /// whether a block changed.
+    pub fn present_frame(&mut self, engine: &Engine, frame: &Framebuffer) -> bool {
+        if !self.on {
+            return false;
+        }
+        let state = engine.state();
+        let mut images = self.images.images(&state, engine.io());
+        let wrote = self.compositor.compose(frame, &mut images, self.scale);
+        self.holds = None;
+        wrote
+    }
+
     /// The HD frame: `WIDTH·S × HEIGHT·S` packed RGBA words (`u6_render::hd`), the last
     /// composition's (empty before the first).
     pub fn rgba(&self) -> &[u32] {

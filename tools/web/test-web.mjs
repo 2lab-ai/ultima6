@@ -24,8 +24,10 @@
 // map covering the 1920 x 1080 canvas, the framed windows over it, the pointer through them, the
 // letterbox, fullscreen, the compositor's time and scale, the setting across the builds; spec 14:
 // the actor windows, the active one marked, the side panel's own window in another mode or a
-// conversation), and the remembered sight (spec 18: on in the page, off in the harness, grey on
-// the canvas where the engine's frame remembers a cell out of sight).
+// conversation), the remembered sight (spec 18: on in the page, off in the harness, grey on
+// the canvas where the engine's frame remembers a cell out of sight), and smooth motion (spec 20:
+// on in the page, off in the harness; steps by key and by click slide through in-between
+// positions in Original, HD and Wide, and reach the prompt when a run without it does).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
@@ -11566,6 +11568,236 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   await started(fresh, FILES);
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
 }, { needs: h.haveHfes });
+
+// --- smooth motion (spec 20) ------------------------------------------------------------------
+// The harness keeps it off (`openPage`'s `motion`), so every other test reads the engine's frame
+// after a step; here it is on, and a run with it off is the control: the same seed (the page's
+// clock seed, app.js clockSeed, from a fixed Date.now) and the same inputs at the same frames of
+// the same virtual 60 Hz display, so both games run the same steps. The party walks to the
+// room's door ten cells south of the start cell (as the remembered sight's test) at 8x, opens it,
+// then at 1x steps south through the doorway, four more cells by key and five by click. With
+// U6_MOTION_FRAMES set, the doorway step's first, middle and last frames of the slide are kept
+// there as PNG files of the canvas (the owner's game shown, written outside the repository).
+
+const MOTION_DIRS = [
+  { key: 'ArrowDown', dx: 0, dy: 1 },
+  { key: 'ArrowRight', dx: 1, dy: 0 },
+  { key: 'ArrowLeft', dx: -1, dy: 0 },
+  { key: 'ArrowUp', dx: 0, dy: -1 },
+];
+
+// A gated page of `mode` ('original': HD off; 'hd': HD on, the Original layout; 'wide': the Wide
+// build) with smooth motion `motion`, seeded from `seedTime`, on a virtual 60 Hz display from its
+// boot, the wasm memory kept (`wasmMemoryHook`), at the game's prompt.
+async function motionPage(env, mode, motion, seedTime) {
+  const opts = { motion: motion ? 'on' : 'off', font: 'pixel' };
+  const { context, page } = mode === 'wide' ? await h.openWide(env, opts) : await h.openPage(env, opts);
+  await context.addInitScript((t) => { Date.now = () => t; }, seedTime);
+  await context.addInitScript(wasmMemoryHook);
+  if (mode === 'original') {
+    await context.addInitScript(() => {
+      try {
+        if (localStorage.getItem('u6.hd') === null) localStorage.setItem('u6.hd', 'off');
+      } catch {
+        // An opaque origin (about:blank) has no storage.
+      }
+    });
+  }
+  await h.load(page, env);
+  await h.virtualDisplay(page, 60, { loop: false });
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  await h.runFramesToPrompt(page, 60_000);
+  const shown = await page.evaluate(() => [globalThis.__shownGame.hd_on(), globalThis.__shownGame.motion(), document.body.dataset.layout]);
+  assert.deepEqual(shown, [mode !== 'original', motion, mode === 'wide' ? 'wide' : 'original'], `${mode}: HD, motion and the layout`);
+  return { context, page };
+}
+
+const motionLeader = async (page) => (await h.state(page)).leader;
+
+// On the virtual display: `key` pressed, then frames until the prompt (`runFramesToPrompt`).
+async function motionKey(page, key) {
+  await page.keyboard.press(key);
+  await h.runFramesToPrompt(page, 60_000);
+}
+
+// The leader `cells` south of where it is (the remembered sight's `walkSouth`, on the virtual
+// display): south first, a pass where a key walked nothing; bounded.
+async function motionWalkSouth(page, cells) {
+  const at = async () => (await motionLeader(page)).split(',').map(Number);
+  const [sx, sy] = await at();
+  const to = [sx, sy + cells];
+  for (let tries = 0; tries < 160; tries += 1) {
+    const [x, y] = await at();
+    if (x === to[0] && y === to[1]) return;
+    const key = y < to[1] ? 'ArrowDown' : x < to[0] ? 'ArrowRight' : x > to[0] ? 'ArrowLeft' : 'ArrowUp';
+    await motionKey(page, key);
+    const [nx, ny] = await at();
+    if (nx === x && ny === y) await motionKey(page, 'Space');
+  }
+  assert.fail(`the party did not reach the cell ${cells} south of the start`);
+}
+
+// Keeps in the page the shown map as the canvas's frame shows it now (the RGBA frame with HD off,
+// the HD frame with it on: each game pixel's top-left device pixel, read in place).
+const motionReference = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  globalThis.__motionMap = () => {
+    const hd = g.hd_on();
+    const s = hd ? g.hd_scale() : 1;
+    const mem = window.__wasmMemory.buffer;
+    const v = hd ? new Uint8Array(mem, g.hd_frame_ptr(), g.hd_frame_len()) : new Uint8Array(mem, g.frame_ptr(), g.frame_len());
+    const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+    const out = new Uint32Array(mw * mh);
+    for (let y = 0; y < mh; y += 1) {
+      for (let x = 0; x < mw; x += 1) {
+        const i = ((my + y) * s * g.width() * s + (mx + x) * s) * 4;
+        out[y * mw + x] = (v[i] << 16) | (v[i + 1] << 8) | v[i + 2];
+      }
+    }
+    return { out, mw, mh };
+  };
+  globalThis.__motionRef = globalThis.__motionMap();
+});
+
+// Frames after a step's prompt is back for five, in both runs: every frame at the prompt draws from
+// the game's RNG (its idle animation), so the runs see the same frames; 30 at 60 Hz cover the end
+// of a slide that began at the step's picture (360 ms of the clock from it, some 100 ms of which
+// lie before the prompt).
+const MOTION_TAIL = 30;
+
+// On the virtual display after an input toward (dx, dy): frames until the prompt is back for five
+// frames (at most `max`), then `MOTION_TAIL` more. Per frame, how far the shown map has moved along
+// the step from the reference (`motionReference`): the d in 0..16 whose shift (the map at x showing
+// what the reference showed at x + d·dx, y + d·dy) matches most of the map less a cell at each
+// edge. Also the frames from the input to the prompt, whether a slide still ran after the last
+// frame, and with `keep` the canvas's PNG of the slide's first frame and of each frame after it
+// whose d changed.
+const motionFrames = (page, dx, dy, keep, max = 3000) => page.evaluate(([ax, ay, keepPng, limit, tail]) => {
+  const v = window.__display;
+  const c = document.getElementById('screen');
+  const g = globalThis.__shownGame;
+  const ref = globalThis.__motionRef;
+  const offsets = [];
+  const kept = [];
+  let prompt = null;
+  let run = 0;
+  let after = null;
+  for (let f = 0; f < limit && (after === null || f < after + tail); f += 1) {
+    v.run();
+    const at = c.dataset.prompt === '1' && c.dataset.keys === '0';
+    if (at && prompt === null) prompt = f + 1;
+    run = at ? run + 1 : 0;
+    if (run >= 5 && after === null) after = f + 1;
+    const now = globalThis.__motionMap();
+    let best = [-1, 0];
+    for (let d = 0; d <= 16; d += 1) {
+      let same = 0;
+      for (let y = 16; y < now.mh - 16; y += 2) {
+        for (let x = 16; x < now.mw - 16; x += 2) {
+          same += now.out[y * now.mw + x] === ref.out[(y + d * ay) * ref.mw + x + d * ax] ? 1 : 0;
+        }
+      }
+      if (same > best[0]) best = [same, d];
+    }
+    // The slide's first frame, then each frame whose d changed.
+    const first = g.sliding() && !kept.some(([, , slide]) => slide);
+    if (keepPng && (first || (kept.length > 0 && best[1] !== offsets.at(-1)))) kept.push([best[1], c.toDataURL('image/png'), g.sliding()]);
+    offsets.push(best[1]);
+  }
+  return { offsets, prompt, kept, leader: c.dataset.leader, sliding: g.sliding(), atPrompt: c.dataset.prompt === '1' };
+}, [dx, dy, keep, max, MOTION_TAIL]);
+
+// The frames a step's map was seen moving through, each value with its run: `0x26 1 2 ... 16x40`.
+const runsOf = (offsets) => {
+  const out = [];
+  for (const d of offsets) {
+    if (out.length > 0 && out.at(-1)[0] === d) out.at(-1)[1] += 1;
+    else out.push([d, 1]);
+  }
+  return out.map(([d, n]) => (n > 1 ? `${d}x${n}` : `${d}`)).join(' ');
+};
+
+// One step by `how` ('key': the arrow; 'click': the map cell beside the leader's that way): the
+// directions of `dirs` in order, a pass after a round of them blocked, at most `rounds` rounds.
+// Returns the step's direction, its frames (`motionFrames`) and the leader before and after.
+async function motionStep(page, how, mode, { keep = false, dirs = MOTION_DIRS, rounds = 4 } = {}) {
+  for (let round = 0; round < rounds; round += 1) {
+    if (round > 0) await motionKey(page, 'Space');
+    for (const dir of dirs) {
+      const from = await motionLeader(page);
+      await motionReference(page);
+      if (how === 'key') await page.keyboard.press(dir.key);
+      else {
+        const [cx, cy] = mode === 'wide' ? [320 + 18 * 16 + 8, 10 * 16 + 8] : [88, 88];
+        await page.mouse.click(...(await h.screenPoint(page, cx + 16 * dir.dx, cy + 16 * dir.dy)));
+      }
+      const frames = await motionFrames(page, dir.dx, dir.dy, keep);
+      assert.ok(frames.prompt !== null && frames.atPrompt, `${mode}: the prompt came back after a ${how} step`);
+      if (frames.leader !== from) return { dir, from, to: frames.leader, ...frames };
+    }
+  }
+  assert.fail(`${mode}: no ${how} step walked in ${rounds} rounds`);
+}
+
+// A whole run: the door reached at 8x and opened, then at 1x the doorway step and four more by
+// key, five by click. Returns the steps.
+async function motionRun(env, mode, motion, seedTime) {
+  const { context, page } = await motionPage(env, mode, motion, seedTime);
+  await page.evaluate(() => globalThis.__shownGame.set_speed(8));
+  await motionWalkSouth(page, 10);
+  // Use, the cross-hair one cell south (the target wait, not the prompt), Enter: the door opens.
+  for (const key of ['u', 'ArrowDown']) {
+    await page.keyboard.press(key);
+    await h.runFrames(page, 20);
+  }
+  await motionKey(page, 'Enter');
+  await page.evaluate(() => globalThis.__shownGame.set_speed(1));
+  await h.runFramesToPrompt(page, 60_000);
+  const steps = [];
+  const door = await motionStep(page, 'key', mode, { keep: motion, dirs: [MOTION_DIRS[0]], rounds: 12 });
+  steps.push({ how: 'key', ...door });
+  for (let i = 0; i < 4; i += 1) steps.push({ how: 'key', ...(await motionStep(page, 'key', mode)) });
+  for (let i = 0; i < 5; i += 1) steps.push({ how: 'click', ...(await motionStep(page, 'click', mode)) });
+  const scale = await page.evaluate(() => (globalThis.__shownGame.hd_on() ? globalThis.__shownGame.hd_scale() : 1));
+  await context.close();
+  return Object.assign(steps, { scale });
+}
+
+for (const mode of ['original', 'hd', 'wide']) {
+  test(`smooth motion (spec 20), ${mode}: by key and by click, every step's map passes through in-between positions on the virtual 60 Hz display (offsets printed per frame), the doorway step's frames kept; the steps and the frames to the prompt are those of the same run with it off, which shows none`, async (env) => {
+    const seedTime = Date.now();
+    const on = await motionRun(env, mode, true, seedTime);
+    const off = await motionRun(env, mode, false, seedTime);
+    assert.deepEqual(on.map((s) => [s.how, s.from, s.to]), off.map((s) => [s.how, s.from, s.to]), `${mode}: the same steps with it off`);
+    assert.equal(on[0].dir.key, 'ArrowDown', `${mode}: the first step goes south through the doorway`);
+    console.log(`  receipt: ${mode} at S ${on.scale}`);
+    on.forEach((s, i) => {
+      const label = `${mode} step ${i + 1} (${s.how} ${s.dir.key})`;
+      console.log(`  receipt: ${label}: map offset by frame on ${runsOf(s.offsets)}; off ${runsOf(off[i].offsets)}; frames to the prompt ${s.prompt}, off ${off[i].prompt}`);
+      const between = s.offsets.filter((d) => d > 0 && d < 16).length;
+      assert.ok(between > 0, `${label}: in-between positions`);
+      assert.ok(s.offsets.at(-1) === 16 && off[i].offsets.at(-1) === 16, `${label}: a whole cell at the end, on and off`);
+      assert.ok(!s.sliding, `${label}: the slide over by the end of the tail`);
+      assert.ok(off[i].offsets.every((d) => d === 0 || d === 16), `${label}: off, no in-between position`);
+      assert.ok(Math.abs(s.prompt - off[i].prompt) <= 1, `${label}: the prompt within a display frame of the run with it off`);
+    });
+    const kept = on[0].kept;
+    const pick = (want) => kept.reduce((a, b) => (Math.abs(b[0] - want) < Math.abs(a[0] - want) ? b : a));
+    assert.ok(kept.length > 2, `${mode}: the doorway step's slide kept`);
+    const frames = { t0: kept[0], mid: pick(8), end: kept.at(-1) };
+    assert.ok(frames.t0[0] <= 1 && frames.mid[0] > 0 && frames.mid[0] < 16 && frames.end[0] === 16, `${mode}: the doorway step's first, middle and last frames`);
+    const dir = process.env.U6_MOTION_FRAMES;
+    if (dir) {
+      await mkdir(dir, { recursive: true });
+      for (const [name, [d, url]] of Object.entries(frames)) {
+        await writeFile(join(dir, `${mode}-doorway-${name}.png`), Buffer.from(url.split(',')[1], 'base64'));
+        console.log(`  receipt: ${mode} doorway frame ${name}: offset ${d} kept`);
+      }
+    }
+  }, { needs: h.haveHfes });
+}
 
 const filter = process.argv[2];
 const env = await h.setup();
