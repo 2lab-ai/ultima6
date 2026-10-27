@@ -638,9 +638,10 @@ pub fn retreat(s: &mut State, actor: i16) {
     }
 }
 
-/// 0x126738's tail (asm 0x12691a..0x126986), after a pending cast ([`After::RetreatTail`]):
-/// worktype 7 recovers 1 hit point 1 time in 4 and goes back to its combat mode once out of
-/// the critical quarter.
+/// Original: 0x126738's tail (LAB_0012691a, asm 0x12691a..0x126986: worktype 7 heals)
+///
+/// Worktype 7 recovers 1 hit point 1 time in 4 and goes back to its combat mode once out of
+/// the critical quarter. After a pending cast it runs once the cast has ([`After::RetreatTail`]).
 fn retreat_tail(s: &mut State, actor: i16) {
     if wt(s, actor) == 7 && s.rng.range(0, 3) == 0 {
         let i = actor as usize;

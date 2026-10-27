@@ -641,15 +641,18 @@ pub(crate) async fn cast_item(state: &RefCell<State>, io: &Io) -> bool {
         let mut s = state.borrow_mut();
         s.ui.text.on = true;
         let quality = s.objects.qq[cast.item as usize] >> 8;
-        let report = match (quality, s.magic.result) {
-            (0x50, 0xfe) => Some(CHARMED),
-            (0x45, 0) => Some(PARALYZED),
-            _ => None,
-        };
+        let result = s.magic.result;
         let sel = s.ui.input.selection;
-        if let Some(at) = report
-            && sel >= 0
-        {
+        let report = if sel < 0 {
+            None
+        } else if quality == 0x50 && result == 0xfe {
+            Some(CHARMED)
+        } else if quality == 0x45 && result == 0 {
+            Some(PARALYZED)
+        } else {
+            None
+        };
+        if let Some(at) = report {
             let n = name(&mut s, sel);
             say(&mut s, at, vec![n]);
         }

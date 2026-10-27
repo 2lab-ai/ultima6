@@ -107,7 +107,7 @@ pub async fn bury(ux: Ux<'_>, obj: Slot) {
             b[2 * k..2 * k + 2].copy_from_slice(&w.to_be_bytes());
         }
     }
-    let m = s.actors.party.members[(s.ui.panel.member as usize) & 0xf];
+    let m = crate::ui::panels::member_actor(&s, s.ui.panel.member.max(0));
     seams::ready_changed(&mut s, Slot::from(m));
     crate::objects::move_to(&mut s, obj, lx, ly, z);
     let l = Slot::from(leader(&s));

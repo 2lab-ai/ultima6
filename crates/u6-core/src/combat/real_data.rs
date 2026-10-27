@@ -878,7 +878,7 @@ fn gate_travel_from_a_book_takes_the_party_round_member_0() {
 /// A swimmer (creature flag 0x200 only: it cannot step on land, 0x11b1c0) next to the leader in
 /// worktype `wt`, at half its hit points, with a readied spell object of the damage spell 0x44:
 /// fleeing, it is cornered (0x11f452 fails) and fights (0x125254).
-fn cornered_swimmer(s: &mut State, wt: u8) -> Fixture {
+fn cornered_swimmer(s: &mut State, wt: u8, rng: u32) -> Fixture {
     let leader = s.actors.party.leader().quiet().0 as i16;
     let kind = (0..0x400u16)
         .find(|&k| {
@@ -899,25 +899,26 @@ fn cornered_swimmer(s: &mut State, wt: u8) -> Fixture {
         item,
         target: leader,
         casts: true,
-        rng: PIN_RETREAT,
+        rng,
     }
 }
 
-/// The RNG state [`cornered_swimmer`] pins (found as the others).
+/// The RNG states [`cornered_swimmer`] pins (found as the others): one whose roll after the
+/// spell is not 0, one whose roll is 0.
 const PIN_RETREAT: u32 = 0x00de_0987;
+const PIN_RETREAT_HEALED: u32 = 0x00de_09e3;
 
 /// 0x126738 (worktype 7) calls the assault 0x125254 at 0x1268ce, whose hit casts, and only then
 /// (0x12691a..0x126986) tests the worktype, draws `random(0, 3)` and heals 1 hit point, putting
 /// back the combat mode. The same cornered swimmer in worktype 0x13 (no such tail) takes the
 /// same draws up to and through its cast: the spell's damage is the same in both turns, and
-/// worktype 7's RNG ends one `random(0, 3)` past 0x13's, that roll deciding its hit points and
-/// worktype.
-#[test]
-fn a_fleeing_monsters_roll_comes_after_its_cast() {
-    let Some(flee) = cast_turn(&[], &[], true, |s| cornered_swimmer(s, 7)) else {
+/// worktype 7's RNG ends one `random(0, 3)` past 0x13's, that roll (0 when `healed`) deciding
+/// its hit points and worktype.
+fn fleeing_order(rng: u32, healed: bool) {
+    let Some(flee) = cast_turn(&[], &[], true, move |s| cornered_swimmer(s, 7, rng)) else {
         return;
     };
-    let Some(other) = cast_turn(&[], &[], true, |s| cornered_swimmer(s, 0x13)) else {
+    let Some(other) = cast_turn(&[], &[], true, move |s| cornered_swimmer(s, 0x13, rng)) else {
         return;
     };
     flee.common("flee 7");
@@ -929,25 +930,38 @@ fn a_fleeing_monsters_roll_comes_after_its_cast() {
     r.set_state(other.after.rng.state());
     let roll = r.range(0, 3);
     let (b, a) = (&flee.before.actors, &flee.after.actors);
-    let healed = roll == 0;
     println!(
-        "flee: same damage {}, one roll later {}, healed {healed}",
+        "flee: same damage {}, one roll later {}, roll 0 {}",
         hurt(&flee) == hurt(&other),
         r.state() == flee.after.rng.state(),
+        roll == 0,
     );
     assert!(
         hurt(&flee) > 0 && hurt(&flee) == hurt(&other),
         "the spell's draws first"
     );
     assert_eq!(r.state(), flee.after.rng.state(), "then the roll");
+    assert_eq!(roll == 0, healed, "the pinned roll");
     assert_eq!(
         a.attrs.hp[m],
         b.attrs.hp[m] + u8::from(healed),
         "the hit point"
     );
     let wt = if healed { b.attrs.combat_mode[m] } else { 7 };
+    assert!(wt != 7 || !healed, "the combat mode is not 7");
     assert_eq!(a.worktype[m], wt, "the worktype");
     assert_eq!(other.after.actors.worktype[m], 0x13);
+}
+
+#[test]
+fn a_fleeing_monsters_roll_comes_after_its_cast() {
+    fleeing_order(PIN_RETREAT, false);
+}
+
+/// The same with the roll at 0: the hit point back and the worktype the combat mode.
+#[test]
+fn a_fleeing_monsters_roll_after_its_cast_heals_it() {
+    fleeing_order(PIN_RETREAT_HEALED, true);
 }
 
 /// The Attack command's cast (0x124caa → 0x124a98 → 0x124232). The shipped weapon table

@@ -402,7 +402,7 @@ Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2,
 | 0x1259b0 | combat | S | `combat/npc.rs::rear` | ported |
 | 0x125e26 | combat | S | `combat/npc.rs::flank` | ported |
 | 0x1263a2 | combat | S | `combat/npc.rs::berserk` | ported |
-| 0x126738 | combat | S | `combat/npc.rs::retreat` | ported |
+| 0x126738 | combat | S | `combat/npc.rs::retreat`; `combat/npc.rs::retreat_tail` | ported |
 | 0x126990 | combat | S | `combat/npc.rs::tame` | ported |
 | 0x126b28 | combat | S | `combat/npc.rs::wary` | ported |
 | 0x126cc0 | combat | S | `combat/npc.rs::lurk` | ported |

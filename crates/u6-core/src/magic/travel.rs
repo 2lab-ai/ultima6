@@ -139,8 +139,8 @@ pub async fn wizard_eye(state: &RefCell<State>, io: &Io, x: i16, y: i16, mode: i
     say(state, io, FMT_NL_S_NL, Msg::Done).await;
     let shown = {
         let s = state.borrow();
-        let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-        (s.ui.panel.mode == 0x92).then(|| u16::from(s.actors.party.members[m]))
+        let m = crate::ui::panels::member_actor(&s, s.ui.panel.member.max(0));
+        (s.ui.panel.mode == 0x92).then_some(u16::from(m))
     };
     if let Some(a) = shown {
         seams::inventory_of(state, io, a).await;

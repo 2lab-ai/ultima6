@@ -227,8 +227,8 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
             0x101 => {
                 let regen_all = s.ui.panel.mode == 0x91;
                 let regen_one = s.ui.panel.mode == 0x90
-                    && s.actors.party.members.get(s.ui.panel.member as usize)
-                        == Some(&(actor as u8));
+                    && s.ui.panel.member >= 0
+                    && crate::ui::panels::member_actor(s, s.ui.panel.member) == actor as u8;
                 if (regen_all || regen_one)
                     && u16::from(s.actors.attrs.hp[a]) < leaves::max_hp(s, actor)
                 {

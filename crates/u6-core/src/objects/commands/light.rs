@@ -46,8 +46,7 @@ const TORCH: u16 = 0x5a;
 const HANDS: [i16; 2] = [2, 5];
 
 fn panel_actor(s: &State) -> Slot {
-    let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-    Slot::from(s.actors.party.members[m])
+    Slot::from(crate::ui::panels::member_actor(s, s.ui.panel.member.max(0)))
 }
 
 /// Original: 0x12c326 (objects: use torch `t`: light it in a free hand, or put it out)
