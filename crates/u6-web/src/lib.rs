@@ -807,7 +807,7 @@ impl Game {
     /// is up ([`Game::at_prompt`], pointer moves queued since the last step let through) and the
     /// pixel is on the map or on an inventory or equipment slot (Wide's included); else JSON
     /// `{kind: "map"|"panel", cell: [x, y] | null, underlined: code | null, sections: [{object,
-    /// name, entries: [{code, enabled, reason, theft}]}]}`.
+    /// kind: [type, frame] | null, name, entries: [{code, enabled, reason, theft}]}]}`.
     /// The name is the game's display name (the user's game text, for the page's menu only:
     /// never logged or kept). Reads the game only ([`u6_core::ui::menu::query`]).
     pub fn context_menu(&self, x: i32, y: i32) -> String {
@@ -833,7 +833,11 @@ impl Game {
             return false;
         }
         let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        let icon = match u6_core::ui::menu::Run::start(code, (word(x), word(y))) {
+        let Some(e) = &self.engine else {
+            return false;
+        };
+        let start = u6_core::ui::menu::Run::start(&e.state(), code, (word(x), word(y)));
+        let icon = match start {
             Some((icon, run)) => {
                 self.run = Some(run);
                 icon
@@ -1397,19 +1401,25 @@ impl Game {
 }
 
 impl Game {
-    /// Spec 17: the engine's queue is empty and the page's holds no key, text or button (the
-    /// moves of a button-less pointer change nothing the game reads).
+    /// Spec 17: the engine's queue is empty and the page's holds nothing the game reads as an
+    /// event: the moves of a button-less pointer change nothing it reads, and a key's release is
+    /// applied where the engine queues the input, never one of its events
+    /// ([`InputEvent::Release`]).
     fn quiet(&self) -> bool {
-        let moves =
-            |ev: &InputEvent| matches!(ev, InputEvent::Pointer { buttons, .. } if buttons & 3 == 0);
+        let inert = |ev: &InputEvent| match ev {
+            InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
+            InputEvent::Release(_) => true,
+            _ => false,
+        };
         self.engine
             .as_ref()
             .is_some_and(|e| e.io().pending_events() == 0)
-            && self.pending.iter().all(moves)
+            && self.pending.iter().all(inert)
     }
 
-    /// Spec 17: [`Game::at_prompt`] with the moves of a button-less pointer queued since the last
-    /// step let through: a right press just after a move still gets its menu.
+    /// Spec 17: [`Game::at_prompt`] with the moves of a button-less pointer and the key releases
+    /// queued since the last step let through ([`Game::quiet`]): a right press just after either
+    /// still gets its menu.
     fn prompt_up(&self) -> bool {
         self.quiet()
             && self
@@ -1419,13 +1429,13 @@ impl Game {
     }
 
     /// Spec 17: the held target press of [`Game::command_at`] before a tick: queued once its
-    /// command reads the target with the queues quiet ([`Game::quiet`]), dropped once the prompt
-    /// is up again.
+    /// command reads the target with the queues quiet ([`Game::quiet`]), dropped once a new
+    /// prompt read came, whatever is queued ([`u6_core::ui::menu::Run::step`]).
     fn step_run(&mut self) {
         let (Some(run), Some(e)) = (self.run, &self.engine) else {
             return;
         };
-        let step = run.step(&e.state(), self.quiet(), self.prompt_up());
+        let step = run.step(&e.state(), self.quiet());
         match step {
             u6_core::ui::menu::Step::Hold => {}
             u6_core::ui::menu::Step::Release(press) => {
@@ -1818,7 +1828,13 @@ fn menu_json(m: &u6_core::ui::menu::Menu) -> String {
         if i > 0 {
             out.push(',');
         }
-        out.push_str(&format!("{{\"object\":{},\"name\":", section.object));
+        let kind = section
+            .kind
+            .map_or_else(|| "null".to_string(), |(t, f)| format!("[{t},{f}]"));
+        out.push_str(&format!(
+            "{{\"object\":{},\"kind\":{kind},\"name\":",
+            section.object
+        ));
         json_string(&mut out, &section.name);
         out.push_str(",\"entries\":[");
         for (j, e) in section.entries.iter().enumerate() {
@@ -4664,6 +4680,7 @@ mod tests {
             underlined: Some(0x88),
             sections: vec![Section {
                 object: 300,
+                kind: Some((0x80, 2)),
                 name: "a \"b\"".into(),
                 entries: vec![
                     entry(0x88, Some(Reason::Far), false),
@@ -4673,7 +4690,7 @@ mod tests {
         };
         assert_eq!(
             menu_json(&map),
-            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"name":"a \"b\"","entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}]}"#
+            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"kind":[128,2],"name":"a \"b\"","entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}]}"#
         );
         let panel = Menu {
             kind: Kind::Panel,
@@ -4719,7 +4736,7 @@ mod tests {
         );
         game.pointer(120, 120, 0);
         let after_a_move = game.context_menu(96, 96);
-        assert_eq!(after_a_move, menu, "a pointer move queued: the same menu");
+        assert!(after_a_move == menu, "a pointer move queued: the same menu");
         assert!(game.command_at(0x84, 96, 96));
         assert!(
             !game.command_at(0x84, 96, 96),
@@ -4742,5 +4759,127 @@ mod tests {
         );
         game.key_down("Space", " ", false);
         assert!(prompt(&mut game), "the prompt again");
+    }
+
+    /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn at_the_prompt() -> Option<Game> {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return None;
+        }
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        Some(game)
+    }
+
+    /// Steps `game` (20 ms each, at most 3000) until the prompt is up; false if it never is.
+    fn steps_to_prompt(game: &mut Game) -> bool {
+        for _ in 0..3000 {
+            if game.at_prompt() {
+                return true;
+            }
+            game.step(20);
+        }
+        false
+    }
+
+    /// Spec 17 round 2, item 2, on the user's zip: `context_menu` on every cell of the view and at
+    /// three points of the side panel leaves the running game's state exactly as it was (the
+    /// checks run on a copy).
+    #[test]
+    fn context_menu_leaves_the_game_as_it_was() {
+        let Some(game) = at_the_prompt() else {
+            return;
+        };
+        let before = game.engine.as_ref().quiet().state().clone();
+        let mut menus = 0;
+        for row in 0..11 {
+            for col in 0..11 {
+                let (x, y) = ((8 + 16 * col).min(164), (8 + 16 * row).min(164));
+                menus += usize::from(!game.context_menu(x, y).is_empty());
+            }
+        }
+        for (x, y) in [(0x100, 0x28), (0xb8, 0x20), (0xc0, 0x80)] {
+            menus += usize::from(!game.context_menu(x, y).is_empty());
+        }
+        println!("menus given: {menus}");
+        assert!(menus > 0);
+        let after = game.engine.as_ref().quiet().state().clone();
+        assert!(after == before, "the game's state as it was");
+    }
+
+    /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip, through `Game::command_at` and
+    /// `Game::step`: the leader starts without a readied spellbook, so the menu shows Cast disabled
+    /// as book; forced anyway on a cell two steps off, Cast runs its own refusal before any target
+    /// read (its line printed, the prompt back), the held press is dropped, and the leader has not
+    /// moved.
+    #[test]
+    fn cast_forced_without_a_book_refuses_and_drops_its_target_press() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (x, y) = (88 + 32, 88);
+        let menu = game.context_menu(x, y);
+        let books = menu
+            .matches(r#""code":130,"enabled":false,"reason":"book""#)
+            .count();
+        assert_eq!(books, 1, "Cast shown, disabled as book");
+        let at = game.leader_position();
+        let lines = game.engine.as_ref().quiet().state().ui.messages.len();
+        assert!(game.command_at(0x82, x, y));
+        let mut released = 0;
+        for _ in 0..600 {
+            let before = game.pending.len();
+            game.step(20);
+            released += usize::from(game.pending.len() > before);
+            if game.run.is_none() && game.at_prompt() {
+                break;
+            }
+        }
+        let printed = game.engine.as_ref().quiet().state().ui.messages.len() - lines;
+        println!(
+            "Cast's book entries disabled: {books}, presses released: {released}, lines: {printed}"
+        );
+        assert!(
+            game.run.is_none() && game.at_prompt(),
+            "the prompt is back, the run over"
+        );
+        assert_eq!(released, 0, "the target press never went in");
+        assert!(printed > 0, "Cast printed its refusal");
+        assert_eq!(game.leader_position(), at, "the leader did not move");
+    }
+
+    /// Spec 17 round 2, item 0: a key let go just before a right press (its release queued, as
+    /// `key_up` queues it) does not hide the menu, and the entry chosen then runs: the release
+    /// is applied where the engine queues the input and is never one of its events.
+    #[test]
+    fn a_key_let_go_just_before_a_right_press_keeps_the_menu_and_its_run() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        assert!(game.key_down("KeyX", "x", false));
+        game.step(20);
+        assert!(steps_to_prompt(&mut game), "the prompt after the key");
+        let menu = game.context_menu(96, 96);
+        assert!(game.key_up("KeyX"), "the key was held");
+        let with_release = game.context_menu(96, 96);
+        assert!(
+            with_release == menu,
+            "the same menu with the release queued"
+        );
+        assert!(game.command_at(0x84, 96, 96), "the entry runs");
+        let mut read = 0;
+        for _ in 0..200 {
+            game.step(20);
+            if game.run.is_none() {
+                read = u32::from(!game.at_prompt());
+                break;
+            }
+        }
+        assert_eq!(read, 1, "Look read its target");
     }
 }

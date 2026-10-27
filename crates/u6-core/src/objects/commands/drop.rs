@@ -143,8 +143,8 @@ fn amount(s: &State, kind: u16, obj: Slot, n: i16) -> u16 {
     }
 }
 
-/// 0x12a226: nothing selected, an object on the map, or the container the panel shows (the
-/// nothing message).
+/// Original: 0x12a226 (objects: Drop's first test, pseudocode l.23-28: nothing selected, an
+/// object on the map, or the container the panel shows: the nothing message)
 pub(crate) fn nothing_to_drop(s: &State, sel: Slot) -> bool {
     sel == -1 || s.objects.place(sel) == 0 || sel as u16 == s.ui.panel.container
 }

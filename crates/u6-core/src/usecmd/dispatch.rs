@@ -115,42 +115,6 @@ pub(crate) fn in_other_hand(s: &State, sel: Slot) -> bool {
     other && s.objects.place(sel) == READIED && s.objects.kind(sel) != 0x5a
 }
 
-/// What a case of the type switch refuses before it acts (`cases.rs`, 0x13095e..0x130efa).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CaseRefusal {
-    /// The not-usable, not-readied or no-effect line of the case.
-    Case,
-    /// The solo-mode line (the ladder).
-    Solo,
-}
-
-/// 0x1305e0's switch (pseudocode l.114 on, `cases.rs`): the refusal a case of type `ty` gives
-/// `obj` of frame `frame` from the state alone, before any draw or prompt: the vortex cube off
-/// the shrine (0x3e, A4-0x7afb set), a wand on the map or not readied (0x4e), an orb on the map
-/// (0x57), a sextant or balloon basket off levels 0 and 5 (0x5d, 0x1a4), a chest carried (0x62),
-/// a shovel or pick not readied (0x67, 0x68), a brazier of frame bit 1 (0xce), a crate of frame
-/// other than 1 (0xba, 0xc0), a vessel carried (0x19c, 0x19e, 0x19f, 0x1a7), a ladder in solo
-/// mode (0x131). The switch keeps its own copy of these tests; the menu's test runs the switch
-/// to hold the two together.
-pub(crate) fn case_refusal(s: &State, obj: Slot, ty: u16, frame: u16) -> Option<CaseRefusal> {
-    let place = s.objects.place(obj);
-    let off_levels = !matches!(s.map.centre.z, 0 | 5);
-    let refused = match ty {
-        0x3e => s.map.flag_7afb != 0,
-        0x4e | 0x67 | 0x68 => place != READIED,
-        0x57 => place == 0,
-        0x5d | 0x1a4 => off_levels,
-        0x62 | 0x19c | 0x19e | 0x19f | 0x1a7 => place != 0,
-        0xce => frame & 2 != 0,
-        0xba | 0xc0 => frame != 1,
-        0x131 => {
-            return (crate::ui::globals::solo_member(&s.actors) != -1).then_some(CaseRefusal::Solo);
-        }
-        _ => false,
-    };
-    refused.then_some(CaseRefusal::Case)
-}
-
 /// What the checks of 0x1305e0 decided before the switch.
 enum Checked {
     /// Refused: the command ends without the end-of-use step.

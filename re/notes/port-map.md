@@ -309,7 +309,7 @@ Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2
 | 0x11a508 | magic |  | `magic/spells.rs::wind_change` | ported |
 | 0x11a550 | magic |  | `magic/creatures.rs::armageddon` | ported |
 | 0x11a586 | magic |  | `magic/dispatch.rs::dispatch` | ported; stub at `combat/seams.rs:98 in cast_from_item` |
-| 0x11abd0 | magic |  | `magic/cast.rs::book_cast` | ported |
+| 0x11abd0 | magic |  | `magic/cast.rs::book_cast`; `magic/cast.rs::checks_refusal` | ported |
 | 0x11af10 | magic | S | `magic/cast.rs::cast` | ported |
 | 0x11b1c0 | actors | M | `actors/walk.rs::can_move_to` | ported |
 | 0x11b92a | actors | M | `actors/walk.rs::outside_window` | ported |
@@ -442,7 +442,7 @@ Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2
 | 0x1298b8 | objects | S | `objects/commands/look.rs::look` | ported |
 | 0x12a050 | objects |  | `objects/commands/drop.rs::surface_at` | ported |
 | 0x12a106 | objects |  | `objects/commands/drop.rs::how_many` | ported |
-| 0x12a226 | objects | S | `objects/commands/drop.rs::drop_object` | ported |
+| 0x12a226 | objects | S | `objects/commands/drop.rs::drop_object`; `objects/commands/drop.rs::nothing_to_drop` | ported |
 | 0x12a7a4 | objects | S | `objects/commands/get.rs::get` | ported |
 | 0x12acc0 | objects |  | `objects/commands/push.rs::push_blocked` | ported |
 | 0x12adc4 | objects |  | `objects/list.rs::outer_holder` | ported |

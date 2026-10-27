@@ -1978,14 +1978,26 @@ fn total_gold(s: &State, owner: Slot) -> u16 {
 use crate::ui::menu::{self, Menu, Reason, Run, Step};
 
 /// The menu of a right press at frame pixel `at` with the prompt up (A4-0x7a2c set on a copy of
-/// `s`); the query leaves that state as it was.
+/// `s`); the query leaves that state as it was, its print queues (the queued text-layer calls,
+/// combat's said lines) included, and draws nothing (the `Io`'s back buffer mark, its queue).
 fn menu_of(s: &State, files: &Files, at: (i16, i16)) -> Option<Menu> {
     let mut prompt = s.clone();
     prompt.main.reading = 1;
     let before = prompt.clone();
     let io = Io::new(files.clone());
+    let (mark, events) = (io.back_mark(), io.pending_events());
     let m = menu::query(&prompt, &io, at.0, at.1);
+    assert!(
+        prompt.main.pending_print == before.main.pending_print,
+        "no text queued"
+    );
+    assert!(prompt.combat.said == before.combat.said, "no line said");
     assert!(prompt == before, "the query leaves the state as it was");
+    assert_eq!(
+        (io.back_mark(), io.pending_events()),
+        (mark, events),
+        "nothing drawn or queued"
+    );
     m
 }
 
@@ -2021,13 +2033,15 @@ fn at_prompt(e: &Engine, queued: &[InputEvent]) -> bool {
     e.state().main.reading == 1 && e.io().pending_events() == 0 && queued.is_empty()
 }
 
-/// `u6-web`'s quiet queue for a run: nothing in the engine's, and only moves of a button-less
-/// pointer in the page's.
+/// `u6-web`'s quiet queue for a run: nothing in the engine's, and in the page's only moves of a
+/// button-less pointer and key releases.
 fn quiet(e: &Engine, queued: &[InputEvent]) -> bool {
-    e.io().pending_events() == 0
-        && queued
-            .iter()
-            .all(|ev| matches!(ev, InputEvent::Pointer { buttons, .. } if buttons & 3 == 0))
+    let inert = |ev: &InputEvent| match ev {
+        InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
+        InputEvent::Release(_) => true,
+        _ => false,
+    };
+    e.io().pending_events() == 0 && queued.iter().all(inert)
 }
 
 /// One page step of `u6-web`'s `Game::step` with `run` held: the run's step before the tick,
@@ -2035,7 +2049,7 @@ fn quiet(e: &Engine, queued: &[InputEvent]) -> bool {
 fn page_step(e: &mut Engine, queued: &mut Vec<InputEvent>, run: &mut Option<Run>) -> bool {
     let mut released = false;
     if let Some(r) = *run {
-        match r.step(&e.state(), quiet(e, queued), at_prompt(e, queued)) {
+        match r.step(&e.state(), quiet(e, queued)) {
             Step::Hold => {}
             Step::Release(press) => {
                 queued.extend(press);
@@ -2055,13 +2069,23 @@ fn page_step(e: &mut Engine, queued: &mut Vec<InputEvent>, run: &mut Option<Run>
 /// direction, the next weapon's target) is answered with Escape. True when the target press
 /// went in.
 fn choose(e: &mut Engine, code: u16, at: (i16, i16)) -> bool {
-    let (icon, run) = Run::start(code, at).expect("a command with a target");
+    choose_then(e, code, at, &[])
+}
+
+/// [`choose`], the command's later prompts answered with `then` first, one event list each
+/// (a direction key, a press on a map cell), then Escape.
+fn choose_then(e: &mut Engine, code: u16, at: (i16, i16), then: &[&[InputEvent]]) -> bool {
+    let (icon, run) = Run::start(&e.state(), code, at).expect("a command with a target");
     let (mut queued, mut run) = (icon.to_vec(), Some(run));
+    let mut then = then.iter();
     let mut released = false;
     for _ in 0..3000 {
         let waits = e.state().ui.input.in_wait && e.state().main.reading == 0;
         if run.is_none() && waits && quiet(e, &queued) && queued.is_empty() {
-            queued.push(InputEvent::Key(Key::Escape));
+            match then.next() {
+                Some(events) => queued.extend_from_slice(events),
+                None => queued.push(InputEvent::Key(Key::Escape)),
+            }
         }
         released |= page_step(e, &mut queued, &mut run);
         if run.is_none() && at_prompt(e, &queued) {
@@ -2095,10 +2119,11 @@ fn at_slot(s: &State, slot: Slot) -> (i16, i16) {
 
 /// Spec 17 Acceptance 1: a right press on a closed door next to the leader gives one section,
 /// the door's, with Look and Use enabled and Attack last; the query changes nothing. Choosing Use
-/// (its icon, then the press at the door once Use reads its target) opens the door, and leaves
-/// the same state and RNG, step for step, as `u` then a left press on the door; no underline is
-/// written. The fields only the letter's cross-hair sets (0x104216's cursor start: the cursor
-/// mode's cell and range) are the exceptions.
+/// (its icon, then the press at the door once Use reads its target) opens the door and leaves the
+/// same state and RNG as `u` then a left press on the door, tick for tick; no underline is
+/// written. The one difference is by design and pinned: the letter starts the cross-hair
+/// (0x104216: the leader's cell, range -1), the icon leaves it as it was (0x10658e's code goes
+/// straight to the command); the next input (a step) then does the same in both.
 #[test]
 fn a_door_next_to_the_leader_offers_use_and_use_opens_it_as_u_and_a_press() {
     let Some(files) = files() else { return };
@@ -2121,32 +2146,9 @@ fn a_door_next_to_the_leader_offers_use_and_use_opens_it_as_u_and_a_press() {
 
     let closed = s.objects.tf(door) >> 10;
     let underline = crate::ui::globals::last_command(&s.actors);
-    let mut by_letter = prompt_engine(s.clone(), &files);
-    let mut by_menu = prompt_engine(s, &files);
-    let (icon, run) = Run::start(menu::USE, at).expect("Use takes a target");
-    let mut letter_in = vec![InputEvent::Key(Key::Char('u'))];
-    let mut menu_in = icon.to_vec();
-    let (mut letter_waits, mut run) = (true, Some(run));
-    let mut steps = 0;
-    while steps < 600 {
-        if letter_waits
-            && quiet(&by_letter, &letter_in)
-            && menu::target_read(&by_letter.state(), menu::USE)
-        {
-            letter_in.extend(menu::left_press(at.0, at.1));
-            letter_waits = false;
-        }
-        by_letter.tick(&letter_in, 16);
-        letter_in.clear();
-        page_step(&mut by_menu, &mut menu_in, &mut run);
-        steps += 1;
-        let done = |e: &Engine| at_prompt(e, &[]);
-        if !letter_waits && run.is_none() && done(&by_letter) && done(&by_menu) {
-            break;
-        }
-    }
-    assert!(steps < 600, "both came back to the prompt");
-    let (a, mut b) = (by_letter.state().clone(), by_menu.state().clone());
+    let (cursor, range) = (s.ui.input.cursor, s.ui.input.range);
+    let (mut by_letter, mut by_menu) = letter_and_menu(&s, &files, 'u', menu::USE, at);
+    let (a, b) = (by_letter.state().clone(), by_menu.state().clone());
     assert_eq!(a.objects.tf(door) >> 10, closed ^ 4, "the door opened");
     assert_eq!(b.objects.tf(door) >> 10, closed ^ 4, "the menu opened it");
     assert!(a.rng == b.rng, "the same RNG");
@@ -2155,9 +2157,45 @@ fn a_door_next_to_the_leader_offers_use_and_use_opens_it_as_u_and_a_press() {
         underline,
         "no underline written"
     );
-    b.ui.input.cursor = a.ui.input.cursor;
-    b.ui.input.range = a.ui.input.range;
-    assert!(a == b, "the same state");
+    let leader_cell = crate::ui::target::LEADER_CELL;
+    assert_eq!(
+        (a.ui.input.cursor, a.ui.input.range),
+        (leader_cell, -1),
+        "the letter's cross-hair"
+    );
+    assert_eq!(
+        (b.ui.input.cursor, b.ui.input.range),
+        (cursor, range),
+        "the icon's: as it was"
+    );
+    let mut b2 = b.clone();
+    (b2.ui.input.cursor, b2.ui.input.range) = (a.ui.input.cursor, a.ui.input.range);
+    assert!(a == b2, "the same state but for the cross-hair's start");
+    let step = [Key::Right, Key::Left, Key::Down, Key::Up]
+        .into_iter()
+        .find(|&k| {
+            let (dx, dy) = match k {
+                Key::Right => (1, 0),
+                Key::Left => (-1, 0),
+                Key::Down => (0, 1),
+                _ => (0, -1),
+            };
+            walkable(&a, i32::from(bx) + dx, i32::from(by) + dy)
+        })
+        .expect("a free tile beside the leader");
+    for e in [&mut by_letter, &mut by_menu] {
+        e.tick(&[InputEvent::Key(step)], 16);
+        for _ in 0..400 {
+            if at_prompt(e, &[]) {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+    }
+    let (a, mut b) = (by_letter.state().clone(), by_menu.state().clone());
+    assert_ne!(leader_at(&a), (bx, by), "the step walked");
+    (b.ui.input.cursor, b.ui.input.range) = (a.ui.input.cursor, a.ui.input.range);
+    assert!(a == b, "the next input does the same in both");
 }
 
 /// A walkable tile `d` cells from `slot` along a row or a column (east, west, south, north),
@@ -2197,63 +2235,6 @@ fn a_door_three_cells_away_shows_use_disabled_as_far() {
     assert_eq!(e.state().objects.tf(door) >> 10, closed, "nothing opened");
 }
 
-/// An actor in view, not of the party, standing on an object Get or Use reaches through it.
-fn actor_on_object(s: &State, files: &Files) -> Option<(Slot, Menu)> {
-    (1..FIRST_TEMP_ACTOR)
-        .filter(|&a| {
-            let o = &s.objects;
-            o.type_frame[a as usize] != 0
-                && o.place(a) == 0
-                && o.z(a) == s.map.centre.z
-                && !out_of_view(s, a)
-                && s.actors.attrs.status[a as usize] & 0x80 == 0
-        })
-        .find_map(|a| {
-            let m = menu_of(s, files, at_slot(s, a))?;
-            (m.sections.len() == 2 && m.sections[0].object == a).then_some((a, m))
-        })
-}
-
-/// Spec 17 Acceptance 3: a right press on an actor standing on an object gives two sections: the
-/// actor's (Talk, Look, Attack; Move, perhaps disabled), then the object's (Get or Use). Found in
-/// the start town; failing that, a loaf (0x80) made under the nearest townsperson in view.
-#[test]
-fn an_actor_on_an_object_gives_the_actors_section_then_the_objects() {
-    let Some(files) = files() else { return };
-    let mut s = with_text(&files);
-    let found = actor_on_object(&s, &files);
-    eprintln!("found in the start town: {}", found.is_some());
-    let (actor, m) = found.unwrap_or_else(|| {
-        let a = (1..FIRST_TEMP_ACTOR)
-            .find(|&a| {
-                let o = &s.objects;
-                o.type_frame[a as usize] != 0
-                    && o.place(a) == 0
-                    && o.z(a) == s.map.centre.z
-                    && !out_of_view(&s, a)
-                    && s.actors.attrs.status[a as usize] & 0x80 == 0
-            })
-            .expect("a townsperson in view");
-        let (x, y, z) = (s.objects.x(a), s.objects.y(a), u16::from(s.objects.z(a)));
-        let loaf = crate::objects::create_on_map(&mut s.objects, 0x80, 0, 1, x, y, z);
-        assert!(loaf >= 0);
-        crate::objects::move_to(&mut s, a, x, y, z);
-        crate::map::view::update_view(&mut s);
-        actor_on_object(&s, &files).expect("the townsperson on the loaf")
-    });
-    let first = codes(&m, actor);
-    for code in [menu::TALK, menu::LOOK, menu::ATTACK] {
-        assert!(first.contains(&code), "the actor's section has {code:#x}");
-    }
-    let under = m.sections[1].object;
-    assert!(under >= 0x100, "an object under it");
-    let second = codes(&m, under);
-    assert!(
-        second.iter().all(|c| [menu::GET, menu::USE].contains(c)),
-        "the object's section: Get, Use"
-    );
-}
-
 /// The hero's inventory panel as its draw leaves it (mode 0x92, member 0, its list cells), and
 /// the frame pixel of list cell `k`.
 fn show_inventory(s: &mut State) -> Vec<Slot> {
@@ -2281,46 +2262,6 @@ fn equipment_cell(slot: i16) -> (i16, i16) {
         1..=3 => (0xb0 + 8, 0x18 + (slot - 1) * 16 + 8),
         4..=6 => (0xe0 + 8, 0x18 + (slot - 4) * 16 + 8),
         _ => (0xc8 + 8, 0x40 + 8),
-    }
-}
-
-/// Spec 17 Acceptance 4: a right press on an inventory object gives the panel menu, one section:
-/// the slot's own left-press action first (ready, or open for a container), then Look, Drop and
-/// Move; on an equipped object the action is take off.
-#[test]
-fn an_inventory_object_gives_the_panel_menu_with_its_own_action_first() {
-    let Some(files) = files() else { return };
-    let mut s = with_text(&files);
-    let listed = show_inventory(&mut s);
-    assert!(!listed.is_empty(), "the hero carries something");
-    let m = menu_of(&s, &files, list_cell(0)).expect("a panel menu");
-    assert!(m.kind == menu::Kind::Panel && m.cell.is_none());
-    assert_eq!(m.sections.len(), 1);
-    let c = codes(&m, listed[0]);
-    assert!(
-        [menu::READY, menu::OPEN].contains(&c[0]),
-        "ready or open first"
-    );
-    for code in [menu::LOOK, menu::DROP, menu::MOVE] {
-        assert_eq!(reason(&m, listed[0], code), Some(None), "{code:#x} enabled");
-    }
-    let worn = (0..8).find(|&k| s.inventory.equip(k) > 1);
-    eprintln!("an equipped object: {}", worn.is_some());
-    if let Some(k) = worn {
-        let obj = s.inventory.equip(k);
-        let m = menu_of(&s, &files, equipment_cell(k)).expect("a panel menu");
-        assert_eq!(
-            codes(&m, obj).first(),
-            Some(&menu::UNREADY),
-            "take off first"
-        );
-    }
-    let empty = (0..12).find(|&k| s.inventory.cells[k] == 0);
-    if let Some(k) = empty {
-        assert!(
-            menu_of(&s, &files, list_cell(k)).is_none(),
-            "an empty cell: none"
-        );
     }
 }
 
@@ -2388,48 +2329,6 @@ fn cast_without_a_book_is_disabled_and_forced_its_target_press_is_dropped() {
     );
 }
 
-/// Spec 17 Acceptance 7 (Wide): on a cell outside the 11 × 11 window round the leader, every
-/// entry but Look is disabled as window (a target press there gives the command nothing),
-/// before any other reason (the door is out of reach too).
-#[cfg(feature = "wide")]
-#[test]
-fn wide_outside_the_window_every_entry_but_look_is_disabled_as_window() {
-    let Some(files) = files() else { return };
-    let s0 = with_text(&files);
-    let off = crate::geom::RULE_HALF as i32 + 1;
-    // A door the view shows from a tile `off` cells off (on the farther axis), found at run time.
-    let shown = |door: Slot| {
-        let (x, y) = (i32::from(s0.objects.x(door)), i32::from(s0.objects.y(door)));
-        let ring = (-off..=off).flat_map(|a| [(a, -off), (a, off), (-off, a), (off, a)]);
-        ring.map(|(dx, dy)| (x + dx, y + dy))
-            .filter(|&(x, y)| walkable(&s0, x, y))
-            .find_map(|(x, y)| {
-                let mut s = s0.clone();
-                stand_at(&mut s, x as u16, y as u16);
-                let m = menu_of(&s, &files, at_slot(&s, door))?;
-                m.sections.iter().any(|x| x.object == door).then_some(m)
-            })
-    };
-    let (door, m) = (0x129..=0x12c)
-        .flat_map(|kind| nearest(&s0, kind, |_, _| true).into_iter().take(4))
-        .find_map(|door| Some((door, shown(door)?)))
-        .expect("a door in view from six cells off");
-    let section = m
-        .sections
-        .iter()
-        .find(|x| x.object == door)
-        .expect("the door's");
-    assert!(section.entries.len() > 1, "more than Look");
-    for e in &section.entries {
-        let want = if e.code == menu::LOOK {
-            None
-        } else {
-            Some(Reason::Window)
-        };
-        assert_eq!(e.reason, want, "{:#x}", e.code);
-    }
-}
-
 /// `s` with the target a left press at `at` confirms (0x105f7c on the pointer there), as the
 /// command's handler gets it.
 fn confirmed(s: &State, at: (i16, i16)) -> State {
@@ -2477,7 +2376,11 @@ fn agrees(
     let before = confirmed(s, at);
     let (after, _) = run(before.clone(), files, keys, cmd);
     let did = reached(&before, &after);
-    eprintln!("{label}: enabled {}, reached {did}", entry.enabled());
+    eprintln!(
+        "{label}: enabled {}, reached {}",
+        u8::from(entry.enabled()),
+        u8::from(did)
+    );
     assert_eq!(entry.enabled(), did, "{label}");
     entry.reason
 }
@@ -2834,7 +2737,7 @@ fn with_book(s: &mut State, spell: u8) -> Slot {
 
 /// Cast at a map target (0x11abd0 pseudocode l.41-49) as the menu reads it, against the real
 /// Cast run from the prompt as the menu runs it (the icon, then the press on the cell once the
-/// book reads it): a book holding a first-circle spell (0x09, a timed light) casts it (its magic
+/// book reads it): a book holding a first-circle spell that takes reagents casts it (its magic
 /// point spent); no book, the negate timer, a book of no spell, too low a level, no magic points
 /// and no reagents each refuse, as the menu says.
 #[test]
@@ -2848,10 +2751,16 @@ fn casts_checks_at_a_target_agree_with_cast() {
     let points = move |b: &State, a: &State| {
         a.actors.attrs.magic[hero as usize] < b.actors.attrs.magic[hero as usize]
     };
-    const LIGHT: u8 = 0x09;
+    // The first first-circle spell that takes reagents and casts on a cell without a prompt of
+    // its own (a timed spell: 0x09 is the first of them when it takes any).
+    let spell = [0x09u8, 0x07, 0x00, 0x05, 0x06, 0x03]
+        .into_iter()
+        .find(|&sp| s.magic.tables.mask(usize::from(sp)) != 0)
+        .expect("a first-circle spell with reagents");
     let mut base = s.clone();
-    let book = with_book(&mut base, LIGHT);
-    let mask = base.magic.tables.mask(usize::from(LIGHT));
+    let book = with_book(&mut base, spell);
+    let mask = base.magic.tables.mask(usize::from(spell));
+    assert_ne!(mask, 0, "the spell takes reagents");
     let mut cases: Vec<(&str, State, Option<Reason>)> = vec![("a book", base.clone(), None)];
     let mut none = base.clone();
     without_books(&mut none);
@@ -2869,7 +2778,7 @@ fn casts_checks_at_a_target_agree_with_cast() {
     let mut spent_out = base.clone();
     spent_out.actors.attrs.magic[hero as usize] = 0;
     cases.push(("no magic points", spent_out, Some(Reason::Points)));
-    if mask != 0 {
+    {
         let mut bare = base.clone();
         let kinds: Vec<u16> = (0..8)
             .filter(|i| mask >> i & 1 != 0)
@@ -2891,48 +2800,13 @@ fn casts_checks_at_a_target_agree_with_cast() {
         let mut e = prompt_engine(c.clone(), &files);
         choose(&mut e, menu::CAST, at);
         let did = points(&c, &e.state());
-        eprintln!("{label}: enabled {}, cast {did}", r.is_none());
+        eprintln!(
+            "{label}: enabled {}, cast {}",
+            u8::from(r.is_none()),
+            u8::from(did)
+        );
         assert_eq!(r.is_none(), did, "{label}");
         assert_eq!(r, want, "{label}");
-    }
-}
-
-/// Aboard (A4-0x7b7a = the party size) Get, Move, Cast and Attack are refused before they read a
-/// target (`targeted`, 0x124caa): on a loaf by the leader the menu disables them as aboard, and
-/// run, each comes back to the prompt with its target press dropped; on foot Get, Move and
-/// Attack read theirs.
-#[test]
-fn aboard_the_commands_that_refuse_first_are_disabled_and_read_no_target() {
-    let Some(files) = files() else { return };
-    let mut s = with_text(&files);
-    let (bread, (sx, sy)) = nearest(&s, 0x80, |s, o| beside(s, o).is_some())
-        .into_iter()
-        .find_map(|o| Some((o, beside(&s, o)?)))
-        .expect("a loaf to stand by");
-    stand_at(&mut s, sx, sy);
-    let at = at_slot(&s, bread);
-    let mut aboard = s.clone();
-    let size = usize::from(aboard.actors.party.size);
-    aboard.actors.party.members[size] = aboard.actors.party.members[0];
-    aboard.actors.party.leader_index = size as u8;
-    let m = menu_of(&aboard, &files, at).expect("a menu");
-    for code in [menu::GET, menu::MOVE, menu::CAST, menu::ATTACK] {
-        assert_eq!(
-            reason(&m, bread, code),
-            Some(Some(Reason::Aboard)),
-            "{code:#x}"
-        );
-        let mut e = prompt_engine(aboard.clone(), &files);
-        assert!(!choose(&mut e, code, at), "{code:#x}: no target read");
-    }
-    let m = menu_of(&s, &files, at).expect("a menu");
-    for code in [menu::GET, menu::MOVE, menu::ATTACK] {
-        assert!(
-            m.entry(bread, code).is_some_and(|e| e.enabled()),
-            "{code:#x} on foot"
-        );
-        let mut e = prompt_engine(s.clone(), &files);
-        assert!(choose(&mut e, code, at), "{code:#x}: its target read");
     }
 }
 
@@ -2967,10 +2841,1109 @@ fn the_wait_flag_is_set_only_while_the_engine_waits_in_the_event_wait() {
         }
         e.tick(&[], 16);
     }
-    eprintln!("ticks waited outside the key read: {}", outside > 0);
+    eprintln!("ticks waited outside the key read: {outside}");
     assert!(outside > 0, "the walk waits outside the event wait");
     assert!(
         at_prompt(&e, &[]) && e.state().ui.input.in_wait,
         "the prompt's read again"
     );
+}
+
+// ---- spec 17, round 2 -------------------------------------------------------------------------
+
+/// [`prompt_engine`] that also hands back the engine's own state cell, for a test that changes
+/// the world between two ticks (as a player's other input would).
+fn shared_engine(s: State, files: &Files) -> (Engine, Rc<RefCell<State>>) {
+    let cell: Rc<RefCell<Option<Rc<RefCell<State>>>>> = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&cell);
+    let mut e = Engine::with_game(s, files.clone(), move |st, io| {
+        *keep.borrow_mut() = Some(Rc::clone(&st));
+        async move { crate::main_loop::commands::command_loop(&st, &io).await }
+    });
+    for _ in 0..400 {
+        if at_prompt(&e, &[]) {
+            let st = cell.borrow().clone().expect("the game started");
+            return (e, st);
+        }
+        e.tick(&[], 16);
+    }
+    panic!("the prompt never came up");
+}
+
+/// `letter` then a left press at `at` (once the command waits for its target: the loop out of
+/// its prompt read, A4-0x7a2c clear, and A4-0x7a32 set), and the menu's run of `code` on `at`,
+/// on two engines from `s`, tick for tick, until both are back at the prompt (at most 600 ticks).
+fn letter_and_menu(
+    s: &State,
+    files: &Files,
+    letter: char,
+    code: u16,
+    at: (i16, i16),
+) -> (Engine, Engine) {
+    let mut by_letter = prompt_engine(s.clone(), files);
+    let mut by_menu = prompt_engine(s.clone(), files);
+    let (icon, run) = Run::start(&by_menu.state(), code, at).expect("a command with a target");
+    let mut letter_in = vec![InputEvent::Key(Key::Char(letter))];
+    let mut menu_in = icon.to_vec();
+    let (mut letter_waits, mut run) = (true, Some(run));
+    for _ in 0..600 {
+        let waits = {
+            let st = by_letter.state();
+            st.main.reading == 0 && st.ui.input.target_pending == 1
+        };
+        if letter_waits && letter_in.is_empty() && waits {
+            letter_in.extend(menu::left_press(at.0, at.1));
+            letter_waits = false;
+        }
+        by_letter.tick(&letter_in, 16);
+        letter_in.clear();
+        page_step(&mut by_menu, &mut menu_in, &mut run);
+        let done = |e: &Engine| at_prompt(e, &[]);
+        if !letter_waits && run.is_none() && done(&by_letter) && done(&by_menu) {
+            return (by_letter, by_menu);
+        }
+    }
+    panic!("the two runs did not both come back to the prompt");
+}
+
+/// Spec 17 round 2, item 0b: a crate (0xba, 0xc0) whose frame is not 1 keeps Use enabled: its case
+/// prints the not-usable line and searches it all the same (`usecmd/cases.rs`, 0xba / 0xc0); open
+/// (frame 0), the loaf inside comes out (`world::search`). Chosen from the menu, Use leaves the
+/// same world as `u` and a press, the end-of-use step paid in both.
+#[test]
+fn a_crate_not_of_frame_one_keeps_use_enabled_and_use_searches_it() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (lx, ly) = leader_at(&s);
+    let (cx, cy) = beside_tile(&s, lx, ly).expect("a free tile by the leader");
+    let z = u16::from(s.map.centre.z);
+    for kind in [0xbau16, 0xc0] {
+        let mut c = s.clone();
+        let tf = kind;
+        let chest = crate::objects::create_on_map(&mut c.objects, tf, 0, 0, cx, cy, z);
+        let loaf = crate::objects::create_in(&mut c, 0x80, crate::objects::IN_CONTAINER, 1, chest);
+        assert!(chest >= 0 && loaf >= 0);
+        crate::map::view::update_view(&mut c);
+        let at = at_slot(&c, chest);
+        let m = menu_of(&c, &files, at).expect("a menu on it");
+        assert_eq!(
+            reason(&m, chest, menu::USE),
+            Some(None),
+            "{kind:#x}: Use enabled"
+        );
+        let (a, b) = letter_and_menu(&c, &files, 'u', menu::USE, at);
+        let (a, b) = (a.state().clone(), b.state().clone());
+        assert_eq!(
+            a.objects.place(loaf),
+            0,
+            "{kind:#x}: the letter's Use searched it"
+        );
+        assert_eq!(
+            b.objects.place(loaf),
+            0,
+            "{kind:#x}: the menu's Use searched it"
+        );
+        assert!(
+            a.objects == b.objects && a.rng == b.rng,
+            "{kind:#x}: the same world"
+        );
+        assert!(
+            spent(&c, &a, 5) && spent(&c, &b, 5),
+            "{kind:#x}: the end of Use in both"
+        );
+    }
+    s.rng.seed(0);
+}
+
+/// Spec 17 round 2, item 4b: a key queued as the prompt comes back does not carry the held press
+/// into its own command. Cast without a book, from the menu, refuses before it reads a target;
+/// as its prompt returns the hero gets a book and `c` is queued: that Cast opens the book and
+/// waits for its own target, and the menu's press never lands in it (no magic point spent).
+#[test]
+fn a_key_queued_as_the_prompt_returns_does_not_take_the_held_press() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    without_books(&mut s);
+    let (door, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let at = at_slot(&s, door);
+    let hero = leader_slot(&s);
+    let (mut e, st) = shared_engine(s, &files);
+    let (icon, run) = Run::start(&e.state(), menu::CAST, at).expect("Cast takes a target");
+    let (mut queued, mut run) = (icon.to_vec(), Some(run));
+    let (mut keyed, mut mp) = (false, 0);
+    for _ in 0..600 {
+        let back = e.state().main.reading == 1 && e.io().pending_events() == 0;
+        if !keyed && back && queued.is_empty() && e.state().ui.input.target_command != menu::CAST {
+            let mut w = st.borrow_mut();
+            with_book(&mut w, 0x09);
+            mp = w.actors.attrs.magic[hero as usize];
+            drop(w);
+            queued.push(InputEvent::Key(Key::Char('c')));
+            keyed = true;
+        }
+        page_step(&mut e, &mut queued, &mut run);
+        if keyed && run.is_none() {
+            break;
+        }
+    }
+    assert!(keyed, "the prompt came back");
+    for _ in 0..200 {
+        page_step(&mut e, &mut queued, &mut run);
+    }
+    let w = st.borrow();
+    assert!(run.is_none(), "the run is over");
+    assert_eq!(w.actors.attrs.magic[hero as usize], mp, "no spell cast");
+    assert!(
+        menu::target_read(&w, menu::CAST),
+        "the key's Cast waits for its own target"
+    );
+}
+
+/// Spec 17 round 2, item 4e: the time of one right press's query on the door's cell and on the
+/// hero's inventory slot, the mean of 50 (printed in microseconds; nothing asserted on it).
+#[test]
+#[allow(clippy::disallowed_types)] // a test may read the clock
+fn the_time_of_one_right_press() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (door, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let at = at_slot(&s, door);
+    let mut panel = s.clone();
+    show_inventory(&mut panel);
+    let io = Io::new(files.clone());
+    for (st, at) in [(&mut s, at), (&mut panel, list_cell(0))] {
+        st.main.reading = 1;
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            assert!(menu::query(st, &io, at.0, at.1).is_some());
+        }
+        eprintln!("one right press: {} us", t.elapsed().as_micros() / 50);
+    }
+}
+
+/// A loaf (0x80) made on a free tile next to the leader, the view rebuilt; its slot and pixel.
+fn loaf_beside(s: &mut State) -> (Slot, (i16, i16)) {
+    let (lx, ly) = leader_at(s);
+    let (x, y) = beside_tile(s, lx, ly).expect("a free tile by the leader");
+    let z = u16::from(s.map.centre.z);
+    let loaf = crate::objects::create_on_map(&mut s.objects, 0x80, 0, 1, x, y, z);
+    assert!(loaf >= 0);
+    crate::map::view::update_view(s);
+    (loaf, at_slot(s, loaf))
+}
+
+/// A loaf made on a free tile `d` cells from the leader (on the farther axis) that the view
+/// shows (its menu names it), the view rebuilt; its slot and pixel.
+fn loaf_in_view(s: &mut State, files: &Files, d: i32) -> (Slot, (i16, i16)) {
+    let (lx, ly) = leader_at(s);
+    let z = u16::from(s.map.centre.z);
+    let ring = (-d..=d).flat_map(|a| [(a, -d), (a, d), (-d, a), (d, a)]);
+    for (dx, dy) in ring {
+        let (x, y) = (i32::from(lx) + dx, i32::from(ly) + dy);
+        if !walkable(s, x, y) {
+            continue;
+        }
+        let mut c = s.clone();
+        let loaf = crate::objects::create_on_map(&mut c.objects, 0x80, 0, 1, x as u16, y as u16, z);
+        crate::map::view::update_view(&mut c);
+        let at = at_slot(&c, loaf);
+        if menu_of(&c, files, at).is_some_and(|m| m.sections.iter().any(|x| x.object == loaf)) {
+            *s = c;
+            return (loaf, at);
+        }
+    }
+    panic!("no tile {d} cells off in view");
+}
+
+/// Spec 17 round 2, item 4: a button-less pointer event queued before the held target press (a
+/// release, at another cell) lets the press go in (the queues stay quiet), selects nothing on its
+/// own (0x106bbc with no button down gives no code) and walks no one: the press then takes the
+/// loaf.
+#[test]
+fn a_queued_button_release_before_the_target_press_selects_nothing() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (door, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let (loaf, at) = loaf_beside(&mut s);
+    let elsewhere = at_slot(&s, door);
+    let mut e = prompt_engine(s.clone(), &files);
+    let (icon, run) = Run::start(&e.state(), menu::GET, at).expect("Get takes a target");
+    let (mut queued, mut run) = (icon.to_vec(), Some(run));
+    let mut released = 0;
+    for _ in 0..600 {
+        let reads = run.is_some() && menu::target_read(&e.state(), menu::GET);
+        if reads && queued.is_empty() && e.io().pending_events() == 0 {
+            let (x, y) = elsewhere;
+            queued.push(InputEvent::Pointer { x, y, buttons: 0 });
+            released += 1;
+        }
+        page_step(&mut e, &mut queued, &mut run);
+        if run.is_none() && at_prompt(&e, &queued) {
+            break;
+        }
+    }
+    eprintln!("releases queued before the press: {released}");
+    assert_eq!(
+        released, 1,
+        "the release went in first, the press in the same step"
+    );
+    let after = e.state();
+    assert_eq!(leader_at(&after), (bx, by), "no walk");
+    assert!(!still_there(&s, &after, loaf), "the press took the loaf");
+}
+
+/// The hero (leader) with only `weapon` readied (its type), the readied things before taken
+/// away; 0 for bare hands.
+fn armed(s: &mut State, weapon: u16) -> Slot {
+    let hero = leader_slot(s);
+    let readied: Vec<Slot> = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&o| s.objects.place(o) == crate::objects::READIED && s.objects.parent(o) == hero)
+        .collect();
+    for o in readied {
+        crate::objects::remove(s, o);
+    }
+    if weapon == 0 {
+        return 0;
+    }
+    let w = crate::objects::create_in(s, weapon, crate::objects::READIED, 1, hero);
+    assert!(w >= 0);
+    w
+}
+
+/// The arrows (0x37) `hero` carries.
+fn arrows(s: &State, hero: Slot) -> u16 {
+    (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&o| s.objects.kind(o) == 0x37 && s.objects.contained_in(o, hero))
+        .map(|o| s.objects.qq_of(o) & 0xff)
+        .sum()
+}
+
+/// Spec 17 round 2, item 4c, Attack (0x124caa, 0x124a98, 0x124232), judged on the copy over the
+/// weapons 0x1249de lists, against the real Attack run from the menu on a loaf three cells off,
+/// in both directions: a bow (0x29) without arrows (ammo: nothing flies), the bow with arrows
+/// (enabled: an arrow flies, 0x124232's missile takes it), bare hands (far: 0x124232's range test
+/// forgets the attack target, A4-0x7a4a = -1), the bow and arrows with a foe next to the leader
+/// (blocked: nothing flies).
+#[test]
+fn attacks_ammo_and_range_checks_agree_with_attack() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let (far_loaf, at_far) = loaf_in_view(&mut s, &files, 3);
+    let hero = leader_slot(&s);
+    type Struck = Box<dyn Fn(&State, &State) -> bool>;
+    let flew: Struck = Box::new(move |b, a| arrows(a, hero) < arrows(b, hero));
+    let kept: Struck = Box::new(move |_, a| a.main.attack_target == far_loaf);
+    let mut cases: Vec<(&str, State, Option<Reason>, Struck)> = Vec::new();
+    let mut bow = s.clone();
+    armed(&mut bow, 0x29);
+    let none_flew: Struck = Box::new(move |b, a| arrows(a, hero) < arrows(b, hero));
+    cases.push((
+        "a bow, no arrows",
+        bow.clone(),
+        Some(Reason::Ammo),
+        none_flew,
+    ));
+    crate::objects::create_in(&mut bow, 0x37, crate::objects::IN_INVENTORY, 20, hero);
+    let bow_with_arrows = bow.clone();
+    cases.push(("a bow and arrows", bow, None, flew));
+    let mut hands = s.clone();
+    armed(&mut hands, 0);
+    cases.push((
+        "bare hands, three cells off",
+        hands,
+        Some(Reason::Far),
+        kept,
+    ));
+    // A foe next to the fighting leader (0x12276a: worktype 2..0x0f, its foe live, awake, within
+    // one cell) stops the bow's arrow before it flies.
+    let mut blocked = bow_with_arrows;
+    let (lx, ly) = leader_at(&blocked);
+    let z = u16::from(blocked.map.centre.z);
+    let foe = (1..FIRST_TEMP_ACTOR)
+        .find(|&a| {
+            let o = &blocked.objects;
+            a != hero
+                && o.type_frame[a as usize] != 0
+                && o.place(a) == 0
+                && blocked.actors.attrs.status[a as usize] & 0x96 == 0
+                && blocked.actors.attrs.movement_flags[a as usize] & 0x10 == 0
+        })
+        .expect("an actor to stand in the way");
+    let (fx, fy) = beside_tile(&blocked, lx, ly).expect("a free tile by the leader");
+    crate::objects::move_to(&mut blocked, foe, fx, fy, z);
+    blocked.actors.worktype[hero as usize] = 3;
+    blocked.actors.attrs.unknown_18f1[hero as usize] = foe as u8;
+    crate::map::view::update_view(&mut blocked);
+    let none_flew2: Struck = Box::new(move |b, a| arrows(a, hero) < arrows(b, hero));
+    cases.push((
+        "a foe in the way",
+        blocked,
+        Some(Reason::Blocked),
+        none_flew2,
+    ));
+    for (label, c, want, struck) in cases {
+        let m = menu_of(&c, &files, at_far).expect("a menu");
+        let r = reason(&m, far_loaf, menu::ATTACK).expect("Attack shown");
+        let mut e = prompt_engine(c.clone(), &files);
+        assert!(
+            choose(&mut e, menu::ATTACK, at_far),
+            "{label}: its target read"
+        );
+        let did = struck(&c, &e.state());
+        eprintln!(
+            "{label}: enabled {}, struck {}",
+            u8::from(r.is_none()),
+            u8::from(did)
+        );
+        assert_eq!(r, want, "{label}");
+        assert_eq!(r.is_none(), did, "{label}");
+    }
+}
+
+/// The hero's inventory as `show_inventory` lays it out after `make` adds to it; the list cell
+/// or equipment cell pixel of `obj` there.
+fn cell_of_carried(s: &mut State, obj: Slot) -> (i16, i16) {
+    let listed = show_inventory(s);
+    if let Some(k) = listed.iter().take(12).position(|&o| o == obj) {
+        return list_cell(k);
+    }
+    let k = (0..8)
+        .find(|&k| s.inventory.equip(k) == obj)
+        .expect("the object on the panel");
+    equipment_cell(k)
+}
+
+/// The hero's readied things taken away, the inventory panel shown.
+fn bare_hero(s: &mut State) -> Slot {
+    let hero = Slot::from(s.actors.party.members[0]);
+    let readied: Vec<Slot> = (0x100..crate::objects::OBJECT_SLOTS as Slot)
+        .filter(|&o| s.objects.place(o) == crate::objects::READIED && s.objects.parent(o) == hero)
+        .collect();
+    for o in readied {
+        crate::objects::remove(s, o);
+    }
+    hero
+}
+
+/// Spec 17 Acceptance 4 (round 2, item 9), on made objects: a loaf the hero carries (usable:
+/// eaten), a bag (a container of the set A4-0x670c), a shovel readied (0x67). Each gives one
+/// section, its own action first, then Use, Look, Drop, Move, exactly: the loaf readied (0xa7),
+/// the bag opened (0xa0), the shovel taken off (0xa8); Use only where the type is in the use list.
+#[test]
+fn an_inventory_object_gives_the_panel_menu_with_its_own_action_first() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let hero = bare_hero(&mut s);
+    let made = |s: &mut State, kind: u16, place: u8| {
+        let o = crate::objects::create_in(s, kind, place, 1, hero);
+        assert!(o >= 0);
+        o
+    };
+    let loaf = made(&mut s, 0x80, crate::objects::IN_INVENTORY);
+    let bag_kind = bag_type(&s);
+    let bag = made(&mut s, bag_kind, crate::objects::IN_INVENTORY);
+    let shovel = made(&mut s, 0x67, crate::objects::READIED);
+    for (label, obj, own) in [
+        ("a loaf", loaf, menu::READY),
+        ("a bag", bag, menu::OPEN),
+        ("a readied shovel", shovel, menu::UNREADY),
+    ] {
+        let mut c = s.clone();
+        let at = cell_of_carried(&mut c, obj);
+        let m = menu_of(&c, &files, at).expect("a panel menu");
+        assert!(
+            m.kind == menu::Kind::Panel && m.cell.is_none(),
+            "{label}: panel"
+        );
+        assert_eq!(m.sections.len(), 1, "{label}: one section");
+        assert_eq!(m.sections[0].object, obj, "{label}: its own");
+        let usable = super::in_type_list(&c, c.objects.kind(obj));
+        let mut want = vec![own];
+        if usable {
+            want.push(menu::USE);
+        }
+        want.extend([menu::LOOK, menu::DROP, menu::MOVE]);
+        eprintln!("{label}: entries {}, use {}", want.len(), u8::from(usable));
+        assert_eq!(codes(&m, obj), want, "{label}: the entries");
+        let all_enabled = m.sections[0].entries.iter().all(|e| e.enabled());
+        assert!(all_enabled, "{label}: each can run");
+    }
+    assert!(super::in_type_list(&s, 0x80), "the loaf is usable");
+    let empty = (0..12).find(|&k| {
+        let mut c = s.clone();
+        show_inventory(&mut c);
+        c.inventory.cells[k] == 0
+    });
+    if let Some(k) = empty {
+        let mut c = s.clone();
+        show_inventory(&mut c);
+        assert!(
+            menu_of(&c, &files, list_cell(k)).is_none(),
+            "an empty cell: none"
+        );
+    }
+}
+
+/// Spec 17 round 2, item 4c, the panel's own checks, each against the real handler run from the
+/// menu: Drop and Move of the readied amulet of submission (0x4c) stay (0x1122dc: the panel only
+/// redrawn), and Move hides on it (a 0x4c never moves, its kind test); the Open of a chest of frame
+/// bit 1 is locked (0x10619c's locked line, the chest still closed); Move of what another member
+/// carries while that member is out of view (0x112bf2) is refused.
+#[test]
+fn the_panels_stays_locked_and_away_checks_agree_with_the_handlers() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let hero = bare_hero(&mut s);
+    let amulet = crate::objects::create_in(&mut s, 0x4c, crate::objects::READIED, 1, hero);
+    let mut c = s.clone();
+    let at = cell_of_carried(&mut c, amulet);
+    let m = menu_of(&c, &files, at).expect("a panel menu");
+    assert_eq!(
+        reason(&m, amulet, menu::DROP),
+        Some(Some(Reason::Stays)),
+        "Drop stays"
+    );
+    assert_eq!(reason(&m, amulet, menu::MOVE), None, "Move hidden on 0x4c");
+    let mut e = prompt_engine(c.clone(), &files);
+    choose(&mut e, menu::DROP, at);
+    assert_eq!(
+        e.state().objects.place(amulet),
+        crate::objects::READIED,
+        "Drop: it stays"
+    );
+
+    let mut locked = s.clone();
+    let chest = crate::objects::create_in(
+        &mut locked,
+        0x62 | 3 << 10,
+        crate::objects::IN_INVENTORY,
+        0,
+        hero,
+    );
+    let at = cell_of_carried(&mut locked, chest);
+    let m = menu_of(&locked, &files, at).expect("a panel menu");
+    assert_eq!(codes(&m, chest).first(), Some(&menu::OPEN));
+    assert_eq!(
+        reason(&m, chest, menu::OPEN),
+        Some(Some(Reason::Locked)),
+        "locked"
+    );
+    let mut open = locked.clone();
+    open.objects.type_frame[chest as usize] = 0x62 | 1 << 10;
+    let m = menu_of(&open, &files, at).expect("a panel menu");
+    assert_eq!(
+        reason(&m, chest, menu::OPEN),
+        Some(None),
+        "closed, not locked: Open runs"
+    );
+    for (label, st, opens) in [("locked", &locked, false), ("closed", &open, true)] {
+        let mut e = prompt_engine(st.clone(), &files);
+        let [press, release] = menu::left_press(at.0, at.1);
+        e.tick(&[press, release], 16);
+        for _ in 0..200 {
+            e.tick(&[], 16);
+        }
+        let shown = e.state().ui.panel.container as Slot;
+        eprintln!("{label}: opened {}", u8::from(shown == chest));
+        assert_eq!(shown == chest, opens, "{label}: the left press");
+    }
+
+    let mut away = s.clone();
+    let other = Slot::from(away.actors.party.members[1]);
+    // A shovel (0x67): carried, not counted (no stack to merge into).
+    let gem = crate::objects::create_in(&mut away, 0x67, crate::objects::IN_INVENTORY, 1, other);
+    let (ox, oy) = (away.objects.x(other), away.objects.y(other));
+    let z = u16::from(away.map.centre.z);
+    for (label, far) in [("in view", false), ("out of view", true)] {
+        let mut c = away.clone();
+        if far {
+            crate::objects::move_to(&mut c, other, ox + 40, oy, z);
+        }
+        c.ui.panel.mode = 0x92;
+        c.ui.panel.member = 1;
+        c.ui.panel.container = other as u16;
+        crate::inventory::recount(&mut c, other);
+        let listed = listed_children(&mut c, other);
+        for (k, cell) in c.inventory.cells[..12].iter_mut().enumerate() {
+            *cell = listed.get(k).copied().unwrap_or(0);
+        }
+        let k = listed.iter().position(|&o| o == gem).expect("listed");
+        let m = menu_of(&c, &files, list_cell(k)).expect("a panel menu");
+        let r = reason(&m, gem, menu::MOVE).expect("Move shown");
+        let mut e = prompt_engine(c.clone(), &files);
+        let hero_cell = cell_pixel(&c, c.objects.x(hero), c.objects.y(hero));
+        let to_hero = [
+            InputEvent::Pointer {
+                x: hero_cell.0,
+                y: hero_cell.1,
+                buttons: 1,
+            },
+            InputEvent::Pointer {
+                x: hero_cell.0,
+                y: hero_cell.1,
+                buttons: 0,
+            },
+        ];
+        choose_then(&mut e, menu::MOVE, list_cell(k), &[&to_hero]);
+        let moved = !carried_by(&e.state(), other, gem);
+        eprintln!(
+            "{label}: enabled {}, moved {}",
+            u8::from(r.is_none()),
+            u8::from(moved)
+        );
+        assert_eq!(r, far.then_some(Reason::Screen), "{label}");
+        assert_eq!(r.is_none(), moved, "{label}");
+    }
+}
+
+/// Spec 17 Acceptance 3 (round 2, item 8): an actor on a chair, built for the test (a
+/// townsperson in view moved onto a made chair, 0xfc, next to the leader) and checked apart from
+/// the menu: two sections, the actor's then the chair's, with exactly the commands that resolve
+/// to each: the actor Talk (when it has a script to talk with), Look, Move, Cast (the cell's),
+/// Attack; the chair Use when its type is in the use list and Get when it can be taken.
+#[test]
+fn an_actor_on_a_chair_gives_the_actors_section_then_the_chairs() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let (lx, ly) = leader_at(&s);
+    let (cx, cy) = beside_tile(&s, lx, ly).expect("a free tile by the leader");
+    let z = u16::from(s.map.centre.z);
+    let chair = crate::objects::create_on_map(&mut s.objects, 0xfc, 0, 0, cx, cy, z);
+    let npc = (1..FIRST_TEMP_ACTOR)
+        .find(|&a| {
+            let o = &s.objects;
+            o.type_frame[a as usize] != 0
+                && o.place(a) == 0
+                && s.actors.attrs.status[a as usize] & 0x96 == 0
+                && crate::converse::start::refusal(&s, leader_slot(&s), a).is_none()
+                && crate::converse::start::may_have_script(a, o.kind(a))
+        })
+        .expect("a townsperson who would talk");
+    crate::objects::move_to(&mut s, npc, cx, cy, z);
+    crate::map::view::update_view(&mut s);
+    let m = menu_of(&s, &files, at_slot(&s, npc)).expect("a menu");
+    let objects: Vec<Slot> = m.sections.iter().map(|x| x.object).collect();
+    assert_eq!(
+        objects,
+        vec![npc, chair],
+        "the actor's section, then the chair's"
+    );
+    let mut actor = codes(&m, npc);
+    actor.sort_unstable();
+    let mut want = vec![menu::TALK, menu::LOOK, menu::MOVE, menu::CAST, menu::ATTACK];
+    want.sort_unstable();
+    assert_eq!(actor, want, "the actor's commands");
+    let mut want_chair = Vec::new();
+    if super::in_type_list(&s, 0xfc) {
+        want_chair.push(menu::USE);
+    }
+    let mut g = s.clone();
+    let hero = leader_slot(&g);
+    let wt = super::get::weigh(&mut g, hero, chair);
+    if !super::get::cannot_take(&g, chair, wt) && !super::get::hazard(&g, chair) {
+        want_chair.push(menu::GET);
+    }
+    eprintln!("chair commands: {}", want_chair.len());
+    assert_eq!(codes(&m, chair), want_chair, "the chair's commands");
+}
+
+/// Spec 17 round 2, item 7: the engine names the underlined command (A4-0x7b09) in every menu,
+/// Rest and Combat included; none when nothing is underlined.
+#[test]
+fn the_menu_names_the_underlined_command() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (door, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let at = at_slot(&s, door);
+    crate::ui::globals::set_last_command(&mut s.actors, 0xff);
+    assert_eq!(menu_of(&s, &files, at).expect("a menu").underlined, None);
+    for code in [menu::LOOK, menu::REST, menu::COMBAT] {
+        crate::ui::globals::set_last_command(&mut s.actors, code as u8);
+        let m = menu_of(&s, &files, at).expect("a menu");
+        assert_eq!(m.underlined, Some(code), "{code:#x}");
+    }
+}
+
+/// Spec 17 Acceptance 7 (Wide, round 2, item 11): Look is shown and enabled on any cell of the
+/// view; every other entry of an object 6 cells from the leader (one past the original's
+/// 5-cell window, literal) is disabled as window, and one 5 cells off is not: Get there says
+/// far. Run, Get's press 6 cells off gives the command nothing (it still waits for its target);
+/// 5 cells off Get reads it and refuses (back at the prompt).
+#[cfg(feature = "wide")]
+#[test]
+fn wide_outside_the_window_every_entry_but_look_is_disabled_as_window() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    for (d, want) in [(5, Reason::Far), (6, Reason::Window)] {
+        let mut c = s.clone();
+        let (loaf, at) = loaf_in_view(&mut c, &files, d);
+        let m = menu_of(&c, &files, at).expect("a menu");
+        let section = m
+            .sections
+            .iter()
+            .find(|x| x.object == loaf)
+            .expect("the loaf's");
+        assert_eq!(
+            reason(&m, loaf, menu::LOOK),
+            Some(None),
+            "{d}: Look enabled"
+        );
+        assert_eq!(reason(&m, loaf, menu::GET), Some(Some(want)), "{d}: Get");
+        let others = section
+            .entries
+            .iter()
+            .filter(|e| e.code != menu::LOOK)
+            .count();
+        assert!(others > 0, "{d}: a named entry besides Look");
+        if d == 6 {
+            assert!(
+                section
+                    .entries
+                    .iter()
+                    .all(|e| e.code == menu::LOOK || e.reason == Some(Reason::Window))
+            );
+        }
+        let mut e = prompt_engine(c.clone(), &files);
+        let (icon, run) = Run::start(&e.state(), menu::GET, at).expect("Get");
+        let (mut queued, mut run) = (icon.to_vec(), Some(run));
+        for _ in 0..200 {
+            page_step(&mut e, &mut queued, &mut run);
+        }
+        let waits = menu::target_read(&e.state(), menu::GET);
+        eprintln!("{d} cells off: still waiting {}", u8::from(waits));
+        assert!(run.is_none(), "{d}: the press went in");
+        assert_eq!(
+            waits,
+            d == 6,
+            "{d}: the press gave the command nothing only outside"
+        );
+        assert!(still_there(&c, &e.state(), loaf), "{d}: not taken");
+    }
+}
+
+/// The party aboard (A4-0x7b7a = the party size, the leader's slot the vessel's), as the
+/// original's boarding leaves it.
+fn aboard(s: &State) -> State {
+    let mut a = s.clone();
+    let size = usize::from(a.actors.party.size);
+    a.actors.party.members[size] = a.actors.party.members[0];
+    a.actors.party.leader_index = size as u8;
+    a
+}
+
+/// Spec 17 round 2, item 12, aboard: on a loaf by the leader the menu disables Get, Move, Cast and
+/// Attack as aboard, and run, each refuses before its target (the loaf stays, the leader's movement
+/// points and magic stay); in the panel, Drop is disabled aboard and run, the loaf stays carried.
+/// On foot Get takes it, Move pushes it one cell (the direction key), Attack names it its target,
+/// Drop puts it down (a press on a free cell by the leader); Cast aboard spends no magic.
+#[test]
+fn aboard_the_commands_that_refuse_first_are_disabled_and_do_nothing() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let (loaf, at) = loaf_beside(&mut s);
+    let hero = leader_slot(&s);
+    let on_board = aboard(&s);
+    let m = menu_of(&on_board, &files, at).expect("a menu");
+    // What each command does once it has its target: Get and Move change the loaf, Attack names
+    // it its target (A4-0x7a4a), Cast spends the caster's magic.
+    let magic = move |st: &State| st.actors.attrs.magic[hero as usize];
+    let acted = |b: &State, a: &State| {
+        !still_there(b, a, loaf) || a.main.attack_target == loaf || magic(a) != magic(b)
+    };
+    for code in [menu::GET, menu::MOVE, menu::CAST, menu::ATTACK] {
+        assert_eq!(
+            reason(&m, loaf, code),
+            Some(Some(Reason::Aboard)),
+            "{code:#x}"
+        );
+        let mut c = on_board.clone();
+        c.main.attack_target = -1;
+        if code == menu::CAST {
+            with_book(&mut c, 0x09);
+        }
+        let mut e = prompt_engine(c.clone(), &files);
+        choose_then(&mut e, code, at, &[&[InputEvent::Key(Key::Right)]]);
+        let did = acted(&c, &e.state());
+        eprintln!("{code:#x} aboard: acted {}", u8::from(did));
+        assert!(!did, "{code:#x}: nothing done aboard");
+    }
+    let m = menu_of(&s, &files, at).expect("a menu");
+    let (lx, ly) = leader_at(&s);
+    let dir = |dx: i16, dy: i16| match (dx, dy) {
+        (1, 0) => Key::Right,
+        (-1, 0) => Key::Left,
+        (0, 1) => Key::Down,
+        _ => Key::Up,
+    };
+    let (ox, oy) = (s.objects.x(loaf) as i16, s.objects.y(loaf) as i16);
+    let push = dir(ox - lx as i16, oy - ly as i16);
+    for (code, then) in [
+        (menu::GET, vec![]),
+        (menu::MOVE, vec![InputEvent::Key(push)]),
+        (menu::ATTACK, vec![]),
+    ] {
+        assert_eq!(reason(&m, loaf, code), Some(None), "{code:#x} on foot");
+        let mut c = s.clone();
+        c.main.attack_target = -1;
+        let mut e = prompt_engine(c.clone(), &files);
+        assert!(
+            choose_then(&mut e, code, at, &[&then]),
+            "{code:#x}: its target read"
+        );
+        let did = acted(&c, &e.state());
+        eprintln!("{code:#x} on foot: acted {}", u8::from(did));
+        assert!(did, "{code:#x}: it acted");
+    }
+    let mut carried = s.clone();
+    let held = crate::objects::create_in(&mut carried, 0x67, crate::objects::IN_INVENTORY, 1, hero);
+    let at_held = cell_of_carried(&mut carried, held);
+    let (tx, ty) = beside_tile(&carried, lx, ly).expect("a free tile by the leader");
+    let free = cell_pixel(&carried, tx, ty);
+    let spot = menu::left_press(free.0, free.1);
+    for (label, st, refused) in [
+        ("aboard", aboard(&carried), true),
+        ("on foot", carried.clone(), false),
+    ] {
+        let m = menu_of(&st, &files, at_held).expect("a panel menu");
+        let r = reason(&m, held, menu::DROP).expect("Drop shown");
+        let mut e = prompt_engine(st.clone(), &files);
+        choose_then(&mut e, menu::DROP, at_held, &[&spot]);
+        let dropped = !carried_by(&e.state(), hero, held);
+        eprintln!(
+            "Drop {label}: enabled {}, dropped {}",
+            u8::from(r.is_none()),
+            u8::from(dropped)
+        );
+        assert_eq!(r, refused.then_some(Reason::Aboard), "Drop {label}");
+        assert_eq!(r.is_none(), dropped, "Drop {label}");
+    }
+}
+
+/// Spec 17 round 2, item 12, solo mode (A4's solo member, objlist tail 0x79): Talk is refused
+/// while a member other than the first is the solo one (0x114afa: disabled as solo; run, no
+/// conversation starts) and runs out of solo mode (a conversation starts); Drop takes no solo test
+/// (the leader solo: enabled, and it drops).
+#[test]
+fn solo_mode_disables_talk_and_leaves_drop() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let hero = leader_slot(&s);
+    let (lx, ly) = leader_at(&s);
+    let free: Vec<(u16, u16)> = [
+        (-1i32, 0i32),
+        (1, 0),
+        (0, 1),
+        (0, -1),
+        (-1, 1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+    ]
+    .into_iter()
+    .map(|(dx, dy)| (i32::from(lx) + dx, i32::from(ly) + dy))
+    .filter(|&(x, y)| walkable(&s, x, y))
+    .map(|(x, y)| (x as u16, y as u16))
+    .collect();
+    assert!(free.len() >= 2, "two free tiles by the leader");
+    let ((cx, cy), (tx, ty)) = (free[0], free[1]);
+    let z = u16::from(s.map.centre.z);
+    let npc = (1..FIRST_TEMP_ACTOR)
+        .find(|&a| {
+            let o = &s.objects;
+            o.type_frame[a as usize] != 0
+                && o.place(a) == 0
+                && s.actors.attrs.status[a as usize] & 0x96 == 0
+                && crate::converse::start::refusal(&s, hero, a).is_none()
+                && crate::converse::start::may_have_script(a, o.kind(a))
+        })
+        .expect("a townsperson who would talk");
+    crate::objects::move_to(&mut s, npc, cx, cy, z);
+    crate::map::view::update_view(&mut s);
+    let at = at_slot(&s, npc);
+    let mut solo = s.clone();
+    solo.actors.objlist_tail[0x79] = 2;
+    for (label, st, refused) in [("solo", &solo, true), ("party", &s, false)] {
+        let m = menu_of(st, &files, at).expect("a menu");
+        let r = reason(&m, npc, menu::TALK).expect("Talk shown");
+        let mut e = prompt_engine(st.clone(), &files);
+        let (icon, run) = Run::start(&e.state(), menu::TALK, at).expect("Talk");
+        let (mut queued, mut run) = (icon.to_vec(), Some(run));
+        let mut talked = false;
+        for _ in 0..600 {
+            page_step(&mut e, &mut queued, &mut run);
+            talked |= e.state().converse.active;
+            if run.is_none() && (talked || at_prompt(&e, &queued)) {
+                break;
+            }
+        }
+        eprintln!(
+            "Talk {label}: enabled {}, talked {}",
+            u8::from(r.is_none()),
+            u8::from(talked)
+        );
+        assert_eq!(r, refused.then_some(Reason::Solo), "Talk {label}");
+        assert_eq!(r.is_none(), talked, "Talk {label}");
+    }
+    // Solo mode as `0x31`..`0x38` leave it for the leader (0x104b..: the tail byte its party index).
+    let mut solo = s.clone();
+    solo.actors.objlist_tail[0x79] = solo.actors.party.leader_index;
+    let held = crate::objects::create_in(&mut solo, 0x67, crate::objects::IN_INVENTORY, 1, hero);
+    let at_held = cell_of_carried(&mut solo, held);
+    let m = menu_of(&solo, &files, at_held).expect("a panel menu");
+    assert_eq!(reason(&m, held, menu::DROP), Some(None), "Drop in solo");
+    let spot = cell_pixel(&solo, tx, ty);
+    let mut e = prompt_engine(solo.clone(), &files);
+    choose_then(
+        &mut e,
+        menu::DROP,
+        at_held,
+        &[&menu::left_press(spot.0, spot.1)],
+    );
+    assert!(!carried_by(&e.state(), hero, held), "Drop in solo drops");
+}
+
+/// Spec 17 round 2, item 12, Move's strength contest (0x115c06) is a draw, never judged before:
+/// a townsperson standing next to the leader keeps Move enabled whether the seed lets the push
+/// through or not; the real Move pushes it in one seed and not in the other.
+#[test]
+fn moves_contest_is_never_judged_before() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let (lx, ly) = leader_at(&s);
+    let free = |s: &State, x: i32, y: i32| walkable(s, x, y);
+    let (cx, cy, key) = [
+        (1i32, 0i32, Key::Right),
+        (-1, 0, Key::Left),
+        (0, 1, Key::Down),
+        (0, -1, Key::Up),
+    ]
+    .into_iter()
+    .map(|(dx, dy, k)| (i32::from(lx) + dx, i32::from(ly) + dy, k, dx, dy))
+    .find(|&(x, y, _, dx, dy)| free(&s, x, y) && free(&s, x + dx, y + dy))
+    .map(|(x, y, k, _, _)| (x as u16, y as u16, k))
+    .expect("two free cells in a line from the leader");
+    let z = u16::from(s.map.centre.z);
+    let npc = (1..FIRST_TEMP_ACTOR)
+        .find(|&a| {
+            let o = &s.objects;
+            o.type_frame[a as usize] != 0
+                && o.place(a) == 0
+                && o.kind(a) != 0x153
+                && s.actors.attrs.status[a as usize] & 0x80 == 0
+                && !super::push::immovable(&s, a)
+        })
+        .expect("a townsperson");
+    crate::objects::move_to(&mut s, npc, cx, cy, z);
+    let t = s.objects.tf(npc);
+    s.objects.type_frame[npc as usize] = t & !(3 << 10);
+    crate::map::view::update_view(&mut s);
+    let at = at_slot(&s, npc);
+    let (mut won, mut lost) = (0, 0);
+    for seed in 0..200u16 {
+        let mut c = s.clone();
+        c.rng.seed(seed);
+        let m = menu_of(&c, &files, at).expect("a menu");
+        assert_eq!(
+            reason(&m, npc, menu::MOVE),
+            Some(None),
+            "seed {seed}: enabled"
+        );
+        let mut e = prompt_engine(c.clone(), &files);
+        choose_then(&mut e, menu::MOVE, at, &[&[InputEvent::Key(key)]]);
+        if still_there(&c, &e.state(), npc) {
+            lost += 1;
+        } else {
+            won += 1;
+        }
+        if won > 0 && lost > 0 {
+            break;
+        }
+    }
+    eprintln!("seeds: pushed {won}, refused {lost}");
+    assert!(
+        won > 0 && lost > 0,
+        "the draw went both ways, the entry enabled each time"
+    );
+}
+
+/// Makes one object for a Use case: on the map at the given tile, or carried by the given actor.
+type Make = Box<dyn Fn(&mut State, Slot, (u16, u16, u16)) -> Slot>;
+
+/// The words of `text` (a line of the user's `game`), in order, among the words of `lines`.
+fn said_line(lines: &[String], text: &[u8]) -> bool {
+    let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let want = words(&String::from_utf8_lossy(text));
+    !want.is_empty() && words(&lines.join(" ")).contains(&want)
+}
+
+/// Spec 17 round 2, item 12, every refusal family of Use's switch (`usecmd::cases::refusal`), one
+/// object each made beside the leader or carried, in both directions: the menu disables it
+/// exactly when the real Use prints that family's line: not usable (an orb on the map, 0x57;
+/// carried by the hero, not), not readied (a shovel carried, 0x67; readied, not), no
+/// effect (the vortex cube, 0x3e, with A4-0x7afb set; clear: the cube's own test, a draw-free
+/// refusal of the port, prints the same line, so only the flag's side is pinned), not in solo
+/// (a ladder, 0x131, in solo mode; out of it, the leader climbs).
+#[test]
+fn every_use_case_refusal_family_agrees_with_use() {
+    use crate::usecmd::defs;
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let hero = leader_slot(&s);
+    let io = Io::new(files.clone());
+    let a4 = |off: u32| crate::main_loop::pointed_string(&io, crate::image::A4.wrapping_sub(off));
+    let not_usable = a4(defs::MSG_NOT_USABLE);
+    let no_effect = a4(defs::MSG_NO_EFFECT);
+    let not_readied = super::text::string(&s, 0x0012_cfd4);
+    let not_solo = super::text::string(&s, 0x0012_cfc0);
+    let (lx, ly) = leader_at(&s);
+    let (cx, cy) = beside_tile(&s, lx, ly).expect("a free tile by the leader");
+    let z = u16::from(s.map.centre.z);
+    let on_map = |kind: u16| -> Make {
+        Box::new(move |st, _, (x, y, z)| {
+            crate::objects::create_on_map(&mut st.objects, kind, 0, 0, x, y, z)
+        })
+    };
+    let carried = |kind: u16, place: u8| -> Make {
+        Box::new(move |st, hero, _| crate::objects::create_in(st, kind, place, 1, hero))
+    };
+    let mut solo = s.clone();
+    solo.actors.objlist_tail[0x79] = 0;
+    let mut flagged = s.clone();
+    flagged.map.flag_7afb = 1;
+    let cases: Vec<(&str, State, Make, &[u8], bool)> = vec![
+        (
+            "an orb on the map",
+            s.clone(),
+            on_map(0x57),
+            &not_usable,
+            true,
+        ),
+        (
+            "an orb carried",
+            s.clone(),
+            carried(0x57, crate::objects::IN_INVENTORY),
+            &not_usable,
+            false,
+        ),
+        (
+            "a shovel carried",
+            s.clone(),
+            carried(0x67, crate::objects::IN_INVENTORY),
+            &not_readied,
+            true,
+        ),
+        (
+            "a shovel readied",
+            s.clone(),
+            carried(0x67, crate::objects::READIED),
+            &not_readied,
+            false,
+        ),
+        (
+            "the cube, flag set",
+            flagged,
+            carried(0x3e, crate::objects::IN_INVENTORY),
+            &no_effect,
+            true,
+        ),
+        ("a ladder in solo", solo, on_map(0x131), &not_solo, true),
+        (
+            "a ladder in party",
+            s.clone(),
+            on_map(0x131),
+            &not_solo,
+            false,
+        ),
+    ];
+    for (label, mut st, make, line, refused) in cases {
+        let obj = make(&mut st, hero, (cx, cy, z));
+        assert!(obj >= 0, "{label}: made");
+        crate::map::view::update_view(&mut st);
+        let at = if st.objects.place(obj) == 0 {
+            at_slot(&st, obj)
+        } else {
+            cell_of_carried(&mut st, obj)
+        };
+        let m = menu_of(&st, &files, at).expect("a menu");
+        let r = reason(&m, obj, menu::USE).expect("Use shown");
+        let mut e = prompt_engine(st.clone(), &files);
+        let before = lines_of(&e.state()).len();
+        choose(&mut e, menu::USE, at);
+        let after = e.state().clone();
+        let lines = lines_of(&after);
+        let printed = said_line(&lines[before.saturating_sub(1).min(lines.len())..], line);
+        eprintln!(
+            "{label}: enabled {}, its refusal printed {}",
+            u8::from(r.is_none()),
+            u8::from(printed)
+        );
+        assert_eq!(r.is_some(), refused, "{label}: the menu");
+        assert_eq!(printed, refused, "{label}: the handler");
+    }
+}
+
+/// Spec 17 round 2, item 13b: a more prompt before the target read. The message window is paged
+/// with one row left when Attack starts (its name and weapon line, 0x124caa, fill it): the more
+/// prompt waits (A4-0x7a42 clear) with Attack's target pending; the held press waits through it
+/// (a key answers it), then lands once the target read is up: the loaf is struck.
+#[test]
+fn the_target_press_waits_through_a_more_prompt() {
+    let Some(files) = files() else { return };
+    let mut s = with_text(&files);
+    let (_, (bx, by)) = closed_door(&s);
+    stand_at(&mut s, bx, by);
+    let (loaf, at) = loaf_beside(&mut s);
+    let hero = leader_slot(&s);
+    armed(&mut s, 0);
+    let (mut e, st) = shared_engine(s.clone(), &files);
+    {
+        let mut w = st.borrow_mut();
+        w.ui.text.win_mut().flags |= crate::ui::text::PAGED;
+        w.ui.text.more_rows = 1;
+    }
+    let (icon, run) = Run::start(&e.state(), menu::ATTACK, at).expect("Attack");
+    let (mut queued, mut run) = (icon.to_vec(), Some(run));
+    let (mut mores, mut held_through) = (0, 0);
+    for _ in 0..600 {
+        let more = {
+            let w = st.borrow();
+            !w.ui.input.accept && w.ui.input.in_wait && w.ui.input.target_pending == 1
+        };
+        if more && run.is_some() {
+            held_through += 1;
+            if queued.is_empty() && e.io().pending_events() == 0 {
+                queued.push(InputEvent::Key(Key::Space));
+                mores += 1;
+            }
+        }
+        page_step(&mut e, &mut queued, &mut run);
+        if run.is_none() && at_prompt(&e, &queued) {
+            break;
+        }
+    }
+    eprintln!("more prompts answered {mores}, steps the press waited through one {held_through}");
+    assert!(mores >= 1, "a more prompt came before the target read");
+    assert!(run.is_none(), "the press went in after it");
+    let after = e.state();
+    assert!(
+        after.main.attack_target == loaf,
+        "the press reached Attack's target read"
+    );
+    assert!(after.actors.movement_points[hero as usize] != s.actors.movement_points[hero as usize]);
 }

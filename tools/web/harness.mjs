@@ -992,6 +992,12 @@ export const contextMenuAt = (page, x, y) => page.evaluate(([gx, gy]) => {
   return json ? JSON.parse(json) : null;
 }, [x, y]);
 
+/// Spec 17: `contextMenuAt` for each game pixel of `points` ([x, y] each), in one call.
+export const contextMenus = (page, points) => page.evaluate((list) => list.map(([gx, gy]) => {
+  const json = globalThis.__shownGame?.context_menu(gx, gy) ?? '';
+  return json ? JSON.parse(json) : null;
+}), points);
+
 /// Presses the right button at game pixel (x, y) and waits until the page's context menu shows;
 /// the button stays down.
 export async function rightPress(page, x, y) {

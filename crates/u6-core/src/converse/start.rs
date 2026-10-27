@@ -190,7 +190,7 @@ fn set_vars(s: &mut State, talker: u8, target: i16) {
 /// anything else runs the text with its keyword blocks.
 pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
     load_text(cx);
-    let refusal = cx.st(|s| refusal(s, talker, target));
+    let refusal = cx.st(|s| checked(s, talker, target));
     if let Some(m) = refusal {
         let m = cx.msg(m);
         seams::print(cx, &m).await;
@@ -265,11 +265,35 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
     });
 }
 
-/// The refusal message of 0x114afa's checks (pseudocode l.25-54), or `None`; sets the talker /
-/// NPC words.
-pub(crate) fn refusal(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
+/// 0x114afa's checks (pseudocode l.25-54) as it makes them: the talker and NPC words set (the
+/// NPC the target, a shrine's or statue's word once the first two checks passed), then the
+/// refusal message ([`refusal`]), or `None`.
+fn checked(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
+    let r = refusal(s, talker, target);
     s.converse.talker = talker;
-    s.converse.npc = target;
+    s.converse.npc = match r {
+        Some(Msg::NotOnScreen | Msg::NotInSolo) => target,
+        _ => npc_of(s, target),
+    };
+    r
+}
+
+/// The NPC 0x114afa talks with for `target` (pseudocode l.28-30): a shrine's or a statue's is
+/// the high byte of its object word, anyone else is the target.
+pub(crate) fn npc_of(s: &State, target: i16) -> i16 {
+    let ty = obj_type(s, target);
+    if ty == SHRINE || STATUES.contains(&ty) {
+        i16::from((seams::object_word_250c(s, target) >> 8) as u8)
+    } else {
+        target
+    }
+}
+
+/// The refusal message of 0x114afa's checks (pseudocode l.25-54) for `talker` and `target`, or
+/// `None`, from the state alone: a party member off screen, solo mode for another member than
+/// the first, a dead NPC 0 / ≥ 0xe0 reached by spell, an actor that cannot answer, A4-0x7afb
+/// set, talking to oneself.
+pub(crate) fn refusal(s: &State, talker: i16, target: i16) -> Option<Msg> {
     if status(s, target) & 0x80 != 0 && !on_screen(s, target) {
         return Some(Msg::NotOnScreen);
     }
@@ -277,11 +301,7 @@ pub(crate) fn refusal(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
     if solo != -1 && solo != 0 {
         return Some(Msg::NotInSolo);
     }
-    let ty = obj_type(s, target);
-    if ty == SHRINE || STATUES.contains(&ty) {
-        s.converse.npc = i16::from((seams::object_word_250c(s, target) >> 8) as u8);
-    }
-    let npc = s.converse.npc;
+    let npc = npc_of(s, target);
     let st = status(s, npc);
     let by_spell = s.converse.by_spell;
     if (npc == 0 || npc >= 0xe0) && st & 0x10 != 0 && by_spell {
@@ -301,7 +321,7 @@ pub(crate) fn refusal(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
     if seams::talk_refused(s) {
         return Some(Msg::NoResponse);
     }
-    if s.converse.talker == s.converse.npc {
+    if talker == npc {
         return Some(Msg::TalkingToYourself);
     }
     None

@@ -269,9 +269,9 @@ pub(crate) fn has_spells(s: &mut State) -> bool {
     s.magic.known.iter().any(|&w| w != 0)
 }
 
-/// 0x11abd0's checks after the choice: `actor`'s level against `spell`'s circle, the magic points,
-/// the reagent count of the page line that shows the spell (line -1 reads the byte before the
-/// counts, the last page byte A4+0x17ff).
+/// Original: 0x11abd0 (magic: the checks after the choice, pseudocode l.97-108: `actor`'s level
+/// against `spell`'s circle, the magic points, the reagent count of the page line that shows the
+/// spell (0x11612e; line -1 reads the byte before the counts, the last page byte A4+0x17ff))
 pub(crate) fn checks_refusal(s: &State, actor: u16, spell: u16, circle: u16) -> Option<Refusal> {
     let a = usize::from(actor);
     let line = page_line(&s.magic, spell);
@@ -292,11 +292,11 @@ pub(crate) fn checks_refusal(s: &State, actor: u16, spell: u16, circle: u16) -> 
 }
 
 /// Port-only (spec 17): what Cast at a map target (the book's current spell on the cell,
-/// 0x11abd0 pseudocode l.41-49) refuses, run on `s` (the caller's copy: the books are loaded and
-/// the page laid out into it as the command does): no book, the negate timer, no spells, then
-/// the checks on the page the book would draw (0x116218: its lines, each line's reagent count as
-/// 0x116084 keeps it, the current spell's marked).
-pub(crate) fn refusal_at_target(s: &mut State) -> Option<Refusal> {
+/// 0x11abd0 pseudocode l.41-49) refuses. Writes the `State` it is given, as the command does
+/// (the books, their loading 0x115da4, the page's lines and counts 0x116218 / 0x116084, the
+/// current spell's mark): the context menu passes its own copy. No book, the negate timer, no
+/// spells, then the checks on that page ([`checks_refusal`]).
+pub(crate) fn refusal_at_target_on(s: &mut State) -> Option<Refusal> {
     let books = readied_books(s);
     let (Some(&b1), b2) = (books.first(), books.get(1).copied().unwrap_or(0)) else {
         return Some(Refusal::Book);
@@ -313,7 +313,7 @@ pub(crate) fn refusal_at_target(s: &mut State) -> Option<Refusal> {
     let current = s.magic.current_spell();
     for (i, &spell) in lines.iter().enumerate() {
         s.magic.page[i] = spell as u8;
-        if let Some(n) = reagent_casts(s, Slot::from(actor as i16), spell) {
+        if let Some(n) = super::book::casts_of(s, Slot::from(actor as i16), spell) {
             s.magic.page_reagents[i] = n as u8;
         }
         if spell == current {
@@ -321,23 +321,6 @@ pub(crate) fn refusal_at_target(s: &mut State) -> Option<Refusal> {
         }
     }
     checks_refusal(s, actor, current, current / 16 + 1)
-}
-
-/// 0x116084's count for `spell` without its print: the least carried count over its reagents
-/// (quality 0), 99 when it needs none; Help (7) and Armageddon (0x70) 1; `None` for a spell of no
-/// reagent other than those two (the line keeps its count).
-fn reagent_casts(s: &State, actor: Slot, spell: u16) -> Option<i16> {
-    let mask = s.magic.tables.mask(usize::from(spell));
-    if mask == 0 && spell != HELP && spell != 0x70 {
-        return None;
-    }
-    if spell == HELP || spell == 0x70 {
-        return Some(1);
-    }
-    let reagents = (0..8).filter(|i| mask >> i & 1 != 0);
-    let counts = reagents
-        .map(|i| super::book::carried_count(&s.objects, actor, s.magic.tables.reagents[i], 0));
-    Some(counts.fold(99, i16::min))
 }
 
 /// Original: 0x11615a (magic: use one of each reagent spell `spell` needs from `actor`, and

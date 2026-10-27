@@ -4038,39 +4038,55 @@ function focusMenu() {
   (items.find((x) => x.getAttribute('aria-disabled') !== 'true') ?? items[0])?.focus({ preventScroll: true });
 }
 
-// The menu at client point (x, y) inside the screen box: to the right of and below the point, or
-// flipped to the other side where it would not fit, and kept inside the box.
+// The menu at client point (x, y): to the right of and below the point, or flipped to the other
+// side where it would not fit, kept inside the part of the screen box the viewport shows; at most
+// that part's size, scrolling inside when its entries need more.
 function placeMenu(x, y) {
   const box = screenBox.getBoundingClientRect();
-  const w = contextMenu.offsetWidth;
-  const h = contextMenu.offsetHeight;
-  let left = x - box.left;
-  let top = y - box.top;
-  if (left + w > box.width) left -= w;
-  if (top + h > box.height) top -= h;
-  contextMenu.style.left = `${clamp(left, 0, Math.max(0, box.width - w))}px`;
-  contextMenu.style.top = `${clamp(top, 0, Math.max(0, box.height - h))}px`;
+  const view = {
+    left: Math.max(box.left, 0),
+    top: Math.max(box.top, 0),
+    right: Math.min(box.right, window.innerWidth),
+    bottom: Math.min(box.bottom, window.innerHeight),
+  };
+  const [vw, vh] = [Math.max(0, view.right - view.left), Math.max(0, view.bottom - view.top)];
+  contextMenu.style.maxWidth = `${vw}px`;
+  contextMenu.style.maxHeight = `${vh}px`;
+  const w = Math.min(contextMenu.offsetWidth, vw);
+  const h = Math.min(contextMenu.offsetHeight, vh);
+  let left = x;
+  let top = y;
+  if (left + w > view.right) left -= w;
+  if (top + h > view.bottom) top -= h;
+  left = clamp(left, view.left, Math.max(view.left, view.right - w));
+  top = clamp(top, view.top, Math.max(view.top, view.bottom - h));
+  contextMenu.style.left = `${left - box.left}px`;
+  contextMenu.style.top = `${top - box.top}px`;
 }
 
 const menuItems = () => [...contextMenu.querySelectorAll('[role="menuitem"]')];
 
 // Closes the menu; the canvas has the focus again unless `refocus` is false. A key that closes it
-// (`key`) gives the canvas the focus only at its release, so the release never reaches the game.
-let refocusAt = null; // the key whose release gives the canvas the focus back
-function closeContextMenu(refocus = true, key = null) {
+// (`code`, its DOM `code`) gives the canvas the focus only at its release, so the release never
+// reaches the game; a blur of the window forgets it.
+let refocusAt = null; // the physical key whose release gives the canvas the focus back
+function closeContextMenu(refocus = true, code = null) {
   if (menuAt === null) return;
   menuAt = null;
   contextMenu.hidden = true;
   contextMenu.replaceChildren();
-  if (refocus && key !== null) refocusAt = key;
+  if (refocus && code !== null) refocusAt = code;
   else if (refocus) canvas.focus({ preventScroll: true });
 }
 window.addEventListener('keyup', (e) => {
-  if (refocusAt === null || e.key !== refocusAt) return;
+  if (refocusAt === null || e.code !== refocusAt) return;
   refocusAt = null;
   e.stopPropagation();
   canvas.focus({ preventScroll: true });
 }, { capture: true });
+window.addEventListener('blur', () => {
+  refocusAt = null;
+});
 
 function chooseEntry(item, key = null) {
   if (menuAt === null || item.getAttribute('aria-disabled') === 'true') return;
@@ -4096,12 +4112,12 @@ contextMenu.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowUp') focus(at < 0 ? -1 : at - 1);
   else if (e.key === 'Home') focus(0);
   else if (e.key === 'End') focus(-1);
-  else if (e.key === 'Escape') closeContextMenu(true, e.key);
+  else if (e.key === 'Escape') closeContextMenu(true, e.code);
   else if (e.key === 'Enter' || e.key === ' ') {
-    if (at >= 0) chooseEntry(items[at], e.key);
+    if (at >= 0) chooseEntry(items[at], e.code);
   } else if (letter !== undefined) {
     const item = items.find((x) => Number(x.dataset.code) === letter && x.getAttribute('aria-disabled') !== 'true');
-    if (item) chooseEntry(item, e.key);
+    if (item) chooseEntry(item, e.code);
   } else if (e.key !== 'Tab') return;
   if (e.key !== 'Tab') {
     e.preventDefault();
@@ -4113,7 +4129,7 @@ contextMenu.addEventListener('focusout', (e) => {
 });
 contextMenu.addEventListener('contextmenu', (e) => e.preventDefault());
 // A press outside the open menu closes it and goes nowhere else: not to the game, up to its
-// release.
+// release, which the window sees wherever it happens (the press need not be the canvas's).
 window.addEventListener('pointerdown', (e) => {
   if (menuAt === null || contextMenu.contains(e.target)) return;
   e.preventDefault();
@@ -4121,6 +4137,13 @@ window.addEventListener('pointerdown', (e) => {
   swallowing = true;
   closeContextMenu();
 }, { capture: true });
+for (const kind of ['pointerup', 'pointercancel']) {
+  window.addEventListener(kind, (e) => {
+    if (!swallowing || (kind === 'pointerup' && (e.buttons & 3) !== 0)) return;
+    swallowing = false;
+    if (e.target === canvas) e.stopPropagation();
+  }, { capture: true });
+}
 
 // The whole page accepts drops so a near miss does not open the file in the tab.
 window.addEventListener('dragover', (e) => {

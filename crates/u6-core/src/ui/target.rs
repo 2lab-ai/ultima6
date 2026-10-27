@@ -77,9 +77,10 @@ const DIRECTION_KEYS: [(u16, i16); 8] = [
 /// the panel keys. The result is non-zero. The inline spell syllable entry and the spellbook
 /// keys are magic's ([`crate::magic::spell_key`], [`crate::magic::book_panel_key`]).
 ///
-/// Port-only (spec 17): [`super::InputState::in_wait`] is set while it runs.
+/// Port-only (spec 17): [`super::InputState::in_wait`] is set while it runs ([`InWait`]), and a
+/// wait the command loop's prompt read enters counts in [`super::InputState::prompt_reads`].
 pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
-    let outer = std::mem::replace(&mut state.borrow_mut().ui.input.in_wait, true);
+    let _wait = InWait::enter(state);
     if state.borrow().ui.input.accept {
         #[cfg(test)]
         crate::converse::disasm::trace::wait_put();
@@ -93,7 +94,6 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     }
     loop {
         if key != 0 {
-            state.borrow_mut().ui.input.in_wait = outer;
             return key;
         }
         key = pointer_click(state, io).await;
@@ -121,6 +121,35 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         } else {
             panel_key(state, io, key).await
         };
+    }
+}
+
+/// Port-only (spec 17): [`super::InputState::in_wait`] set for the life of one
+/// [`wait_event`], and put back as it was when the wait ends, however it ends: its return, or
+/// its future dropped while it waits (a more prompt waits inside an outer wait, so the outer's
+/// flag comes back). Entering while the command loop reads a command (A4-0x7a2c set) counts one
+/// prompt read.
+struct InWait<'a> {
+    state: &'a RefCell<State>,
+    outer: bool,
+}
+
+impl<'a> InWait<'a> {
+    fn enter(state: &'a RefCell<State>) -> Self {
+        let mut s = state.borrow_mut();
+        if s.main.reading == 1 {
+            s.ui.input.prompt_reads = s.ui.input.prompt_reads.wrapping_add(1);
+        }
+        let outer = std::mem::replace(&mut s.ui.input.in_wait, true);
+        InWait { state, outer }
+    }
+}
+
+impl Drop for InWait<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.state.try_borrow_mut() {
+            s.ui.input.in_wait = self.outer;
+        }
     }
 }
 
@@ -745,5 +774,45 @@ mod tests {
         }
         println!("{} (state, key) pairs taken, {} not", cases[1], cases[0]);
         assert!(cases[0] > 0 && cases[1] > 0);
+    }
+
+    /// Spec 17 round 2, item 5: [`InWait`] puts the flag back as it was however the wait ends: a
+    /// more prompt's wait inside the prompt's leaves it set for the outer one, the outer's end
+    /// clears it, and a wait whose future is dropped while it waits (an engine dropped) clears it
+    /// too. Only a wait entered at the command loop's read counts a prompt read.
+    #[test]
+    fn the_wait_flag_comes_back_as_it_was_however_the_wait_ends() {
+        use std::rc::Rc;
+        let state = RefCell::new(State::default());
+        state.borrow_mut().main.reading = 1;
+        {
+            let _outer = InWait::enter(&state);
+            state.borrow_mut().main.reading = 0;
+            {
+                let _more = InWait::enter(&state);
+                assert!(state.borrow().ui.input.in_wait, "inside both");
+            }
+            assert!(
+                state.borrow().ui.input.in_wait,
+                "the outer wait still waits"
+            );
+        }
+        assert!(!state.borrow().ui.input.in_wait, "after both");
+        assert_eq!(state.borrow().ui.input.prompt_reads, 1, "one prompt read");
+
+        let kept: Rc<RefCell<Option<Rc<RefCell<State>>>>> = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&kept);
+        let mut e =
+            crate::Engine::with_game(State::default(), crate::Files::default(), move |st, io| {
+                *keep.borrow_mut() = Some(Rc::clone(&st));
+                async move {
+                    wait_event(&st, &io).await;
+                }
+            });
+        e.tick(&[], 16);
+        let st = kept.borrow().clone().expect("the game ran");
+        assert!(st.borrow().ui.input.in_wait, "waiting");
+        drop(e);
+        assert!(!st.borrow().ui.input.in_wait, "the dropped wait cleared it");
     }
 }

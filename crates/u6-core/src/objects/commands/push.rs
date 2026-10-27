@@ -309,6 +309,17 @@ fn member(s: &State, m: i16) -> Slot {
     Slot::from(s.actors.party.members[usize::try_from(m).unwrap_or(0).min(15)])
 }
 
+/// 0x12b24c..: the member the inventory panel shows (A4-0x7a3e) is out of view (0x112bf2): the
+/// not-around line.
+pub(crate) fn giver_away(s: &State) -> bool {
+    !crate::converse::on_screen(s, member(s, s.ui.panel.member))
+}
+
+/// 0x12b24c..: `obj` is of type 0x4c, which stays where it is (its line, A4-0x6c3c).
+pub(crate) fn fixed(s: &State, obj: Slot) -> bool {
+    s.objects.kind(obj) == FIXED
+}
+
 /// The carried half of 0x12ae04 (0x12b24c..0x12ba34) on `obj`.
 ///
 /// A readied object that resists (0x1122dc) only redraws the panel's container (0x111be0). The
@@ -332,8 +343,7 @@ async fn move_carried(state: &RefCell<State>, io: &Io, obj: Slot) {
         let kind = s.objects.kind(obj);
         (kind, stack_kind(&s.objects, kind), s.ui.panel.member)
     };
-    let giver = member(&state.borrow(), m);
-    if !crate::converse::on_screen(&state.borrow(), giver) {
+    if giver_away(&state.borrow()) {
         print_at(state, io, S_NOT_AROUND, &[]).await;
         return;
     }
@@ -342,7 +352,7 @@ async fn move_carried(state: &RefCell<State>, io: &Io, obj: Slot) {
         return;
     }
     print_at(state, io, S_TO, &[]).await;
-    if kind == FIXED {
+    if fixed(&state.borrow(), obj) {
         let msg = message(&state.borrow(), P_FIXED);
         print_at(state, io, S_NL2_LINE_NL, &[Arg::Str(&msg)]).await;
         return;

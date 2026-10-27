@@ -3,16 +3,15 @@
 //!
 //! The query reads what each command reaches from the pressed map cell or inventory slot: the
 //! selection the pointer target 0x105f7c leaves, then each command's own resolution of it and its
-//! own checks, run on a copy of the state (they move the location cursor and the sums) through
-//! the handlers' functions. An entry is a command that resolves to an object; a check of the
-//! target's kind hides it, a check of the current state disables it with a [`Reason`]; a random
-//! draw or a later prompt never does. The run is the original's mouse flow: a left press on the
-//! command's icon, then a left press at the target once the command reads it ([`Run`]).
+//! own checks, through the handlers' functions, on one copy of the state (they move the location
+//! cursor, the sums, the weapon list and the book's page; each check takes the selection back as
+//! the press left it). An entry is a command that resolves to an object; a check of the target's
+//! kind hides it, a check of the current state disables it with a [`Reason`]; a random draw or a
+//! later prompt never does. The run is the original's mouse flow: a left press on the command's
+//! icon, then a left press at the target once the command reads it ([`Run`]).
 
 use super::cursor::{NO_ICON, target_from_pointer};
-use super::target::LEADER_CELL;
 use crate::engine::{InputEvent, Io};
-use crate::geom::RULE_HALF;
 use crate::objects::commands::{drop, get, push};
 use crate::objects::{Shown, Slot};
 use crate::state::State;
@@ -52,7 +51,7 @@ pub enum Kind {
 /// Why an entry is shown disabled: a check of the current state that refuses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
-    /// More than one tile away.
+    /// More than one tile away, or out of the weapons' range.
     Far,
     /// Too heavy to carry.
     Heavy,
@@ -88,9 +87,43 @@ pub enum Reason {
     Silent,
     /// The actor lies down.
     Lying,
+    /// No arrows or bolts for the weapons.
+    Ammo,
+    /// A foe next to the leader stops the missiles.
+    Blocked,
+    /// It will not come off (a readied 0x4c).
+    Stays,
+    /// The chest is locked.
+    Locked,
 }
 
 impl Reason {
+    /// Every reason, for the page's words.
+    pub const ALL: [Reason; 22] = [
+        Reason::Far,
+        Reason::Heavy,
+        Reason::Aboard,
+        Reason::Window,
+        Reason::Hands,
+        Reason::Book,
+        Reason::Negate,
+        Reason::Spells,
+        Reason::Level,
+        Reason::Points,
+        Reason::Reagents,
+        Reason::Solo,
+        Reason::Door,
+        Reason::Hand,
+        Reason::Case,
+        Reason::Screen,
+        Reason::Silent,
+        Reason::Lying,
+        Reason::Ammo,
+        Reason::Blocked,
+        Reason::Stays,
+        Reason::Locked,
+    ];
+
     /// The code the page words.
     pub fn code(self) -> &'static str {
         match self {
@@ -112,6 +145,10 @@ impl Reason {
             Reason::Screen => "screen",
             Reason::Silent => "silent",
             Reason::Lying => "lying",
+            Reason::Ammo => "ammo",
+            Reason::Blocked => "blocked",
+            Reason::Stays => "stays",
+            Reason::Locked => "locked",
         }
     }
 }
@@ -137,6 +174,8 @@ impl Entry {
 pub struct Section {
     /// The object (-1: the cell's tile).
     pub object: Slot,
+    /// The object's type and frame (none for the tile).
+    pub kind: Option<(u16, u16)>,
     /// Its display name, UTF-8 (the user's game text or the locale pack's).
     pub name: String,
     pub entries: Vec<Entry>,
@@ -163,7 +202,7 @@ impl Menu {
 
 /// The menu of a right press at frame pixel (x, y): `None` unless the command loop waits for a
 /// command (A4-0x7a2c set) and the pixel is on the map or on an inventory or equipment slot (in
-/// Wide the inventory view's slot too). `s` is read only.
+/// Wide the inventory view's slot too). `s` is read only: the checks run on one copy of it.
 pub fn query(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
     if s.main.reading != 1 {
         return None;
@@ -174,8 +213,8 @@ pub fn query(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
     let underlined = Some(u16::from(super::globals::last_command(&c.actors)))
         .filter(|&u| u != u16::from(NO_ICON));
     let mut menu = match super::click::region_at(&c, x, y)? {
-        0 => map_menu(c, io)?,
-        2 if c.ui.panel.mode == 0x92 => panel_menu(c, io)?,
+        0 => map_menu(&mut c, io)?,
+        2 if c.ui.panel.mode == 0x92 => panel_menu(&mut c, io)?,
         #[cfg(feature = "wide")]
         i if super::pointer::SLOT_REGIONS.contains(&i) => {
             if !super::panels::begin_slot_press(&mut c, i - super::pointer::SLOT_REGIONS.start)
@@ -183,7 +222,7 @@ pub fn query(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
             {
                 return None;
             }
-            panel_menu(c, io)?
+            panel_menu(&mut c, io)?
         }
         _ => return None,
     };
@@ -201,16 +240,6 @@ fn leader(s: &State) -> Slot {
     s.actors.party.leader().map_or(0, |l| l.0 as Slot)
 }
 
-/// Spec 13 Decision 4: a non-Look command takes a map target only in the original's 11 × 11
-/// window round the leader (`ui/click.rs`, `in_reach`); in Original that is the whole view.
-fn in_window(s: &State) -> bool {
-    let (px, py) = s.ui.input.pointer;
-    let (col, row) = super::pointer::view_cell(px, py);
-    let (lx, ly) = (i16::from(LEADER_CELL.0), i16::from(LEADER_CELL.1));
-    let rule = -RULE_HALF..=RULE_HALF;
-    rule.contains(&(col - lx)) && rule.contains(&(row - ly))
-}
-
 /// The display name of `slot` as the commands print it (0x10eef8, [`crate::objects::shown_name`]),
 /// its plural markers read for its quantity.
 fn name_of(s: &State, slot: Slot) -> String {
@@ -224,6 +253,33 @@ fn shown_text(shown: Shown, plural: bool) -> String {
         Shown::Pack(b) => String::from_utf8_lossy(&b).into_owned(),
     };
     u6_formats::look::resolve_plural(&text, plural)
+}
+
+/// The press's copy of the state, each check run on it as the press left it: the selection and
+/// the target put back before each (the checks resolve them their own way); what else a check
+/// writes (the location cursor, the sums, the weapon list, the book's page) no later check reads.
+struct Press<'a> {
+    c: &'a mut State,
+    selection: Slot,
+    target: (i16, i16),
+}
+
+impl<'a> Press<'a> {
+    fn new(c: &'a mut State) -> Self {
+        let (selection, target) = (c.ui.input.selection, c.ui.input.target);
+        Press {
+            c,
+            selection,
+            target,
+        }
+    }
+
+    /// The copy, its selection and target as the press left them.
+    fn check(&mut self) -> &mut State {
+        self.c.ui.input.selection = self.selection;
+        self.c.ui.input.target = self.target;
+        self.c
+    }
 }
 
 /// The entries of one press, each with the object its command resolves to.
@@ -254,6 +310,7 @@ impl Entries {
                 let entries: Vec<Entry> = self.0.iter().filter(|e| e.0 == o).map(|e| e.1).collect();
                 (!entries.is_empty()).then(|| Section {
                     object: o,
+                    kind: Some((s.objects.kind(o), s.objects.tf(o) >> 10)),
                     name: name_of(s, o),
                     entries,
                 })
@@ -264,8 +321,8 @@ impl Entries {
 
 /// The map menu: the pointer target (0x105f7c) on the copy `c`, then Talk, Look, Use, Get,
 /// Move, Cast and Attack, each from that selection.
-fn map_menu(mut c: State, io: &Io) -> Option<Menu> {
-    target_from_pointer(&mut c);
+fn map_menu(c: &mut State, io: &Io) -> Option<Menu> {
+    target_from_pointer(c);
     let sel = c.ui.input.selection;
     let cell = Some(c.ui.input.target);
     // An invisible selection (status 0x02) is the tile to Look as well (0x1298b8 pseudocode
@@ -278,7 +335,8 @@ fn map_menu(mut c: State, io: &Io) -> Option<Menu> {
         };
         let section = Section {
             object: -1,
-            name: tile_name(&c),
+            kind: None,
+            name: tile_name(c),
             entries: vec![look],
         };
         return Some(Menu {
@@ -288,39 +346,42 @@ fn map_menu(mut c: State, io: &Io) -> Option<Menu> {
             sections: vec![section],
         });
     }
-    let window = (!in_window(&c)).then_some(Reason::Window);
+    // Spec 13 Decision 4: a non-Look command takes a map target only in the original's window.
+    let window = (!super::click::in_reach(c, USE)).then_some(Reason::Window);
+    let (lead, aboard) = (leader(c), aboard(c));
+    let mut p = Press::new(c);
     let mut e = Entries::default();
-    if let Some((o, r)) = talk(&c) {
+    if let Some((o, r)) = talk(p.check()) {
         e.add(o, TALK, window.or(r));
     }
-    e.add(look_object(&c), LOOK, None);
-    if let Some((o, r)) = use_entry(&c, io) {
+    e.add(look_object(p.check()), LOOK, None);
+    if let Some((o, r)) = use_entry(p.check(), io) {
         e.add(o, USE, window.or(r));
     }
-    if let Some((o, r, theft)) = get_entry(&c) {
+    if let Some((o, r, theft)) = get_entry(p.check()) {
         e.add(o, GET, window.or(r));
         if let Some(last) = e.0.last_mut() {
             last.1.theft = theft;
         }
     }
-    if let Some(r) = move_entry(&c) {
+    if let Some(r) = move_entry(p.check()) {
         e.add(sel, MOVE, window.or(r));
     }
-    let cast = if aboard(&c) {
+    let cast = if aboard {
         Some(Reason::Aboard)
     } else {
-        crate::magic::cast::refusal_at_target(&mut c.clone()).map(cast_reason)
+        crate::magic::cast::refusal_at_target_on(p.check()).map(cast_reason)
     };
     e.add(sel, CAST, window.or(cast));
-    if sel != leader(&c) {
-        let aboard = crate::combat::attack::refused_aboard(&c).then_some(Reason::Aboard);
-        e.add(sel, ATTACK, window.or(aboard));
+    if sel != lead {
+        e.add(sel, ATTACK, window.or(attack_reason(p.check())));
     }
+    let c = p.check();
     Some(Menu {
         kind: Kind::Map,
         cell,
         underlined: None,
-        sections: e.sections(&c, sel),
+        sections: e.sections(c, sel),
     })
 }
 
@@ -337,10 +398,10 @@ fn tile_name(c: &State) -> String {
 }
 
 /// Look's object (0x1298b8 pseudocode l.52-60): an actor's or a horse's rider (0x1240fa).
-fn look_object(c: &State) -> Slot {
+fn look_object(c: &mut State) -> Slot {
     let sel = c.ui.input.selection;
     if sel < 0x100 || c.objects.kind(sel) == HORSE {
-        crate::combat::leaves::owner(&mut c.clone(), sel)
+        crate::combat::leaves::owner(c, sel)
     } else {
         sel
     }
@@ -349,21 +410,20 @@ fn look_object(c: &State) -> Slot {
 /// Talk (0x1127c4, 0x114afa): the one it talks to and why it would refuse; `None` when Talk
 /// does not take the selection: no actor, shrine or statue, the talker itself, or no script to
 /// load (NPC 0, or past 0xe0 and not a talking object).
-fn talk(c: &State) -> Option<(Slot, Option<Reason>)> {
+fn talk(c: &mut State) -> Option<(Slot, Option<Reason>)> {
+    use crate::converse::start;
     use crate::converse::text::Msg;
-    let mut t = c.clone();
-    let target = crate::converse::start::talk_target(&mut t, c.ui.input.selection)?;
-    let talker = leader(&t);
-    let refusal = crate::converse::start::refusal(&mut t, talker, target);
-    let reason = match refusal {
+    let target = start::talk_target(c, c.ui.input.selection)?;
+    let talker = leader(c);
+    let reason = match start::refusal(c, talker, target) {
         None => None,
         Some(Msg::TalkingToYourself) => return None,
         Some(Msg::NotOnScreen) => Some(Reason::Screen),
         Some(Msg::NotInSolo) => Some(Reason::Solo),
         Some(_) => Some(Reason::Silent),
     };
-    let npc = t.converse.npc;
-    if reason.is_none() && !crate::converse::start::may_have_script(npc, t.objects.kind(target)) {
+    let npc = start::npc_of(c, target);
+    if reason.is_none() && !start::may_have_script(npc, c.objects.kind(target)) {
         return None;
     }
     Some((target, reason))
@@ -371,30 +431,29 @@ fn talk(c: &State) -> Option<(Slot, Option<Reason>)> {
 
 /// Use (0x1305e0): its object and why it would refuse; `None` when it reaches nothing or a type
 /// outside the use list (0x128b6a).
-fn use_entry(c: &State, io: &Io) -> Option<(Slot, Option<Reason>)> {
-    use crate::usecmd::dispatch;
-    let mut u = c.clone();
-    let (obj, _) = dispatch::resolve(&mut u);
+fn use_entry(u: &mut State, io: &Io) -> Option<(Slot, Option<Reason>)> {
+    use crate::usecmd::{cases, dispatch};
+    let (obj, _) = dispatch::resolve(u);
     if obj < 0 {
         return None;
     }
     let ty = u.objects.kind(obj);
-    if !crate::objects::commands::in_type_list(&u, ty) {
+    if !crate::objects::commands::in_type_list(u, ty) {
         return None;
     }
-    let reason = if aboard(&u) && crate::usecmd::refused_aboard(&u, io, obj) {
+    let reason = if aboard(u) && crate::usecmd::refused_aboard(u, io, obj) {
         Some(Reason::Aboard)
-    } else if dispatch::out_of_reach(&u, obj) {
+    } else if dispatch::out_of_reach(u, obj) {
         Some(Reason::Far)
-    } else if dispatch::not_now(&mut u, obj) {
+    } else if dispatch::not_now(u, obj) {
         Some(Reason::Door)
-    } else if dispatch::in_other_hand(&u, obj) {
+    } else if dispatch::in_other_hand(u, obj) {
         Some(Reason::Hand)
     } else {
         let frame = u.objects.tf(obj) >> 10;
-        dispatch::case_refusal(&u, obj, ty, frame).map(|r| match r {
-            dispatch::CaseRefusal::Solo => Reason::Solo,
-            dispatch::CaseRefusal::Case => Reason::Case,
+        cases::refusal(u, obj, ty, frame).map(|r| match r {
+            cases::CaseRefusal::NotSolo => Reason::Solo,
+            _ => Reason::Case,
         })
     };
     Some((obj, reason))
@@ -402,30 +461,29 @@ fn use_entry(c: &State, io: &Io) -> Option<(Slot, Option<Reason>)> {
 
 /// Get (0x12a7a4): its object, why it would refuse, and whether taking it is a theft; `None`
 /// when it reaches nothing on the map, a harmful tile, or what cannot be taken.
-fn get_entry(c: &State) -> Option<(Slot, Option<Reason>, bool)> {
-    let mut g = c.clone();
-    get::resolve(&mut g);
+fn get_entry(g: &mut State) -> Option<(Slot, Option<Reason>, bool)> {
+    get::resolve(g);
     let obj = g.ui.input.selection;
-    if obj == -1 || g.objects.place(obj) != 0 || get::hazard(&g, obj) {
+    if obj == -1 || g.objects.place(obj) != 0 || get::hazard(g, obj) {
         return None;
     }
-    let actor = leader(&g);
-    let wt = get::weigh(&mut g, actor, obj);
-    if get::cannot_take(&g, obj, wt) {
+    let actor = leader(g);
+    let wt = get::weigh(g, actor, obj);
+    if get::cannot_take(g, obj, wt) {
         return None;
     }
-    let reason = if aboard(&g) {
+    let reason = if aboard(g) {
         Some(Reason::Aboard)
-    } else if get::out_of_reach(&g, actor) {
+    } else if get::out_of_reach(g, actor) {
         Some(Reason::Far)
-    } else if get::too_heavy(&g, actor, wt) {
+    } else if get::too_heavy(g, actor, wt) {
         Some(Reason::Heavy)
-    } else if get::no_free_hand(&g, obj) {
+    } else if get::no_free_hand(g, obj) {
         Some(Reason::Hands)
     } else {
         None
     };
-    Some((obj, reason, get::theft(&g, obj)))
+    Some((obj, reason, get::theft(g, obj)))
 }
 
 /// Move of a map object (0x12ae04): why it would refuse; `None` when it does not take the
@@ -446,6 +504,20 @@ fn move_entry(c: &State) -> Option<Option<Reason>> {
     })
 }
 
+/// Attack (0x124caa): refused aboard a vessel other than a ship, else when every weapon refuses
+/// at the cell (its ammunition, its range, a foe in the way of a missile).
+fn attack_reason(c: &mut State) -> Option<Reason> {
+    use crate::combat::attack::{self, WeaponRefusal};
+    if attack::refused_aboard(c) {
+        return Some(Reason::Aboard);
+    }
+    attack::refusal_on(c).map(|r| match r {
+        WeaponRefusal::Ammo => Reason::Ammo,
+        WeaponRefusal::Range => Reason::Far,
+        WeaponRefusal::Blocked => Reason::Blocked,
+    })
+}
+
 fn cast_reason(r: crate::magic::cast::Refusal) -> Reason {
     use crate::magic::cast::Refusal;
     match r {
@@ -458,47 +530,55 @@ fn cast_reason(r: crate::magic::cast::Refusal) -> Reason {
     }
 }
 
-/// The panel menu: the slot's object (0x111e3c / 0x111eec), its own left-press action, Look,
-/// Drop, Move and Use.
-fn panel_menu(mut c: State, io: &Io) -> Option<Menu> {
+/// The panel menu: the slot's object (0x111e3c / 0x111eec), its own left-press action (0x10619c:
+/// open, ready, take off), Use, Look, Drop and Move.
+fn panel_menu(c: &mut State, io: &Io) -> Option<Menu> {
     let (px, py) = c.ui.input.pointer;
     // The container figure goes back to the parent (0x10619c), it is no slot.
     if (0x110..0x120).contains(&px) && (0x10..0x20).contains(&py) {
         return None;
     }
-    let code = target_from_pointer(&mut c);
+    let code = target_from_pointer(c);
     let sel = c.ui.input.selection;
     if sel < 0 || (code != 0x9b && code != 0x9c) {
         return None;
     }
-    let own = if code == 0x9c {
-        UNREADY
+    let mut own = Entry {
+        code: READY,
+        reason: None,
+        theft: false,
+    };
+    if code == 0x9c {
+        own.code = UNREADY;
     } else {
         let kind = c.objects.kind(sel);
         if crate::objects::in_type_set_670c(&c.objects, kind) && kind != READY_ANYWAY {
-            OPEN
-        } else {
-            READY
+            own.code = OPEN;
+            own.reason = super::click::locked_chest(c, sel).then_some(Reason::Locked);
         }
-    };
-    let aboard = aboard(&c).then_some(Reason::Aboard);
+    }
+    let aboard = aboard(c).then_some(Reason::Aboard);
+    let stays = crate::inventory::ready::stays(c, sel).then_some(Reason::Stays);
+    let mut p = Press::new(c);
     let mut e = Entries::default();
-    e.add(sel, own, None);
-    e.add(sel, LOOK, None);
-    if !drop::nothing_to_drop(&c, sel) {
-        e.add(sel, DROP, aboard);
-    }
-    if sel as u16 != c.ui.panel.container {
-        e.add(sel, MOVE, aboard);
-    }
-    if let Some((o, r)) = use_entry(&c, io) {
+    e.add(sel, own.code, own.reason);
+    if let Some((o, r)) = use_entry(p.check(), io) {
         e.add(o, USE, r);
+    }
+    e.add(sel, LOOK, None);
+    let c = p.check();
+    if !drop::nothing_to_drop(c, sel) {
+        e.add(sel, DROP, aboard.or(stays));
+    }
+    if sel as u16 != c.ui.panel.container && !push::fixed(c, sel) {
+        let away = push::giver_away(c).then_some(Reason::Screen);
+        e.add(sel, MOVE, aboard.or(stays).or(away));
     }
     Some(Menu {
         kind: Kind::Panel,
         cell: None,
         underlined: None,
-        sections: e.sections(&c, sel),
+        sections: e.sections(c, sel),
     })
 }
 
@@ -525,12 +605,15 @@ pub fn target_read(s: &State, code: u16) -> bool {
     i.target_pending == 1 && i.target_command == code && i.accept && i.in_wait
 }
 
-/// A chosen entry being run: its icon press went in, its target press waits for the target read.
+/// A chosen entry being run: its icon press went in at the prompt read `prompt`
+/// ([`super::InputState::prompt_reads`]), its target press waits for the target read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Run {
     pub code: u16,
     /// The target's frame pixel.
     pub at: (i16, i16),
+    /// The prompt read the icon press goes to.
+    pub prompt: u32,
 }
 
 /// What a run does at a step.
@@ -540,27 +623,30 @@ pub enum Step {
     Hold,
     /// Queue the target press now; the run is over.
     Release([InputEvent; 2]),
-    /// The command came back to the prompt without reading its target: forget the press.
+    /// A prompt read came after the icon's: the command ended without reading its target.
+    /// Forget the press.
     Drop,
 }
 
 impl Run {
-    /// Starts command `code` (0x81..0x88) on the target at frame pixel `at`: the icon press to
-    /// queue now, and the run that holds the target press.
-    pub fn start(code: u16, at: (i16, i16)) -> Option<([InputEvent; 2], Run)> {
+    /// Starts command `code` (0x81..0x88) on the target at frame pixel `at`, the prompt up in
+    /// `s`: the icon press to queue now, and the run that holds the target press.
+    pub fn start(s: &State, code: u16, at: (i16, i16)) -> Option<([InputEvent; 2], Run)> {
+        let prompt = s.ui.input.prompt_reads;
         (ATTACK..=USE)
             .contains(&code)
-            .then(|| (icon_press(code), Run { code, at }))
+            .then(|| (icon_press(code), Run { code, at, prompt }))
     }
 
-    /// The step for the state `s` between two ticks: `quiet` when no event that could change
-    /// what the command reads is queued (keys, text, a button), `at_prompt` when the command loop
-    /// waits for a command with nothing queued.
-    pub fn step(&self, s: &State, quiet: bool, at_prompt: bool) -> Step {
-        if quiet && target_read(s, self.code) {
-            Step::Release(left_press(self.at.0, self.at.1))
-        } else if at_prompt {
+    /// The step for the state `s` between two ticks, `quiet` when no event that could change
+    /// what the command reads is queued (keys, text, a button): a new prompt read drops the
+    /// press whatever is queued; the command's own target read takes it once the queues are
+    /// quiet.
+    pub fn step(&self, s: &State, quiet: bool) -> Step {
+        if s.ui.input.prompt_reads != self.prompt {
             Step::Drop
+        } else if quiet && target_read(s, self.code) {
+            Step::Release(left_press(self.at.0, self.at.1))
         } else {
             Step::Hold
         }
@@ -583,10 +669,10 @@ mod tests {
 
     #[test]
     fn the_target_press_goes_in_only_while_the_command_waits_in_the_event_wait() {
-        let (icon, run) = Run::start(USE, (40, 56)).expect("a map command");
-        assert_eq!(icon, icon_press(USE));
         let s = waiting(USE);
-        assert_eq!(run.step(&s, true, false), Step::Release(left_press(40, 56)));
+        let (icon, run) = Run::start(&s, USE, (40, 56)).expect("a map command");
+        assert_eq!(icon, icon_press(USE));
+        assert_eq!(run.step(&s, true), Step::Release(left_press(40, 56)));
         let mut more = s.clone();
         more.ui.input.accept = false;
         let mut printing = s.clone();
@@ -596,19 +682,30 @@ mod tests {
         let mut none = s.clone();
         none.ui.input.target_pending = 0;
         for held in [&more, &printing, &other, &none] {
-            assert_eq!(run.step(held, true, false), Step::Hold);
+            assert_eq!(run.step(held, true), Step::Hold);
         }
-        assert_eq!(run.step(&s, false, false), Step::Hold, "a key queued first");
+        assert_eq!(run.step(&s, false), Step::Hold, "a key queued first");
+        let mut again = none.clone();
+        again.ui.input.prompt_reads += 1;
+        assert_eq!(run.step(&again, true), Step::Drop, "a new prompt read");
         assert_eq!(
-            run.step(&none, true, true),
+            run.step(&again, false),
             Step::Drop,
-            "back at the prompt"
+            "also with a key queued"
+        );
+        let mut waits = s.clone();
+        waits.ui.input.prompt_reads += 1;
+        assert_eq!(
+            run.step(&waits, true),
+            Step::Drop,
+            "another command's target read"
         );
     }
 
     #[test]
     fn only_the_targeted_commands_start_a_run_and_each_icon_is_its_own_column() {
-        assert!(Run::start(REST, (0, 0)).is_none() && Run::start(OPEN, (0, 0)).is_none());
+        let s = State::default();
+        assert!(Run::start(&s, REST, (0, 0)).is_none() && Run::start(&s, OPEN, (0, 0)).is_none());
         for code in ATTACK..=COMBAT {
             let [
                 InputEvent::Pointer { x, y, buttons: 1 },
@@ -624,14 +721,9 @@ mod tests {
 
     #[test]
     fn every_reason_has_its_own_code() {
-        use Reason::*;
-        let all = [
-            Far, Heavy, Aboard, Window, Hands, Book, Negate, Spells, Level, Points, Reagents, Solo,
-            Door, Hand, Case, Screen, Silent, Lying,
-        ];
-        let mut codes: Vec<&str> = all.iter().map(|r| r.code()).collect();
+        let mut codes: Vec<&str> = Reason::ALL.iter().map(|r| r.code()).collect();
         codes.sort_unstable();
         codes.dedup();
-        assert_eq!(codes.len(), all.len());
+        assert_eq!(codes.len(), Reason::ALL.len());
     }
 }
