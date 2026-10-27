@@ -454,19 +454,26 @@ pub fn key_from_dom(code: &str, key: &str, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// Spec 19 O1c: the farthest a key event's `timeStamp` may lie from the page's clock
+/// ([`Game::set_clock`]) and be taken as the press's time; past it the two are not one timeline
+/// (a page that never set the clock, a host's own stamps) and the clock stands in.
+const CLOCK_SKEW_MS: f64 = 1000.0;
+
 /// The most characters one [`Game::text_input`] queues: more than a conversation's line holds
 /// (the engine also keeps no more text queued than that, `u6_core::engine`'s text room).
 const TEXT_CHARS: usize = 64;
 
 /// Spec 19 O1b, O1c: one key held on the page: its DOM `code`, the engine key its presses and
-/// repeats were queued as, its first press's event time (`timeStamp`), and the page's clock at
-/// the press last added for it ([`Game::step`]).
+/// repeats were queued as, its first event's time (`timeStamp`), and whether it walks: only a
+/// key whose first event was its press, made with neither Ctrl nor Alt down ([`Game::key_down`]);
+/// one first seen by a repeat ([`Game::key_repeat`]: its press was not the game's, a chord with
+/// a modifier the page kept) never does, as in the native window.
 #[derive(Clone, Debug, PartialEq)]
 struct HeldKey {
     code: String,
     key: Key,
     at: f64,
-    added: Option<f64>,
+    walking: bool,
 }
 
 #[wasm_bindgen]
@@ -526,8 +533,11 @@ pub struct Game {
     run: Option<u6_core::ui::menu::Run>,
     /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
     /// repeats were queued as, so its release takes back those ([`Game::key_up`]); spec 19 O1c:
-    /// with its first press's event time and the time of the press last added for it.
+    /// with its first event's time and whether it walks.
     held: Vec<HeldKey>,
+    /// Spec 19 O1c: the page's clock at the step whose tick the command prompt last took a
+    /// press in ([`u6_core::Engine::prompt_takes`]): the minimum interval runs from it.
+    last_step: Option<f64>,
     /// Spec 19 O1c: the page's clock, the animation frame's time ([`Game::set_clock`]: the
     /// timeline of the key events' `timeStamp`), against which a held key's times are read.
     clock: f64,
@@ -579,6 +589,7 @@ impl Game {
             voices: false,
             run: None,
             held: Vec::new(),
+            last_step: None,
             clock: 0.0,
             modifiers: false,
             sight_memory: false,
@@ -673,6 +684,15 @@ impl Game {
             u6_core::main_loop::Program::U => "u".into(),
             u6_core::main_loop::Program::Game => "game".into(),
         }
+    }
+
+    /// Spec 19 O1c: the presses the command prompt has taken in this game
+    /// ([`u6_core::Engine::prompt_takes`]: a key, a paced press; never a repeat of a direction
+    /// key, which the prompt takes back), 0 before a start. For the page's tests.
+    pub fn prompt_takes(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.prompt_takes() as f64)
     }
 
     /// Keys queued and not yet taken by the game (the page's and the engine's queues).
@@ -967,14 +987,17 @@ impl Game {
         let due = self.held_due();
         if let Some(engine) = &mut self.engine {
             // Spec 19 O1c: a held direction key is pressed again at the command prompt, at most
-            // once a `MIN_STEP_MS` on the page's clock.
+            // once a `MIN_STEP_MS` on the page's clock from the press it last took.
             if let Some(i) = due
                 && let Some(press) = engine.held_press(&self.pending, Some(self.held[i].key))
             {
                 self.pending.push(press);
-                self.held[i].added = Some(self.clock);
             }
+            let takes = engine.prompt_takes();
             engine.tick(&self.pending, ms);
+            if engine.prompt_takes() != takes {
+                self.last_step = Some(self.clock);
+            }
             self.log.extend(engine.take_log());
             if let Some(driver) = &mut self.audio {
                 driver.sync(&engine.state().sound, engine.io().files());
@@ -1370,7 +1393,7 @@ impl Game {
 
     /// Spec 19 O1c: the page's clock now, the animation frame's time (on the timeline of the
     /// key events' `timeStamp`, which [`Game::key_down`] takes), read by the held walk's interval
-    /// ([`u6_core::engine::walk_due`]). Called once a frame, before its steps.
+    /// ([`u6_core::engine::paced_press_due`]). Called once a frame, before its steps.
     pub fn set_clock(&mut self, now: f64) {
         if now.is_finite() {
             self.clock = now;
@@ -1672,8 +1695,10 @@ impl Game {
     }
 
     /// Queues `event` of the engine key the DOM key maps to ([`key_from_dom`]) while a game
-    /// runs, noting it as held by `code` from `at` (the event's `timeStamp`) if it is not held
-    /// yet; whether it is a game key.
+    /// runs, noting it as held by `code` from `at` (the event's `timeStamp`; the page's clock
+    /// instead when the two are more than [`CLOCK_SKEW_MS`] apart, a time on another timeline)
+    /// if it is not held yet, walking when `event` is the press and no modifier is down; whether
+    /// it is a game key.
     fn key_event(
         &mut self,
         event: fn(Key) -> InputEvent,
@@ -1687,11 +1712,12 @@ impl Game {
                 if self.engine.is_some() {
                     self.pending.push(event(k));
                     if !self.held.iter().any(|h| h.code == code && h.key == k) {
+                        let near = (at - self.clock).abs() <= CLOCK_SKEW_MS;
                         self.held.push(HeldKey {
                             code: code.to_string(),
                             key: k,
-                            at,
-                            added: None,
+                            at: if near { at } else { self.clock },
+                            walking: event(k) == InputEvent::Key(k) && !self.modifiers,
                         });
                     }
                 }
@@ -1702,18 +1728,19 @@ impl Game {
     }
 
     /// Spec 19 O1c: the held key (its index in `held`) the next step may press again: the
-    /// newest direction key ([`u6_core::engine::newest_direction`]; one pressed with Ctrl is
-    /// no game key, [`key_from_dom`], and with Alt or Meta never reaches the game) when its walk
-    /// is due on the page's clock ([`u6_core::engine::walk_due`]) and neither Ctrl nor Alt is
-    /// down now.
+    /// newest walking direction key ([`u6_core::engine::newest_direction`]; one pressed with
+    /// Ctrl is no game key, [`key_from_dom`], one with Alt or Meta never reaches the game, and
+    /// one first seen by a repeat does not walk) when its paced press is due on the page's clock
+    /// ([`u6_core::engine::paced_press_due`], from the last press the prompt took) and neither
+    /// Ctrl nor Alt is down now.
     fn held_due(&self) -> Option<usize> {
         if self.modifiers {
             return None;
         }
-        let keys = self.held.iter().enumerate().map(|(i, h)| (h.key, i));
-        let (_, i) = u6_core::engine::newest_direction(keys)?;
+        let walking = self.held.iter().enumerate().filter(|(_, h)| h.walking);
+        let (_, i) = u6_core::engine::newest_direction(walking.map(|(i, h)| (h.key, i)))?;
         let (h, now) = (&self.held[i], self.clock);
-        u6_core::engine::walk_due(now - h.at, h.added.map(|a| now - a)).then_some(i)
+        u6_core::engine::paced_press_due(now - h.at, self.last_step.map(|t| now - t)).then_some(i)
     }
 
     /// A pointer button is down as the input handler has it: the last pointer event queued
@@ -1724,6 +1751,7 @@ impl Game {
             InputEvent::Pointer { buttons, .. } => Some(buttons),
             InputEvent::Key(_)
             | InputEvent::Repeat(_)
+            | InputEvent::Paced(_)
             | InputEvent::Release(_)
             | InputEvent::Text(_) => None,
         });
@@ -1749,6 +1777,7 @@ impl Game {
         self.engine = Some(engine);
         self.pending.clear();
         self.held.clear();
+        self.last_step = None;
         self.redraw();
         self.hd.restart();
         self.compose_hd();
@@ -5394,10 +5423,10 @@ mod tests {
     /// Spec 19 O1c (round 3, D1'), the owner's symptom above 4.3×: at 6× and 8× every castle
     /// turn is shorter than the minimum interval (640 / 860 engine ms are 107 / 143 wall ms at
     /// 6×, 80 / 108 at 8×), so a held walk steps at an even max(turn / speed, 150) = 150 wall
-    /// ms rounded to a frame: every gap between two steps, the first one included, is 150
-    /// within one frame (the first is a frame short: the interval runs from the press, and its
-    /// step comes in the next frame; the round-2 gate on the first press alone gave 150 ms, then
-    /// turn / speed). At Max at most one press is added per 150 ms.
+    /// ms rounded to a frame: every gap between two steps, the first one included (the interval
+    /// runs from the step the prompt last took), is 150 within one frame (the round-2 gate on
+    /// the first press alone gave 150 ms, then turn / speed). At Max too, both ways (round 4
+    /// item 6): one paced press per 150 ms, no more and no fewer.
     #[test]
     fn above_4x_a_held_walk_keeps_an_even_cadence_and_max_is_rate_capped() {
         for speed in [6.0, 8.0, 0.0] {
@@ -5415,32 +5444,120 @@ mod tests {
             // The frames' clock is a sum of 1000 / 60 steps: a little slack for its rounding.
             let frame = FRAME + 0.01;
             assert!(gaps.len() >= 4, "steps while held at speed {speed}");
-            if speed == 0.0 {
-                assert!(
-                    gaps.iter().all(|&g| g >= MIN - frame),
-                    "at Max one added press per 150 ms at most: {shown:?}"
-                );
-            } else {
-                assert!(
-                    gaps.iter().all(|&g| (g - MIN).abs() <= frame),
-                    "an even 150 ms at {speed}x: {shown:?}"
-                );
-            }
+            assert!(
+                gaps.iter().all(|&g| (g - MIN).abs() <= frame),
+                "an even 150 ms at speed {speed} (0: Max): {shown:?}"
+            );
         }
     }
 
-    /// Spec 19 O1c (review, round 3 item 3): the first step comes at once, in the first step()
-    /// after the press, at 1× and at 8×.
+    /// Spec 19 O1c (round 4 item 1), the owner's symptom on a real keyboard above 4×: the down
+    /// arrow held 1 s with the browser's repeat (the first 225 wall ms after the press, then one
+    /// every 30 ms) at 6×, 8× and Max, where every castle turn is shorter than the minimum
+    /// interval. The command prompt takes the repeats back, so the paced press is its one step
+    /// source and every gap between two steps is 150 wall ms within one frame; a repeat waiting
+    /// at the prompt would step at once (a turn's 80 to 143 ms at 6× and 8×, about a step a
+    /// repeat at Max). Written on the API round 3 had, so it runs on that code as it is.
+    #[test]
+    fn above_4x_a_held_walk_with_the_browsers_repeat_keeps_the_minimum_interval() {
+        for speed in [6.0, 8.0, 0.0] {
+            let Some(mut game) = in_the_castle() else {
+                return;
+            };
+            game.set_speed(speed);
+            let t0 = game.clock;
+            assert!(game.key_down("ArrowDown", "ArrowDown", false, t0));
+            let mut at = game.leader_position();
+            let mut steps = Vec::new();
+            let mut next_repeat = 225.0;
+            while game.clock - t0 < 1000.0 {
+                while game.clock - t0 + FRAME > next_repeat {
+                    assert!(game.key_repeat("ArrowDown", "ArrowDown", false, t0 + next_repeat));
+                    next_repeat += 30.0;
+                }
+                frame(&mut game, FRAME, &mut |g| {
+                    if g.leader_position() != at {
+                        at = g.leader_position();
+                        steps.push(g.clock - t0);
+                    }
+                });
+            }
+            assert!(game.key_up("ArrowDown"));
+            let gaps: Vec<f64> = steps.windows(2).map(|w| w[1] - w[0]).collect();
+            let shown: Vec<f64> = gaps.iter().map(|g| g.round()).collect();
+            println!(
+                "held 1 s at speed {speed} with the browser's repeat: {} steps, gaps {shown:?} wall ms",
+                steps.len()
+            );
+            assert!(gaps.len() >= 4, "steps while held at speed {speed}");
+            assert!(
+                gaps.iter().all(|&g| (g - MIN).abs() <= FRAME + 0.01),
+                "150 ms within a frame at speed {speed} (0: Max): {shown:?}"
+            );
+        }
+    }
+
+    /// Spec 19 O1c (round 4 item 3): the minimum interval holds between steps however late a
+    /// frame took the press. At Max the arrow is pressed at the page's clock t0 and the first
+    /// frame comes 200 ms late, so the press is taken there, 200 ms after its event; then 60 Hz
+    /// frames. The second step comes 150 ms after the first (the interval runs from the step the
+    /// prompt took), not within that frame because the press is already 150 ms old.
+    #[test]
+    fn a_late_first_frame_keeps_the_minimum_interval_after_the_first_step() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        game.set_speed(0.0);
+        let t0 = game.clock;
+        assert!(down(&mut game, "ArrowDown"));
+        let mut at = game.leader_position();
+        let mut steps = Vec::new();
+        let mut seen = |g: &Game| {
+            if g.leader_position() != at {
+                at = g.leader_position();
+                steps.push(g.clock - t0);
+            }
+        };
+        frame(&mut game, 200.0, &mut seen);
+        while game.clock - t0 < 700.0 {
+            frame(&mut game, FRAME, &mut seen);
+        }
+        assert!(game.key_up("ArrowDown"));
+        let shown: Vec<f64> = steps.iter().map(|t| t.round()).collect();
+        println!("a 200 ms first frame at Max: steps at {shown:?} wall ms from the press");
+        assert!(steps.len() >= 3, "a walk: {shown:?}");
+        assert_eq!(steps[0], 200.0, "the press, in the late frame");
+        let gaps: Vec<f64> = steps.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.iter().all(|&g| g >= MIN - 0.01),
+            "150 ms between steps: {shown:?}"
+        );
+    }
+
+    /// Spec 19 O1c (review, round 3 item 3; round 4 item 9): the first step comes at once, in
+    /// the first step() after the press, and on the page's clock in the first frame that runs a
+    /// step: at 8× and Max the first frame after the press; at 1×, where a step is 20 wall ms,
+    /// the second 60 Hz frame (the pacer's, not the walk's).
     #[test]
     fn the_first_step_follows_the_first_step_call_after_the_press() {
-        for speed in [1.0, 8.0] {
+        for speed in [1.0, 8.0, 0.0] {
             let Some(mut game) = in_the_castle() else {
                 return;
             };
             let (cells, first) = press_for(&mut game, speed, 120.0);
-            println!("speed {speed}: the first step after {first} step() call(s)");
+            let ms = cells.first().map_or(f64::NAN, |c| c.0);
+            println!("speed {speed}: the first step after {first} step() call(s), {ms:.1} wall ms");
             assert!(!cells.is_empty() && cells[0].1, "a step while down");
             assert_eq!(first, 1, "the first step() after the press, at {speed}x");
+            let frames = if speed == 0.0 {
+                1.0
+            } else {
+                (f64::from(pacer::STEP_MS) / speed / FRAME).ceil()
+            };
+            assert!(
+                ms <= frames * FRAME + 0.01,
+                "within {frames} frame(s) at {speed}x: {ms} ms"
+            );
         }
     }
 
@@ -5502,6 +5619,25 @@ mod tests {
         assert_eq!(game.held_due(), None, "140 ms down: not due");
         game.set_clock(1250.0);
         assert_eq!(game.held_due(), Some(0), "150 ms down: due");
+    }
+
+    /// Spec 19 O1c (round 4 item 12): a press whose event time is more than [`CLOCK_SKEW_MS`]
+    /// from the page's clock (another timeline) is timed from the clock instead: pressed at
+    /// 5000 with the clock at 1000, it is due at 1150, not at 5150; one 900 ms off keeps its own
+    /// time.
+    #[test]
+    fn a_press_far_from_the_clock_is_timed_from_the_clock() {
+        let mut game = Game::new();
+        game.engine = Some(reader(true, Rc::default()));
+        game.set_clock(1000.0);
+        game.step(20);
+        assert!(game.key_down("ArrowLeft", "ArrowLeft", false, 5000.0));
+        assert_eq!(game.held[0].at, 1000.0, "the clock's time");
+        game.set_clock(1150.0);
+        assert_eq!(game.held_due(), Some(0), "due 150 ms after the clock");
+        assert!(game.key_up("ArrowLeft"));
+        assert!(game.key_down("ArrowLeft", "ArrowLeft", false, 2050.0));
+        assert_eq!(game.held[0].at, 2050.0, "900 ms off: its own time");
     }
 
     /// Spec 19 O1c (review S1): a letter pressed while an arrow is held is read at the prompt
@@ -5607,23 +5743,23 @@ mod tests {
         assert!(cells > paused, "walks on once it is up");
     }
 
-    /// A game that stands for the waits: it reads one key (with `prompt`, A4-0x7a2c set: the
-    /// command prompt; without, another wait such as the line editor's), then waits 100 ms,
-    /// over and over; the keys it read go to `out`.
+    /// A game that stands for the waits: it reads one key (with `prompt`, A4-0x7a2c and
+    /// A4-0x7a42 set: the command prompt, [`u6_core::engine::command_prompt`]; without, another
+    /// wait such as the line editor's), then waits 100 ms, over and over; the keys it read go to
+    /// `out`. It reads in order, as the line editor does (the command prompt's drain would take
+    /// the newest press queued).
     fn reader(prompt: bool, out: Rc<std::cell::RefCell<Vec<u6_core::engine::Typed>>>) -> Engine {
-        Engine::with_game(
-            u6_core::State::empty(),
-            Files::default(),
-            move |st, io| async move {
-                loop {
-                    st.borrow_mut().main.reading = u16::from(prompt);
-                    let t = io.next_typed().await;
-                    st.borrow_mut().main.reading = 0;
-                    out.borrow_mut().push(t);
-                    io.sleep(100).await;
-                }
-            },
-        )
+        let mut state = u6_core::State::empty();
+        state.ui.input.accept = true;
+        Engine::with_game(state, Files::default(), move |st, io| async move {
+            loop {
+                st.borrow_mut().main.reading = u16::from(prompt);
+                let t = io.next_typed().await;
+                st.borrow_mut().main.reading = 0;
+                out.borrow_mut().push(t);
+                io.sleep(100).await;
+            }
+        })
     }
 
     /// Spec 19 O1c on [`reader`]: with the key `code` / `key` pressed (no browser repeat) and
@@ -5678,13 +5814,16 @@ mod tests {
         assert_eq!(keys_read(false, "ArrowLeft", "ArrowLeft"), 1);
     }
 
-    /// Spec 19 O1c (review S2, round 3 item 3) through the page's tracking (`key_down`,
-    /// `key_repeat`, `key_up`) on [`reader`] at the prompt, every read checked: the down arrow
-    /// held alone reads only Down; the left arrow pressed too reads only Left from its press on
-    /// (the newest; no transient Down: until Left is due nothing is added); the browser's
-    /// repeat of Down is read once, as the Down it is (the one older read allowed), and the
-    /// added presses stay Left (a repeat does not make the older newer); Left let go, only Down.
-    /// Each phase lasts 400 ms at 1×.
+    /// Spec 19 O1c (review S2, round 3 item 3; round 4 item 7) through the page's tracking
+    /// (`key_down`, `key_repeat`, `key_up`) on [`reader`] at the command prompt, every read
+    /// checked against the oracle: a paced press is always the newest walking direction, and a
+    /// read of an older direction only consumes a physical press queued before the newest press
+    /// was made, at most once per direction change. Phase A: the down arrow held alone reads
+    /// only Down. Phase B: Down let go and pressed again, then Left pressed, in one frame: one
+    /// Down (that press, queued before Left; the reader reads in order, where the real prompt's
+    /// drain would take the newest, Left, and drop it), then only Left. Phase C: the browser's
+    /// repeat of Down is taken back at the prompt, so only Left (a repeat does not make the older
+    /// newer). Phase D: Left let go, only Down. Each phase lasts 400 ms at 1×.
     #[test]
     fn the_newest_held_arrow_walks_and_the_older_comes_back_at_its_release() {
         use u6_core::engine::Typed;
@@ -5706,22 +5845,24 @@ mod tests {
             a.len() >= 2 && a.iter().all(|&t| t == south),
             "Down alone: {a:?}"
         );
+        assert!(game.key_up("ArrowDown"));
+        assert!(down(&mut game, "ArrowDown"));
         assert!(down(&mut game, "ArrowLeft"));
         let b = phase(&mut game);
+        assert_eq!(
+            b.first(),
+            Some(&south),
+            "the Down press queued before Left's, once: {b:?}"
+        );
         assert!(
-            b.len() >= 2 && b.iter().all(|&t| t == west),
-            "the newest: {b:?}"
+            b.len() >= 3 && b[1..].iter().all(|&t| t == west),
+            "then only the newest: {b:?}"
         );
         assert!(repeat(&mut game, "ArrowDown"));
         let c = phase(&mut game);
-        assert_eq!(
-            c.first(),
-            Some(&south),
-            "the browser's repeat, read as Down: {c:?}"
-        );
         assert!(
-            c.len() >= 2 && c[1..].iter().all(|&t| t == west),
-            "then Left again: {c:?}"
+            c.len() >= 2 && c.iter().all(|&t| t == west),
+            "the browser's repeat of Down taken back, only Left: {c:?}"
         );
         assert!(game.key_up("ArrowLeft"));
         let d = phase(&mut game);
@@ -5729,5 +5870,71 @@ mod tests {
             d.len() >= 2 && d.iter().all(|&t| t == south),
             "the older again: {d:?}"
         );
+    }
+
+    /// Spec 19 O1c (round 4 item 2): an arrow whose press was not the game's never walks,
+    /// though its repeats reach the page with no modifier down, through the page's calls in the
+    /// order the page makes them: Alt down (the chord is not the game's: the page sets the
+    /// modifiers, [`Game::set_modifiers`], and calls no `key_down`), the arrow pressed (no
+    /// `key_down` either), Alt let go, then 1 s of the browser's repeats of the arrow (one every
+    /// 30 ms); the same with Ctrl, where the arrow pressed with Ctrl down is no game key. No
+    /// step in the castle: the repeats are taken back at the command prompt, and the key, first
+    /// seen by a repeat, has no paced press.
+    #[test]
+    fn an_arrow_first_pressed_with_alt_or_ctrl_never_walks() {
+        for ctrl in [false, true] {
+            let Some(mut game) = in_the_castle() else {
+                return;
+            };
+            let mut at = game.leader_position();
+            game.set_modifiers(true);
+            if ctrl {
+                let t = game.clock;
+                assert!(
+                    !game.key_down("ArrowDown", "ArrowDown", true, t),
+                    "no game key"
+                );
+            }
+            game.set_modifiers(false);
+            let t0 = game.clock;
+            let mut next = 0.0;
+            let mut steps = 0;
+            while game.clock - t0 < 1000.0 {
+                while game.clock - t0 + 20.0 > next {
+                    assert!(game.key_repeat("ArrowDown", "ArrowDown", false, t0 + next));
+                    next += 30.0;
+                }
+                step_1x(&mut game);
+                if game.leader_position() != at {
+                    at = game.leader_position();
+                    steps += 1;
+                }
+            }
+            let what = if ctrl { "Ctrl" } else { "Alt" };
+            println!("an arrow first pressed with {what}: {steps} steps in 1 s of its repeats");
+            assert_eq!(steps, 0, "first pressed with {what}: no step");
+            assert!(game.held.iter().all(|h| !h.walking), "held, not walking");
+            assert!(game.key_up("ArrowDown"));
+        }
+    }
+
+    /// Spec 19 O1c (round 4 item 2): the repeats of a key that does not walk (first seen by a
+    /// repeat) still reach every wait but the command prompt: at another wait ([`reader`]
+    /// without the prompt: the line editor's, say) each is read.
+    #[test]
+    fn the_repeats_of_a_key_that_does_not_walk_reach_another_wait() {
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut game = Game::new();
+        game.engine = Some(reader(false, Rc::clone(&seen)));
+        step_1x(&mut game);
+        for _ in 0..4 {
+            let at = game.clock;
+            assert!(game.key_repeat("ArrowLeft", "ArrowLeft", false, at));
+            for _ in 0..8 {
+                step_1x(&mut game);
+            }
+        }
+        assert_eq!(seen.borrow().len(), 4, "each repeat read");
+        assert!(game.held.iter().all(|h| !h.walking));
     }
 }
