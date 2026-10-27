@@ -18,7 +18,7 @@ const WORD_CELLS: usize = 8;
 const BLANK: u16 = 0x20;
 
 /// One keyword the message window shows in the alert colour: a run of cells the line assembler
-/// drew on one row ([`KeySpans`]).
+/// drew on one row ([`KeySpans`]), or one part of a keyword the word wrap broke over rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeySpan {
     /// The window row (from 0).
@@ -29,16 +29,17 @@ pub struct KeySpan {
     pub cells: Vec<u16>,
     /// Their ink.
     pub ink: u8,
+    /// When it is the rest of a keyword the word wrap broke off the row above (it starts at
+    /// column 0): the cells the wrap dropped between the two parts, a space or none; `None` for
+    /// a keyword's first part.
+    pub joined: Option<Vec<u16>>,
 }
 
 impl KeySpan {
-    /// The word it types (UTF-8): its cells as typed ([`typed`]), without the spaces at its end.
+    /// The word its own cells type (UTF-8): its cells as typed ([`typed`]), without the spaces
+    /// at its end.
     pub fn word(&self) -> Vec<u8> {
-        let mut w = typed(&self.cells);
-        while w.last() == Some(&b' ') {
-            w.pop();
-        }
-        w
+        trimmed(typed(&self.cells))
     }
 
     fn covers(&self, row: u8, col: u8) -> bool {
@@ -46,44 +47,79 @@ impl KeySpan {
     }
 }
 
+/// `w` without the spaces at its end.
+fn trimmed(mut w: Vec<u8>) -> Vec<u8> {
+    while w.last() == Some(&b' ') {
+        w.pop();
+    }
+    w
+}
+
 /// The keywords the message window shows (`TextState::keys`): recorded as the line assembler
-/// draws alert cells there ([`KeySpans::draw`]), forgotten where a cell is drawn over them
-/// ([`KeySpans::forget`]), moved by its scroll ([`KeySpans::scroll`]).
+/// draws its cells there ([`KeySpans::draw`]), forgotten where a cell is drawn over them
+/// ([`KeySpans::forget`]), moved by its scroll ([`KeySpans::scroll`]), the two parts of one the
+/// word wrap broke joined ([`KeySpans::wrapped`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct KeySpans(pub Vec<KeySpan>);
+pub struct KeySpans {
+    /// The spans shown.
+    pub spans: Vec<KeySpan>,
+    /// The cells the last wrap dropped inside a keyword it broke, until the next row's first
+    /// cell is drawn ([`KeySpans::wrapped`]).
+    wrap: Option<Vec<u16>>,
+}
 
 impl KeySpans {
-    /// Cell `c` drawn in `ink` at window cell (`row`, `col`), the span under it forgotten
-    /// first: it ends the span of that ink just before it on the row, or starts one unless it is
-    /// a space (the more prompt blanks its row in the ink of a keyword it broke).
-    pub fn draw(&mut self, row: u8, col: u8, c: u16, ink: u8) {
+    /// Cell `c` drawn in `ink` at window cell (`row`, `col`), `keyword` when that is the alert
+    /// colour. The span holding the cell is forgotten first (whatever is drawn), then a keyword
+    /// cell ends the span of that ink just before it on the row, or starts one unless it is a
+    /// space (the more prompt blanks its row in the ink of a keyword it broke). The first cell
+    /// drawn at column 0 after a wrap that broke a keyword, a space aside, takes that wrap: a
+    /// keyword cell starts the keyword's rest there, any other ends it.
+    pub fn draw(&mut self, row: u8, col: u8, c: u16, ink: u8, keyword: bool) {
+        self.forget(row, col);
+        let wrap = if col == 0 && c != BLANK {
+            self.wrap.take()
+        } else {
+            None
+        };
+        if !keyword {
+            return;
+        }
         let next = |s: &&mut KeySpan| {
             s.row == row && s.ink == ink && usize::from(s.col) + s.cells.len() == usize::from(col)
         };
-        match self.0.iter_mut().find(next) {
+        match self.spans.iter_mut().find(next) {
             Some(s) => s.cells.push(c),
-            None if c != BLANK => self.0.push(KeySpan {
+            None if c != BLANK => self.spans.push(KeySpan {
                 row,
                 col,
                 cells: vec![c],
                 ink,
+                joined: wrap,
             }),
             None => {}
         }
     }
 
+    /// The line assembler's word wrap broke the row inside a keyword (its last cell drawn and
+    /// the next cell in the alert colour, with the cells it dropped between them, `dropped`,
+    /// a space or none): the span the next row starts with at column 0 is that keyword's rest.
+    pub fn wrapped(&mut self, dropped: Vec<u16>) {
+        self.wrap = Some(dropped);
+    }
+
     /// The cell at window cell (`row`, `col`) is drawn over: the span holding it goes.
     pub fn forget(&mut self, row: u8, col: u8) {
-        self.0.retain(|s| !s.covers(row, col));
+        self.spans.retain(|s| !s.covers(row, col));
     }
 
     /// The window scrolled its cells up a row (0x10525c): every span moves up with them; those
     /// of the top row leave the window and are returned, in order.
     pub fn scroll(&mut self) -> Vec<KeySpan> {
-        let (gone, kept): (Vec<KeySpan>, Vec<KeySpan>) = std::mem::take(&mut self.0)
+        let (gone, kept): (Vec<KeySpan>, Vec<KeySpan>) = std::mem::take(&mut self.spans)
             .into_iter()
             .partition(|s| s.row == 0);
-        self.0 = kept
+        self.spans = kept
             .into_iter()
             .map(|s| KeySpan {
                 row: s.row - 1,
@@ -95,12 +131,59 @@ impl KeySpans {
 
     /// The span holding window cell (`row`, `col`).
     pub fn at(&self, row: u8, col: u8) -> Option<&KeySpan> {
-        self.0.iter().find(|s| s.covers(row, col))
+        self.spans.iter().find(|s| s.covers(row, col))
+    }
+
+    /// The parts of the keyword one of whose cells is window cell (`row`, `col`), first to
+    /// last: a part that is the rest of another ([`KeySpan::joined`]) follows the last span of
+    /// its ink on the row above, and the span of its ink at column 0 of the row below that is
+    /// a rest follows it. Empty off every span.
+    pub fn parts(&self, row: u8, col: u8) -> Vec<&KeySpan> {
+        let Some(s) = self.at(row, col) else {
+            return Vec::new();
+        };
+        let mut parts = vec![s];
+        while let Some(first) = parts.first().copied().filter(|p| p.joined.is_some()) {
+            let above = self
+                .spans
+                .iter()
+                .filter(|p| p.ink == first.ink && Some(p.row) == first.row.checked_sub(1))
+                .max_by_key(|p| p.col);
+            match above {
+                Some(p) => parts.insert(0, p),
+                None => break,
+            }
+        }
+        while let Some(last) = parts.last().copied() {
+            let below = self.spans.iter().find(|p| {
+                p.joined.is_some() && p.ink == last.ink && p.col == 0 && p.row == last.row + 1
+            });
+            match below {
+                Some(p) => parts.push(p),
+                None => break,
+            }
+        }
+        parts
+    }
+
+    /// The word the keyword holding window cell (`row`, `col`) types (UTF-8): its parts' cells
+    /// and the cells the wrap dropped between them, as typed ([`typed`]), without the spaces at
+    /// its end; empty off every span.
+    pub fn word(&self, row: u8, col: u8) -> Vec<u8> {
+        let mut cells = Vec::new();
+        for (i, p) in self.parts(row, col).into_iter().enumerate() {
+            if i > 0 {
+                cells.extend(p.joined.iter().flatten());
+            }
+            cells.extend(&p.cells);
+        }
+        trimmed(typed(&cells))
     }
 
     /// Forgets every span (the window set up again).
     pub fn clear(&mut self) {
-        self.0.clear();
+        self.spans.clear();
+        self.wrap = None;
     }
 }
 
@@ -120,7 +203,7 @@ pub struct Button {
 pub enum Target {
     /// [`TalkClicks::buttons`]`[i]`.
     Button(usize),
-    /// The span of the message window that starts at window cell (`row`, `col`).
+    /// The keyword of the message window whose first part starts at window cell (`row`, `col`).
     Key { row: u8, col: u8 },
 }
 
@@ -213,7 +296,9 @@ fn draw_cells(s: &State, io: &Io, cells: &[u16], (col, row): (u16, u16), (ink, p
 
 /// Spec 22 Contract 2: the read of the player's words begins. When every pixel of the Status
 /// window's last row is the paper colour (the portrait panel leaves it so), the two buttons are
-/// drawn there, centred, one blank cell between them, and recorded; else none.
+/// drawn there, centred, one blank cell between them, and recorded; else none. Wider than the
+/// row with their blank cells, they go without them; wider still (a row narrower than main's
+/// 17 cells, which two words of [`WORD_CELLS`] and the cell between fill), there are none.
 pub fn begin(s: &mut State, io: &Io) {
     s.ui.talk = TalkClicks::default();
     let (row, x0, x1) = button_row(s);
@@ -227,6 +312,9 @@ pub fn begin(s: &mut State, io: &Io) {
     }
     let [(a, ta), (b, tb)] = words(s);
     let width = s.ui.text.window(WindowId::Status).width as usize;
+    if a.len() + b.len() + 1 > width {
+        return;
+    }
     let pad = usize::from(a.len() + b.len() + 5 <= width);
     let total = a.len() + b.len() + 4 * pad + 1;
     let mut col = (x0 as usize / CELL + width.saturating_sub(total) / 2) as u8;
@@ -247,7 +335,8 @@ pub fn begin(s: &mut State, io: &Io) {
 /// of the queue are taken in order ([`Io::take_pointer`], one press or release a take), the
 /// target under the pointer drawn inverse after each; a click on one (the left button down on it
 /// and up again on it) types its word: one Backspace for each of the `typed` cells the line
-/// holds, the word, Enter, at the front of the queue, before any event after the release.
+/// holds, the word, Enter, at the front of the queue, before any event after the release. A
+/// word that types nothing (a keyword of cells no key types) types nothing at all.
 pub fn pointer(s: &mut State, io: &Io, typed: usize) {
     loop {
         let before = io.pointer().buttons & POINTER_LEFT;
@@ -259,8 +348,10 @@ pub fn pointer(s: &mut State, io: &Io, typed: usize) {
             (POINTER_LEFT, 0) => {
                 if let Some(t) = s.ui.talk.pressed.take().filter(|&t| Some(t) == target) {
                     let word = word_of(s, t);
-                    io.push_front(&keys(typed, &word));
-                    return;
+                    if !word.is_empty() {
+                        io.push_front(&keys(typed, &word));
+                        return;
+                    }
                 }
             }
             _ => {}
@@ -274,6 +365,20 @@ pub fn pointer(s: &mut State, io: &Io, typed: usize) {
 /// Spec 22 Contract 6: the target drawn inverse is drawn as it was (before a key is taken).
 pub fn cool(s: &mut State, io: &Io) {
     hover(s, io, None);
+}
+
+/// Spec 22 Contract 4 and 6: the message window scrolled its cells up a row (0x10525c): its
+/// keywords move up with them ([`KeySpans::scroll`], whose spans of the top row are returned),
+/// and so do the keyword drawn inverse and the one the left button went down on (one of the top
+/// row has left the window: none).
+pub fn scroll(ui: &mut super::UiState) -> Vec<KeySpan> {
+    let gone = ui.text.keys.scroll();
+    for t in [&mut ui.talk.hot, &mut ui.talk.pressed] {
+        if let Some(Target::Key { row, col }) = *t {
+            *t = row.checked_sub(1).map(|row| Target::Key { row, col });
+        }
+    }
+    gone
 }
 
 /// Spec 22 Contract 2 and 6: the read ends: the hover goes, the buttons' row is filled with the
@@ -309,10 +414,10 @@ pub fn target_at(s: &State, x: i16, y: i16) -> Option<Target> {
     if c >= u16::from(w.width) || r >= u16::from(w.height) {
         return None;
     }
-    let span = s.ui.text.keys.at(r as u8, c as u8)?;
+    let first = *s.ui.text.keys.parts(r as u8, c as u8).first()?;
     Some(Target::Key {
-        row: span.row,
-        col: span.col,
+        row: first.row,
+        col: first.col,
     })
 }
 
@@ -325,12 +430,7 @@ fn word_of(s: &State, t: Target) -> Vec<u8> {
                 .get(i)
                 .map_or_else(Vec::new, |b| b.word.clone())
         }
-        Target::Key { row, col } => {
-            s.ui.text
-                .keys
-                .at(row, col)
-                .map_or_else(Vec::new, KeySpan::word)
-        }
+        Target::Key { row, col } => s.ui.text.keys.word(row, col),
     }
 }
 
@@ -365,8 +465,8 @@ fn hover(s: &mut State, io: &Io, target: Option<Target>) {
 }
 
 /// Draws target `t`, inverse when `hot` (its ink and paper swapped): a button's word in the
-/// paper colour on cells of the command colour A4-0x6572 (0x106506's mark), a keyword in its ink
-/// on the message window's paper.
+/// paper colour on cells of the command colour A4-0x6572 (0x106506's mark), a keyword (every
+/// part of it) in its ink on the message window's paper.
 fn draw_target(s: &State, io: &Io, t: Target, hot: bool) {
     let swap = |(ink, paper): (u8, u8)| if hot { (paper, ink) } else { (ink, paper) };
     match t {
@@ -379,15 +479,14 @@ fn draw_target(s: &State, io: &Io, t: Target, hot: bool) {
             draw_cells(s, io, &b.cells, at, swap((c.paper, c.command)));
         }
         Target::Key { row, col } => {
-            let Some(k) = s.ui.text.keys.at(row, col) else {
-                return;
-            };
             let w = s.ui.text.window(WindowId::Messages);
-            let at = (
-                u16::from(w.x) + u16::from(k.col),
-                u16::from(w.y) + u16::from(k.row),
-            );
-            draw_cells(s, io, &k.cells, at, swap((k.ink, w.bg)));
+            for k in s.ui.text.keys.parts(row, col) {
+                let at = (
+                    u16::from(w.x) + u16::from(k.col),
+                    u16::from(w.y) + u16::from(k.row),
+                );
+                draw_cells(s, io, &k.cells, at, swap((k.ink, w.bg)));
+            }
         }
     }
 }
@@ -396,15 +495,20 @@ fn draw_target(s: &State, io: &Io, t: Target, hot: bool) {
 mod tests {
     use super::*;
 
+    /// `cells` drawn as keyword cells in ink 3 from window cell (`row`, `col`).
+    fn put(k: &mut KeySpans, row: u8, col: u8, cells: &[u16]) {
+        for (i, &c) in cells.iter().enumerate() {
+            k.draw(row, col + i as u8, c, 3, true);
+        }
+    }
+
     #[test]
     fn spans_join_on_a_row_forget_where_drawn_over_and_leave_with_the_top_row() {
         let mut k = KeySpans::default();
-        for (i, c) in b"ab".iter().enumerate() {
-            k.draw(1, 4 + i as u8, u16::from(*c), 3);
-        }
-        k.draw(0, 0, u16::from(b'z'), 3);
-        k.draw(1, 7, u16::from(b'c'), 3);
-        let words: Vec<Vec<u8>> = k.0.iter().map(KeySpan::word).collect();
+        put(&mut k, 1, 4, &[0x61, 0x62]);
+        put(&mut k, 0, 0, &[0x7a]);
+        put(&mut k, 1, 7, &[0x63]);
+        let words: Vec<Vec<u8>> = k.spans.iter().map(KeySpan::word).collect();
         assert_eq!(words, [b"ab".to_vec(), b"z".to_vec(), b"c".to_vec()]);
         assert_eq!(k.at(1, 5).map(KeySpan::word), Some(b"ab".to_vec()));
         assert_eq!(k.at(1, 6), None, "between two spans");
@@ -413,19 +517,86 @@ mod tests {
         assert_eq!(k.at(0, 4).map(|s| s.row), Some(0), "a row up");
         k.forget(0, 5);
         assert_eq!(k.at(0, 4), None, "drawn over: forgotten whole");
-        assert_eq!(k.0.len(), 1);
+        assert_eq!(k.spans.len(), 1);
         k.clear();
-        assert!(k.0.is_empty());
+        assert!(k.spans.is_empty());
         // Spaces join a span but start none, and its word ends at its last other cell.
-        for col in 0..3 {
-            k.draw(2, col, BLANK, 3);
+        put(&mut k, 2, 0, &[BLANK; 3]);
+        assert!(k.spans.is_empty(), "a row of spaces is no keyword");
+        put(&mut k, 2, 5, &[0x61, 0x20, 0x62, 0x20]);
+        assert_eq!(k.spans.len(), 1);
+        assert_eq!(k.spans[0].word(), b"a b");
+    }
+
+    #[test]
+    fn a_cell_drawn_over_a_keyword_replaces_it_whatever_its_ink() {
+        let mut k = KeySpans::default();
+        put(&mut k, 1, 4, &[0x61, 0x62]);
+        k.draw(1, 5, 0x7a, 1, false);
+        assert!(
+            k.spans.is_empty(),
+            "a cell of the text ink over its second cell"
+        );
+        put(&mut k, 1, 4, &[0x61]);
+        k.draw(1, 4, 0x7a, 1, false);
+        put(&mut k, 1, 4, &[0x62]);
+        let words: Vec<Vec<u8>> = k.spans.iter().map(KeySpan::word).collect();
+        assert_eq!(
+            words,
+            [b"b".to_vec()],
+            "a fresh span, not the old one's tail"
+        );
+        put(&mut k, 1, 5, &[0x63]);
+        put(&mut k, 1, 4, &[0x64]);
+        assert_eq!(
+            k.spans.iter().map(KeySpan::word).collect::<Vec<_>>(),
+            [b"d".to_vec()],
+            "a keyword cell over a keyword forgets all of it and starts a fresh one"
+        );
+        println!("drawn over: replaced: pass");
+    }
+
+    #[test]
+    fn a_keyword_the_wrap_broke_is_one_word_from_either_part() {
+        let mut k = KeySpans::default();
+        put(&mut k, 3, 10, &[0x62, 0x69, 0x67]);
+        k.wrapped(vec![BLANK]);
+        // The more prompt's blank row between the two parts leaves the wrap.
+        k.draw(4, 0, BLANK, 3, true);
+        put(&mut k, 4, 0, &[0x63, 0x61, 0x74]);
+        for (row, col) in [(3, 11), (4, 1)] {
+            assert_eq!(k.word(row, col), b"big cat", "from row {row}");
+            let first = k.parts(row, col)[0];
+            assert_eq!(
+                (first.row, first.col),
+                (3, 10),
+                "one target: the first part"
+            );
         }
-        assert!(k.0.is_empty(), "a row of spaces is no keyword");
-        for (i, &c) in [0x61, 0x20, 0x62, 0x20].iter().enumerate() {
-            k.draw(2, 5 + i as u8, c, 3);
-        }
-        assert_eq!(k.0.len(), 1);
-        assert_eq!(k.0[0].word(), b"a b");
+        // Scrolled a row up, still one; its first part gone with the top row, the rest alone.
+        k.scroll();
+        assert_eq!(k.word(3, 1), b"big cat");
+        k.scroll();
+        k.scroll();
+        k.scroll();
+        assert_eq!(k.word(0, 1), b"cat", "the first part left the window");
+        // Two keywords, the wrap between them dropping no keyword cell: two words.
+        k.clear();
+        put(&mut k, 3, 14, &[0x61]);
+        put(&mut k, 4, 0, &[0x62]);
+        assert_eq!(
+            (k.word(3, 14), k.word(4, 0)),
+            (b"a".to_vec(), b"b".to_vec())
+        );
+        // A wrap whose next row starts with a cell of another ink is spent.
+        k.clear();
+        put(&mut k, 3, 14, &[0x61]);
+        k.wrapped(Vec::new());
+        k.draw(4, 0, 0x78, 1, false);
+        put(&mut k, 5, 0, &[0x62]);
+        assert_eq!(k.word(5, 0), b"b");
+        assert_eq!(k.spans[1].joined, None);
+        println!("wrapped keyword: one word from either part: pass");
     }
 
     #[test]

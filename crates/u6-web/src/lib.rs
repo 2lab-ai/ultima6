@@ -1924,6 +1924,18 @@ mod tests {
     }
 
     #[test]
+    fn a_release_queued_again_replaces_the_one_before_it() {
+        // Spec 22 (site/app.js `pointercancel`): a cancelled press's release, queued again at
+        // (-1, -1) at once, is the only release the engine sees.
+        let mut q = Vec::new();
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        queue_pointer(&mut q, 40, 50, 1);
+        queue_pointer(&mut q, 40, 50, 0);
+        queue_pointer(&mut q, -1, -1, 0);
+        assert_eq!(q, [p(40, 50, 1), p(-1, -1, 0)]);
+    }
+
+    #[test]
     fn maps_named_codes_and_single_characters() {
         assert_eq!(
             key_from_dom("ArrowRight", "ArrowRight", false),

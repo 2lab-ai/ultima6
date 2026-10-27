@@ -248,7 +248,7 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
             } else if win.flags & text::SCROLL != 0 {
                 ui.text.drawn = true;
                 if ui.text.current == super::WindowId::Messages {
-                    ui.text.keys.scroll();
+                    super::talk::scroll(ui);
                 }
                 let w = *ui.text.win();
                 io.draw(|fb| text::scroll_window(fb, &w, ui.paper.as_ref()));

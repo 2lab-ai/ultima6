@@ -12097,7 +12097,7 @@ async function clickTalkFixture() {
 const NAME_BUTTON = [33 * 8 + 4, 12 * 8 + 4];
 
 for (const layout of ['original', 'wide']) {
-  test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels, and no key was sent for the press`, async (env) => {
+  test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a touch on Name the browser cancels types nothing; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels (the prompt's cursor cell aside), and no key was sent for the press`, async (env) => {
     const { page } = layout === 'wide' ? await h.openWide(env) : await h.openPage(env);
     await h.load(page, env);
     await page.setInputFiles('#picker', h.HFES);
@@ -12105,8 +12105,7 @@ for (const layout of ['original', 'wide']) {
     await h.waitPrompt(page);
     assert.equal(await h.replaceKept(page, 'converse.a', await clickTalkFixture()), 1, 'one archive replaced');
     // Pixels of the game's frame (the 320 x 200 UI at its top left in both builds), as a list:
-    // compared, never printed. The message window's rows but its last, where the prompt's
-    // cursor turns.
+    // compared, never printed.
     const region = (x0, y0, x1, y1) => page.evaluate(([a, b, c, d]) => {
       const g = globalThis.__shownGame;
       const w = g.width();
@@ -12115,7 +12114,34 @@ for (const layout of ['original', 'wide']) {
       for (let y = b; y < d; y += 1) for (let x = a; x < c; x += 1) out.push(rgba.slice((y * w + x) * 4, (y * w + x) * 4 + 3).join(','));
       return out;
     }, [x0, y0, x1, y1]);
-    const messages = async () => (await region(0x16 * 8, 0x0e * 8, 0x27 * 8, 0x17 * 8)).join(';');
+    // The message window's 17 x 10 cells (cols 0x16..=0x26, rows 0x0e..=0x17), each its pixels.
+    const windowCells = async () => {
+      const px = await region(0x16 * 8, 0x0e * 8, 0x27 * 8, 0x18 * 8);
+      const cells = [];
+      for (let r = 0; r < 10; r += 1) {
+        for (let c = 0; c < 17; c += 1) {
+          const cell = [];
+          for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) cell.push(px[(r * 8 + y) * 17 * 8 + c * 8 + x]);
+          cells.push(cell.join(';'));
+        }
+      }
+      return cells;
+    };
+    // At the prompt: the window's cells, the prompt's turning cursor masked (the one cell that
+    // changes from frame to frame; sampled until it has).
+    const messages = async () => {
+      const first = await windowCells();
+      let changed = [];
+      for (let i = 0; i < 20 && changed.length === 0; i += 1) {
+        await h.waitFrames(page, 1);
+        const now = await windowCells();
+        changed = now.flatMap((c, j) => (c === first[j] ? [] : [j]));
+      }
+      assert.equal(changed.length, 1, 'at the prompt one cell turns: its cursor');
+      const cells = await windowCells();
+      cells[changed[0]] = 'cursor';
+      return { cursor: changed[0], cells: cells.join('|') };
+    };
     // Talk to member 2 up to the player's words, the pointer at rest over the Name button.
     const talkTo2 = async () => {
       await page.reload();
@@ -12136,6 +12162,21 @@ for (const layout of ['original', 'wide']) {
     const cells = await talkTo2();
     assert.ok(new Set(cells).size >= 2, 'the Name button drawn in the frame (its cells of two colours, the pointer elsewhere)');
     await keepFrame(page.locator('#screen'), `talk-click-${layout}-hover.png`);
+    // A touch pressed on Name that the browser cancels (a scroll or a zoom taking it): released
+    // off every target, it types nothing, and the read goes on.
+    const touchAt = await h.screenPoint(page, ...NAME_BUTTON);
+    await page.evaluate(([x, y]) => {
+      const c = document.getElementById('screen');
+      const init = (buttons) => ({ pointerType: 'touch', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true });
+      c.dispatchEvent(new PointerEvent('pointerdown', init(1)));
+      c.dispatchEvent(new PointerEvent('pointercancel', init(0)));
+    }, touchAt);
+    for (let i = 0; i < 40; i += 1) {
+      await h.waitFrames(page, 1);
+      assert.equal(await page.evaluate(() => globalThis.__owned), 7, 'the cancelled touch typed nothing: the words are still read');
+    }
+    await page.mouse.move(...(await h.screenPoint(page, ...NAME_BUTTON)));
+    await h.waitTaken(page);
     await page.evaluate(() => { globalThis.__sent.length = 0; });
     await page.mouse.down();
     await page.mouse.up();
@@ -12149,7 +12190,8 @@ for (const layout of ['original', 'wide']) {
     await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
     await h.waitPrompt(page);
     const typed = await messages();
-    assert.ok(pressed === typed, 'the press answered as typing name and Enter: the same message window');
+    assert.equal(pressed.cursor, typed.cursor, 'the prompt\'s cursor in the same cell');
+    assert.ok(pressed.cells === typed.cells, 'the press answered as typing name and Enter: the same message window');
     console.log(`  receipt: ${layout}: Name pressed in the canvas answered as typed: pass`);
   }, { needs: h.haveHfes });
 }

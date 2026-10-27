@@ -3936,8 +3936,15 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
-canvas.addEventListener('pointercancel', (e) =>
-  sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+// A cancelled press (the browser took the touch, a scroll or a zoom) is released off every target:
+// the release `sendPointer` queued moves to frame pixel (-1, -1) (`Game::pointer` merges a pointer
+// event into the one queued before it with the same buttons), so it ends no click (spec 22
+// Contract 5: a key cap or a keyword types on a release over the target it was pressed on).
+canvas.addEventListener('pointercancel', (e) => {
+  const held = sentButtons;
+  sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
+  if (held !== 0 && sentButtons === 0 && game && !crashed) game.pointer(-1, -1, 0);
+});
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });

@@ -553,11 +553,17 @@ fn a_held_map_press_during_the_exit_question_does_not_hang() {
 /// Spec 22 receipt: Talk to member 1 by the pointer, then press its Name button, its Job button
 /// and a keyword the scroll shows in the alert colour; the same run with the pointer moved to the
 /// same places and the words typed instead (each word and Enter in one tick, as a press sends
-/// them) ends each answer with the same words, scroll, frame and state. Counts and equality only;
-/// with `U6_TALK_FRAMES` set, frames of the buttons and of a hovered keyword go there.
+/// them) ends each answer with the same words, scroll, frame and state. At each read the two
+/// buttons are drawn again, their row the same pixels (and HD sources) as at the first: the row
+/// the read before filled with the paper on the real paper map is all paper again (gpt-a
+/// SHOULD 1). Counts and equality only; prints whether it ran; with `U6_TALK_FRAMES` set, frames
+/// of the buttons and of a hovered keyword go there.
 #[test]
 fn a_real_talk_answers_a_press_as_the_word_typed() {
-    let Some(files) = files() else { return };
+    let Some(files) = files() else {
+        println!("real talk receipt: skipped (no game files)");
+        return;
+    };
     let begin = || {
         let mut p = Play::boot(&files);
         p.click(48, 184);
@@ -567,6 +573,7 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
         p
     };
     let (mut press, mut typed) = (begin(), begin());
+    let rest = press.e.state().ui.pointer.at;
     assert!(
         press.e.state().ui.input.line_input,
         "member 1 waits for words"
@@ -574,6 +581,7 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
     let (n, pixels) = press.buttons();
     assert_eq!(n, 2, "the Job and Name buttons");
     println!("buttons {n}, drawn pixels {pixels}");
+    let first_row = press.button_row();
     press.frame("buttons");
     let button = |p: &Play, i: usize| {
         let s = p.e.state();
@@ -597,10 +605,24 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
         typed.answer(xy, Some((before, &word)));
         press.same_as(&typed, &word);
         answers += 1;
+        assert_eq!(press.buttons().0, 2, "the buttons again at the next read");
+        // The pointer back where the read began, off the buttons (resting on Name it shows it
+        // inverse: Contract 6).
+        for p in [&mut press, &mut typed] {
+            p.send(InputEvent::Pointer {
+                x: rest.0,
+                y: rest.1,
+                buttons: 0,
+            });
+        }
+        assert!(
+            press.button_row() == first_row,
+            "their row as at the first read"
+        );
     }
     let span = {
         let s = press.e.state();
-        s.ui.text.keys.0.first().cloned()
+        s.ui.text.keys.spans.first().cloned()
     };
     let span = span.expect("a keyword in the alert colour after the answers");
     let w = *press.e.state().ui.text.window(WindowId::Messages);
@@ -618,7 +640,7 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
         "the keyword under the pointer drawn inverse"
     );
     press.frame("keyword-hover");
-    let word = span.word();
+    let word = press.e.state().ui.text.keys.word(span.row, span.col);
     press.answer(xy, None);
     typed.answer(xy, Some((0, &word)));
     press.same_as(&typed, &word);
@@ -626,8 +648,9 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
     println!(
         "presses answered as typed: {answers} (keyword of {} cells, spans shown {})",
         span.cells.len(),
-        press.e.state().ui.text.keys.0.len()
+        press.e.state().ui.text.keys.spans.len()
     );
+    println!("real talk receipt: ran");
 }
 
 impl Play {
@@ -654,6 +677,20 @@ impl Play {
             .filter(|&(x, y)| fb.get(x, y) == Some(command))
             .count();
         (s.ui.talk.buttons.len(), drawn)
+    }
+
+    /// The buttons' row (the Status window's last) as the game drew it (no pointer sprite):
+    /// each pixel and its HD source.
+    fn button_row(&self) -> Vec<(Option<u8>, Option<u6_render::Src>)> {
+        let s = self.e.state();
+        let w = s.ui.text.window(WindowId::Status);
+        let row = usize::from(w.y) + usize::from(w.height) - 1;
+        let x0 = usize::from(w.x) * CELL;
+        let fb = self.e.published_frame();
+        (row * CELL..(row + 1) * CELL)
+            .flat_map(|y| (x0..x0 + usize::from(w.width) * CELL).map(move |x| (x, y)))
+            .map(|(x, y)| (fb.get(x, y), fb.src_at(x, y)))
+            .collect()
     }
 
     /// The pointer moved to `xy`, then a press and release there, or `back` Backspaces, `word`

@@ -26,8 +26,9 @@ fn is_lower(c: i32) -> bool {
 }
 
 /// Draws `c` at window-relative cell (`col`, `row`) of the current window, in its colours.
-/// Port (spec 22 Contract 4): in the message window the keyword the cell is drawn over is
-/// forgotten, and a cell in the alert colour is recorded.
+/// Port (spec 22 Contract 4): in the message window the cell goes to its keyword record
+/// ([`super::talk::KeySpans::draw`]: the keyword under it forgotten, a cell in the alert colour
+/// recorded).
 fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
     let ui = &s.ui;
     let w = *ui.text.win();
@@ -38,10 +39,7 @@ fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
         let alert = ui.tables.colours.alert;
         let keys = &mut s.ui.text.keys;
         let r = row.saturating_sub(u16::from(w.y)) as u8;
-        keys.forget(r, col);
-        if w.fg == alert {
-            keys.draw(r, col, c, w.fg);
-        }
+        keys.draw(r, col, c, w.fg, w.fg == alert);
     }
 }
 
@@ -204,6 +202,7 @@ pub(super) async fn put_cell(state: &RefCell<State>, io: &Io, c: i32) {
 /// (spec 09): `said` = the speech tap kept `c`; the line's cell marks move with its cells.
 fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
     let text_ink = s.ui.tables.colours.text;
+    let alert = s.ui.tables.colours.alert;
     let t = &mut s.ui.text;
     let w = *t.win();
     let len = usize::from(t.line_len);
@@ -247,6 +246,20 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
         t.win_mut().col = end as u8;
     }
     if wrapped {
+        // Port (spec 22 Contract 4): a keyword the wrap breaks (its last cell drawn and what
+        // follows the break, the space dropped there or the next cell, in the alert colour)
+        // goes on at the next row's start.
+        if t.current == WindowId::Messages && c != NL && end > start && t.line_ink[end - 1] == alert
+        {
+            let dropped = if t.line[end] == SP {
+                vec![SP]
+            } else {
+                Vec::new()
+            };
+            if t.line_ink[end] == alert {
+                t.keys.wrapped(dropped);
+            }
+        }
         if t.line[end] == SP {
             end += 1;
         }
@@ -284,7 +297,7 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
             let w = *w;
             t.drawn = true;
             if t.current == WindowId::Messages {
-                t.keys.scroll();
+                super::talk::scroll(&mut s.ui);
             }
             let paper = s.ui.paper.as_ref();
             io.draw(|fb| text::scroll_window(fb, &w, paper));
