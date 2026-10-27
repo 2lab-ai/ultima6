@@ -134,7 +134,7 @@ impl RenderCache {
 
     fn frozen(&self, id: u16) -> Option<&Frozen> {
         let slot = usize::from(id.checked_sub(FROZEN_BASE)?);
-        self.memory.frozen.get(slot)?.as_ref()
+        self.memory.frozen.get(slot)
     }
 }
 
@@ -155,25 +155,24 @@ impl RenderCache {
 /// then; a record whose pixels the shore merge rewrites in place (0x152dac, the 32 shore tiles'
 /// records, the only writer of records after the load: the module docs), and any record
 /// rewritten so far (its version not 0, whichever tile draws it now), is kept as a copy of its
-/// pixels then ([`Frozen`]). The copies are shared by record and content, counted by the layers
-/// that name them, freed with the last, and at most [`MAX_COPIES`]: past it a layer keeps the
-/// record itself.
+/// pixels then ([`Frozen`]). The copies are an append-only store, one per record and content
+/// (the owner's game makes 255 over 10 000 animation ticks: the shore merges of a cycling
+/// water), kept until load state, at most [`MAX_COPIES`]. A remembered layer never draws a
+/// rewritten record live: when the store is full and a cell in sight needs a new copy, the cell
+/// is forgotten instead (black once out of sight, as in the original).
 #[derive(Debug)]
 pub struct SightMemory {
     cells: HashMap<(u8, u16, u16), Remembered>,
     /// An unlit cell in sight (0x1bc) shows its remembered sight: [`MEMORY_IN_DARKNESS`].
     darkness: bool,
-    /// The copies of rewritten records' pixels, by slot ([`Layer::frozen`]).
-    frozen: Vec<Option<Frozen>>,
-    /// The free slots of `frozen`.
-    free: Vec<u16>,
-    /// The copies by record and content hash.
+    /// The copies of rewritten records' pixels, by slot ([`Layer::frozen`]): never removed, so a
+    /// slot names one content for the store's life (the window cache's key names it).
+    frozen: Vec<Frozen>,
+    /// The slots by record and content hash (a match compares the pixels too).
     by_content: HashMap<(u16, u64), Vec<u16>>,
-    /// Per record, its version and the slot of its copy at that version, for the last copy
-    /// taken of it (the copy a cell in sight takes again at every render).
+    /// Per record, its version and the slot of its content at that version, for the last
+    /// version looked up (the one a cell in sight takes again at every render).
     latest: HashMap<u16, (u32, u16)>,
-    /// Copies made so far: the generation of the next ([`Frozen::generation`]).
-    made: u32,
     /// The game hour ([`minutes`] / 60) of the last sweep of the forgotten cells.
     swept: Option<u64>,
     /// Scratch: the layers of a cell being remembered.
@@ -187,10 +186,8 @@ impl Default for SightMemory {
             cells: HashMap::new(),
             darkness: MEMORY_IN_DARKNESS,
             frozen: Vec::new(),
-            free: Vec::new(),
             by_content: HashMap::new(),
             latest: HashMap::new(),
-            made: 0,
             swept: None,
             scratch: Vec::new(),
         }
@@ -204,15 +201,11 @@ struct Remembered {
     layers: Vec<Layer>,
 }
 
-/// A record's pixels and transparency as a remembered layer shows them: the record they were
-/// taken from, their hash, the layers that name them, and the copy's generation (no two copies
-/// share one: the window cache's key names it, [`WindowKey::layer`]).
+/// A record's pixels and transparency as a remembered layer shows them, and the record they were
+/// taken from.
 #[derive(Debug)]
 struct Frozen {
     record: u16,
-    hash: u64,
-    refs: u32,
-    generation: u32,
     pixels: Vec<u8>,
     transparent: Vec<bool>,
 }
@@ -225,7 +218,8 @@ pub const FROZEN_BASE: u16 = TILE_COUNT as u16;
 /// Spec 18: the most cells the remembered sight keeps (the oldest sight is forgotten first).
 pub const MAX_CELLS: usize = 1 << 17;
 
-/// Spec 18: the most copies of rewritten records it keeps (about 0.5 KiB each).
+/// Spec 18: the most copies of rewritten records it keeps (about 0.5 KiB each, 4 MiB in all; 32
+/// times the 255 the owner's game makes).
 pub const MAX_COPIES: usize = 1 << 13;
 
 /// Spec 18 (the owner's follow-up): whole game days after which a remembered cell is black and
@@ -276,7 +270,6 @@ pub(super) struct Layer {
     pub(super) record: u16,
     pub(super) masktype: u8,
     pub(super) frame: u8,
-    pub(super) ver: u32,
     pub(super) frozen: Option<u16>,
 }
 
@@ -284,12 +277,10 @@ impl Layer {
     /// Word `w` as the blitter draws it now ([`GfxState::record`]), not yet copied.
     fn of(gfx: &GfxState, w: u16) -> Layer {
         let t = usize::from(w & 0x7ff);
-        let record = gfx.record_of[t];
         Layer {
-            record,
+            record: gfx.record_of[t],
             masktype: gfx.masktype[t],
             frame: gfx.frame,
-            ver: gfx.cache.version(usize::from(record)),
             frozen: None,
         }
     }
@@ -300,7 +291,7 @@ impl Layer {
     pub(super) fn image<'a>(&self, gfx: &'a GfxState) -> Option<(&'a [u8], &'a [bool], u16, u32)> {
         match self.frozen {
             Some(slot) => {
-                let f = gfx.cache.memory.frozen.get(usize::from(slot))?.as_ref()?;
+                let f = gfx.cache.memory.frozen.get(usize::from(slot))?;
                 Some((&f.pixels, &f.transparent, FROZEN_BASE + slot, 0))
             }
             None => {
@@ -377,109 +368,58 @@ impl SightMemory {
         (!cell.layers.is_empty()).then_some((fade, cell.layers.as_slice()))
     }
 
-    /// The slot of a copy of `record`'s pixels now, one more layer naming it: the last copy taken
-    /// of the record at this version, else one of the same content, else a new one; `None` at
-    /// [`MAX_COPIES`].
+    /// The slot of the copy of `record`'s pixels now: the one looked up last for the record at
+    /// this version, else a copy of the same content, else a new one; `None` when a new one is
+    /// needed and the store holds [`MAX_COPIES`].
     fn freeze(&mut self, gfx: &GfxState, record: u16) -> Option<u16> {
         let r = usize::from(record);
         let ver = gfx.cache.version(r);
-        let slot = match self.latest.get(&record) {
-            Some(&(v, slot)) if v == ver => slot,
-            _ => {
-                let rec = &gfx.records[r];
-                let hash = content_hash(&rec.pixels, &rec.transparent);
-                let same = self.by_content.get(&(record, hash)).and_then(|slots| {
-                    slots.iter().copied().find(|&s| {
-                        let f = self.frozen[usize::from(s)].as_ref();
-                        f.is_some_and(|f| {
-                            f.pixels == rec.pixels && f.transparent == rec.transparent
-                        })
-                    })
+        if let Some(&(v, slot)) = self.latest.get(&record)
+            && v == ver
+        {
+            return Some(slot);
+        }
+        let rec = &gfx.records[r];
+        let hash = content_hash(&rec.pixels, &rec.transparent);
+        let same = self.by_content.get(&(record, hash)).and_then(|slots| {
+            slots.iter().copied().find(|&s| {
+                let f = &self.frozen[usize::from(s)];
+                f.pixels == rec.pixels && f.transparent == rec.transparent
+            })
+        });
+        let slot = match same {
+            Some(slot) => slot,
+            None if self.frozen.len() >= MAX_COPIES => return None,
+            None => {
+                self.frozen.push(Frozen {
+                    record,
+                    pixels: rec.pixels.clone(),
+                    transparent: rec.transparent.clone(),
                 });
-                let slot = match same {
-                    Some(slot) => slot,
-                    None => {
-                        if self.frozen.len() - self.free.len() >= MAX_COPIES {
-                            return None;
-                        }
-                        let copy = Frozen {
-                            record,
-                            hash,
-                            refs: 0,
-                            generation: self.made,
-                            pixels: rec.pixels.clone(),
-                            transparent: rec.transparent.clone(),
-                        };
-                        self.made = self.made.wrapping_add(1);
-                        let slot = match self.free.pop() {
-                            Some(free) => {
-                                self.frozen[usize::from(free)] = Some(copy);
-                                free
-                            }
-                            None => {
-                                self.frozen.push(Some(copy));
-                                (self.frozen.len() - 1) as u16
-                            }
-                        };
-                        self.by_content
-                            .entry((record, hash))
-                            .or_default()
-                            .push(slot);
-                        slot
-                    }
-                };
-                self.latest.insert(record, (ver, slot));
+                let slot = (self.frozen.len() - 1) as u16;
+                self.by_content
+                    .entry((record, hash))
+                    .or_default()
+                    .push(slot);
                 slot
             }
         };
-        if let Some(f) = self.frozen[usize::from(slot)].as_mut() {
-            f.refs += 1;
-        }
+        self.latest.insert(record, (ver, slot));
         Some(slot)
     }
 
-    /// One layer less names the copies `layers` name; a copy no layer names is freed.
-    fn release(&mut self, layers: &[Layer]) {
-        for slot in layers.iter().filter_map(|l| l.frozen) {
-            let at = usize::from(slot);
-            let Some(f) = self.frozen[at].as_mut() else {
-                continue;
-            };
-            f.refs -= 1;
-            if f.refs > 0 {
-                continue;
-            }
-            let (record, hash) = (f.record, f.hash);
-            self.frozen[at] = None;
-            self.free.push(slot);
-            if let Some(slots) = self.by_content.get_mut(&(record, hash)) {
-                slots.retain(|&s| s != slot);
-                if slots.is_empty() {
-                    self.by_content.remove(&(record, hash));
-                }
-            }
-            if self.latest.get(&record).is_some_and(|&(_, s)| s == slot) {
-                self.latest.remove(&record);
-            }
+    /// Once a game hour ([`minutes`] / 60), forgets the cells [`FORGET_DAYS`] old at `now` (a scan
+    /// of every cell); the copies they named stay in the store.
+    fn sweep(&mut self, now: u64) {
+        if self.swept == Some(now / 60) {
+            return;
         }
+        self.swept = Some(now / 60);
+        self.cells.retain(|_, c| fade_of(c.seen, now).is_some());
     }
 
-    /// Forgets the cells for which `gone` holds, their copies released.
-    fn forget(&mut self, gone: impl Fn(&Remembered) -> bool) {
-        let keys: Vec<(u8, u16, u16)> = self
-            .cells
-            .iter()
-            .filter(|(_, c)| gone(c))
-            .map(|(&k, _)| k)
-            .collect();
-        for k in keys {
-            if let Some(c) = self.cells.remove(&k) {
-                self.release(&c.layers);
-            }
-        }
-    }
-
-    /// Past [`MAX_CELLS`], forgets the oldest sights down to seven eighths of it.
+    /// Past [`MAX_CELLS`], forgets the oldest sights down to seven eighths of it (a scan of every
+    /// cell); the copies they named stay in the store.
     fn cap(&mut self) {
         if self.cells.len() <= MAX_CELLS {
             return;
@@ -488,7 +428,7 @@ impl SightMemory {
         let mut seen: Vec<u64> = self.cells.values().map(|c| c.seen).collect();
         let k = self.cells.len() - target;
         let (_, &mut cutoff, _) = seen.select_nth_unstable(k);
-        self.forget(|c| c.seen < cutoff);
+        self.cells.retain(|_, c| c.seen >= cutoff);
         // Sights of the cutoff's own minute, as many as still go.
         let over = self.cells.len().saturating_sub(target);
         let tied: Vec<(u8, u16, u16)> = (self.cells.iter())
@@ -497,17 +437,17 @@ impl SightMemory {
             .take(over)
             .collect();
         for k in tied {
-            if let Some(c) = self.cells.remove(&k) {
-                self.release(&c.layers);
-            }
+            self.cells.remove(&k);
         }
     }
 
     /// The remembered sight for the render of `window` (the state's view now): with `framed`,
     /// every cell in sight remembered as the render draws it now, at the time now (in the cell's
-    /// own entry; a rewritten record as a copy of its pixels now); once a game hour the cells
-    /// [`FORGET_DAYS`] old forgotten, and past [`MAX_CELLS`] the oldest. Then per box, what the
-    /// render draws in grey ([`SightMemory::shown`]).
+    /// own entry; a rewritten record as a copy of its pixels now; a cell whose new copy the full
+    /// store cannot take forgotten instead); once a game hour the cells [`FORGET_DAYS`] old
+    /// forgotten (a scan of every cell), and past [`MAX_CELLS`] the oldest (a scan of every cell,
+    /// then the cells are down to seven eighths of it). Then per box, what the render draws in
+    /// grey ([`SightMemory::shown`]).
     pub(super) fn layers(state: &mut State, window: &ViewWindow, framed: bool) -> Vec<Shown> {
         if framed {
             let now = minutes(&state.actors.calendar);
@@ -540,22 +480,26 @@ impl SightMemory {
                     }
                     n = d.node_next[i];
                 }
+                let mut kept = true;
                 for l in layers.iter_mut() {
                     let r = usize::from(l.record);
                     if merged.contains(&l.record) || gfx.cache.version(r) != 0 {
                         l.frozen = memory.freeze(gfx, l.record);
+                        kept &= l.frozen.is_some();
                     }
                 }
-                let cell = memory.cells.entry(key).or_default();
-                cell.seen = now;
-                std::mem::swap(&mut cell.layers, &mut layers);
-                memory.release(&layers);
+                if kept {
+                    let cell = memory.cells.entry(key).or_default();
+                    cell.seen = now;
+                    std::mem::swap(&mut cell.layers, &mut layers);
+                } else {
+                    // The store is full: the look is not kept, nor the older one (not the
+                    // cell's last sight).
+                    memory.cells.remove(&key);
+                }
                 memory.scratch = layers;
             }
-            if memory.swept != Some(now / 60) {
-                memory.swept = Some(now / 60);
-                memory.forget(|c| fade_of(c.seen, now).is_none());
-            }
+            memory.sweep(now);
             memory.cap();
             gfx.cache.memory = memory;
         }
@@ -580,7 +524,37 @@ impl SightMemory {
     /// The copies of rewritten records' pixels held now (the tests read it).
     #[cfg(test)]
     pub(super) fn copies(&self) -> usize {
-        self.frozen.iter().flatten().count()
+        self.frozen.len()
+    }
+
+    /// Fills the copy store up to `n` copies of record `record`, of distinct contents (pixels 0
+    /// and 1 the slot's two bytes, the rest 0; opaque: the saturation tests).
+    #[cfg(test)]
+    pub(super) fn fill_copies(&mut self, n: usize, record: u16) {
+        for i in self.frozen.len()..n {
+            let mut pixels = vec![0; 256];
+            pixels[0] = i as u8;
+            pixels[1] = (i >> 8) as u8;
+            let transparent = vec![false; 256];
+            let hash = content_hash(&pixels, &transparent);
+            let slot = self.frozen.len() as u16;
+            self.frozen.push(Frozen {
+                record,
+                pixels,
+                transparent,
+            });
+            self.by_content
+                .entry((record, hash))
+                .or_default()
+                .push(slot);
+        }
+    }
+
+    /// Remembers world cell (x, y) of level `z` as `layers`, seen at `seen` (the tests of a given
+    /// layer).
+    #[cfg(test)]
+    pub(super) fn remember(&mut self, (z, x, y): (u8, u16, u16), layers: Vec<Layer>, seen: u64) {
+        self.cells.insert((z, x, y), Remembered { seen, layers });
     }
 
     /// Whether world cell (x, y) is remembered now, on any level (the tests read it).
@@ -630,7 +604,6 @@ impl SightMemory {
                 record,
                 masktype: 0,
                 frame: 0,
-                ver: 0,
                 frozen: None,
             }];
             let key = (z, (i % 1024) as u16, y0.wrapping_add((i / 1024) as u16));
@@ -638,18 +611,36 @@ impl SightMemory {
         }
     }
 
-    /// The bytes the memory holds on the heap, from its tables' capacities (the cost receipts).
+    /// The bytes the memory holds on the heap, from its tables' and buffers' capacities in this
+    /// build's layouts (the cost receipts): the cells' table and their layers, the copy store
+    /// and its copies' pixels and transparencies, the index by content and its slot lists, the
+    /// latest index, the scratch layers. A table of capacity n holds a power of two of buckets,
+    /// n at most seven eighths of them, each an entry and a control byte, and 16 control bytes
+    /// more (std's hashbrown). Not the allocator's own overhead.
     #[cfg(test)]
     pub(super) fn heap_bytes(&self) -> usize {
-        let entry = std::mem::size_of::<((u8, u16, u16), Remembered)>() + 1;
+        use std::mem::size_of;
+        let table = |cap: usize, entry: usize| match cap {
+            0 => 0,
+            _ => (cap * 8 / 7).next_power_of_two() * (entry + 1) + 16,
+        };
+        let cells = table(
+            self.cells.capacity(),
+            size_of::<((u8, u16, u16), Remembered)>(),
+        );
         let layers: usize = self.cells.values().map(|c| c.layers.capacity()).sum();
-        let copies: usize = self
-            .frozen
-            .iter()
-            .flatten()
-            .map(|f| f.pixels.capacity() * 2)
+        let store = self.frozen.capacity() * size_of::<Frozen>();
+        let copies: usize = (self.frozen.iter())
+            .map(|f| f.pixels.capacity() + f.transparent.capacity() * size_of::<bool>())
             .sum();
-        self.cells.capacity() * entry + layers * std::mem::size_of::<Layer>() + copies
+        let index = table(
+            self.by_content.capacity(),
+            size_of::<((u16, u64), Vec<u16>)>(),
+        );
+        let lists: usize = (self.by_content.values()).map(|v| v.capacity() * 2).sum();
+        let latest = table(self.latest.capacity(), size_of::<(u16, (u32, u16))>());
+        let scratch = self.scratch.capacity();
+        cells + (layers + scratch) * size_of::<Layer>() + store + copies + index + lists + latest
     }
 }
 
@@ -768,12 +759,13 @@ const GLOBAL: usize = 1;
 
 impl WindowKey {
     /// The values the framed render of `window` reads, per box: the cell's base word, the count
-    /// of its remembered layers (spec 18, `memory`: per box, empty with the remembered sight off),
-    /// with some their fade and each as [`WindowKey::layer`] has it, the count of its object words, each word as
-    /// [`WindowKey::word`] has it (with a clock word the hour and the minute), then the target
-    /// cursor's word when it is in the box, then the box's border word. `None` when the render
-    /// cannot be remembered: the sparkle, the dissolve or XOR plots on, the cursor outside the
-    /// cells, an overlay or clock hands that would leave their box.
+    /// of its remembered layers (spec 18, `memory`: per box, empty with the remembered sight off)
+    /// and, when it has any, their fade and each layer as [`WindowKey::layer`] has it, the count
+    /// of its object words, each word as [`WindowKey::word`] has it (with a clock word the hour
+    /// and the minute), then the target cursor's word when it is in the box, then the box's
+    /// border word. `None` when the render cannot be remembered: the sparkle, the dissolve or XOR
+    /// plots on, the cursor outside the cells, an overlay or clock hands that would leave their
+    /// box.
     pub(super) fn of(
         state: &State,
         window: &ViewWindow,
@@ -871,18 +863,15 @@ impl WindowKey {
     }
 
     /// Remembered layer `l` drawn in a box ([`super::view`]'s memory blit, which stays in it):
-    /// the record, the masktype, whether it draws a copy and the version of the pixels it draws
-    /// (the copy's generation, which no other copy has, else the record's version now), and when
-    /// the overlay is drawn (masktype bit 2, an overlay) the first frame with the rows of the
-    /// frame kept. The box's fade is read before its layers ([`WindowKey::of`]).
+    /// the record, the masktype, whether it draws a copy, and which pixels it draws (the copy's
+    /// slot, which names one content for the store's life, else the record's version now), and
+    /// when the overlay is drawn (masktype bit 2, an overlay) the first frame with the rows of
+    /// the frame kept. The box's fade is read before its layers ([`WindowKey::of`]).
     fn layer(&mut self, gfx: &GfxState, l: Layer) {
         let r = usize::from(l.record);
-        let frozen = l
-            .frozen
-            .and_then(|s| gfx.cache.memory.frozen.get(usize::from(s))?.as_ref());
-        let ver = match (l.frozen, frozen) {
-            (Some(_), Some(f)) => f.generation,
-            _ => gfx.cache.version(r),
+        let ver = match l.frozen {
+            Some(slot) => u32::from(slot),
+            None => gfx.cache.version(r),
         };
         self.values.extend([
             r as u32,
@@ -966,7 +955,130 @@ pub(super) fn check_static(gfx: &mut GfxState) {
 
 #[cfg(test)]
 mod sight_tests {
-    use super::{FORGET_DAYS, MAX_CELLS, SightMemory, fade_of, keeps};
+    use u6_testkit::Quiet;
+
+    use super::{FORGET_DAYS, Layer, MAX_CELLS, MAX_COPIES, SightMemory, fade_of, keeps};
+    use crate::gfx::GfxState;
+
+    /// Record `r` rewritten to `colour` on every pixel, opaque, and reported as the shore merge
+    /// reports a rewrite (its version one more).
+    fn paint(g: &mut GfxState, r: u16, colour: u8) {
+        let rec = &mut g.records[usize::from(r)];
+        rec.pixels.fill(colour);
+        rec.transparent.fill(false);
+        g.cache.record_changed(usize::from(r));
+    }
+
+    /// The colour copy `slot` holds, if it holds one opaque colour on every pixel.
+    fn colour_of(m: &SightMemory, slot: u16) -> Option<u8> {
+        let f = m.frozen.get(usize::from(slot))?;
+        let c = f.pixels[0];
+        let one = f.pixels.iter().all(|&p| p == c) && f.transparent.iter().all(|&t| !t);
+        one.then_some(c)
+    }
+
+    /// One layer of record `record` drawn from copy `slot`.
+    fn layer(record: u16, slot: u16) -> Vec<Layer> {
+        vec![Layer {
+            record,
+            masktype: 0,
+            frame: 0,
+            frozen: Some(slot),
+        }]
+    }
+
+    /// Spec 18 (the review's copy ownership; the append-only store): one copy per record and
+    /// content. The record at the same version, and rewritten to a content held before (a new
+    /// version), takes the copy it took then; another record of the same content its own; a new
+    /// content (the transparency included) a new slot, the slots before still holding theirs.
+    #[test]
+    fn one_copy_per_record_and_content() {
+        let mut g = GfxState::default();
+        let mut m = SightMemory::default();
+        paint(&mut g, 5, 1);
+        let a = m.freeze(&g, 5).quiet();
+        assert_eq!(m.freeze(&g, 5), Some(a), "the same version: the same copy");
+        assert_eq!(m.copies(), 1);
+        paint(&mut g, 6, 1);
+        let b = m.freeze(&g, 6).quiet();
+        assert!(b != a, "another record of the same content: its own copy");
+        paint(&mut g, 5, 1);
+        assert_eq!(
+            m.freeze(&g, 5),
+            Some(a),
+            "the same content, a new version: no new copy"
+        );
+        assert_eq!(m.copies(), 2);
+        paint(&mut g, 5, 2);
+        let c = m.freeze(&g, 5).quiet();
+        assert!(c != a && c != b, "a new content: a new slot");
+        paint(&mut g, 5, 1);
+        assert_eq!(m.freeze(&g, 5), Some(a), "a content held before: its copy");
+        g.records[5].transparent[0] = true;
+        g.cache.record_changed(5);
+        let d = m.freeze(&g, 5).quiet();
+        assert!(![a, b, c].contains(&d), "another transparency: a new slot");
+        assert_eq!(m.copies(), 4);
+        assert_eq!(colour_of(&m, a), Some(1), "slot a: its content");
+        assert_eq!(colour_of(&m, c), Some(2), "slot c: its content");
+        assert_eq!(
+            m.frozen[usize::from(b)].record,
+            6,
+            "slot b: taken from record 6"
+        );
+    }
+
+    /// Spec 18 (the review's forgetting, cap and sweep): the sweep forgets the cells
+    /// [`FORGET_DAYS`] old, once a game hour (a cell as old after it waits for the next hour);
+    /// the cap the oldest; neither drops a copy, and a slot keeps its content after every cell
+    /// naming it is gone (so the window cache's key, which names the slot, names that content).
+    #[test]
+    fn forgetting_cells_keeps_their_copies() {
+        let mut g = GfxState::default();
+        let mut m = SightMemory::default();
+        paint(&mut g, 5, 1);
+        let a = m.freeze(&g, 5).quiet();
+        let now = FORGET_DAYS * 1440;
+        m.remember((0, 1, 1), layer(5, a), 0);
+        m.remember((0, 2, 1), layer(5, a), now);
+        m.sweep(now);
+        assert!(!m.holds_on(0, 1, 1), "five days old: forgotten");
+        assert!(m.holds_on(0, 2, 1), "seen now: kept");
+        m.remember((0, 3, 1), layer(5, a), 0);
+        m.sweep(now + 59);
+        assert!(m.holds_on(0, 3, 1), "the same hour: no sweep");
+        m.sweep(now + 60);
+        assert!(!m.holds_on(0, 3, 1), "the next hour: forgotten");
+        assert_eq!(m.copies(), 1, "the sweep drops no copy");
+        m.fill_synthetic(MAX_CELLS, 1, 0, 7, 1);
+        m.cap();
+        assert_eq!(m.len(), MAX_CELLS - MAX_CELLS / 8, "the cap: seven eighths");
+        assert!(m.holds_on(0, 2, 1), "the cap: the newest kept");
+        m.cells.clear();
+        assert_eq!(m.copies(), 1, "no cell left: the copy stays");
+        assert_eq!(colour_of(&m, a), Some(1), "its content");
+        assert_eq!(m.freeze(&g, 5), Some(a), "taken again: the same slot");
+    }
+
+    /// Spec 18 (the review's saturation, item 1): a store of [`MAX_COPIES`] takes no new copy
+    /// (the caller forgets the cell instead: no remembered layer draws a rewritten record live),
+    /// and still gives the copies it holds, at a new version too.
+    #[test]
+    fn a_full_store_takes_no_new_copy_and_gives_the_ones_it_holds() {
+        let mut g = GfxState::default();
+        let mut m = SightMemory::default();
+        m.fill_copies(MAX_COPIES - 1, 9);
+        paint(&mut g, 5, 1);
+        let a = m.freeze(&g, 5).quiet();
+        assert_eq!(usize::from(a), MAX_COPIES - 1, "the last slot");
+        assert_eq!(m.copies(), MAX_COPIES);
+        paint(&mut g, 5, 2);
+        assert_eq!(m.freeze(&g, 5), None, "full: no new copy");
+        assert_eq!(m.copies(), MAX_COPIES);
+        paint(&mut g, 5, 1);
+        assert_eq!(m.freeze(&g, 5), Some(a), "a content held: its copy");
+        assert_eq!(m.freeze(&g, 5), Some(a), "again at that version");
+    }
 
     /// Past [`MAX_CELLS`] the oldest sights go first, down to seven eighths, also when they all
     /// share one minute; the newest stay.
@@ -981,6 +1093,19 @@ mod sight_tests {
             (0..1000).all(|i| m.holds_on(1, i % 1024, i / 1024)),
             "the newest kept"
         );
+    }
+
+    /// Spec 18's bounds as heap bytes ([`SightMemory::heap_bytes`], this build's layouts):
+    /// [`MAX_CELLS`] cells of one layer each and [`MAX_COPIES`] copies stay under 24 MiB.
+    #[test]
+    fn the_bounds_hold_the_heap_under_24_mib() {
+        let mut m = SightMemory::default();
+        m.fill_synthetic(MAX_CELLS, 0, 0, 1, 10);
+        let cells = m.heap_bytes();
+        m.fill_copies(MAX_COPIES, 9);
+        let all = m.heap_bytes();
+        println!("{MAX_CELLS} cells: {cells} heap bytes; with {MAX_COPIES} copies: {all}");
+        assert!(all < 24 << 20, "under 24 MiB");
     }
 
     /// The fade's days: whole days of 1440 minutes, none from [`FORGET_DAYS`]; the pattern keeps

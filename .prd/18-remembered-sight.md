@@ -22,29 +22,30 @@ Owner's follow-up (2026-10-27, verbatim): "화면에 안보이면 바로 없는�
 ## Contract
 
 - **What is remembered.** Each map-window cell that was in sight keeps its look from its last sight, with the game time of that sight: its ground, and its objects that do not move. Actors are never remembered, and neither are objects that move with an actor (`objects/moves.rs:29` `moves_with_actor`: parted objects, 0x1a9, the serpent). The look is drawn in dark grey, in the window and through the HD compositor.
-- **Where it is kept.** `gfx::cache::SightMemory` (`gfx/cache.rs:162`), keyed by level and world cell. A cell stays remembered after it leaves the window and while the party is on another level. It shows again, in grey, when it is back in the window and out of sight. It is never saved.
+- **Where it is kept.** `gfx::cache::SightMemory` (`gfx/cache.rs:164`), keyed by level and world cell. A cell stays remembered after it leaves the window and while the party is on another level. It shows again, in grey, when it is back in the window and out of sight. It is never saved.
   - Load state (0x105350, a restore) forgets it all: `RenderCache::forget_sight`, `gfx/cache.rs:118`, called at `saveload/restore.rs:90`. The saved memory is unit C3.
   - The window reset 0x133a96 (death, arrest, the healer) keeps it. The reset window shows the remembered cells.
-- **Fading by game days.** The age is the game time since the cell's last sight, on the original's calendar: 60 minutes, 24 hours, days 1..28, months 1..12 (`minutes`, `gfx/cache.rs:251`). d is the whole days of 1440 minutes (`fade_of`, `:259`).
+- **Fading by game days.** The age is the game time since the cell's last sight, on the original's calendar: 60 minutes, 24 hours, days 1..28, months 1..12 (`minutes`, `gfx/cache.rs:245`). d is the whole days of 1440 minutes (`fade_of`, `:253`).
 
   | d (whole days) | 0 | 1 | 2 | 3 | 4 | 5 and later |
   |---|---|---|---|---|---|---|
   | pixels shown | 100 % | 50 % | 25 % | 12.5 % | 6.25 % | none: black, forgotten |
   | of a fully opaque 16 × 16 tile | 256 | 128 | 64 | 32 | 16 | 0 |
 
-  A cell in sight is seen again at every framed render, so it is always day 0.
-- **The pattern.** A fixed 4 × 4 ordered (Bayer) matrix on the original's pixel grid (`BAYER`, `gfx/cache.rs:238`; `keeps`, `:245`). It is anchored to the world: a cell is 16 pixels, so the cell's own column and row stand for the world's. Day d keeps the pixels whose threshold is below 16 >> d. Each day's pixels are a subset of the day before's, and 50 % is a checkerboard.
-  - The window render first draws the cell's own tile (0xff or 0x1bc, black), then the remembered layers, writing only the kept pixels (`draw_remembered` and `blit_memory`, `gfx/view.rs:155` and `:106`). The overlay OR pass (masktype bit 2) obeys the same mask.
-  - The missiles' redraw (`blit_remembered`, `gfx/view.rs:174`, called from `combat/present.rs`) and the cached window path draw the same way. The window cache keys a remembered box by its fade too.
+  A lit cell in sight is seen again at every framed render (its look taken again), so it is day 0. An unlit cell in sight (0x1bc) is not seen: it keeps the age of its last lit sight.
+- **The pattern.** A fixed 4 × 4 ordered (Bayer) matrix on the original's pixel grid (`BAYER`, `gfx/cache.rs:232`; `keeps`, `:239`). It is anchored to the world: a cell is 16 pixels, so the cell's own column and row stand for the world's. Day d keeps the pixels whose threshold is below 16 >> d. Each day's pixels are a subset of the day before's, and 50 % is a checkerboard.
+  - The window render first draws the cell's own tile (0xff or 0x1bc, black), then the remembered layers, writing only the kept pixels (`draw_remembered` and `blit_memory`, `gfx/view.rs:156` and `:107`). The overlay OR pass (masktype bit 2) obeys the same mask.
+  - The missiles' redraw (`blit_remembered`, `gfx/view.rs:175`, called from `combat/present.rs`) and the cached window path draw the same way. The window cache keys a remembered box by its fade too.
   - In HD, only the kept pixels carry `FLAG_MEMORY`. The left-out pixels name the cell's own black tile, so the pattern holds at the original's pixel grid.
 - **Frozen at last sight.** The shore merge 0x152dac rewrites map records in place (`gfx/anim.rs:121`, the only writer of record pixels after the load). A remembered layer of a record in the merge set, or of any record already rewritten (version not 0), keeps a copy of the record's pixels from that sight (`Frozen`).
-  - Copies are shared by record and content: a new version with the same pixels reuses the copy.
-  - Each copy counts the layers that name it, and is freed with the last one. Freeing costs O(the layers changed), not O(all cells).
-  - A copy's image id is `FROZEN_BASE` + slot, at version 0 (`gfx/cache.rs:223`). `FROZEN_BASE` is 2048, past every record. Each copy has its own generation, which the window cache keys by.
+  - The copies are an append-only store (`freeze`, `gfx/cache.rs:374`): one per record and content (pixels and transparency, compared in full behind a hash). A new version whose content was held before takes the copy it took then.
+  - The owner's game makes 255 copies, of 32 records, over 10 000 animation ticks (the shore merges of the water's cycle; measured in round 2, counts only). So no copy is ever freed: a slot names one content until load state, and the window cache keys a copy by its slot.
+  - A copy's image id is `FROZEN_BASE` + slot, at version 0 (`gfx/cache.rs:216`). `FROZEN_BASE` is 2048, past every record.
+  - At most `MAX_COPIES` copies (8 192, `:223`), 32 times the measured need. When the store is full and a cell in sight needs a new copy, that cell is forgotten: it is black once out of sight. Its older look is not kept, because it is not the look of its last sight. A remembered layer never draws a rewritten record live.
 - **Bounds.**
-  - At most `MAX_CELLS` cells (131 072, `gfx/cache.rs:226`). Past it the oldest sights are forgotten first, down to seven eighths.
-  - At most `MAX_COPIES` copies (8 192, `:229`). Past it a layer keeps the record itself.
-  - Cells of day 5 and later show nothing at once. A sweep, at most once per game hour, forgets them and releases their copies. No render scans all cells.
+  - At most `MAX_CELLS` cells (131 072, `gfx/cache.rs:219`). Past it the oldest sights are forgotten first, down to seven eighths (`cap`, `:423`).
+  - Cells of day 5 and later show nothing at once. A sweep forgets them (`sweep`, `:413`).
+  - Two passes scan every cell, inside a framed render: the sweep, at most once per game hour, and the cap, only when the cells are over `MAX_CELLS` (then not again for the next 16 384 new cells). Every other render touches only the cells of the view.
 - **The grey.** One function serves classic and HD: `u6_render::grey` (`u6-render/src/lib.rs:125`), the luma `(77r + 150g + 29b + 128) >> 8` × `GREY_LEVEL` 115 / 256, rounded.
   - In classic, palette entries `GREY + i` (0x20..0x3f) hold the grey of game colour `i`, written by the map window render only while the switch is on. With the switch off, entries 32..63 are left alone, so the frames match the original pixel for pixel (visual parity, not 256-entry parity).
   - In HD, a pixel flagged `FLAG_MEMORY` (0x80) is drawn from the grey copy of its HD image.
@@ -53,13 +54,22 @@ Owner's follow-up (2026-10-27, verbatim): "화면에 안보이면 바로 없는�
 - **In sight is unchanged.** A cell in sight draws exactly as it did before, whether the switch is on or off (`real_a_cell_in_sight_is_the_same_with_the_switch_on_and_off`, both builds).
 - **The switch.** `Io::set_sight_memory` defaults to off, so tests, oracle comparisons and receipts see the original's frames. The page turns it on for each game. A visitor who stores `localStorage['u6.memory'] = 'off'` keeps it off.
 
-## Cost (unit C2, measured on the owner's game, gate profile, source plane on, load average about 50)
+## Cost (unit C2 round 2, measured on the owner's game, gate profile, source plane on, load average about 100 to 127)
 
-- Tick at idle, after the door scenario (`receipt_the_tick_with_50k_remembered_cells`, run with `--ignored`):
-  - Wide: 2.14 ms with the memory off, 2.19 ms on, 2.23 ms on with 50 000 more cells (C1: 2.56 ms on).
-  - Original: 0.335, 0.344 and 0.354 ms.
-- Memory: 50 276 cells hold about 2.96 MB of heap in the native build, by the tables' capacities. On wasm32 the pointers are half the size, about 2.5 MB [추정: computed from the layouts, not measured in the page].
-- Copies: about 0.5 KiB each, at most `MAX_COPIES`.
+- Tick at idle, after the door scenario (`receipt_the_tick_with_50k_remembered_cells`, run with `--ignored`), median of 600 ticks:
+
+  | build | memory off | on | on, 50 000 more cells | the same at night |
+  |---|---|---|---|---|
+  | Wide (912 × 408) | 2.333 ms | 2.380 ms | 2.422 ms | 2.420 ms |
+  | Original (320 × 200) | 0.389 ms | 0.400 ms | 0.412 ms | 0.415 ms |
+
+  - The 50 000 more cells are off the view (one layer each, seen at the time of the injection). They are never drawn; the hourly sweep scans them.
+  - The night case also sets the hour to 23 and the ambient light to 0, as the clock does then. The unlit cells in sight that the scenario remembered then draw their remembered look too: 10 885 grey pixels instead of 8 007 (Original), 30 036 instead of 23 722 (Wide). Cells never seen stay black, so this is not every cell of the window.
+- Memory (`SightMemory::heap_bytes`: every table and buffer by its capacity, std's hashbrown bucket layout, not the allocator's overhead; native build):
+  - 50 221 cells (Original) hold 3.09 MB, and 50 276 cells (Wide) hold 3.10 MB.
+  - At the bounds (`the_bounds_hold_the_heap_under_24_mib`): `MAX_CELLS` cells of one layer each hold 11.8 MB, and 17.2 MB with `MAX_COPIES` copies.
+  - On wasm32 the pointers are half the size, so the tables are smaller [추정: computed from the layouts, not measured in the page].
+- Copies: about 0.5 KiB each. The owner's game makes 255 over 10 000 animation ticks, 0.13 MB.
 
 ## Residual
 
@@ -72,4 +82,4 @@ The receipts are in `objects-menu-fog-motion/loop.md`, under C1 and deploy 27. T
 - frames at `~/Games/ultima6/work/dispatch/r1027-r2/c1-frames/`, by day and night, and for shore and flight;
 - the live check after deploy.
 
-Unit C2's frames are at `~/Games/ultima6/work/dispatch/r1027-r2/c2-frames/`: one place on days 0..5 in classic and HD ×4, and a cell that leaves the window and comes back.
+Unit C2's frames are at `~/Games/ultima6/work/dispatch/r1027-r2/c2-frames/` (round 2, the final code): one place on days 0..5 in classic and HD ×4, through the window cache, and a cell that leaves the window and comes back.
