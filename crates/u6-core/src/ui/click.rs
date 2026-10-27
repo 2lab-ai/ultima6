@@ -153,7 +153,7 @@ fn map_click(s: &mut State) -> u16 {
 /// original's 11 × 11 window round the leader ([`RULE_HALF`] each way, on each axis, of the
 /// leader's view cell [`LEADER_CELL`]), as the cross-hair moves; Look (0x84) names any cell of
 /// the view (Decision 5). In Original that window is the whole view, so every map click passes.
-fn in_reach(s: &State, cmd: u16) -> bool {
+pub(crate) fn in_reach(s: &State, cmd: u16) -> bool {
     if cmd == LOOK {
         return true;
     }
@@ -436,13 +436,18 @@ fn inventory_checks(s: &mut State) -> Inventory {
     if !crate::objects::in_type_set_670c(&s.objects, kind) || kind == READY_ANYWAY {
         return Inventory::Code(0xa7);
     }
-    if kind == CHEST && frame & 2 != 0 {
+    if locked_chest(s, obj) {
         return Inventory::Locked;
     }
     if kind == CHEST && frame == 1 && find_child(&mut s.objects, obj, TRAP, TRAP_QUALITY) != -1 {
         return Inventory::Trap;
     }
     Inventory::Code(0xa0)
+}
+
+/// 0x10619c (0x1063f4..): `obj` is a chest (0x62) of frame bit 1: the locked line.
+pub(crate) fn locked_chest(s: &State, obj: i16) -> bool {
+    s.objects.kind(obj) == CHEST && s.objects.tf(obj) >> 10 & 2 != 0
 }
 
 /// 0x1061de..0x106268: the next combat mode of party member `member` (after 8 comes 2); in

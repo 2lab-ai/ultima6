@@ -524,6 +524,9 @@ pub struct Game {
     pointer_version: u64,
     /// Voices on ([`Game::set_voices`]): the engine's speech tap keeps what NPCs say.
     voices: bool,
+    /// Spec 17: the context-menu choice whose target press waits for its command to read the
+    /// target ([`Game::command_at`]).
+    run: Option<u6_core::ui::menu::Run>,
     /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
     /// repeats were queued as, so its release takes back those ([`Game::key_up`]).
     held: Vec<(String, Key)>,
@@ -574,6 +577,7 @@ impl Game {
             pointer_rgba: Vec::new(),
             pointer_version: 0,
             voices: false,
+            run: None,
             held: Vec::new(),
             sight_memory: false,
             motion: Motion::new(),
@@ -826,6 +830,51 @@ impl Game {
         })
     }
 
+    /// Spec 17: the context menu of a right press at frame pixel (x, y): `""` unless the prompt
+    /// is up ([`Game::at_prompt`], pointer moves queued since the last step let through) and the
+    /// pixel is on the map or on an inventory or equipment slot (Wide's included); else JSON
+    /// `{kind: "map"|"panel", cell: [x, y] | null, underlined: code | null, sections: [{object,
+    /// kind: [type, frame] | null, name, entries: [{code, enabled, reason, theft}]}]}`.
+    /// The name is the game's display name (the user's game text, for the page's menu only:
+    /// never logged or kept). Reads the game only ([`u6_core::ui::menu::query`]).
+    pub fn context_menu(&self, x: i32, y: i32) -> String {
+        if !self.prompt_up() {
+            return String::new();
+        }
+        let Some(e) = &self.engine else {
+            return String::new();
+        };
+        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        u6_core::ui::menu::query(&e.state(), e.io(), word(x), word(y))
+            .map_or_else(String::new, |m| menu_json(&m))
+    }
+
+    /// Spec 17: runs context-menu entry `code` on the target at frame pixel (x, y) as the
+    /// original's mouse does: a left press and release on the command's icon now, and for a
+    /// command that reads a target (0x81..0x88) a left press and release at (x, y) once it reads
+    /// it ([`Game::step`]; dropped if the prompt comes back first). Rest and Combat (0x89, 0x8a)
+    /// are the icon press alone. No underline is written. False (nothing queued) unless the
+    /// prompt is up and `code` is one of those.
+    pub fn command_at(&mut self, code: u16, x: i32, y: i32) -> bool {
+        if !self.prompt_up() || !(0x81..=0x8a).contains(&code) {
+            return false;
+        }
+        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        let Some(e) = &self.engine else {
+            return false;
+        };
+        let start = u6_core::ui::menu::Run::start(&e.state(), code, (word(x), word(y)));
+        let icon = match start {
+            Some((icon, run)) => {
+                self.run = Some(run);
+                icon
+            }
+            None => u6_core::ui::menu::icon_press(code),
+        };
+        self.pending.extend(icon);
+        true
+    }
+
     /// The leader's map position (x, y, z), or empty before a start.
     pub fn leader_position(&self) -> Vec<u16> {
         self.engine.as_ref().map_or_else(Vec::new, |e| {
@@ -914,6 +963,7 @@ impl Game {
     /// the previous one: the engine's log taken, the sound machine given the game's calls, the
     /// queue emptied. The RGBA frame is left as it was ([`Game::present`]).
     pub fn step(&mut self, ms: u32) {
+        self.step_run();
         if let Some(engine) = &mut self.engine {
             engine.tick(&self.pending, ms);
             self.log.extend(engine.take_log());
@@ -1552,6 +1602,51 @@ impl Game {
 }
 
 impl Game {
+    /// Spec 17: the engine's queue is empty and the page's holds nothing the game reads as an
+    /// event: the moves of a button-less pointer change nothing it reads, and a key's release is
+    /// applied where the engine queues the input, never one of its events
+    /// ([`InputEvent::Release`]).
+    fn quiet(&self) -> bool {
+        let inert = |ev: &InputEvent| match ev {
+            InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
+            InputEvent::Release(_) => true,
+            _ => false,
+        };
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.io().pending_events() == 0)
+            && self.pending.iter().all(inert)
+    }
+
+    /// Spec 17: [`Game::at_prompt`] with the moves of a button-less pointer and the key releases
+    /// queued since the last step let through ([`Game::quiet`]): a right press just after either
+    /// still gets its menu.
+    fn prompt_up(&self) -> bool {
+        self.quiet()
+            && self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.state().main.reading == 1)
+    }
+
+    /// Spec 17: the held target press of [`Game::command_at`] before a tick: queued once its
+    /// command reads the target with the queues quiet ([`Game::quiet`]), dropped once a new
+    /// prompt read came, whatever is queued ([`u6_core::ui::menu::Run::step`]).
+    fn step_run(&mut self) {
+        let (Some(run), Some(e)) = (self.run, &self.engine) else {
+            return;
+        };
+        let step = run.step(&e.state(), self.quiet());
+        match step {
+            u6_core::ui::menu::Step::Hold => {}
+            u6_core::ui::menu::Step::Release(press) => {
+                self.pending.extend(press);
+                self.run = None;
+            }
+            u6_core::ui::menu::Step::Drop => self.run = None,
+        }
+    }
+
     /// [`Game::load_file`] without the JS error type.
     fn collect(&mut self, path: &str, data: Vec<u8>) -> Result<(), String> {
         let total = self.input_bytes.saturating_add(data.len());
@@ -2209,6 +2304,54 @@ fn speech_json(said: &[u6_core::speech::Utterance]) -> String {
     out
 }
 
+/// [`Game::context_menu`]'s JSON for `m`.
+fn menu_json(m: &u6_core::ui::menu::Menu) -> String {
+    use u6_core::ui::menu::Kind;
+    let kind = match m.kind {
+        Kind::Map => "map",
+        Kind::Panel => "panel",
+    };
+    let cell = m
+        .cell
+        .map_or_else(|| "null".to_string(), |(x, y)| format!("[{x},{y}]"));
+    let underlined = m
+        .underlined
+        .map_or_else(|| "null".to_string(), |c| c.to_string());
+    let mut out =
+        format!("{{\"kind\":\"{kind}\",\"cell\":{cell},\"underlined\":{underlined},\"sections\":[");
+    for (i, section) in m.sections.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let kind = section
+            .kind
+            .map_or_else(|| "null".to_string(), |(t, f)| format!("[{t},{f}]"));
+        out.push_str(&format!(
+            "{{\"object\":{},\"kind\":{kind},\"name\":",
+            section.object
+        ));
+        json_string(&mut out, &section.name);
+        out.push_str(",\"entries\":[");
+        for (j, e) in section.entries.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            let reason = e
+                .reason
+                .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
+            out.push_str(&format!(
+                "{{\"code\":{},\"enabled\":{},\"reason\":{reason},\"theft\":{}}}",
+                e.code,
+                e.enabled(),
+                e.theft
+            ));
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}");
+    out
+}
+
 /// `text` as a JSON string literal: `"` and `\` escaped, control characters as `\u00XX`.
 fn json_string(out: &mut String, text: &str) {
     out.push('"');
@@ -2226,6 +2369,7 @@ fn json_string(out: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use u6_core::geom::{HALF_H, HALF_W};
     use u6_testkit::{Quiet, assert_same};
 
     #[test]
@@ -6003,5 +6147,349 @@ mod tests {
              map covered",
             page.whole, page.changes, page.misses, checked[0], checked[1]
         );
+    }
+
+    /// Spec 17: before a start there is no context menu and no entry runs (nothing queued).
+    #[test]
+    fn before_a_start_there_is_no_context_menu_and_no_entry_runs() {
+        let mut game = Game::new();
+        let (x, y) = hero_point();
+        assert_eq!(game.context_menu(x, y), "");
+        assert!(!game.command_at(0x88, x, y));
+        assert!(game.pending.is_empty() && game.run.is_none());
+    }
+
+    /// Spec 17: the context menu's JSON: its kind, cell, underlined command and sections, each
+    /// entry's code, whether it can run, its reason's code and the theft mark; the name as a JSON
+    /// string (made-up names here).
+    #[test]
+    fn the_context_menus_json() {
+        use u6_core::ui::menu::{Entry, Kind, Menu, Reason, Section};
+        let entry = |code, reason, theft| Entry {
+            code,
+            reason,
+            theft,
+        };
+        let map = Menu {
+            kind: Kind::Map,
+            cell: Some((3, -1)),
+            underlined: Some(0x88),
+            sections: vec![Section {
+                object: 300,
+                kind: Some((0x80, 2)),
+                name: "a \"b\"".into(),
+                entries: vec![
+                    entry(0x88, Some(Reason::Far), false),
+                    entry(0x85, None, true),
+                ],
+            }],
+        };
+        assert_eq!(
+            menu_json(&map),
+            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"kind":[128,2],"name":"a \"b\"","entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}]}"#
+        );
+        let panel = Menu {
+            kind: Kind::Panel,
+            cell: None,
+            underlined: None,
+            sections: Vec::new(),
+        };
+        assert_eq!(
+            menu_json(&panel),
+            r#"{"kind":"panel","cell":null,"underlined":null,"sections":[]}"#
+        );
+    }
+
+    /// Spec 17, on the user's zip (skipped when absent; read only): at the prompt a right press
+    /// on the hero (the view's centre cell, [`cell_point`], so in either build's layout) has a
+    /// map menu with Look, also with a pointer move queued since the last step;
+    /// `command_at` Look there queues the icon press and,
+    /// once Look reads its target, the press on the hero (Look then shows the portrait and waits
+    /// for a key: no prompt); with no prompt it refuses. A key gets the prompt back.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn command_at_runs_look_on_the_hero_through_the_target_read() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        let prompt = |game: &mut Game| {
+            for _ in 0..3000 {
+                if game.at_prompt() {
+                    return true;
+                }
+                game.step(20);
+            }
+            false
+        };
+        assert!(prompt(&mut game), "the prompt");
+        let (hx, hy) = hero_point();
+        let menu = game.context_menu(hx, hy);
+        assert!(
+            menu.starts_with(r#"{"kind":"map""#) && menu.contains(r#""code":132,"enabled":true"#)
+        );
+        let (mx, my) = cell_point(HALF_W as i32 + 2, HALF_H as i32 + 2);
+        game.pointer(mx, my, 0);
+        let after_a_move = game.context_menu(hx, hy);
+        assert!(after_a_move == menu, "a pointer move queued: the same menu");
+        assert!(game.command_at(0x84, hx, hy));
+        assert!(
+            !game.command_at(0x84, hx, hy),
+            "no prompt with the icon queued"
+        );
+        let mut read = false;
+        for _ in 0..200 {
+            game.step(20);
+            if game.run.is_none() {
+                read = !game.at_prompt();
+                break;
+            }
+        }
+        for _ in 0..50 {
+            game.step(20);
+        }
+        assert!(
+            read && !game.at_prompt(),
+            "Look read its target and waits on the portrait"
+        );
+        game.key_down("Space", " ", false);
+        assert!(prompt(&mut game), "the prompt again");
+    }
+
+    /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn at_the_prompt() -> Option<Game> {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return None;
+        }
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        Some(game)
+    }
+
+    /// Steps `game` (20 ms each, at most 3000) until the prompt is up; false if it never is.
+    fn steps_to_prompt(game: &mut Game) -> bool {
+        steps_to_prompt_within(game, 3000)
+    }
+
+    /// [`steps_to_prompt`] in at most `steps` steps.
+    fn steps_to_prompt_within(game: &mut Game, steps: usize) -> bool {
+        for _ in 0..steps {
+            if game.at_prompt() {
+                return true;
+            }
+            game.step(20);
+        }
+        false
+    }
+
+    /// The frame pixel a test presses for view cell (col, row), laid out from the build's map
+    /// geometry ([`u6_core::geom`]: the view's origin `MAP_X`/`MAP_Y`, Original (0, 0), Wide
+    /// (320, 0)): the cell's centre, except in the last column and row, whose centre lies past
+    /// the shown map's edge (`SHOWN`, the view less half a cell each side; no menu there), so
+    /// theirs is 3 pixels inside that edge, still in the same cell.
+    fn cell_point(col: i32, row: i32) -> (i32, i32) {
+        use u6_core::geom::{MAP_X, MAP_Y, SHOWN};
+        let at = |k: i32, origin: u16, edge: u16| {
+            (i32::from(origin) + 16 * k + 8).min(i32::from(edge) - 3)
+        };
+        (at(col, MAP_X, SHOWN.2), at(row, MAP_Y, SHOWN.3))
+    }
+
+    /// The hero's cell: [`u6_core::ui::pointer::LEADER_PIXEL`], the centre of the view's centre
+    /// cell, the leader's.
+    fn hero_point() -> (i32, i32) {
+        let (x, y) = u6_core::ui::pointer::LEADER_PIXEL;
+        (i32::from(x), i32::from(y))
+    }
+
+    /// Spec 17 rounds 2 and 3 and follow-up F0, items 2 and 12, on the user's zip: with the
+    /// leader's inventory shown (as Drop's key shows it, 0x92; Drop then let go with Escape),
+    /// `context_menu` on every cell of the build's view (Original 11 × 11, Wide 37 × 21, each
+    /// pressed at [`cell_point`]), on two inventory slots and on one control point leaves the
+    /// running game's state as it was, checked after each query (the checks run on a copy); every
+    /// view cell gives a menu, each slot gives one exactly when it holds something (and at least
+    /// one does). The slots are the first list cell and an equipment cell, the neck (the cell
+    /// lookups 0x111e3c / 0x111eec), inside the side panel's click region (region 2, the UI's own
+    /// rect, the same pixels in both builds); the control (0xc0, 0x80) lies below that region and
+    /// off the map, and gives none.
+    #[test]
+    fn context_menu_leaves_the_game_as_it_was() {
+        use u6_core::geom::{VIEW_H, VIEW_W};
+        use u6_core::ui::pointer::{map_column, region, view_cell};
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        assert!(game.key_down("KeyD", "d", false), "Drop's key");
+        for _ in 0..200 {
+            game.step(20);
+            if !game.at_prompt() {
+                break;
+            }
+        }
+        assert!(game.key_up("KeyD"), "Drop's key let go");
+        // Escape: the first takes the cursor off (0x106e1e), the next one ends the read.
+        for _ in 0..4 {
+            if steps_to_prompt_within(&mut game, 50) {
+                break;
+            }
+            assert!(game.key_down("Escape", "Escape", false), "Escape taken");
+            game.step(20);
+            assert!(game.key_up("Escape"), "Escape let go");
+        }
+        assert!(steps_to_prompt(&mut game), "the prompt again");
+        let before = game.engine.as_ref().quiet().state().clone();
+        assert_eq!(before.ui.panel.mode, 0x92, "the inventory shown");
+        // After each query, the game's state as it was (a write would show at the query that
+        // made it).
+        let query = |x: i32, y: i32| {
+            let menu = game.context_menu(x, y);
+            let same = *game.engine.as_ref().quiet().state() == before;
+            assert!(
+                same,
+                "the game's state as it was after the query at ({x}, {y})"
+            );
+            !menu.is_empty()
+        };
+        let mut cells = 0;
+        for row in 0..VIEW_H as i32 {
+            for col in 0..VIEW_W as i32 {
+                let (x, y) = cell_point(col, row);
+                let cell = view_cell(x as i16, y as i16);
+                assert_eq!(
+                    cell,
+                    (col as i16, row as i16),
+                    "the press point in its own cell"
+                );
+                cells += usize::from(query(x, y));
+            }
+        }
+        let panel_rect = region(&before.ui.pointer.tables, 2).expect("the side panel's region");
+        let in_panel = |x: i32, y: i32| {
+            let [x0, y0, x1, y1] = panel_rect.map(i32::from);
+            (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
+        };
+        // What the slots hold: list cell 0, and equipment slot 1 (the neck); an equipment value of
+        // 0, or 1 (the both-hands marker), is an empty slot.
+        let inv = &before.inventory;
+        let neck = inv.equip(1);
+        let slots = [
+            ((0x100, 0x28), inv.cells[0] != 0),
+            ((0xb8, 0x20), neck != 0 && neck != 1),
+        ];
+        let (mut panel, mut held) = (0, 0);
+        for ((x, y), holds) in slots {
+            assert!(in_panel(x, y), "a slot inside the side panel's region");
+            let menu = query(x, y);
+            assert_eq!(
+                menu, holds,
+                "a menu on slot ({x}, {y}) exactly when it holds something"
+            );
+            panel += usize::from(menu);
+            held += usize::from(holds);
+        }
+        let (cx, cy) = (0xc0, 0x80);
+        assert!(
+            !in_panel(cx, cy) && !map_column(cx as i16),
+            "the control: off the panel and the map"
+        );
+        assert!(!query(cx, cy), "the control: no menu");
+        println!(
+            "menus given: view {cells} of {}, panel {panel} of 2 (slots holding something {held})",
+            VIEW_W * VIEW_H
+        );
+        assert_eq!(cells, VIEW_W * VIEW_H, "a menu on every view cell");
+        assert!(held >= 1, "a slot holds something");
+    }
+
+    /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip, through `Game::command_at` and
+    /// `Game::step`: the leader starts without a readied spellbook, so the menu shows Cast disabled
+    /// as book; forced anyway on a cell two to five steps off that shows it ([`cell_point`],
+    /// either build's layout), Cast runs its own refusal before any target
+    /// read (its line printed, the prompt back), the held press is dropped, and the leader has not
+    /// moved.
+    #[test]
+    fn cast_forced_without_a_book_refuses_and_drops_its_target_press() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        // Cast is offered on a cell with an object (a bare tile gives Look alone), so the cell is
+        // the first one whose menu shows Cast disabled as book two to five steps from the hero
+        // (inside the original's targeting box in both builds), two east first: what shows Cast
+        // two east differs between the builds.
+        const BOOK: &str = r#""code":130,"enabled":false,"reason":"book""#;
+        let near = (-5..=5i32).flat_map(|r| (-5..=5i32).map(move |c| (c, r)));
+        let (dx, dy) = std::iter::once((2, 0))
+            .chain(near.filter(|&(c, r)| c.abs().max(r.abs()) >= 2 && (c, r) != (2, 0)))
+            .find(|&(c, r)| {
+                let (x, y) = cell_point(HALF_W as i32 + c, HALF_H as i32 + r);
+                game.context_menu(x, y).matches(BOOK).count() == 1
+            })
+            .expect("a cell two to five steps off whose menu shows Cast disabled as book once");
+        let (x, y) = cell_point(HALF_W as i32 + dx, HALF_H as i32 + dy);
+        let at = game.leader_position();
+        let lines = game.engine.as_ref().quiet().state().ui.messages.len();
+        assert!(game.command_at(0x82, x, y));
+        let mut released = 0;
+        for _ in 0..600 {
+            let before = game.pending.len();
+            game.step(20);
+            released += usize::from(game.pending.len() > before);
+            if game.run.is_none() && game.at_prompt() {
+                break;
+            }
+        }
+        let printed = game.engine.as_ref().quiet().state().ui.messages.len() - lines;
+        println!(
+            "the cell {dx}, {dy} from the hero; presses released: {released}, lines: {printed}"
+        );
+        assert!(
+            game.run.is_none() && game.at_prompt(),
+            "the prompt is back, the run over"
+        );
+        assert_eq!(released, 0, "the target press never went in");
+        assert!(printed > 0, "Cast printed its refusal");
+        assert_eq!(game.leader_position(), at, "the leader did not move");
+    }
+
+    /// Spec 17 round 2, item 0: a key let go just before a right press on the hero ([`hero_point`])
+    /// (its release queued, as `key_up` queues it) does not hide the menu, and the entry chosen
+    /// then runs: the release is applied where the engine queues the input and is never one of
+    /// its events.
+    #[test]
+    fn a_key_let_go_just_before_a_right_press_keeps_the_menu_and_its_run() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        assert!(game.key_down("KeyX", "x", false));
+        game.step(20);
+        assert!(steps_to_prompt(&mut game), "the prompt after the key");
+        let (hx, hy) = hero_point();
+        let menu = game.context_menu(hx, hy);
+        assert!(!menu.is_empty(), "a menu on the hero");
+        assert!(game.key_up("KeyX"), "the key was held");
+        let with_release = game.context_menu(hx, hy);
+        assert!(
+            with_release == menu,
+            "the same menu with the release queued"
+        );
+        assert!(game.command_at(0x84, hx, hy), "the entry runs");
+        let mut read = 0;
+        for _ in 0..200 {
+            game.step(20);
+            if game.run.is_none() {
+                read = u32::from(!game.at_prompt());
+                break;
+            }
+        }
+        assert_eq!(read, 1, "Look read its target");
     }
 }

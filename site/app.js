@@ -277,6 +277,7 @@ const voiceAccept = document.getElementById('voice-accept');
 const voiceDecline = document.getElementById('voice-decline');
 const forgetVoices = document.getElementById('forget-voices');
 const screenBox = document.getElementById('screen-box');
+const contextMenu = document.getElementById('context-menu');
 const fullscreenButton = document.getElementById('fullscreen');
 const fullscreenExit = document.getElementById('fullscreen-exit');
 
@@ -4021,30 +4022,39 @@ faster.addEventListener('click', () => changeSpeed(1));
 // this order, the focus, the game's pointer event (queued for the next step, exactly once) and
 // the gesture that starts the sound (the AudioContext is created before its first await, inside
 // the press's user activation); the sound starting never delays or drops the event.
+// The game pixel of pointer event `e` (null on a canvas with no box), as `sendPointer` sends it.
+function pointerPixel(e) {
+  const box = canvas.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+  const buttons = e.buttons & 3;
+  if (shownView === FRAME) {
+    return [Math.floor(((e.clientX - box.left) * game.width()) / box.width),
+      Math.floor(((e.clientY - box.top) * game.height()) / box.height)];
+  }
+  const px = ((e.clientX - box.left) * canvas.width) / box.width;
+  const py = ((e.clientY - box.top) * canvas.height) / box.height;
+  if (WIDE && dragWindow(e, px, py)) return [...WIDE_REST];
+  return layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
+}
 function sendPointer(e) {
   if (!game || crashed) return;
-  const box = canvas.getBoundingClientRect();
-  if (box.width === 0 || box.height === 0) return;
-  const buttons = e.buttons & 3;
-  let x;
-  let y;
-  if (shownView === FRAME) {
-    x = Math.floor(((e.clientX - box.left) * game.width()) / box.width);
-    y = Math.floor(((e.clientY - box.top) * game.height()) / box.height);
-  } else {
-    const px = ((e.clientX - box.left) * canvas.width) / box.width;
-    const py = ((e.clientY - box.top) * canvas.height) / box.height;
-    if (WIDE && dragWindow(e, px, py)) [x, y] = WIDE_REST;
-    else [x, y] = layoutToGame(px, py, buttons !== 0 || sentButtons !== 0);
+  if (swallowing) {
+    // The press that opened the context menu, or the outside press that closed it: none of it
+    // reaches the game, up to its release.
+    if ((e.buttons & 3) === 0) swallowing = false;
+    return;
   }
+  const at = pointerPixel(e);
+  if (!at) return;
+  const buttons = e.buttons & 3;
   sentButtons = buttons;
-  game.pointer(x, y, buttons);
+  game.pointer(at[0], at[1], buttons);
 }
 canvas.addEventListener('pointerdown', (e) => {
   canvas.focus();
   keepCanvas = false; // a press on the canvas gives a line being read the hidden input again
   if (game && !crashed) canvas.setPointerCapture(e.pointerId);
-  sendPointer(e);
+  if (!openContextMenu(e)) sendPointer(e);
   gesture();
 });
 canvas.addEventListener('pointermove', sendPointer);
@@ -4054,6 +4064,231 @@ canvas.addEventListener('pointercancel', (e) =>
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
+
+// --- the context menu (spec 17) -----------------------------------------------------------------
+// A right press (the left button up) at the game's prompt on the map, or on an inventory or
+// equipment slot, opens a menu of what the commands can do with what is there
+// (Game.context_menu, at the press's game pixel); anywhere else, or with no prompt, the press
+// goes to the game as before. The menu lies in the screen box at the press, flipped and kept
+// inside it, and has the focus: arrows, Home and End move, Enter or Space chooses, a command's
+// letter chooses its first entry that can run, Escape or a press outside closes it; none of
+// these reach the game, nor does the press that opened it, held and moved, up to its release.
+// A choice runs as the original's mouse does (Game.command_at: its icon, then the target once the
+// command asks for it); an inventory slot's own action (ready, open, take off) is a left click
+// there. The words are the page's; the names are the game's, given at run time.
+const COMMAND_WORDS = {
+  0x81: 'cmdAttack', 0x82: 'cmdCast', 0x83: 'cmdTalk', 0x84: 'cmdLook', 0x85: 'cmdGet', 0x86: 'cmdDrop',
+  0x87: 'cmdMove', 0x88: 'cmdUse', 0x89: 'cmdRest', 0x8a: 'cmdCombat', 0xa0: 'cmdOpen', 0xa7: 'cmdReady',
+  0xa8: 'cmdUnready',
+};
+const COMMAND_LETTERS = { a: 0x81, c: 0x82, t: 0x83, l: 0x84, g: 0x85, d: 0x86, m: 0x87, u: 0x88 };
+// An inventory slot's own left-press actions: open, ready, take off.
+const SLOT_ACTIONS = new Set([0xa0, 0xa7, 0xa8]);
+let swallowing = false; // the pointer's events up to its release are the menu's
+let menuAt = null; // the game pixel the open menu is for, null while it is closed
+
+// The reason a disabled entry shows: its code's line ('far' → whyFar).
+const reasonLine = (code) => t(`why${code[0].toUpperCase()}${code.slice(1)}`);
+
+function menuItem(entry, name) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.setAttribute('role', 'menuitem');
+  item.dataset.code = String(entry.code);
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = t(COMMAND_WORDS[entry.code]);
+  item.append(label);
+  if (name) {
+    const of = document.createElement('span');
+    of.className = 'of';
+    of.textContent = name;
+    item.append(of);
+  }
+  if (entry.theft) {
+    const theft = document.createElement('span');
+    theft.className = 'theft';
+    theft.textContent = t('theft');
+    item.append(theft);
+  }
+  if (!entry.enabled) {
+    item.setAttribute('aria-disabled', 'true');
+    const why = document.createElement('span');
+    why.className = 'why';
+    why.textContent = entry.reason ? reasonLine(entry.reason) : '';
+    item.append(why);
+  }
+  item.addEventListener('click', () => chooseEntry(item));
+  return item;
+}
+
+// Opens the menu for pointer event `e` when it is a right press the game has a menu for; false
+// otherwise (the press then goes to the game).
+function openContextMenu(e) {
+  if (!game || crashed || (e.buttons & 3) !== 2) return false;
+  const at = pointerPixel(e);
+  if (!at) return false;
+  const json = game.context_menu(at[0], at[1]);
+  if (!json) return false;
+  const menu = JSON.parse(json);
+  contextMenu.replaceChildren();
+  // The underlined command first: Rest and Combat only there, any other as its first entry.
+  let first = null;
+  if (menu.underlined !== null) {
+    if (menu.underlined === 0x89 || menu.underlined === 0x8a) {
+      first = { code: menu.underlined, enabled: true, reason: null, theft: false };
+      contextMenu.append(menuItem(first, ''));
+    } else {
+      for (const section of menu.sections) {
+        const entry = section.entries.find((x) => x.code === menu.underlined);
+        if (entry) {
+          first = entry;
+          contextMenu.append(menuItem(entry, section.name));
+          break;
+        }
+      }
+    }
+  }
+  for (const section of menu.sections) {
+    const entries = section.entries.filter((x) => x !== first);
+    if (entries.length === 0) continue;
+    const head = document.createElement('div');
+    head.className = 'head';
+    head.setAttribute('role', 'presentation');
+    head.textContent = section.name;
+    contextMenu.append(head);
+    for (const entry of entries) contextMenu.append(menuItem(entry, ''));
+  }
+  menuAt = at;
+  swallowing = true;
+  contextMenu.hidden = false;
+  placeMenu(e.clientX, e.clientY);
+  // No focus for the canvas from the press (its mouse default), the menu takes it, again once the
+  // press's own handling is over.
+  e.preventDefault();
+  focusMenu();
+  setTimeout(focusMenu, 0);
+  return true;
+}
+
+// The open menu's first entry that can run (else its first) has the focus.
+function focusMenu() {
+  if (menuAt === null || contextMenu.contains(document.activeElement)) return;
+  const items = menuItems();
+  (items.find((x) => x.getAttribute('aria-disabled') !== 'true') ?? items[0])?.focus({ preventScroll: true });
+}
+
+// The menu at client point (x, y): to the right of and below the point, or flipped to the other
+// side where it would not fit, kept inside the part of the screen box the viewport shows; at most
+// that part's size, scrolling inside when its entries need more. Its style's minimum width gives
+// way where that part is narrower (a minimum outweighs a maximum), and it is sized at the box's
+// corner before its rect is read, so the width it gets is not the room left where it was last.
+function placeMenu(x, y) {
+  const box = screenBox.getBoundingClientRect();
+  const view = {
+    left: Math.max(box.left, 0),
+    top: Math.max(box.top, 0),
+    right: Math.min(box.right, window.innerWidth),
+    bottom: Math.min(box.bottom, window.innerHeight),
+  };
+  const [vw, vh] = [Math.max(0, view.right - view.left), Math.max(0, view.bottom - view.top)];
+  contextMenu.style.left = '0px';
+  contextMenu.style.top = '0px';
+  contextMenu.style.minWidth = `min(10em, ${vw}px)`;
+  contextMenu.style.maxWidth = `${vw}px`;
+  contextMenu.style.maxHeight = `${vh}px`;
+  const size = contextMenu.getBoundingClientRect();
+  const [w, h] = [size.width, size.height];
+  let left = x;
+  let top = y;
+  if (left + w > view.right) left -= w;
+  if (top + h > view.bottom) top -= h;
+  left = clamp(left, view.left, Math.max(view.left, view.right - w));
+  top = clamp(top, view.top, Math.max(view.top, view.bottom - h));
+  contextMenu.style.left = `${left - box.left}px`;
+  contextMenu.style.top = `${top - box.top}px`;
+}
+
+const menuItems = () => [...contextMenu.querySelectorAll('[role="menuitem"]')];
+
+// Closes the menu; the canvas has the focus again unless `refocus` is false. A key that closes it
+// (`code`, its DOM `code`) gives the canvas the focus only at its release, so the release never
+// reaches the game; a blur of the window forgets it.
+let refocusAt = null; // the physical key whose release gives the canvas the focus back
+function closeContextMenu(refocus = true, code = null) {
+  if (menuAt === null) return;
+  menuAt = null;
+  contextMenu.hidden = true;
+  contextMenu.replaceChildren();
+  if (refocus && code !== null) refocusAt = code;
+  else if (refocus) canvas.focus({ preventScroll: true });
+}
+window.addEventListener('keyup', (e) => {
+  if (refocusAt === null || e.code !== refocusAt) return;
+  refocusAt = null;
+  e.stopPropagation();
+  canvas.focus({ preventScroll: true });
+}, { capture: true });
+window.addEventListener('blur', () => {
+  refocusAt = null;
+});
+
+function chooseEntry(item, key = null) {
+  if (menuAt === null || item.getAttribute('aria-disabled') === 'true') return;
+  const code = Number(item.dataset.code);
+  const [x, y] = menuAt;
+  closeContextMenu(true, key);
+  if (!game || crashed) return;
+  if (SLOT_ACTIONS.has(code)) {
+    game.pointer(x, y, 1);
+    game.pointer(x, y, 0);
+    sentButtons = 0;
+  } else {
+    game.command_at(code, x, y);
+  }
+}
+
+contextMenu.addEventListener('keydown', (e) => {
+  const items = menuItems();
+  const at = items.indexOf(document.activeElement);
+  const focus = (i) => items[(i + items.length) % items.length]?.focus({ preventScroll: true });
+  const letter = e.key.length === 1 ? COMMAND_LETTERS[e.key.toLowerCase()] : undefined;
+  if (e.key === 'ArrowDown') focus(at + 1);
+  else if (e.key === 'ArrowUp') focus(at < 0 ? -1 : at - 1);
+  else if (e.key === 'Home') focus(0);
+  else if (e.key === 'End') focus(-1);
+  else if (e.key === 'Escape') closeContextMenu(true, e.code);
+  else if (e.key === 'Enter' || e.key === ' ') {
+    if (at >= 0) chooseEntry(items[at], e.code);
+  } else if (letter !== undefined) {
+    const item = items.find((x) => Number(x.dataset.code) === letter && x.getAttribute('aria-disabled') !== 'true');
+    if (item) chooseEntry(item, e.code);
+  } else if (e.key !== 'Tab') return;
+  if (e.key !== 'Tab') {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+});
+contextMenu.addEventListener('focusout', (e) => {
+  if (menuAt !== null && !swallowing && !contextMenu.contains(e.relatedTarget)) closeContextMenu(false);
+});
+contextMenu.addEventListener('contextmenu', (e) => e.preventDefault());
+// A press outside the open menu closes it and goes nowhere else: not to the game, up to its
+// release, which the window sees wherever it happens (the press need not be the canvas's).
+window.addEventListener('pointerdown', (e) => {
+  if (menuAt === null || contextMenu.contains(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  swallowing = true;
+  closeContextMenu();
+}, { capture: true });
+for (const kind of ['pointerup', 'pointercancel']) {
+  window.addEventListener(kind, (e) => {
+    if (!swallowing || (kind === 'pointerup' && (e.buttons & 3) !== 0)) return;
+    swallowing = false;
+    if (e.target === canvas) e.stopPropagation();
+  }, { capture: true });
+}
 
 // The whole page accepts drops so a near miss does not open the file in the tab.
 window.addEventListener('dragover', (e) => {

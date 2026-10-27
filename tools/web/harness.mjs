@@ -1009,6 +1009,27 @@ export function mapShift(before, after, width = 320) {
 
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
+/// Spec 17: the context menu the gated page's game gives a right press at game pixel (x, y) now
+/// (`Game.context_menu` on `__shownGame`, read only), parsed; null for none.
+export const contextMenuAt = (page, x, y) => page.evaluate(([gx, gy]) => {
+  const json = globalThis.__shownGame?.context_menu(gx, gy) ?? '';
+  return json ? JSON.parse(json) : null;
+}, [x, y]);
+
+/// Spec 17: `contextMenuAt` for each game pixel of `points` ([x, y] each), in one call.
+export const contextMenus = (page, points) => page.evaluate((list) => list.map(([gx, gy]) => {
+  const json = globalThis.__shownGame?.context_menu(gx, gy) ?? '';
+  return json ? JSON.parse(json) : null;
+}), points);
+
+/// Presses the right button at game pixel (x, y) and waits until the page's context menu shows;
+/// the button stays down.
+export async function rightPress(page, x, y) {
+  await page.mouse.move(...(await screenPoint(page, x, y)));
+  await page.mouse.down({ button: 'right' });
+  await page.locator('#context-menu').waitFor({ state: 'visible', timeout: 10_000 });
+}
+
 /// The directions a step tries, in this order, by arrow key and by the cell it walks to from the
 /// hero's (dx, dy): east, west, south, north.
 export const STEPS = [

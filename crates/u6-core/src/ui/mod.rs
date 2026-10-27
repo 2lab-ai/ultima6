@@ -83,6 +83,7 @@ pub mod effects;
 pub mod globals;
 pub mod input;
 pub mod keyread;
+pub mod menu;
 pub mod panels;
 pub mod pointer;
 pub mod print;
