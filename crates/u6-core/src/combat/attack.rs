@@ -31,16 +31,19 @@ const SHATTERED: u32 = A4 - 0x760d;
 const WISP: u32 = A4 - 0x7545;
 const VANISHED: u32 = A4 - 0x7354;
 /// PC-relative strings of hunk 13: the dash and the space after the command word, the
-/// name-with-full-stop format, the newline, and the word for a wand.
+/// name-with-full-stop format, the newline, the word for a wand, and the charm and paralysis
+/// reports after a spellbook's or spell object's cast (asm 0x124730, 0x124760).
 const DASH: u32 = 0x0012_1bca;
 const SPACE: u32 = 0x0012_1bcc;
 const NAMED: u32 = 0x0012_1bc2;
 const NEWLINE: u32 = 0x0012_1bc8;
 const WAND: u32 = 0x0012_1b8e;
+const CHARMED: u32 = 0x0012_1ba0;
+const PARALYZED: u32 = 0x0012_1bb0;
 
 /// Port-only (spec 08, slice K2): the strings Attack passes to `printf` as its format (queued
 /// through [`say`]), for the locale layer's catalogue ([`crate::locale::strings`]). The wand's
-/// word, which goes in as an argument, is left out (it stays English).
+/// word, which goes in as an argument, is a label ([`SHOWN_AT`]).
 pub(crate) const PRINTED: &[u32] = &[
     ATTACK_WORD,
     NOT_ABOARD,
@@ -62,18 +65,19 @@ pub(crate) const PRINTED: &[u32] = &[
     SPACE,
     NAMED,
     NEWLINE,
+    CHARMED,
+    PARALYZED,
 ];
+
+/// Port-only (spec 16 item 1, 2026-10-27): the wand's word the vanished line takes as its `%s`,
+/// a label of the locale layer's catalogue at its own address ([`crate::locale::strings`]): read
+/// for display ([`with_wand`]), on a wrapping line, so with no cell budget.
+pub(crate) const SHOWN_AT: &[u32] = &[WAND];
 /// Cross-hair confirmed (the key read's code 0x8e).
 const CONFIRMED: u16 = crate::ui::wait::REPEAT;
 
 fn leader(s: &State) -> i16 {
-    let p = &s.actors.party;
-    i16::from(
-        p.members
-            .get(usize::from(p.leader_index))
-            .copied()
-            .unwrap_or(0),
-    )
+    crate::actors::party::leader_actor(s) as i16
 }
 
 fn pos(s: &State, o: i16) -> (i16, i16) {
@@ -157,9 +161,10 @@ pub fn list_weapons(s: &mut State) {
 /// with the line at A4-0x744d. Otherwise the command waits for a target (A4-0x7a32 = 1,
 /// A4-0x7a2e = 0x81), the weapons are listed and the cross-hair limited to the first one's
 /// range. A confirmed target that is not an object in a container or inventory is attacked
-/// with each weapon in turn ([`attack_with_weapon`]), the cross-hair asked again between
-/// weapons; anything else gets the question line A4-0x7694. The leader pays 10 movement
-/// points; the cursor goes off.
+/// with each weapon in turn ([`attack_with_weapon`]; after a hit with a spellbook or spell object
+/// its cast, [`cast_item`], then the rest of 0x124a98, [`next_weapon`]), the cross-hair asked
+/// again between weapons; anything else gets the question line A4-0x7694. The leader pays 10
+/// movement points; the cursor goes off.
 ///
 /// The command loop calls this for code 0x81 and then clears A4-0x7a2e (0x8f).
 pub async fn attack(state: &RefCell<State>, io: &Io) {
@@ -196,6 +201,10 @@ pub async fn attack(state: &RefCell<State>, io: &Io) {
         loop {
             attack_with_weapon(&mut state.borrow_mut());
             present::play_effects(state, io).await;
+            if cast_item(state, io).await {
+                next_weapon(&mut state.borrow_mut());
+                present::play_effects(state, io).await;
+            }
             if state.borrow().ui.input.target_pending != 1 {
                 break;
             }
@@ -229,8 +238,9 @@ pub const AFTER_ATTACK: u16 = NO_COMMAND;
 /// line (A4-0x76b6), or the map tile's name; unless it is the attacker: the object there
 /// ([`leaves::actor_at`]) and the hit ([`hit`]): the interference line (A4-0x75f2) when a foe
 /// next to the attacker blocks a missile, the range line (A4-0x7512; the attack target is
-/// forgotten). Then the next weapon: its range on the cross-hair and its name (A4-0x76ac), or,
-/// after the last, the cursor off.
+/// forgotten). Then the next weapon ([`next_weapon`]). Port: a hit with a spellbook or spell
+/// object leaves its cast for [`attack`] to run ([`cast_item`]); the next weapon waits for it
+/// then, as the original's tail runs after the cast inside the hit.
 pub fn attack_with_weapon(s: &mut State) {
     let attacker = leader(s);
     let weapon = current_weapon(s, attacker);
@@ -281,6 +291,16 @@ pub fn attack_with_weapon(s: &mut State) {
             }
         }
     }
+    if s.combat.item_cast.is_none() {
+        next_weapon(s);
+    }
+}
+
+/// Original: 0x124a98's tail (asm 0x124c20..0x124ca4: the next weapon)
+///
+/// A4-0x68e4 + 1: that weapon's range on the cross-hair and its name (A4-0x76ac); after the
+/// last, the cursor off (A4-0x7a32 = 0, 0x1051a6).
+pub(crate) fn next_weapon(s: &mut State) {
     s.combat.weapon_index += 1;
     if s.combat.weapon_index < s.combat.weapon_count {
         s.ui.input.targeting = 1;
@@ -383,9 +403,10 @@ const MISSILE_WEAPONS: [u16; 10] = [0x21, 0x25, 0x29, 0x2a, 0x31, 0x53, 0x32, 0x
 /// crossbow without ammunition does nothing. The attacker turns toward the target (a ship turns
 /// broadside), attack frames for the dragons 0x170..0x174, the view is refreshed. A missile
 /// (any weapon but 0x28 / 0x2f used at a distance, or one of the missile weapons) is stopped by
-/// an adjacent foe (1). A staff or wand casts the spell its quality names instead (a wisp
-/// 0x175 teleports with quality 0x81); the port refuses that cast before the staff's charge is
-/// taken ([`super::seams::cast_from_item`]). Otherwise the to-hit roll ([`to_hit`]); a missed
+/// an adjacent foe (1). A spellbook (0x39, [`crate::magic::SPELLBOOK`]) or spell object (0x150)
+/// casts the spell its quality names instead (a wisp 0x175 teleports with quality 0x81;
+/// [`item_spell`], the cast run by the caller once the hit has returned, [`cast_item`]).
+/// Otherwise the to-hit roll ([`to_hit`]); a missed
 /// missile lands on a random neighbouring tile; the missile flies ([`missile`]); the damage is the
 /// weapon's ([`leaves::damage_of`]), halved against a creature with flag 0x0080 unless the
 /// weapon is 0x30, 0x32 or 0x36; the triple crossbow strikes up to three targets. The glass
@@ -446,7 +467,7 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
     let mut res: i16 = -1;
     let mut target = leaves::owner(s, s.combat.hit);
     if wt == 0x150 || wt == 0x39 {
-        staff_or_wand(s, attacker, weapon, wt);
+        item_spell(s, attacker, weapon, wt, target);
         return 0;
     }
     if s.combat.hit >= 0 && target < 0x100 {
@@ -516,18 +537,38 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
     0
 }
 
-/// 0x124232's staff (0x39) and wand (0x150) branch.
+/// A spellbook's or spell object's cast its hit (0x124232) leaves for the async code that called
+/// the hit: the attacker, the item and its quality (the spell), the selection with its location,
+/// and what the NPC worktype does after the hit, in order ([`super::npc::After`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemCast {
+    pub attacker: i16,
+    pub item: i16,
+    pub spell: u8,
+    pub selection: i16,
+    pub target: (i16, i16),
+    pub after: Vec<super::npc::After>,
+}
+
+/// 0x124232's spellbook (0x39, [`crate::magic::SPELLBOOK`]) and spell object (0x150) branch (asm
+/// 0x124560..0x124774).
 ///
 /// A wisp (0x175) whose item has quality 0x81 jumps from the view centre
-/// ([`super::mode::scatter`]) or goes back. Otherwise a staff needs its charge (quality / 16 + 1)
-/// in both the attacker's magic and level, else nothing happens. The original then takes the
-/// charge from the magic, makes the attacker party slot 16 (A4+0x47fc, leader index 16) with
-/// the selection as the target, casts the quality's spell with the text off (0x11a586) and
-/// reports a charm (spell 0x50, result 0xfe: the line at 0x121ba0) or a paralysis (0x45,
-/// result 0: 0x121bb0) (asm 0x12461c..0x12476e). That cast awaits and this hit is synchronous
-/// (the Attack command and the NPC worktypes call it), so the port refuses it before the charge
-/// is taken: [`super::seams::cast_from_item`].
-fn staff_or_wand(s: &mut State, attacker: i16, weapon: i16, wt: u16) {
+/// ([`super::mode::scatter`]) or goes back. Otherwise a spellbook needs the circle of its spell
+/// (quality / 16 + 1) in both the attacker's magic and level, else nothing happens, and pays it
+/// from the magic (asm 0x12461c..0x124676; a spell object pays nothing). The hit's target (the
+/// owner of the object hit, A4-0x2f04) and its location become the selection and the quality's
+/// spell is cast ([`cast_item`]). Port: that cast awaits and this hit is synchronous (the Attack
+/// command and the NPC worktypes call it), so the cast is recorded here, after the charge as the
+/// original takes it, and run by the caller once the hit has returned. What the original does
+/// after the hit, and so after the cast, waits for it too: Attack's rest of 0x124a98
+/// ([`next_weapon`]); in the NPC worktypes the movement points (0x127162 after each `bsr
+/// 0x124232`, asm 0x12539a, 0x126246, 0x1265f0, 0x126dc6, 0x127032, and berserk's 5 at
+/// 0x12672a; spells such as 0x07 and 0x64 refill them) and the retreat's roll (0x12691a after
+/// the assault at 0x1268ce), queued in order ([`super::npc::After`]). A target
+/// of -1 (an empty cell, Attack only) has the original read entry -1 of the location table (the
+/// 3 bytes before 0x135588); the port's location is then (-1, -1).
+fn item_spell(s: &mut State, attacker: i16, weapon: i16, wt: u16, target: i16) {
     let a = attacker as usize;
     let quality = s.objects.qq[weapon as usize] >> 8;
     if quality == 0x81 && kind(s, attacker) == 0x175 {
@@ -542,14 +583,86 @@ fn staff_or_wand(s: &mut State, attacker: i16, weapon: i16, wt: u16) {
         }
         return;
     }
-    if wt == 0x39 {
+    if wt == crate::magic::SPELLBOOK {
         let charge = (quality as i16) / 16 + 1;
         let magic = i16::from(s.actors.attrs.magic[a]);
         if magic < charge || i16::from(s.actors.attrs.level[a]) < charge {
             return;
         }
+        s.actors.attrs.magic[a] = (magic - charge) as u8;
     }
-    super::seams::cast_from_item(s);
+    let at = if target >= 0 {
+        pos(s, target)
+    } else {
+        (-1, -1)
+    };
+    s.combat.item_cast = Some(ItemCast {
+        attacker,
+        item: weapon,
+        spell: quality as u8,
+        selection: target,
+        target: at,
+        after: Vec::new(),
+    });
+}
+
+/// Original: 0x124232's cast from a spellbook or spell object (asm 0x12467a..0x12476e), run by
+/// the async code that called the hit once it has returned ([`item_spell`] recorded it); true
+/// when there was one
+///
+/// What was queued before is shown first. The leader index (A4-0x7b7a) becomes 16 and party
+/// slot 16 (A4+0x47fc) the attacker, so the spell's caster is the attacker
+/// ([`crate::actors::party::roster_byte`]); the selection (A4-0x2f04, A4-0x2f02 / -0x2f00) is the
+/// recorded target; with the text off (A4-0x7a4c) 0x11a586(quality, 1) runs the spell at it
+/// ([`super::seams::cast_from_item`]). The text then goes on (set to 1 at 0x124702, not put
+/// back). With the item's quality read again (asm 0x124708..0x124714), a charm (0x50) with the
+/// result byte A4+0x181e at 0xfe is reported with the name of the selection as the spell left
+/// it (0x121ba0), a paralysis (0x45) with result 0 likewise (0x121bb0); the leader index is put
+/// back (0x12476e). Slot 16 keeps the attacker, as in the original. Then what the NPC worktype
+/// does after the hit, in order ([`super::npc::after_cast`]). Port: no report for a selection of
+/// -1, whose name the original reads from slot -1.
+pub(crate) async fn cast_item(state: &RefCell<State>, io: &Io) -> bool {
+    let Some(cast) = state.borrow_mut().combat.item_cast.take() else {
+        return false;
+    };
+    present::play_effects(state, io).await;
+    let leader = {
+        let mut s = state.borrow_mut();
+        let leader = s.actors.party.leader_index;
+        s.actors.party.leader_index = 0x10;
+        s.actors.party.slot16 = cast.attacker as u8;
+        s.ui.input.selection = cast.selection;
+        s.ui.input.target = cast.target;
+        s.ui.text.on = false;
+        leader
+    };
+    super::seams::cast_from_item(state, io, cast.spell).await;
+    {
+        let mut s = state.borrow_mut();
+        s.ui.text.on = true;
+        let quality = s.objects.qq[cast.item as usize] >> 8;
+        let result = s.magic.result;
+        let sel = s.ui.input.selection;
+        let report = if sel < 0 {
+            None
+        } else if quality == 0x50 && result == 0xfe {
+            Some(CHARMED)
+        } else if quality == 0x45 && result == 0 {
+            Some(PARALYZED)
+        } else {
+            None
+        };
+        if let Some(at) = report {
+            let n = name(&mut s, sel);
+            say(&mut s, at, vec![n]);
+        }
+        s.actors.party.leader_index = leader;
+        for &step in &cast.after {
+            super::npc::after_cast(&mut s, cast.attacker, step);
+        }
+    }
+    present::play_effects(state, io).await;
+    true
 }
 
 /// Original: 0x122938 (combat: the flight of a missile weapon from `attacker` toward (x, y),
@@ -689,7 +802,7 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
         }
         0x4f | 0x50 if s.rng.range(1, 100) == 0x25 => {
             objects::remove(s, weapon);
-            let wand = with_wand();
+            let wand = with_wand(s);
             say(s, VANISHED, vec![wand]);
             s.actors.work.prompt = 1;
         }
@@ -710,8 +823,53 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
     1
 }
 
-/// The word for a wand (a PC-relative string of hunk 13), as a message argument.
-fn with_wand() -> Text {
+/// The word for a wand (a PC-relative string of hunk 13), as a message argument. Port (spec 16
+/// item 1, 2026-10-27): read for display, so the locale pack's label of it when it has one
+/// ([`SHOWN_AT`], [`crate::locale::shown`]).
+fn with_wand(s: &State) -> Text {
     let b = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, WAND));
-    Text::Str(b.unwrap_or_default())
+    Text::Str(crate::locale::shown(s, b.unwrap_or_default()))
+}
+
+/// Spec 16 item 1 (2026-10-27): the wand's word in the vanished line ([`with_wand`]) with a
+/// Korean pack holding a form for it, the pack's form; without a pack, the English. A synthetic
+/// `game` of the test's own bytes.
+#[cfg(test)]
+mod tests_words {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// The word [`with_wand`] gives, with a pack or none.
+    fn wand_word(pack: bool) -> Vec<u8> {
+        let parts: [(u32, &[u8]); 1] = [(WAND, b"Zw1")];
+        let mut s = State::empty();
+        if pack {
+            crate::locale::strings::install_test_forms(&mut s, &parts, &[(b"Zw1", "지팡이")]);
+        }
+        let game = crate::locale::strings::test_game(&parts);
+        let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game)]));
+        let out = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let got = out.clone();
+        let mut e = crate::engine::Engine::with_game(s, files, move |st, _io| async move {
+            let s = st.borrow();
+            if let Text::Str(w) = with_wand(&s) {
+                *got.borrow_mut() = w;
+            }
+        });
+        for _ in 0..40 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished());
+        out.take()
+    }
+
+    #[test]
+    fn the_wands_word_is_the_packs_form_and_else_the_english() {
+        assert_eq!(wand_word(true), "지팡이".as_bytes(), "the pack's form");
+        assert_eq!(wand_word(false), b"Zw1", "the English");
+    }
 }

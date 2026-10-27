@@ -59,7 +59,8 @@ const MSG_SOUND_OFF: u32 = 0x7271;
 const COMMAND_NAMES: u32 = 0x7c8e;
 
 /// Port-only (spec 08, slice K2): the strings the loop passes to `printf` as its format, for the
-/// locale layer's catalogue ([`crate::locale::strings`]).
+/// locale layer's catalogue ([`crate::locale::strings`]); spec 16 item 1 (2026-10-27): and main's
+/// line that no character is made yet (0x1350a6, which 0x135452 pushes).
 pub(crate) const PRINTED: &[u32] = &[
     FMT_PROMPT,
     FMT_KEY_ECHO,
@@ -87,6 +88,7 @@ pub(crate) const PRINTED: &[u32] = &[
     A4.wrapping_sub(MSG_VERSION),
     A4.wrapping_sub(MSG_SOUND_ON),
     A4.wrapping_sub(MSG_SOUND_OFF),
+    super::MSG_CREATE_CHARACTER,
 ];
 
 /// Port-only (spec 08, slice K2): the pointers of the command names [`print_command`] shows

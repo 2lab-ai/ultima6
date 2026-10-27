@@ -54,10 +54,11 @@ const NEGATE_TIMER: usize = 13;
 /// The spell Help, which uses no reagent from the page count.
 const HELP: u16 = 7;
 
-/// The caster: the party member the view follows (A4+0x47ec[A4-0x7b7a]).
+/// The caster: the party member the view follows (A4+0x47ec[A4-0x7b7a]); with the leader index
+/// 16, party slot 16 (A4+0x47fc), where a spellbook's or spell object's hit puts its attacker for
+/// the cast (asm 0x12467a..0x124688): [`crate::actors::party::leader_actor`].
 pub(crate) fn caster(s: &State) -> u16 {
-    let p = &s.actors.party;
-    u16::from(p.members[usize::from(p.leader_index).min(15)])
+    crate::actors::party::leader_actor(s)
 }
 
 async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
@@ -300,5 +301,30 @@ pub fn use_reagents(s: &mut State, actor: Slot, spell: u16, line: i16) {
             .and_then(|i| s.magic.page_reagents.get_mut(i))
     {
         *b = b.wrapping_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caster;
+    use crate::state::State;
+
+    #[test]
+    fn the_caster_is_party_slot_16_while_the_leader_index_is_16() {
+        // 0x124232 writes the attacker to A4+0x47fc, the byte after the 16 members, and the leader
+        // index 16 around a spellbook's or spell object's cast (asm 0x12467a..0x124688); past it
+        // the roster reads on into A4+0x47fd, as 0x1095bc's index 0xff does.
+        let mut s = State::empty();
+        s.actors.party.members[0] = 1;
+        s.actors.party.members[15] = 2;
+        s.actors.party.slot16 = 0x10;
+        s.actors.attrs.unknown_1af1[0xee] = 9;
+        assert_eq!(caster(&s), 1);
+        s.actors.party.leader_index = 16;
+        assert_eq!(caster(&s), 0x10);
+        s.actors.party.leader_index = 0xff;
+        assert_eq!(caster(&s), 9, "A4+0x47ec + 0xff");
+        // The panel's member 16 (Pickpocket leaves the leader index there) is slot 16 too.
+        assert_eq!(crate::ui::panels::member_actor(&s, 16), 0x10);
     }
 }

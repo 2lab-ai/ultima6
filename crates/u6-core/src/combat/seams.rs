@@ -1,14 +1,14 @@
-//! Calls from the combat code into functions other modules own, the owner in brackets. Most
+//! Calls from the combat code into functions other modules own, the owner in brackets. They
 //! forward to the ported owner (objects 0x10e596, 0x12f8fe; graphics 0x15265a, 0x152800,
-//! 0x152876, 0x1521f4; magic 0x1165d2; sound 0x110878, 0x110912 and the song word A4-0x779a;
-//! map 0x109c12's overview flood). The remains 0x10c6a6 are ported here from the assembly with
-//! the ported object calls. One is still a `todo_stub!` with its contract and an explicit
-//! fallback: the cast from a staff or wand, 0x11a586.
+//! 0x152876, 0x1521f4; magic 0x1165d2 and a spellbook's or spell object's cast 0x11a586; sound
+//! 0x110878, 0x110912 and the song word A4-0x779a; map 0x109c12's overview flood). The remains
+//! 0x10c6a6 are ported here from the assembly with the ported object calls.
 
-use crate::engine::with_current_io;
+use std::cell::RefCell;
+
+use crate::engine::{Io, with_current_io};
 use crate::objects::{self, Slot};
 use crate::state::State;
-use crate::todo_stub;
 
 /// [graphics] 0x15265a(slot, tile, angle, cx, cy): build sprite `slot` from object tile `tile`
 /// turned by `angle` (0..127 = a full turn) about (cx, cy); the slot's background flag is
@@ -74,31 +74,13 @@ pub(crate) fn remains(s: &mut State, actor: i16) -> Slot {
     body
 }
 
-/// The magic hunk's refusal line (PC-relative 0x1159f8), shown for a cast the port cannot run.
-const CAST_REFUSED: u32 = 0x0011_59f8;
-
-/// Port-only (spec 08, slice K2; 2026-10-24): the strings these calls pass to `printf` as its
-/// format (queued through [`super::present::say`]), for the locale layer's catalogue
-/// ([`crate::locale::strings`]): the refusal line. Its address is magic's not-possible line as
-/// well (`crate::magic::items`' `MSG_NOT_POSSIBLE`, printed through `printf`): the catalogue is
-/// keyed by content, so that line shows the pack's form too.
-pub(crate) const PRINTED: &[u32] = &[CAST_REFUSED];
-
-/// [magic] 0x11a586(spell, 1) from a staff or wand: the spell its quality names, cast by the
-/// attacker as party slot 16 (A4+0x47fc, leader index 16) at the selection with the text off;
-/// the hit then reads the result byte A4+0x181e (asm 0x12467a..0x12476e).
+/// Original: 0x124232's call of 0x11a586 for a spellbook's or spell object's cast (asm
+/// 0x1246e6..0x1246fe: D0 = the item's quality, D1 = 1, the selection chosen already)
 ///
-/// Still a stub after the magic merge: magic's dispatch ([`crate::magic::dispatch`]) awaits (it
-/// prints and flies) while the hit 0x124232 that casts here is synchronous (the Attack command
-/// and the NPC worktypes), and magic's caster has no slot 16. Fallback: the cast is refused
-/// before the staff's charge is taken: the refusal line, the prompt reprinted, nothing cast.
-pub(crate) fn cast_from_item(s: &mut State) {
-    super::present::say(s, CAST_REFUSED, vec![]);
-    s.actors.work.prompt = 1;
-    todo_stub!(
-        "0x11a586 cast a spell from a staff or wand (fallback: refused before the charge)",
-        ()
-    )
+/// [magic] the spell runs at the selection: [`crate::magic::dispatch`] with `chosen`
+/// ([`super::attack::cast_item`] sets the caster, the selection and the text switch around it).
+pub(crate) async fn cast_from_item(state: &RefCell<State>, io: &Io, spell: u8) {
+    crate::magic::dispatch(state, io, u16::from(spell), true).await;
 }
 
 /// [magic] 0x1165d2(attacker, target): weapon 0x5b puts the actor it hit to sleep (D0 = the

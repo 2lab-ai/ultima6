@@ -2,8 +2,9 @@
 //!
 //! [`npc_turn`] is the one entry point (spec 03 §5): scheduler order, side effects and RNG draws
 //! as in the original. Its synchronous part ([`npc_turn_sync`]) runs the worktype; the two
-//! behaviours that wait for the player (an arrest prompt, an NPC who starts a conversation)
-//! hand back a [`Wait`] that the async part awaits without holding a state borrow.
+//! behaviours that wait for the player (an arrest prompt, an NPC who starts a conversation) and
+//! a spellbook's or spell object's cast in a worktype's hit hand back a [`Wait`] that the async
+//! part awaits without holding a state borrow.
 //!
 //! Worktypes implemented in hunk 13 (3..6, 7, 8, 9, 10, 11, 13, 14, 0x13, 0x9a, 0x9b and the
 //! 0x99 target search) are `combat::npc`; the frames they present (hit flashes, missiles) are
@@ -46,6 +47,9 @@ pub enum Wait {
     Arrest,
     /// 0x120034: the NPC starts a conversation with party member `target`.
     Talk(u16),
+    /// 0x124232: the spell of the spellbook or spell object the worktype's hit used, then the
+    /// movement points the worktype paid after the hit ([`crate::combat::attack::cast_item`]).
+    Cast,
 }
 
 /// The combat worktype behaviours (hunk 13, `combat::npc`).
@@ -467,6 +471,10 @@ pub fn npc_turn_sync(s: &mut State, actor: u16) -> Option<(i8, Wait)> {
         0x99 => guard_post(s, actor, tx, ty),
         _ => walk::spend_mp(s, actor, 5),
     }
+    if s.combat.item_cast.is_some() {
+        debug_assert_eq!(wait, Wait::None, "a combat worktype waits for nothing else");
+        wait = Wait::Cast;
+    }
     Some((before, wait))
 }
 
@@ -516,7 +524,7 @@ fn guard_post(s: &mut State, actor: u16, tx: u16, ty: u16) {
 /// Original: 0x1200b0 (schedules: NPC turn: walk to current schedule entry / do worktype)
 ///
 /// The single NPC-turn entry point (spec 03 §5). Runs [`npc_turn_sync`], awaits what it left
-/// (arrest prompt, conversation) with no state borrow held, then the epilogue: an NPC whose
+/// (arrest prompt, conversation, cast) with no state borrow held, then the epilogue: an NPC whose
 /// movement points did not change pays 10, so every turn makes progress.
 pub async fn npc_turn(state: &RefCell<State>, io: &Io, actor: u16) {
     let started = npc_turn_sync(&mut state.borrow_mut(), actor);
@@ -539,6 +547,9 @@ pub(crate) async fn npc_turn_rest(
         Wait::None => {}
         Wait::Arrest => arrest(state, io, actor).await,
         Wait::Talk(target) => talk(state, io, actor, target).await,
+        Wait::Cast => {
+            crate::combat::attack::cast_item(state, io).await;
+        }
     }
     let mut s = state.borrow_mut();
     if s.actors.mp(usize::from(actor)) == before {

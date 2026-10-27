@@ -16,18 +16,27 @@ const MONTHS: u8 = 12;
 /// burns out, the carried item that vanishes, the date line's format.
 const TORCH_OUT: i32 = -0x756f;
 const VANISHED: i32 = -0x7354;
+/// The two item names the vanishing line uses (PC-relative strings in hunk 1).
+const RING_NAME: u32 = 0x0010_1ef6;
+const CLOAK_NAME: u32 = 0x0010_1efc;
 const DATE: i32 = -0x7293;
 /// The wind's name table (pointers, A4 + offset), indexed by the signed wind byte.
 const WIND_NAMES: i32 = -0x7ae4;
 
 /// Port-only (spec 08, slice K2): the strings the clock passes to `printf` as its format, for
 /// the locale layer's catalogue ([`crate::locale::strings`]). The item names the vanishing line
-/// takes as an argument are left out (they stay English).
+/// takes as its argument are labels ([`SHOWN_AT`]).
 pub(crate) const PRINTED: &[u32] = &[
     A4.wrapping_add_signed(TORCH_OUT),
     A4.wrapping_add_signed(VANISHED),
     A4.wrapping_add_signed(DATE),
 ];
+
+/// Port-only (spec 16 item 1, 2026-10-27): the item names the vanishing line takes as its `%s`
+/// (the ring's, the cloak's), labels of the locale layer's catalogue at their own addresses
+/// ([`crate::locale::strings`]): the line reads its argument for display
+/// ([`seams::Arg::Image`], [`crate::locale::shown`]), on a wrapping line, so with no cell budget.
+pub(crate) const SHOWN_AT: &[u32] = &[RING_NAME, CLOAK_NAME];
 
 /// Port-only (spec 08, slice K2): the pointers of the wind's names the date line shows (the
 /// wind byte -1 (calm) to 7, as the wind changes set it), labels of the catalogue.
@@ -181,9 +190,6 @@ pub fn tick(s: &mut State, minutes: i16) {
 
 /// The torches, rings and cloaks a party member carries (0x10368a, 0x10ae52 iteration).
 fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
-    // The two item names the vanishing line uses (PC-relative strings in hunk 1).
-    const RING_NAME: u32 = 0x101ef6;
-    const CLOAK_NAME: u32 = 0x101efc;
     let a = usize::from(actor);
     for obj in seams::contents(s, ObjectId(actor)) {
         let flags = s.objects.obj_status.get(obj.index()).copied().unwrap_or(0);
@@ -221,8 +227,8 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
             0x101 => {
                 let regen_all = s.ui.panel.mode == 0x91;
                 let regen_one = s.ui.panel.mode == 0x90
-                    && s.actors.party.members.get(s.ui.panel.member as usize)
-                        == Some(&(actor as u8));
+                    && s.ui.panel.member >= 0
+                    && crate::ui::panels::member_actor(s, s.ui.panel.member) == actor as u8;
                 if (regen_all || regen_one)
                     && u16::from(s.actors.attrs.hp[a]) < leaves::max_hp(s, actor)
                 {
@@ -622,5 +628,76 @@ mod tests {
         s.map.centre.z = 2;
         s.actors.timers[0] = 0;
         assert_eq!(at(&mut s, 12, 0), 0, "dungeon");
+    }
+}
+
+/// Spec 16 item 1 (2026-10-27): the vanished line's item words (the ring's and the cloak's,
+/// `Arg::Image` of the line at 0x10368a's site) with a Korean pack holding a form for each, the
+/// pack's form; without a pack, the English. A synthetic `game` of the test's own bytes.
+#[cfg(test)]
+mod tests_words {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::main_loop::{Pending, PrintArg};
+
+    /// The `%s` argument the vanished line queues for the word at `at`, with a pack or none.
+    fn word_queued(at: u32, pack: bool) -> Vec<u8> {
+        let parts: [(u32, &[u8]); 3] = [
+            (A4.wrapping_add_signed(VANISHED), b"Zv1 %s\n"),
+            (RING_NAME, b"Zr1"),
+            (CLOAK_NAME, b"Zk1"),
+        ];
+        let mut s = State::empty();
+        if pack {
+            crate::locale::strings::install_test_forms(
+                &mut s,
+                &parts,
+                &[(b"Zr1", "반지"), (b"Zk1", "망토")],
+            );
+        }
+        let game = crate::locale::strings::test_game(&parts);
+        let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game)]));
+        let mut e = crate::engine::Engine::with_game(s, files, move |st, _io| async move {
+            seams::print(&mut st.borrow_mut(), VANISHED, &[Arg::Image(at)]);
+        });
+        for _ in 0..40 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 16);
+        }
+        assert!(e.finished());
+        match e.state().main.pending_print.last() {
+            Some(Pending::Print(_, args)) => match args.as_slice() {
+                [PrintArg::Str(w)] => w.clone(),
+                other => panic!("one string argument, not {}", other.len()),
+            },
+            _ => panic!("the line queued"),
+        }
+    }
+
+    #[test]
+    fn the_vanished_lines_item_word_is_the_packs_form_and_else_the_english() {
+        assert_eq!(
+            word_queued(RING_NAME, true),
+            "반지".as_bytes(),
+            "the ring's form"
+        );
+        assert_eq!(word_queued(RING_NAME, false), b"Zr1", "the ring's English");
+    }
+
+    #[test]
+    fn the_vanished_lines_cloak_word_is_the_packs_form_and_else_the_english() {
+        assert_eq!(
+            word_queued(CLOAK_NAME, true),
+            "망토".as_bytes(),
+            "the cloak's form"
+        );
+        assert_eq!(
+            word_queued(CLOAK_NAME, false),
+            b"Zk1",
+            "the cloak's English"
+        );
     }
 }

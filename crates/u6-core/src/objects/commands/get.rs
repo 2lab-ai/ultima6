@@ -71,8 +71,7 @@ pub fn takeable(s: &State, obj: Slot) -> bool {
 }
 
 fn leader(s: &State) -> Slot {
-    let p = &s.actors.party;
-    Slot::from(p.members[usize::from(p.leader_index).min(15)])
+    Slot::from(crate::actors::party::leader_actor(s) as i16)
 }
 
 fn shows_leader_inventory(s: &State) -> bool {
@@ -80,8 +79,7 @@ fn shows_leader_inventory(s: &State) -> bool {
 }
 
 fn panel_actor(s: &State) -> Slot {
-    let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-    Slot::from(s.actors.party.members[m])
+    Slot::from(crate::ui::panels::member_actor(s, s.ui.panel.member.max(0)))
 }
 
 /// Original: 0x12a7a4 (objects: the Get command on the confirmed target)

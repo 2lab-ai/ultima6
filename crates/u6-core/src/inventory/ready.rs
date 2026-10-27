@@ -76,10 +76,11 @@ async fn prompt(state: &RefCell<State>, io: &Io) {
     say(state, io, STR_PROMPT, &[Arg::Str(&name)]).await;
 }
 
-/// The actor of the member the panel shows (A4+0x47ec + A4-0x7a3e).
+/// The actor of the member the panel shows (A4+0x47ec + A4-0x7a3e; 16 is party slot 16, where
+/// Pickpocket cast from a spellbook or spell object leaves the panel):
+/// [`crate::ui::panels::member_actor`].
 fn shown_actor(s: &State) -> Slot {
-    let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-    Slot::from(s.actors.party.members[m])
+    Slot::from(crate::ui::panels::member_actor(s, s.ui.panel.member.max(0)))
 }
 
 /// A4-0x7b65 is one byte of the objlist block (the clock's fade timer) that the window render
@@ -170,8 +171,14 @@ fn place(s: &mut State, obj: Slot, ty: u16, strength: u8) -> Option<u32> {
         8 => {
             slot = 2;
             s.inventory.set_equip(5, 1);
-            let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-            s.ui.panel.member_flags[m] = 1;
+            // Port: 0x112052 writes A4+0x1370 + the panel member with no bound; at member 16 (the
+            // panel after a Pickpocket from a spellbook or spell object) that is A4+0x1380, the
+            // high byte of the word `open_container`. The port skips that write instead of
+            // modelling it.
+            let m = usize::try_from(s.ui.panel.member).unwrap_or(0);
+            if let Some(f) = s.ui.panel.member_flags.get_mut(m) {
+                *f = 1;
+            }
         }
         2 if hand && !other => slot = 5,
         5 if other && !hand => slot = 2,
@@ -286,8 +293,14 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
         if r != 2 {
             release_effect(&mut s, io, obj, actor);
             if weight::ready_slot(&s, obj) == 8 {
-                let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-                s.ui.panel.member_flags[m] = 0;
+                // Port: 0x1123d6 writes A4+0x1370 + the panel member with no bound; at member 16
+                // (the panel after a Pickpocket from a spellbook or spell object) that is
+                // A4+0x1380, the high byte of the word `open_container`. The port skips that write
+                // instead of modelling it.
+                let m = usize::try_from(s.ui.panel.member).unwrap_or(0);
+                if let Some(f) = s.ui.panel.member_flags.get_mut(m) {
+                    *f = 0;
+                }
                 s.inventory.set_equip(5, 0);
             }
             let stacked = ty == TORCH && {

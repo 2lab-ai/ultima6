@@ -1213,8 +1213,10 @@ version = "0.1.0"
 name = "u6-core"
 version = "0.1.0"
 dependencies = [
+ "proc-macro2",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "u6-audio",
  "u6-formats",
  "u6-hdpack",

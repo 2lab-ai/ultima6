@@ -11,6 +11,7 @@ use u6_formats::position::Position;
 use std::cell::RefCell;
 
 use super::{region, seams, view};
+use crate::actors::party::roster_byte;
 use crate::engine::Io;
 use crate::objects::ObjectId;
 use crate::state::State;
@@ -35,27 +36,11 @@ const SCOUT: ObjectId = ObjectId(3);
 /// Party mode: the solo-member byte holds 0xff.
 const PARTY_MODE: u8 = 0xff;
 
-/// Party roster byte `i` as the original reads it: A4+0x47ec + i. Past the 16 members comes one
-/// unmodelled byte (A4+0x47fc, read as 0), then the A4+0x47fd array (`unknown_1af1`); 0x1095bc
-/// sets the leader index to 0xff, so the next 0x10921a follows actor `unknown_1af1[0xee]`.
-fn roster_byte(state: &State, i: u8) -> u8 {
-    let p = &state.actors.party;
-    let i = usize::from(i);
-    match i.checked_sub(p.members.len()) {
-        None => p.members[i],
-        Some(0) => 0,
-        Some(k) => state
-            .actors
-            .attrs
-            .unknown_1af1
-            .get(k - 1)
-            .copied()
-            .unwrap_or(0),
-    }
-}
-
+/// The first `size` roster bytes ([`roster_byte`]: past the 16 members, party slot 16 and the
+/// A4+0x47fd array, as the original reads them; 0x1095bc sets the leader index to 0xff, so the
+/// next 0x10921a follows actor `unknown_1af1[0xee]`).
 fn members(state: &State) -> Vec<ObjectId> {
-    (0..state.actors.party.size)
+    (0..usize::from(state.actors.party.size))
         .map(|i| ObjectId(roster_byte(state, i).into()))
         .collect()
 }
@@ -127,7 +112,7 @@ pub fn place_party(state: &mut State, x: u16, y: u16, z: u16, mode: u16) {
         draw(state);
     }
     for _ in 0..5 {
-        let leader = ObjectId(roster_byte(state, state.actors.party.leader_index).into());
+        let leader = ObjectId(crate::actors::party::leader_actor(state));
         seams::party_follow(state, leader);
         if mode != 0 {
             draw(state);
@@ -302,7 +287,7 @@ pub fn after_step(state: &mut State) {
     if party.leader_index == party.size {
         return;
     }
-    let leader = ObjectId(roster_byte(state, state.actors.party.leader_index).into());
+    let leader = ObjectId(crate::actors::party::leader_actor(state));
     let (cx, cy, cz) = centre(state);
     let party_mode = seams::tail_byte(state, 0x79) == PARTY_MODE;
     let mut refused = false;
@@ -721,8 +706,9 @@ mod tests {
     fn the_roster_byte_reads_past_the_members_like_the_original() {
         let mut s = party();
         s.actors.attrs.unknown_1af1[0xee] = 9;
+        s.actors.party.slot16 = 7;
         assert_eq!(roster_byte(&s, 1), 2);
-        assert_eq!(roster_byte(&s, 16), 0);
+        assert_eq!(roster_byte(&s, 16), 7, "party slot 16 (A4+0x47fc)");
         assert_eq!(roster_byte(&s, 0xff), 9);
     }
 }

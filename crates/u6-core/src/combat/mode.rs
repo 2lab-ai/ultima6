@@ -17,7 +17,7 @@ const SOLO_WORK: usize = 0x7a;
 const COMBAT_SONG: u16 = 7;
 
 fn member(s: &State, i: usize) -> usize {
-    usize::from(s.actors.party.members.get(i).copied().unwrap_or(0))
+    usize::from(crate::actors::party::roster_byte(s, i))
 }
 
 fn icon(s: &State, tile: u16) {

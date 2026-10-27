@@ -177,13 +177,28 @@ pub struct Party {
     /// Original: A4-0x7b7a (index into `members` of the member the view follows; objlist
     /// 0x1BFB) [likely]
     pub leader_index: u8,
+    /// Original: A4+0x47fc (the byte after `members`: party slot 16, where 0x124232 puts the
+    /// attacker of a spellbook's or spell object's cast, run with the leader index 16, asm
+    /// 0x12467a..0x124688). Not in `objlist`: neither saved nor loaded.
+    pub slot16: u8,
 }
 
 impl Party {
-    /// The actor the view follows. The original indexes the roster without a bound; an index past
-    /// the 16 slots (never seen in the data) yields `None` here.
+    /// Roster byte `i` of the party block (A4+0x47ec + i): a member, or party slot 16 at index
+    /// 16; `None` past it (the A4+0x47fd array, [`crate::actors::party::roster_byte`]).
+    pub fn slot(&self, i: usize) -> Option<u8> {
+        self.members
+            .get(i)
+            .copied()
+            .or((i == PARTY_SLOTS).then_some(self.slot16))
+    }
+
+    /// The actor the view follows: [`Party::slot`] at the leader index (16 while a spellbook's or
+    /// spell object's cast runs). The original indexes the roster without a bound; past slot 16
+    /// (0x1095bc's index 0xff) it reads the A4+0x47fd array, which `Party` does not hold:
+    /// `None` here.
     pub fn leader(&self) -> Option<ObjectId> {
-        let actor = *self.members.get(usize::from(self.leader_index))?;
+        let actor = self.slot(usize::from(self.leader_index))?;
         Some(ObjectId(u16::from(actor)))
     }
 
@@ -306,6 +321,9 @@ mod tests {
         party.leader_index = 2;
         assert_eq!(party.leader(), Some(ObjectId(3)));
         party.leader_index = 16;
+        party.slot16 = 9;
+        assert_eq!(party.leader(), Some(ObjectId(9)), "party slot 16");
+        party.leader_index = 17;
         assert_eq!(party.leader(), None);
         party.size = 200;
         assert_eq!(party.active().count(), PARTY_SLOTS);

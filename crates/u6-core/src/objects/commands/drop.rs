@@ -172,12 +172,8 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
     let (kind, sk, owner) = {
         let s = state.borrow();
         let kind = s.objects.kind(sel);
-        let m = usize::try_from(s.ui.panel.member).unwrap_or(0).min(15);
-        (
-            kind,
-            stack_kind(&s.objects, kind),
-            Slot::from(s.actors.party.members[m]),
-        )
+        let m = crate::ui::panels::member_actor(&s, s.ui.panel.member.max(0));
+        (kind, stack_kind(&s.objects, kind), Slot::from(m))
     };
     let o = sel;
     if seams::cannot_drop(state, io, o).await != 0 {
@@ -232,6 +228,10 @@ pub(super) fn land(
             s.inventory.set_equip(slot, 0);
         }
         if super::super::seams::ready_slot(s, o) == 8 {
+            // Port: 0x12a226 writes A4+0x1370 + the panel member with no bound; at member 16 (the
+            // panel after a Pickpocket from a spellbook or spell object) that is A4+0x1380, the
+            // high byte of the word `open_container`. The port skips that write instead of
+            // modelling it.
             let m = usize::try_from(s.ui.panel.member).unwrap_or(0);
             if let Some(f) = s.ui.panel.member_flags.get_mut(m) {
                 *f = 0;

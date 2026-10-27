@@ -47,7 +47,7 @@ fn status(s: &State, a: i16) -> u8 {
 }
 
 fn member(s: &State, i: usize) -> i16 {
-    i16::from(s.actors.party.members.get(i).copied().unwrap_or(0))
+    i16::from(crate::actors::party::roster_byte(s, i))
 }
 
 /// Original: 0x1230ce (combat: flash a hit: tile 0x101 over the object's window cell, shown at

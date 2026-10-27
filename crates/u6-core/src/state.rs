@@ -307,6 +307,18 @@ mod tests {
     }
 
     #[test]
+    fn the_leader_at_index_16_is_party_slot_16() {
+        // 0x124232 makes the attacker party slot 16 (A4+0x47fc, the byte after the 16 members)
+        // with the leader index 16 around a spellbook's or spell object's cast (asm
+        // 0x12467a..0x124688): the leader is then the attacker.
+        let mut s = State::empty();
+        s.objects.location[0x30] = Position { x: 5, y: 6, z: 0 };
+        s.actors.party.slot16 = 0x30;
+        s.actors.party.leader_index = 16;
+        assert_eq!(s.leader_position(), Some(Position { x: 5, y: 6, z: 0 }));
+    }
+
+    #[test]
     fn anim_flags_clear_slots_on_the_three_base_tiles() {
         let mut s = State::empty();
         let mut base = vec![0u16; 1024];

@@ -264,6 +264,28 @@ fn ready_and_unready_move_a_weapon_and_change_the_weights() {
 }
 
 #[test]
+fn ready_from_the_panel_on_member_16_weighs_for_party_slot_16() {
+    // Pickpocket cast from a spellbook or spell object leaves the panel on member 16 (the leader
+    // index of the cast, 0x124232); 0x112052 then reads A4+0x47ec[16], party slot 16 (A4+0x47fc),
+    // whose strength the weight check takes, not member 15's.
+    let mut s = world();
+    let sword = give(&mut s, SWORD, IN_INVENTORY, 0, 1);
+    carried_weight(&mut s, 1);
+    s.actors.party.members[15] = 2;
+    s.actors.attrs.strength[2] = 0;
+    s.actors.party.slot16 = 1;
+    s.ui.panel.member = 16;
+    s.ui.input.selection = sword;
+    let e = run(s, &[], |st, io| async move { ready(&st, &io).await });
+    assert!(e.finished());
+    assert_eq!(
+        e.state().objects.place(sword),
+        READIED,
+        "actor 1's strength"
+    );
+}
+
+#[test]
 fn ready_refuses_heavy_unreadyable_and_occupied() {
     let mut s = world();
     s.actors.attrs.strength[1] = 8; // 80 tenths; 70 readied already

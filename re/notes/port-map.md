@@ -14,7 +14,7 @@ ported > partial > placeholder > stubbed > replaced > planned; `-` = no marker y
 port lacks, a guard inside the port, or a stub that names the wrong address (counted as
 `also named by a stub`); partial and placeholder rows show their stubs the same way.
 
-Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2, replaced 84, planned 2, - 6. Milestone 1 (M + S) 406: ported 322, partial 2, stubbed 1, replaced 79, planned 2.
+Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2, - 6. Milestone 1 (M + S) 406: ported 322, partial 2, stubbed 1, replaced 79, planned 2.
 
 | address | subsystem | M1 | Rust path | status |
 |---|---|---|---|---|
@@ -89,7 +89,7 @@ Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
 | 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
-| 0x104140 | main | M | `main_loop/commands.rs:436 in dispatch` | stubbed |
+| 0x104140 | main | M | `main_loop/commands.rs:438 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `inventory/portrait.rs::direction_to` | ported |
 | 0x1051a6 | ui | M | `ui/pointer.rs::update_shape` | ported |
@@ -308,7 +308,7 @@ Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2
 | 0x11a470 | magic |  | `magic/travel.rs::locate` | ported |
 | 0x11a508 | magic |  | `magic/spells.rs::wind_change` | ported |
 | 0x11a550 | magic |  | `magic/creatures.rs::armageddon` | ported |
-| 0x11a586 | magic |  | `magic/dispatch.rs::dispatch` | ported; stub at `combat/seams.rs:98 in cast_from_item` |
+| 0x11a586 | magic |  | `magic/dispatch.rs::dispatch` | ported |
 | 0x11abd0 | magic |  | `magic/cast.rs::book_cast` | ported |
 | 0x11af10 | magic | S | `magic/cast.rs::cast` | ported |
 | 0x11b1c0 | actors | M | `actors/walk.rs::can_move_to` | ported |
@@ -389,9 +389,9 @@ Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2
 | 0x123c56 | combat |  | `combat/damage.rs::yell_for_help` | ported |
 | 0x123d86 | combat |  | `combat/damage.rs::apply_damage` | ported |
 | 0x1240fa | combat | S | `combat/leaves.rs::owner` | ported |
-| 0x124232 | combat |  | `combat/attack.rs::hit` | ported |
+| 0x124232 | combat |  | `combat/attack.rs::cast_item`; `combat/attack.rs::hit`; `combat/seams.rs::cast_from_item` | ported |
 | 0x1249de | combat |  | `combat/attack.rs::list_weapons` | ported |
-| 0x124a98 | combat |  | `combat/attack.rs::attack_with_weapon` | ported |
+| 0x124a98 | combat |  | `combat/attack.rs::attack_with_weapon`; `combat/attack.rs::next_weapon` | ported |
 | 0x124caa | combat | S | `combat/attack.rs::attack` | ported |
 | 0x124e0e | combat | S | `combat/leaves.rs::cell_distance` | ported |
 | 0x124e74 | combat |  | `combat/leaves.rs::pick_weapon` | ported |
@@ -402,7 +402,7 @@ Totals: functions 599: ported 500 (also named by a stub 1), partial 5, stubbed 2
 | 0x1259b0 | combat | S | `combat/npc.rs::rear` | ported |
 | 0x125e26 | combat | S | `combat/npc.rs::flank` | ported |
 | 0x1263a2 | combat | S | `combat/npc.rs::berserk` | ported |
-| 0x126738 | combat | S | `combat/npc.rs::retreat` | ported |
+| 0x126738 | combat | S | `combat/npc.rs::retreat`; `combat/npc.rs::retreat_tail` | ported |
 | 0x126990 | combat | S | `combat/npc.rs::tame` | ported |
 | 0x126b28 | combat | S | `combat/npc.rs::wary` | ported |
 | 0x126cc0 | combat | S | `combat/npc.rs::lurk` | ported |

@@ -71,7 +71,7 @@ fn healthy(s: &State, actor: usize) -> bool {
 }
 
 fn member(s: &State, i: usize) -> usize {
-    usize::from(s.actors.party.members.get(i).copied().unwrap_or(0))
+    usize::from(super::party::roster_byte(s, i))
 }
 
 /// The view centre follows member `i` (x and y only, as the original writes them).
@@ -672,12 +672,15 @@ fn owe_first(s: &mut State, owed: &mut u32) {
 }
 
 /// Whether the NPC turn [`npc::npc_turn_sync`] started (`started`) shows something before it
-/// ends: frames or lines queued (played by [`npc::npc_turn_rest`]), an arrest or a
-/// conversation.
+/// ends: frames or lines queued (played by [`npc::npc_turn_rest`]), an arrest, a conversation
+/// or a spellbook's or spell object's cast.
 fn shows(s: &State, started: Option<&(i8, npc::Wait)>) -> bool {
     !s.combat.effects.is_empty()
         || !s.main.pending_print.is_empty()
-        || matches!(started, Some((_, npc::Wait::Arrest | npc::Wait::Talk(_))))
+        || matches!(
+            started,
+            Some((_, npc::Wait::Arrest | npc::Wait::Talk(_) | npc::Wait::Cast))
+        )
 }
 
 /// The end of [`world_turn`]'s loop (0x121760..0x1217cc): true when the pick `actor` is the

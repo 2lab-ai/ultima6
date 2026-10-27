@@ -93,12 +93,7 @@ pub async fn begin(cx: &Cx<'_>, talker: u8, target: i16) {
         set_vars(s, talker, target);
         seams::mark_scroll_talking(s);
         seams::play_song(s, 0);
-        s.actors
-            .party
-            .members
-            .get(usize::from(talker))
-            .copied()
-            .unwrap_or(0)
+        crate::actors::party::roster_byte(s, usize::from(talker))
     });
     converse(cx, i16::from(member), target).await;
     cx.st(|s| {
