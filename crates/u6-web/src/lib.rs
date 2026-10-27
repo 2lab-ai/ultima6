@@ -1359,6 +1359,26 @@ impl Game {
         }
     }
 
+    /// Spec 23: the wheel at frame pixel (x, y) (as [`Game::pointer`] maps it), `dy` lines (< 0
+    /// older, > 0 newer): over the message window while `game` runs it scrolls the message
+    /// history the frame shows, at once ([`Game::present`] shows it), and returns true (the caller
+    /// should then `preventDefault`); elsewhere, or before a start, false and nothing changes.
+    /// Never the game's input.
+    pub fn wheel(&mut self, x: i32, y: i32, dy: i32) -> bool {
+        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.engine
+            .as_mut()
+            .is_some_and(|e| e.wheel(word(x), word(y), dy))
+    }
+
+    /// Spec 23: lines the message history is scrolled back from the live bottom (0: live, and
+    /// before a start).
+    pub fn history_offset(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| u32::try_from(e.history_offset()).unwrap_or(u32::MAX))
+    }
+
     /// Voices on or off (spec 09 Design 1): while on, the engine's speech tap keeps what NPCs
     /// say for [`Game::take_speech`]; off (the default), it keeps nothing. Applies to the game
     /// running and to every game started after.

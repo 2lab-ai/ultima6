@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 
+use super::scrollback::{self, CellKind};
 use super::text::{self, CENTRE, PAGED, RUNIC, SCROLL, WRAP, WindowId};
 use super::textstate::TRANSCRIPT;
 use super::wide;
@@ -25,13 +26,15 @@ fn is_lower(c: i32) -> bool {
     (0x61..=0x7a).contains(&c)
 }
 
-/// Draws `c` at window-relative cell (`col`, `row`) of the current window, in its colours.
+/// Draws `c` at window-relative cell (`col`, `row`) of the current window, in its colours. Port
+/// (spec 23): a cell of the message window is noted for its history.
 fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
     let ui = &s.ui;
     let w = *ui.text.win();
     let x = u16::from(w.x) + u16::from(col);
     let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
     io.draw(|fb| text::draw_char(fb, font, hangul, &w, c, x, row));
+    scrollback::note(&mut s.ui, &w, c, (x, row), CellKind::Char);
 }
 
 /// The code a line cell holds for `c` (codes past `u16` are blank cells; none is put).
@@ -272,6 +275,8 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
         } else if w.flags & SCROLL != 0 {
             let w = *w;
             t.drawn = true;
+            // Port (spec 23): the row that scrolls off is kept.
+            io.draw(|fb| scrollback::scrolled(&mut s.ui, fb, &w));
             let paper = s.ui.paper.as_ref();
             io.draw(|fb| text::scroll_window(fb, &w, paper));
         }

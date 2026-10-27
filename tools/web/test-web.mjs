@@ -12073,6 +12073,137 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
 }, { needs: h.haveHfes });
 
+// --- the message history (spec 23) --------------------------------------------------------------
+// The message window keeps the lines it scrolled off; the wheel over it shows them, with the
+// engine's scrollbar in its last cell column. Passes at the prompt fill the window past its rows.
+// The checks read the engine's RGBA frame (the window's rect, frame pixels 176..311 x 112..191 in
+// every build), with HD on the HD frame's rows over it, and the offset; never the text. The game
+// runs on between reads: its prompt's cursor in the window's last row may blink, so a check that
+// the window stayed the same reads the rows above it (the first 72 pixel rows).
+const ABOVE_CURSOR = 72 * 136;
+
+/// The message window's rect of the RGBA frame (a colour string per pixel), with HD on a digest of
+/// the HD frame's pixels over its rows above the last, and the history offset.
+async function historyShown(page) {
+  return page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const [x0, y0, w, rows] = [176, 112, 136, 80];
+    const fw = g.width();
+    const d = g.frame_rgba();
+    const px = [];
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const i = ((y0 + y) * fw + x0 + x) * 4;
+        px.push(`${d[i]},${d[i + 1]},${d[i + 2]}`);
+      }
+    }
+    let hd = null;
+    if (g.hd_on()) {
+      const s = g.hd_scale();
+      const f = g.hd_frame_rgba();
+      hd = 2166136261;
+      for (let y = y0 * s; y < (y0 + rows - 8) * s; y += 1) {
+        for (let x = x0 * s; x < (x0 + w) * s; x += 1) {
+          for (let k = 0; k < 3; k += 1) hd = Math.imul(hd ^ f[(y * fw * s + x) * 4 + k], 16777619) >>> 0;
+        }
+      }
+    }
+    return { offset: g.history_offset(), px, hd };
+  });
+}
+
+const sameAbove = (a, b) => a.px.every((c, i) => i >= ABOVE_CURSOR || c === b.px[i]);
+
+/// The scrollbar's pixels in a rect read by `historyShown`: in each cell of the last column whose
+/// first five columns show one colour, the last three columns' pixels of another colour (spec 23
+/// Design 7: the bar yields to a letter, over a cell of one colour it is the ink); their count and
+/// their colours.
+function barPixels(px) {
+  const w = 136;
+  const colours = new Set();
+  let n = 0;
+  for (let r = 0; r < 10; r += 1) {
+    const at = (x, y) => px[(r * 8 + y) * w + x];
+    const paper = at(128, 0);
+    let plain = true;
+    for (let y = 0; y < 8; y += 1) for (let x = 128; x < 133; x += 1) plain &&= at(x, y) === paper;
+    if (!plain) continue;
+    for (let y = 0; y < 8; y += 1) {
+      for (let x = 133; x < 136; x += 1) {
+        if (at(x, y) !== paper) {
+          n += 1;
+          colours.add(at(x, y));
+        }
+      }
+    }
+  }
+  return { n, colours: colours.size };
+}
+
+/// Spec 23 in one layout: the passes, the wheel over the map (nothing), over the message window
+/// (back a line a notch, the scrollbar drawn), a key (back to the live bottom).
+async function messageScrollback(page, env, label) {
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const live = await historyShown(page);
+  assert.equal(live.offset, 0, `${label}: the live bottom`);
+  if (label === 'HD') assert.ok(live.hd !== null, 'HD: the HD frame on');
+  assert.equal(barPixels(live.px).n, 0, `${label}: no scrollbar at the live bottom`);
+  // Over the map (Wide: its map window, spec 14): the engine takes nothing, the frame stays.
+  const map = label === 'Wide' ? [600, 150] : [40, 40];
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await page.mouse.wheel(0, -100);
+  await h.waitFrames(page, 2);
+  const away = await historyShown(page);
+  assert.equal(away.offset, 0, `${label}: the wheel over the map scrolls nothing`);
+  assert.ok(sameAbove(away, live) && away.hd === live.hd, `${label}: the window as it was`);
+  // Over the message window: one line a notch, up to four.
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  for (let k = 1; k <= 4; k += 1) {
+    await page.mouse.wheel(0, -100);
+    await h.waitFrames(page, 2);
+    assert.equal((await historyShown(page)).offset, k, `${label}: ${k} lines back after ${k} notches`);
+  }
+  const back = await historyShown(page);
+  const changed = back.px.filter((c, i) => i < ABOVE_CURSOR && c !== live.px[i]).length;
+  assert.ok(changed > 0, `${label}: the window shows older lines`);
+  const bar = barPixels(back.px);
+  assert.ok(bar.n > 0 && bar.colours === 1, `${label}: the scrollbar drawn, in one ink`);
+  if (live.hd !== null) assert.ok(back.hd !== live.hd, `${label}: the HD frame shows them`);
+  await keepFrame(page.locator('#screen'), `scrollback-${label.toLowerCase()}.png`);
+  // A notch down: a line newer.
+  await page.mouse.wheel(0, 100);
+  await h.waitFrames(page, 2);
+  assert.equal((await historyShown(page)).offset, 3, `${label}: a notch down, a line newer`);
+  // A key: the live bottom, the key the game's.
+  await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const after = await historyShown(page);
+  assert.equal(after.offset, 0, `${label}: a key returns to the live bottom`);
+  assert.equal(barPixels(after.px).n, 0, `${label}: no scrollbar after it`);
+  console.log(`  receipt: spec 23 ${label}: 4 notches 4 lines back, ${changed} window pixels changed, ${bar.n} scrollbar pixels in one ink; the map's wheel nothing; a key the live bottom: pass`);
+}
+
+test('the message history (spec 23), Original: the wheel over the message window shows the lines it scrolled off a line a notch, with the engine\'s scrollbar in its last column; over the map it does nothing; a key returns to the live bottom', async (env) => {
+  const { page } = await h.openPage(env);
+  await messageScrollback(page, env, 'Original');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23), the HD layout: the same through the HD frame', async (env) => {
+  const { page } = await h.openPage(env, { layout: 'hd' });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await messageScrollback(page, env, 'HD');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23), Wide: the same in the message scroll\'s window', async (env) => {
+  const { page } = await h.openWide(env, { width: 1400, height: 900 });
+  await messageScrollback(page, env, 'Wide');
+}, { needs: h.haveHfes });
+
 const filter = process.argv[2];
 const env = await h.setup();
 let failed = 0;

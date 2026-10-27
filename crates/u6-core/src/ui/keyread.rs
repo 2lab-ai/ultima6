@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 
 use super::print::put_raw;
+use super::scrollback::CellKind;
 use super::seams;
 use super::text::{self, PAGED};
 use crate::engine::{Io, Key, Typed};
@@ -147,7 +148,8 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
             // Port (spec 11): a symbol, never a character of the HD font.
             let paper = ui.paper.as_ref();
             io.draw(|fb| text::draw_symbol(fb, (font, hangul), &w, glyph, (col, row), paper));
-            let refresh = ui.input.idle_refresh;
+            super::scrollback::note(&mut s.ui, &w, glyph, (col, row), CellKind::Symbol);
+            let refresh = s.ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
             refresh
         };
@@ -177,6 +179,7 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
     let w = *ui.text.win();
     let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
     io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
+    super::scrollback::note(ui, &w, 0x20, (col, row), CellKind::Char);
     ui.text.drawn = true;
     ui.text.win_mut().fg = saved;
     key
@@ -221,8 +224,10 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
         }
         let w = *win;
         io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
+        super::scrollback::note(ui, &w, 0x20, (col, row), CellKind::Char);
     } else {
         io.draw(|fb| text::draw_typed(fb, (font, hangul), &w, c, (col, row)));
+        super::scrollback::note(ui, &w, c, (col, row), CellKind::Typed);
         let win = ui.text.win_mut();
         win.col = win.col.wrapping_add(1);
         if win.col >= win.width {
@@ -232,6 +237,8 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
             } else if win.flags & text::SCROLL != 0 {
                 ui.text.drawn = true;
                 let w = *ui.text.win();
+                // Port (spec 23): the row that scrolls off is kept.
+                io.draw(|fb| super::scrollback::scrolled(ui, fb, &w));
                 io.draw(|fb| text::scroll_window(fb, &w, ui.paper.as_ref()));
             }
         }

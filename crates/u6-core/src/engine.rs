@@ -692,6 +692,15 @@ pub struct Engine {
     src_shows: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
+    /// Port-only (spec 23): the message history the player looks at, drawn over the published
+    /// frame into `shown` while scrolled back ([`crate::ui::scrollback::View`]).
+    view: crate::ui::scrollback::View,
+    /// The view's stamp `shown` was composed with.
+    view_shown: u64,
+    /// Port-only (spec 23): the published frame with the view over it, for the HD frame, made on
+    /// demand while scrolled back ([`Engine::with_view_frame`]), with the published version and
+    /// the view's stamp it was made at.
+    viewed: RefCell<Option<(Framebuffer, u64, u64)>>,
 }
 
 impl Engine {
@@ -763,6 +772,9 @@ impl Engine {
             src_shows: 0,
             sprite: None,
             stubs,
+            view: crate::ui::scrollback::View::default(),
+            view_shown: 0,
+            viewed: RefCell::new(None),
         }
     }
 
@@ -784,11 +796,13 @@ impl Engine {
                     .count()
             };
             let (mut keys, mut texts) = (count(false), count(true));
-            let cancel = {
-                let s = self.state.borrow();
-                s.main.program == main_loop::Program::Game && s.ui.input.drain
-            };
+            let s = self.state.borrow();
+            let game = s.main.program == main_loop::Program::Game;
+            let cancel = game && s.ui.input.drain;
             for &e in input {
+                // Spec 23: the player's input leaves the message history; a press on its bar is
+                // the bar's.
+                let e = self.view.input(&s.ui, game, e);
                 let (held, room) = match e {
                     InputEvent::Key(_) | InputEvent::Repeat(_) => (&mut keys, KEY_RING),
                     InputEvent::Text(_) => (&mut texts, TEXT_RING),
@@ -840,6 +854,7 @@ impl Engine {
                 .sync_from(&mut self.io.front.borrow_mut());
             self.published_front = version;
             self.published_version += 1;
+            self.view.publish(&self.state.borrow().ui.scrollback);
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
@@ -851,13 +866,10 @@ impl Engine {
         }
         let at = self.io.handler_pointer();
         let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
-        if presented || sprite != self.sprite || self.ticks == 1 {
-            self.shown.sync_from(&mut self.io.published.borrow_mut());
-            if let Some(sp) = &sprite {
-                sp.draw(&mut self.shown);
-            }
+        let view_moved = self.view.stamp() != self.view_shown;
+        if presented || sprite != self.sprite || self.ticks == 1 || view_moved {
             self.sprite = sprite;
-            self.shown_version += 1;
+            self.compose_shown();
         } else if src_only {
             // As the composition above, but for the frame version: the published frame's
             // colours are those `shown` was composed from and the sprite has not moved, so the
@@ -867,6 +879,7 @@ impl Engine {
             #[cfg(debug_assertions)]
             let colours = self.shown.pixels().to_vec();
             self.shown.sync_from(&mut self.io.published.borrow_mut());
+            self.draw_view();
             if let Some(sp) = &self.sprite {
                 sp.draw(&mut self.shown);
             }
@@ -883,6 +896,82 @@ impl Engine {
                 self.src_shows += 1;
             }
         }
+    }
+
+    /// The shown frame composed again: the published frame, the message history the player looks
+    /// at over it (spec 23, only while scrolled back), the pointer sprite last taken.
+    fn compose_shown(&mut self) {
+        self.shown.sync_from(&mut self.io.published.borrow_mut());
+        self.draw_view();
+        if let Some(sp) = &self.sprite {
+            sp.draw(&mut self.shown);
+        }
+        self.shown_version += 1;
+    }
+
+    /// Spec 23: the view over `shown` (synced from the published frame just now), nothing at the
+    /// live bottom.
+    fn draw_view(&mut self) {
+        self.view_shown = self.view.stamp();
+        if self.view.offset() > 0 {
+            let state = self.state.borrow();
+            let live = self.io.published.borrow();
+            crate::ui::scrollback::draw_view(&state.ui, &self.view, &live, &mut self.shown);
+        }
+    }
+
+    /// Port-only (spec 23): the wheel at frame pixel (x, y), `dy` lines (< 0 older, > 0 newer).
+    /// Over the message window while `game` runs it scrolls the message history the frame shows
+    /// (from the next composition on, which this call makes at once) and returns true; elsewhere
+    /// it changes nothing. It is never the game's input.
+    pub fn wheel(&mut self, x: i16, y: i16, dy: i32) -> bool {
+        let taken = {
+            let s = self.state.borrow();
+            let game = s.main.program == main_loop::Program::Game;
+            self.view.wheel(&s.ui, game, (x, y), dy)
+        };
+        if taken && self.view.stamp() != self.view_shown {
+            self.compose_shown();
+        }
+        taken
+    }
+
+    /// Port-only (spec 23): lines the view is back from the live bottom (0: the live frame).
+    pub fn history_offset(&self) -> usize {
+        self.view.offset()
+    }
+
+    /// Port-only (spec 23): moves whenever the frame the HD view composes
+    /// ([`Engine::with_view_frame`]) may have changed: the published frame, or the message history
+    /// shown over it.
+    pub fn view_version(&self) -> (u64, u64) {
+        (self.published_version, self.view.stamp())
+    }
+
+    /// Port-only (spec 23): `f` of the published frame as the player sees it without the pointer
+    /// sprite: [`Engine::published_frame`] at the live bottom, else a copy of it with the message
+    /// history the view shows over it, made again only when either changed. The HD frame is
+    /// composed from it.
+    pub fn with_view_frame<R>(&self, f: impl FnOnce(&Framebuffer) -> R) -> R {
+        if self.view.offset() == 0 {
+            self.viewed.replace(None);
+            return f(&self.io.published.borrow());
+        }
+        let (version, stamp) = self.view_version();
+        let mut viewed = self.viewed.borrow_mut();
+        let fresh = viewed
+            .as_ref()
+            .is_some_and(|(_, v, s)| (*v, *s) == (version, stamp));
+        if !fresh {
+            let live = self.io.published.borrow();
+            let mut fb = viewed.take().map_or_else(Framebuffer::new, |(fb, _, _)| fb);
+            fb.clone_from(&live);
+            let state = self.state.borrow();
+            crate::ui::scrollback::draw_view(&state.ui, &self.view, &live, &mut fb);
+            *viewed = Some((fb, version, stamp));
+        }
+        let (fb, _, _) = viewed.as_ref().expect("made above");
+        f(fb)
     }
 
     /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at

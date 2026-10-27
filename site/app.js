@@ -3942,6 +3942,43 @@ canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
 
+// --- the message history (spec 23) ---------------------------------------------------------------
+// The wheel over the message window scrolls the history the engine draws in it (Game.wheel; the
+// engine draws the lines and the scrollbar into its frame, the page adds nothing); elsewhere it
+// does nothing, and with Ctrl it is the browser's zoom. One notch is one line: a line- or
+// page-mode event one line in its direction, pixel deltas (a trackpad's) added up at
+// WHEEL_LINE_PX CSS pixels a line, the carry dropped when the direction turns. The position goes
+// through the layout as a held pointer's does (`layoutToGame` with `held`): over a window's frame
+// or title strip, a gap or a window in front of the message window it is the rest pixel, outside
+// the message window.
+const WHEEL_LINE_PX = 100;
+let wheelCarry = 0;
+function wheelLines(e) {
+  if (e.deltaMode !== 0) return Math.sign(e.deltaY);
+  if (Math.sign(e.deltaY) !== Math.sign(wheelCarry)) wheelCarry = 0;
+  wheelCarry += e.deltaY;
+  const lines = Math.trunc(wheelCarry / WHEEL_LINE_PX);
+  wheelCarry -= lines * WHEEL_LINE_PX;
+  return lines;
+}
+function wheelPixel(e) {
+  const box = canvas.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+  if (shownView === FRAME) {
+    return [Math.floor(((e.clientX - box.left) * game.width()) / box.width),
+      Math.floor(((e.clientY - box.top) * game.height()) / box.height)];
+  }
+  const px = ((e.clientX - box.left) * canvas.width) / box.width;
+  const py = ((e.clientY - box.top) * canvas.height) / box.height;
+  return layoutToGame(px, py, true);
+}
+canvas.addEventListener('wheel', (e) => {
+  if (!game || crashed || e.ctrlKey) return;
+  const at = wheelPixel(e);
+  if (!at) return;
+  if (game.wheel(at[0], at[1], wheelLines(e))) e.preventDefault();
+}, { passive: false });
+
 // --- the context menu (spec 17) -----------------------------------------------------------------
 // A right press (the left button up) at the game's prompt on the map, or on an inventory or
 // equipment slot, opens a menu of what the commands can do with what is there
