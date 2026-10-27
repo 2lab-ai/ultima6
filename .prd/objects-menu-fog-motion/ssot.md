@@ -42,10 +42,28 @@ Decisions taken here (reversible; the owner vetoes on review):
   command on the cell (0xa9), else walks like the left (`crates/u6-core/src/ui/click.rs:116-148`). The menu takes
   the right press on the map and on the panels' objects. The underlined command, when there is one, is the menu's
   first entry, so the original's repeat stays one click away. Left-button walking is unchanged.
-- **Item 3: memory is render state only.** It is keyed by world cell, never saved (the savegame stays the
-  original's format), and dropped once the cell leaves the view. A cell that was seen and is no longer seen, for
-  any reason (sight line or darkness), shows its last seen ground and still objects in dark greyscale. Actors are
-  not shown there.
+- **Item 3: memory is render state only.** It is keyed by world cell and level, kept in the port, outside the
+  original's savegame format. A cell that was seen and is no longer seen, for any reason (sight line or darkness),
+  shows its last seen ground and still objects in dark greyscale. Actors are not shown there. (Amended
+  2026-10-27 by the owner's follow-up below: a cell is no longer dropped when it leaves the view.)
+
+Owner's follow-up on item 3 (2026-10-27, verbatim):
+
+> 화면에 안보이면 바로 없는게 아니고 한번이라도 본 지형은 계속 기억하도록해줘. 그리고 게임내 턴수에 따라서 천천히 없어지는데 1에서 0이 되는게 아니라 1에서 하루가 지날때마다 50%씩 까여 그럼 해당 타일의 50%만 그 디더링하듯 격자로 출력. 이틀 지나면 25% 남고 이렇게 3일 4일 6.25% 5일째되면 검게 표시하도록해줘 이렇게 구현
+
+Decisions on it (reversible):
+
+- **Kept off screen and on other levels.** A remembered cell stays remembered after it leaves the window and while
+  the party is on another level; it shows again in grey when it is back in the window and out of sight. The window
+  reset (death, arrest, the healer) no longer forgets it.
+- **Fades by game days, not turns.** The age is the game time since the cell's last sight, on the original's
+  calendar (60 minutes, 24 hours, 28 days, 12 months). After d whole days (1440 minutes each) the cell shows
+  2^-d of its pixels: 100, 50, 25, 12.5, 6.25 % for d = 0..4. From day 5 it is black and forgotten.
+- **The dither is a fixed 4 × 4 ordered pattern** on the original's pixel grid, anchored to the world, each
+  level's pixels a subset of the one before (50 % is a checkerboard). A pixel outside the pattern is black. HD
+  draws the same pattern at the original's pixel grid.
+- **Saves.** The memory is written beside the savegame as a port-only file and read back with it (unit C3, after
+  C2); until C3 ships, a restore forgets it.
 - **Item 4's deliverable is the spec.** "리서치하고 … 자세히 기술해줘" asks for research and a written
   description, so `19-turn-model.md` ends with options and a recommendation. The owner's words read as a complaint, so the
   cheapest step of that recommendation is built in round 2 beside item 5, and the deploy report names it.

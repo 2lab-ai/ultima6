@@ -9,6 +9,9 @@ tags: [ultima6]
 Status: in progress (2026-10-27). One production deploy per item as soon as its receipt is green, then one per
 follow-up (`ssot.md`).
 
+Owner page (using-epic-issue, opened 2026-10-27): http://192.168.50.49:8763/ultima6-improve-20261027.html, rendered
+from `~/.local/share/ultima6-dashboard/state.json`, refreshed every 15 minutes and at each event.
+
 ## Round 1 (2026-10-27): research and audit, read-only
 
 Every unit writes its findings under `~/Games/ultima6/work/dispatch/r1027-<unit>/`. A finding cites `file:line` and
@@ -56,6 +59,10 @@ deploys.
 | W2 | 5 | `feat/smooth-motion` (from `integ/r1027` ec3c4f6) | spec 20: scene, presenter, early picture on a clone. r1 (6ca722b; `integ/r1027` merged in, 6c180c3): purity holds (State and RNG equal, publications byte-identical with the switch on and off); end-of-slide frames equal the engine's picture in 420 scenes; in-between offsets measured in all three modes; doorway frames read by the dispatcher (half-cell scroll, the mover under the doorway top). Deviation: HD recomposes the whole frame each display frame, which costs Wide 5.18 ms median / 9.01 p95 / 14.9 max per present. Decided: Wide stays on by default, and r2 builds Design 5's per-publication layers. r2 also explains the early-picture spikes and writes the kept deviations into spec 20 (`w2-r2.md`). Reviews wait for r2 | C1, B2, K1 merged (done) |
 | B13 | 1c | (later, after the units in flight) | replace the static scan with a compiler rule: clippy `disallowed-methods` on the image text readers, one string-registry module the catalogue is built from (opus, B10 r4). About 100+ production reader sites (`cstr` 32, `game_string` 31, `printf` 46) | B10, M2, W2, B12 merged |
 | E1 | 1a | (round 3) | the `end` program (O1 row 10): decompile, port, launcher state 2 | — |
+| C2 | 3 | `feat/sight-fade` (from `integ/r1027` b8ed317) | the owner's item-3 follow-up (`ssot.md`): remembered cells kept off the view and on other levels; fade by game days, 2^-d of the pixels through a 4 × 4 ordered pattern, black and forgotten from day 5; the window reset keeps the memory. Brief `c2.md` | C1 shipped: done |
+| K2 | 4 | `fix/held-key-immediate` (from `integ/r1027` ba6cd09) | the owner's report (2026-10-27): a held arrow steps once, waits for the OS repeat delay, then walks on. A held direction key is taken again at every command prompt at once (one step a turn); other waits keep the browser's repeat. Brief `k2.md` | K1 shipped: done |
+| C3 | 3 | (after C2) | the remembered sight written beside the savegame as a port-only file and read back with it | C2 |
+| M2-F | 2 | `feat/context-menu` | F0 (bd0eb13) + F0b (7345d88): the u6-web menu tests' press points from the shown map, so they hold in the wide build (the deploy-30 gate failed 3 there); both reviewers approve, merged into `integ/r1027` ba6cd09. F1 (cca6c84, test-only follow-ups): gpt and opus REVISE, round 2 in progress | M2 |
 
 ### Review state (2026-10-27)
 
