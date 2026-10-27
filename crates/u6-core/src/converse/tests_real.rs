@@ -266,7 +266,7 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
     let w = usize::from(m.width) * 8;
     let bar = (w - 3)..w;
     let (mut talks, mut kept, mut compared, mut equal, mut barred) = (0, 0, 0, 0, 0);
-    let (mut spans, mut patched, mut agree) = (0, 0, 0);
+    let (mut patched, mut agree, mut heap) = (0, 0, 0);
     for &npc in near_the_start(&base).iter().take(40) {
         let mut s = base.clone();
         if name_from_script(&mut s, &files, npc).0.is_empty() {
@@ -305,18 +305,17 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
                 }
             }
         }
-        let (total, base_line, n_spans, n_patched) = {
+        let (total, base_line, n_patched) = {
             let sb = &e.state().ui.scrollback;
             let len = sb.lines().len() as u64;
-            let spans = sb.lines().iter().filter(|l| !l.spans.is_empty()).count();
             let patched = sb.lines().iter().filter(|l| !l.patch.is_empty()).count();
-            (sb.total(), sb.total() - len, spans, patched)
+            heap = heap.max(sb.heap_bytes());
+            (sb.total(), sb.total() - len, patched)
         };
         if total < u64::from(m.height) {
             continue;
         }
         talks += 1;
-        spans += n_spans;
         patched += n_patched;
         // Back a line at a time to the oldest line kept.
         let mut back = 0;
@@ -370,13 +369,14 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
     println!(
         "scrollback receipt: {talks} conversations scrolled; {kept} lines kept and wheeled to; \
          {compared} compared with their published rows, {equal} equal ({barred} under the bar, \
-         {agree} rows seen on two frames agreed); {spans} with keyword spans, {patched} with \
-         patched pixels"
+         {agree} rows seen on two frames agreed); {patched} with patched pixels; at most {heap} \
+         bytes kept"
     );
     assert!(talks >= 3, "three conversations scrolled the window");
+    // Every line wheeled to was on a published frame above the cursor before it scrolled off.
     assert!(
-        compared > 0 && equal == compared,
-        "every compared line is as it was"
+        compared == kept && equal == compared,
+        "every kept line compared, and as it was"
     );
 }
 

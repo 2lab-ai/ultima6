@@ -923,7 +923,8 @@ impl Engine {
     /// Port-only (spec 23): the wheel at frame pixel (x, y), `dy` lines (< 0 older, > 0 newer).
     /// Over the message window while `game` runs it scrolls the message history the frame shows
     /// (from the next composition on, which this call makes at once) and returns true; elsewhere
-    /// it changes nothing. It is never the game's input.
+    /// it changes nothing. `dy` 0 moves nothing: whether the wheel is taken there. It is never the
+    /// game's input.
     pub fn wheel(&mut self, x: i16, y: i16, dy: i32) -> bool {
         let taken = {
             let s = self.state.borrow();
@@ -939,6 +940,13 @@ impl Engine {
     /// Port-only (spec 23): lines the view is back from the live bottom (0: the live frame).
     pub fn history_offset(&self) -> usize {
         self.view.offset()
+    }
+
+    /// Port-only (spec 23): whether a press is the message history's until every button is up
+    /// ([`crate::ui::scrollback::View::holding`]): the game sees no button, the platforms pace the
+    /// steps as with one held (spec 06).
+    pub fn history_holding(&self) -> bool {
+        self.view.holding()
     }
 
     /// Port-only (spec 23): moves whenever the frame the HD view composes

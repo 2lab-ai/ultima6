@@ -6,12 +6,14 @@
 //!
 //! [`Scrollback`] (in [`super::UiState`]) holds what the game drew: a shadow of the window's rows,
 //! written at each draw of a cell inside it ([`note`]), and the lines that scrolled off
-//! ([`scrolled`]). [`View`] (in [`crate::Engine`]) holds what the player looks at: the offset back
-//! from the live bottom and the gesture on the bar. [`draw_view`] draws the view over a copy of
-//! the published frame; at offset 0 it draws nothing, so the frame is the original's.
+//! ([`scrolled`]). [`View`] (in [`crate::Engine`]) holds what the player looks at: the lines kept
+//! as of the last publish, the offset back from the live bottom and the gesture on the bar.
+//! [`draw_view`] draws the view over a copy of the published frame; at offset 0 it draws nothing,
+//! so the frame is the original's.
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::rc::Rc;
 
 use u6_render::{BITMAP_PAPER, Framebuffer, Kind, Src};
 
@@ -19,8 +21,11 @@ use super::UiState;
 use super::text::{self, CELL, Paper, TextWindow, WindowId};
 use crate::engine::{InputEvent, POINTER_LEFT};
 
-/// The lines kept at most; past it the oldest is dropped first. A 17-cell line holds 102 bytes of
-/// cells and three vector headers: about 0.1 MB at the bound ([`Scrollback::heap_bytes`]).
+/// The lines kept at most; past it the oldest is dropped first. Each is shared ([`Rc`]): a copy of
+/// the state, and the view's lines as of a publish, copy a pointer a line. A line of the window's
+/// 17 cells as drawn holds 102 bytes of cells and its shared header; with no patch, about 0.1 MB
+/// at the bound. The patch adds 4 bytes a pixel: at most every pixel of the row (1088), so a bound
+/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11).
 pub const HISTORY: usize = 500;
 /// The thumb's least length, in pixels (one cell's height).
 pub const MIN_THUMB: usize = 8;
@@ -50,14 +55,13 @@ pub struct Cell {
 
 /// One row of the window: its cells, the paper it was cleared to, and what [`scrolled`] adds when
 /// it is kept: the pixels of the row (index in the row, row-major, and colour) the cells do not
-/// draw as they were shown, and the keyword spans, the column ranges `[start, end)` drawn in the
-/// alert ink (braced words, [`super::print`]).
+/// draw as they were shown. A patch pixel is drawn back in its colour alone: naming the paper
+/// where that colour is the paper's there, else no image (spec 23 Design 11).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Line {
     pub cells: Vec<Cell>,
     pub bg: u8,
     pub patch: Vec<(u16, u8)>,
-    pub spans: Vec<(u8, u8)>,
 }
 
 impl Line {
@@ -66,8 +70,12 @@ impl Line {
             cells: vec![Cell::default(); usize::from(width)],
             bg,
             patch: Vec::new(),
-            spans: Vec::new(),
         }
+    }
+
+    /// The bytes the line holds on the heap, by capacity.
+    fn heap_bytes(&self) -> usize {
+        self.cells.capacity() * size_of::<Cell>() + self.patch.capacity() * size_of::<(u16, u8)>()
     }
 }
 
@@ -76,13 +84,13 @@ impl Line {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Scrollback {
     rows: Vec<Line>,
-    lines: VecDeque<Line>,
+    lines: VecDeque<Rc<Line>>,
     total: u64,
 }
 
 impl Scrollback {
     /// The lines kept, oldest first.
-    pub fn lines(&self) -> &VecDeque<Line> {
+    pub fn lines(&self) -> &VecDeque<Rc<Line>> {
         &self.lines
     }
 
@@ -96,16 +104,15 @@ impl Scrollback {
         &self.rows
     }
 
-    /// The bytes the lines and the shadow hold on the heap, by capacity.
+    /// The bytes the lines and the shadow hold on the heap, by capacity: each kept line's shared
+    /// allocation (its two counts and the line) and what the line holds.
     pub fn heap_bytes(&self) -> usize {
-        let line = |l: &Line| {
-            l.cells.capacity() * size_of::<Cell>()
-                + l.patch.capacity() * size_of::<(u16, u8)>()
-                + l.spans.capacity() * size_of::<(u8, u8)>()
-        };
-        self.lines.capacity() * size_of::<Line>()
+        let shared = 2 * size_of::<usize>() + size_of::<Line>();
+        self.lines.capacity() * size_of::<Rc<Line>>()
+            + self.lines.len() * shared
             + self.rows.capacity() * size_of::<Line>()
-            + self.lines.iter().chain(&self.rows).map(line).sum::<usize>()
+            + self.lines.iter().map(|l| l.heap_bytes()).sum::<usize>()
+            + self.rows.iter().map(Line::heap_bytes).sum::<usize>()
     }
 
     /// The shadow at the window's size, blank where it was not.
@@ -138,10 +145,9 @@ impl fmt::Debug for Line {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Line({} cells, {} patched, {} spans)",
+            "Line({} cells, {} patched)",
             self.cells.len(),
-            self.patch.len(),
-            self.spans.len()
+            self.patch.len()
         )
     }
 }
@@ -188,9 +194,9 @@ pub fn note(ui: &mut UiState, w: &TextWindow, c: u16, at: (u16, u16), kind: Cell
 }
 
 /// Before `w` scrolls in `fb` ([`text::scroll_window`]): when `w` is the message window, its top
-/// row is kept, with the pixels of `fb` its cells do not draw and its keyword spans, the oldest
-/// line dropped past [`HISTORY`], and the shadow moves up one row, the new last row blank in
-/// `w`'s paper. Another window over part of it clears the shadow.
+/// row is kept, with the pixels of `fb` its cells do not draw, the oldest line dropped past
+/// [`HISTORY`], and the shadow moves up one row, the new last row blank in `w`'s paper. Another
+/// window over part of it clears the shadow.
 pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow) {
     let m = messages(ui);
     let (a, b) = (rect(&m), rect(w));
@@ -205,12 +211,10 @@ pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow) {
         return;
     }
     ui.scrollback.fit(&m);
-    let alert = ui.tables.colours.alert;
     let mut line = ui.scrollback.rows.remove(0);
     line.patch = patch(ui, fb, &line, &m, m.y);
-    line.spans = spans(&line, alert);
     let sb = &mut ui.scrollback;
-    sb.lines.push_back(line);
+    sb.lines.push_back(Rc::new(line));
     if sb.lines.len() > HISTORY {
         sb.lines.pop_front();
     }
@@ -265,27 +269,7 @@ fn patch(ui: &UiState, fb: &Framebuffer, line: &Line, m: &TextWindow, row: u8) -
             }
         }
     }
-    out
-}
-
-/// The runs of drawn cells in the alert ink, as column ranges.
-fn spans(line: &Line, alert: u8) -> Vec<(u8, u8)> {
-    let mut out = Vec::new();
-    let mut start = None;
-    for (k, cell) in line.cells.iter().enumerate() {
-        let keyword = cell.kind != CellKind::Blank && cell.fg == alert;
-        match (keyword, start) {
-            (true, None) => start = Some(k),
-            (false, Some(s)) => {
-                out.push((s as u8, k as u8));
-                start = None;
-            }
-            _ => {}
-        }
-    }
-    if let Some(s) = start {
-        out.push((s as u8, line.cells.len() as u8));
-    }
+    out.shrink_to_fit();
     out
 }
 
@@ -390,12 +374,11 @@ fn draw_bar(ui: &UiState, m: &TextWindow, (kept, offset): (usize, usize), out: &
 }
 
 /// Draws `view` over `out`, a copy of the published frame `live`, for the message window of `ui`:
-/// each of its rows the kept line or the live row the offset puts there, then the scrollbar.
-/// Nothing at offset 0.
+/// each of its rows the line kept as of the publish or the live row the offset puts there, then
+/// the scrollbar. Nothing at offset 0.
 pub fn draw_view(ui: &UiState, view: &View, live: &Framebuffer, out: &mut Framebuffer) {
     let m = messages(ui);
-    let sb = &ui.scrollback;
-    let kept = view.kept(sb);
+    let kept = view.kept();
     let offset = view.offset.min(kept);
     if offset == 0 || m.width == 0 || m.height == 0 {
         return;
@@ -404,7 +387,7 @@ pub fn draw_view(ui: &UiState, view: &View, live: &Framebuffer, out: &mut Frameb
     for r in 0..u16::from(m.height) {
         let i = first + usize::from(r);
         let row = u16::from(m.y) + r;
-        match sb.lines.get(i).filter(|_| i < kept) {
+        match view.lines.get(i) {
             Some(line) => draw_line(ui, line, &m, row, out),
             None => {
                 let from = u16::from(m.y) + (i - kept) as u16;
@@ -415,22 +398,26 @@ pub fn draw_view(ui: &UiState, view: &View, live: &Framebuffer, out: &mut Frameb
     draw_bar(ui, &m, (kept, offset), out);
 }
 
-/// A press the bar took, until every button is up.
+/// A press the view took, until every button is up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Gesture {
     #[default]
     None,
     /// The thumb held `grab` pixels below its top.
     Thumb { grab: i32 },
-    /// A press on the track (the page turned at the press) or another button.
+    /// A press on the track (the page turned at the press), of another button on the bar, or
+    /// inside the window off it (the view live again at the press), or a drag a key, a repeat or
+    /// text interrupted.
     Held,
 }
 
-/// What the player looks at (the engine's, not the game's): the offset back from the live bottom
-/// (0 = live), the kept lines as of the last publish, the gesture on the bar, the pointer's
-/// buttons last queued, and a stamp that moves whenever what the view shows changed.
+/// What the player looks at (the engine's, not the game's): the lines kept as of the last publish
+/// (those kept after it are not on the published frame, and those dropped since stay until the
+/// next), the offset back from the live bottom (0 = live, at most the lines), the gesture, the
+/// pointer's buttons last queued, and a stamp that moves whenever what the view shows changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct View {
+    lines: Vec<Rc<Line>>,
     offset: usize,
     published: u64,
     gesture: Gesture,
@@ -449,12 +436,15 @@ impl View {
         self.stamp
     }
 
-    /// The kept lines as of the last publish (those after it are not on the published frame).
-    pub fn kept(&self, sb: &Scrollback) -> usize {
-        let pending = sb.total.saturating_sub(self.published);
-        sb.lines
-            .len()
-            .saturating_sub(usize::try_from(pending).unwrap_or(usize::MAX))
+    /// The lines kept as of the last publish.
+    pub fn kept(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Whether a press is the view's ([`View::input`]) until every button is up: the platforms
+    /// pace the steps as with a button held (spec 06), though the game sees none.
+    pub fn holding(&self) -> bool {
+        self.gesture != Gesture::None
     }
 
     fn set(&mut self, offset: usize) {
@@ -464,42 +454,73 @@ impl View {
         }
     }
 
-    /// Back to the live bottom, any gesture ended.
+    /// Back to the live bottom. A gesture stays the view's (as [`Gesture::Held`]) until every
+    /// button is up: the game never sees a button the view took.
     pub fn leave(&mut self) {
         self.set(0);
-        self.gesture = Gesture::None;
+        if self.gesture != Gesture::None {
+            self.gesture = Gesture::Held;
+        }
     }
 
-    /// At a publish: the lines kept since the last one are on the frame now; scrolled back, the
-    /// offset grows by them, so the same lines stay in view.
+    /// At a publish: the lines kept now are those on the frame; scrolled back, the offset grows
+    /// by those kept since the last publish, so the same lines stay in view. Another history (a
+    /// new game's state, its newest line not the view's) returns the view to the live bottom.
     pub fn publish(&mut self, sb: &Scrollback) {
-        let new = sb.total.saturating_sub(self.published);
+        let same = match (self.lines.last(), sb.lines.back()) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        if same && sb.total == self.published {
+            return;
+        }
+        let new = sb.total.checked_sub(self.published).filter(|_| {
+            // The view's newest line is still in the history, `new` lines from its end.
+            let back = usize::try_from(sb.total - self.published).unwrap_or(usize::MAX);
+            match self.lines.last() {
+                None => true,
+                Some(last) => sb
+                    .lines
+                    .len()
+                    .checked_sub(back + 1)
+                    .is_none_or(|i| Rc::ptr_eq(&sb.lines[i], last)),
+            }
+        });
         self.published = sb.total;
+        self.lines.clear();
+        self.lines.extend(sb.lines.iter().cloned());
         if self.offset > 0 {
-            let new = usize::try_from(new).unwrap_or(usize::MAX);
-            let to = self.offset.saturating_add(new).min(self.kept(sb));
-            self.set(to);
+            self.offset = match new {
+                Some(n) => {
+                    let n = usize::try_from(n).unwrap_or(usize::MAX);
+                    self.offset.saturating_add(n).min(self.kept())
+                }
+                None => 0,
+            };
+            self.stamp += 1;
         }
     }
 
     /// The wheel at frame pixel (x, y), `dy` lines (< 0 older, > 0 newer): over the message window
-    /// while `game` runs, the offset moves by -`dy` within the kept lines, and the wheel is taken
-    /// (true); elsewhere nothing changes.
+    /// while `game` runs, the offset moves by -`dy` within the lines kept, and the wheel is taken
+    /// (true); elsewhere nothing changes. `dy` 0 moves nothing: whether the wheel is taken there.
     pub fn wheel(&mut self, ui: &UiState, game: bool, (x, y): (i16, i16), dy: i32) -> bool {
         let m = messages(ui);
         if !game || !over(&m, x, y) {
             return false;
         }
-        let kept = self.kept(&ui.scrollback) as i64;
+        let kept = self.kept() as i64;
         let to = (self.offset as i64 - i64::from(dy)).clamp(0, kept);
         self.set(to as usize);
         true
     }
 
-    /// One input event before the engine queues it: a key, a repeat, typed text, and a press
-    /// anywhere but on the bar return the view to the live bottom; a press on the bar (shown only
-    /// while scrolled back) is the bar's until every button is up, and its events are queued with
-    /// no button held (the sprite follows them, the game sees moves).
+    /// One input event before the engine queues it. A key, a repeat and typed text return the view
+    /// to the live bottom. A press with no button held before it, inside the message window while
+    /// scrolled back, is the view's until every button is up, its events queued with no button
+    /// held (the sprite follows them, the game sees moves): on the bar (shown only then) it
+    /// scrolls, anywhere else in the window it returns to the live bottom. Any other press is the
+    /// game's and returns to the live bottom.
     pub fn input(&mut self, ui: &UiState, game: bool, e: InputEvent) -> InputEvent {
         let InputEvent::Pointer { x, y, buttons } = e else {
             if !matches!(e, InputEvent::Release(_)) {
@@ -508,7 +529,7 @@ impl View {
             return e;
         };
         let held = buttons & 3;
-        let pressed = held & !self.buttons;
+        let before = self.buttons;
         self.buttons = held;
         let moved = InputEvent::Pointer { x, y, buttons: 0 };
         if self.gesture != Gesture::None {
@@ -522,18 +543,22 @@ impl View {
             }
             return moved;
         }
+        let pressed = held & !before;
         if pressed == 0 {
             return e;
         }
         let m = messages(ui);
-        if !(game && self.offset > 0 && on_bar(&m, x, y)) {
+        // A button the game holds makes the press the game's too: the game sees every change.
+        if before != 0 || !(game && self.offset > 0 && over(&m, x, y)) {
             self.set(0);
             return e;
         }
         self.gesture = Gesture::Held;
-        if pressed & POINTER_LEFT != 0 {
+        if !on_bar(&m, x, y) {
+            self.set(0);
+        } else if pressed & POINTER_LEFT != 0 {
             let rows = usize::from(m.height);
-            let kept = self.kept(&ui.scrollback);
+            let kept = self.kept();
             let (top, len) = thumb(rows * CELL, rows, kept, self.offset);
             let t = i32::from(y) - i32::from(m.y) * CELL as i32;
             if (top as i32..(top + len) as i32).contains(&t) {
@@ -554,7 +579,7 @@ impl View {
     fn drag(&mut self, ui: &UiState, y: i16, grab: i32) {
         let m = messages(ui);
         let rows = usize::from(m.height);
-        let kept = self.kept(&ui.scrollback);
+        let kept = self.kept();
         let (_, len) = thumb(rows * CELL, rows, kept, self.offset);
         let span = rows * CELL - len;
         if span == 0 || kept == 0 {

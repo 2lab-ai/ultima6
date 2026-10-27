@@ -3947,7 +3947,9 @@ canvas.addEventListener('contextmenu', (e) => {
 // engine draws the lines and the scrollbar into its frame, the page adds nothing); elsewhere it
 // does nothing, and with Ctrl it is the browser's zoom. One notch is one line: a line- or
 // page-mode event one line in its direction, pixel deltas (a trackpad's) added up at
-// WHEEL_LINE_PX CSS pixels a line, the carry dropped when the direction turns. The position goes
+// WHEEL_LINE_PX CSS pixels a line. The carry takes only events the engine takes (asked first,
+// Game.wheel with 0 lines), and is dropped when the direction turns, at a wheel it does not take,
+// when the pointer leaves the message window or the canvas, and at a key. The position goes
 // through the layout as a held pointer's does (`layoutToGame` with `held`): over a window's frame
 // or title strip, a gap or a window in front of the message window it is the rest pixel, outside
 // the message window.
@@ -3973,11 +3975,30 @@ function wheelPixel(e) {
   return layoutToGame(px, py, true);
 }
 canvas.addEventListener('wheel', (e) => {
-  if (!game || crashed || e.ctrlKey) return;
+  if (!game || crashed || e.ctrlKey) {
+    wheelCarry = 0;
+    return;
+  }
   const at = wheelPixel(e);
-  if (!at) return;
-  if (game.wheel(at[0], at[1], wheelLines(e))) e.preventDefault();
+  if (!at || !game.wheel(at[0], at[1], 0)) {
+    wheelCarry = 0;
+    return;
+  }
+  e.preventDefault();
+  const lines = wheelLines(e);
+  if (lines !== 0) game.wheel(at[0], at[1], lines);
 }, { passive: false });
+canvas.addEventListener('pointermove', (e) => {
+  if (wheelCarry === 0 || !game || crashed) return;
+  const at = wheelPixel(e);
+  if (!at || !game.wheel(at[0], at[1], 0)) wheelCarry = 0;
+});
+canvas.addEventListener('pointerleave', () => {
+  wheelCarry = 0;
+});
+window.addEventListener('keydown', () => {
+  wheelCarry = 0;
+}, true);
 
 // --- the context menu (spec 17) -----------------------------------------------------------------
 // A right press (the left button up) at the game's prompt on the map, or on an inventory or

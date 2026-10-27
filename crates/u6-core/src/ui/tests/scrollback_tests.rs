@@ -161,6 +161,77 @@ fn at((x, y): (i16, i16), buttons: u8) -> InputEvent {
     InputEvent::Pointer { x, y, buttons }
 }
 
+/// What a game that reads all its input took, in order: the buttons of each pointer sample
+/// ([`Io::take_pointer`], one change of the buttons at a time), each key (or repeat) and each
+/// character of text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    Buttons(u8),
+    Key(Key),
+    Text(char),
+}
+
+/// A game that prints `l0`, `l1`, … as [`talker`] (`n` lines, each presented), then at every
+/// frame takes every event queued into `log` (a consumer that sees each press and release).
+fn recorder(
+    n: u16,
+    log: Rc<RefCell<Vec<Seen>>>,
+) -> impl FnOnce(Rc<RefCell<State>>, Rc<Io>) -> Talk {
+    move |st, io| {
+        Box::pin(async move {
+            for i in 0..n {
+                printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+                io.present();
+                io.vblank().await;
+            }
+            loop {
+                while io.pending_events() > 0 {
+                    let seen = if io.typed_ready() {
+                        match io.next_typed().await {
+                            crate::engine::Typed::Key(k) => Seen::Key(k),
+                            crate::engine::Typed::Text(c) => Seen::Text(c),
+                        }
+                    } else {
+                        Seen::Buttons(io.take_pointer().buttons)
+                    };
+                    log.borrow_mut().push(seen);
+                }
+                io.vblank().await;
+            }
+        })
+    }
+}
+
+/// An engine running [`recorder`] with 39 lines (30 kept), ticked until they are published, and
+/// its log, empty.
+fn recorded() -> (Engine, Rc<RefCell<Vec<Seen>>>) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut e = Engine::with_game(
+        game_state(),
+        Files::default(),
+        recorder(39, Rc::clone(&log)),
+    );
+    for _ in 0..43 {
+        e.tick(&[], 16);
+    }
+    assert_eq!(e.state().ui.scrollback.lines().len(), 30);
+    log.borrow_mut().clear();
+    (e, log)
+}
+
+/// The buttons the game took, each change once.
+fn presses(log: &[Seen]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for s in log {
+        if let Seen::Buttons(b) = *s
+            && out.last() != Some(&b)
+        {
+            out.push(b);
+        }
+    }
+    out
+}
+
 #[test]
 fn history_keeps_the_scrolled_off_lines_in_order_up_to_the_bound() {
     let n = (HISTORY + 30) as u16;
@@ -172,7 +243,7 @@ fn history_keeps_the_scrolled_off_lines_in_order_up_to_the_bound() {
     assert_eq!(sb.total(), off as u64, "every line that scrolled off");
     assert_eq!(sb.lines().len(), HISTORY, "at most HISTORY kept");
     let want: Vec<String> = (off - HISTORY..off).map(|i| format!("l{i}")).collect();
-    let got: Vec<String> = sb.lines().iter().map(line_text).collect();
+    let got: Vec<String> = sb.lines().iter().map(|l| line_text(l)).collect();
     assert_eq!(got, want, "the newest HISTORY, oldest first");
     assert!(
         sb.lines()
@@ -181,14 +252,15 @@ fn history_keeps_the_scrolled_off_lines_in_order_up_to_the_bound() {
         "each a row of the window's cells, drawn as shown"
     );
     let bytes = sb.heap_bytes();
-    assert!(bytes < 150_000, "about 0.1 MB at the bound: {bytes}");
+    println!("a bound of lines with no patch: {bytes} bytes");
+    assert!(bytes < 100_000, "about 0.1 MB at the bound: {bytes}");
     // The live rows are the shadow's.
     let rows: Vec<String> = sb.rows().iter().map(line_text).collect();
     assert_eq!(rows, shown_rows(e.frame()));
 }
 
 #[test]
-fn a_kept_line_keeps_its_keyword_spans_and_colours() {
+fn a_kept_line_keeps_each_cell_in_its_colours() {
     let e = run(game_state(), &[], 4, |st, io| async move {
         printf(&st, &io, b"say @name. ok\n", &[]).await;
         for _ in 0..10 {
@@ -199,13 +271,60 @@ fn a_kept_line_keeps_its_keyword_spans_and_colours() {
     let s = e.state();
     let first = &s.ui.scrollback.lines()[0];
     assert_eq!(line_text(first), "say name. ok");
-    assert_eq!(
-        first.spans,
-        [(4, 8)],
-        "the keyword's cells, drawn in the alert ink"
-    );
+    // The keyword's cells in the alert ink, the rest in the ink (spec 22's keyword spans of a
+    // kept line come with its merge, spec 23 Design 10).
     assert!(first.cells[4..8].iter().all(|c| c.fg == ALERT));
     assert!(first.cells[..4].iter().all(|c| c.fg == INK));
+    assert!(first.cells[8..12].iter().all(|c| c.fg == INK));
+}
+
+#[test]
+fn a_bound_of_lines_all_patch_keeps_the_stated_size() {
+    // Each line scrolls off over a row the game filled in a colour its cells do not draw (9): the
+    // whole row is patch.
+    let n = (HISTORY + 20) as u16;
+    let e = run(
+        game_state(),
+        &[],
+        usize::from(n) + 4,
+        move |st, io| async move {
+            for i in 0..n {
+                io.draw(|fb| {
+                    for y in Y {
+                        for x in X {
+                            fb.set(x, y, 9);
+                        }
+                    }
+                });
+                printf(&st, &io, b"\n", &[]).await;
+                if i % 50 == 0 {
+                    io.present();
+                }
+            }
+            io.present();
+        },
+    );
+    let s = e.state();
+    let sb = &s.ui.scrollback;
+    assert_eq!(sb.lines().len(), HISTORY);
+    assert!(
+        sb.lines().iter().all(|l| l.patch.len() == 17 * 64),
+        "every pixel of every line patch"
+    );
+    let bytes = sb.heap_bytes();
+    println!("a bound of lines all patch: {bytes} bytes");
+    assert!(
+        (2_200_000..2_400_000).contains(&bytes),
+        "about 2.3 MB (spec 23 Design 11): {bytes}"
+    );
+    // A copy of the state copies a pointer a line.
+    let copy = s.ui.scrollback.clone();
+    assert!(
+        copy.lines()
+            .iter()
+            .zip(sb.lines())
+            .all(|(a, b)| Rc::ptr_eq(a, b))
+    );
 }
 
 #[test]
@@ -415,8 +534,8 @@ fn a_key_returns_the_view_to_the_live_bottom() {
 }
 
 #[test]
-fn a_press_off_the_bar_returns_and_reaches_the_game() {
-    let mut e = engine(game_state(), 25, 0, false);
+fn a_press_outside_the_window_returns_and_reaches_the_game() {
+    let (mut e, log) = recorded();
     assert!(e.wheel(IN.0, IN.1, -3));
     e.tick(&[at(MAP, POINTER_LEFT)], 16);
     assert_eq!(e.history_offset(), 0);
@@ -426,11 +545,30 @@ fn a_press_off_the_bar_returns_and_reaches_the_game() {
         "the game's press"
     );
     e.tick(&[at(MAP, 0)], 16);
-    // A press inside the window off the bar too.
-    assert!(e.wheel(IN.0, IN.1, -3));
+    assert_eq!(presses(&log.borrow()), [POINTER_LEFT, 0]);
+}
+
+#[test]
+fn a_press_inside_the_window_while_scrolled_back_returns_to_live_and_is_not_the_games() {
+    let (mut e, log) = recorded();
+    for button in [POINTER_LEFT, POINTER_RIGHT] {
+        assert!(e.wheel(IN.0, IN.1, -3));
+        e.tick(&[at(IN, button)], 16);
+        assert_eq!(e.history_offset(), 0, "button {button}: live");
+        assert_eq!(e.io().handler_pointer().buttons, 0, "button {button}");
+        e.tick(&[at((IN.0 + 20, IN.1), button)], 16);
+        e.tick(&[at(IN, 0)], 16);
+        assert_eq!(e.history_offset(), 0);
+        assert!(same_frame(e.frame(), &e.published_frame()), "the bar gone");
+    }
+    assert!(
+        presses(&log.borrow()).iter().all(|&b| b == 0),
+        "none was the game's"
+    );
+    // At the live bottom the same press is the game's.
     e.tick(&[at(IN, POINTER_RIGHT)], 16);
-    assert_eq!(e.history_offset(), 0);
-    assert_eq!(e.io().handler_pointer().buttons, POINTER_RIGHT);
+    e.tick(&[at(IN, 0)], 16);
+    assert_eq!(presses(&log.borrow()), [0, POINTER_RIGHT, 0]);
 }
 
 #[test]
@@ -440,8 +578,16 @@ fn the_wheel_over_anything_but_the_window_does_nothing() {
     assert!(!e.wheel(MAP.0, MAP.1, -3), "on the map");
     assert!(!e.wheel(175, 150, -3), "beside the window");
     assert!(!e.wheel(200, 192, -3), "below it");
+    assert!(!e.wheel(MAP.0, MAP.1, 0), "0 lines: the same answer");
     assert_eq!(e.history_offset(), 0);
     assert_eq!(e.frame_version(), before, "nothing composed");
+    // Over the window 0 lines is taken and moves nothing.
+    assert!(e.wheel(IN.0, IN.1, 0));
+    assert!(e.wheel(IN.0, IN.1, -2));
+    let stamp = e.view_version();
+    assert!(e.wheel(IN.0, IN.1, 0));
+    assert_eq!((e.history_offset(), e.view_version()), (2, stamp));
+    assert!(e.wheel(IN.0, IN.1, 2));
     // Not in `game` (the launcher's `u`): the window is not the game's.
     let mut s = game_state();
     s.main.program = Program::U;
@@ -537,23 +683,66 @@ fn new_text_while_scrolled_back_keeps_the_view() {
     assert_eq!(shown_rows(e.frame()), live, "the wheel to the bottom: live");
 }
 
+/// Whether two frames show the same colours outside the message window.
+fn same_outside(a: &Framebuffer, b: &Framebuffer) -> bool {
+    (0..u6_render::HEIGHT).all(|y| {
+        (0..u6_render::WIDTH)
+            .all(|x| (X.contains(&x) && Y.contains(&y)) || a.get(x, y) == b.get(x, y))
+    })
+}
+
 #[test]
 fn viewing_changes_no_state() {
-    let s = game_state();
-    let mut a = engine(s.clone(), 39, 0, true);
-    let mut b = engine(s, 39, 0, true);
+    // `a` scrolls back and uses the bar (a page, a thumb drag, a press inside the window); `b`
+    // gets the same pointer moves with no button. Each game takes every event it is given.
+    let (mut a, la) = recorded();
+    let (mut b, lb) = recorded();
     assert!(a.wheel(IN.0, IN.1, -8));
-    a.tick(&[at((BAR_X, 120), POINTER_LEFT)], 16);
-    a.tick(&[at((BAR_X, 130), POINTER_LEFT)], 16);
-    a.tick(&[at((BAR_X, 130), 0)], 16);
-    b.tick(&[at((BAR_X, 120), 0)], 16);
-    b.tick(&[at((BAR_X, 130), 0)], 16);
-    b.tick(&[at((BAR_X, 130), 0)], 16);
+    let (top, len) = scrollback::thumb(80, 10, 30, 8);
+    let grab = 112 + (top + len / 2) as i16;
+    let steps = [
+        ((BAR_X, 114), POINTER_LEFT),
+        ((BAR_X, 114), 0),
+        ((BAR_X, 190), POINTER_RIGHT),
+        ((BAR_X, 190), 0),
+        ((BAR_X, grab), POINTER_LEFT),
+        ((BAR_X, grab + 12), POINTER_LEFT),
+        (MAP, POINTER_LEFT | POINTER_RIGHT),
+        (MAP, 0),
+    ];
+    let mut viewed = 0;
+    for (k, &(p, buttons)) in steps.iter().enumerate() {
+        a.tick(&[at(p, buttons)], 16);
+        b.tick(&[at(p, 0)], 16);
+        viewed += usize::from(a.history_offset() > 0);
+        assert!(*a.state() == *b.state(), "step {k}: the same game state");
+        assert!(
+            *la.borrow() == *lb.borrow(),
+            "step {k}: the same input taken"
+        );
+        assert!(
+            same_frame(&a.published_frame(), &b.published_frame()),
+            "step {k}"
+        );
+        assert!(
+            same_outside(a.frame(), b.frame()),
+            "step {k}: the frame outside the window"
+        );
+    }
+    assert!(viewed >= 6, "scrolled back through the steps: {viewed}");
+    // A press inside the window while scrolled back: live again, the press the view's.
+    assert!(a.wheel(IN.0, IN.1, -4));
+    for (p, buttons) in [(IN, POINTER_LEFT), (IN, 0)] {
+        a.tick(&[at(p, buttons)], 16);
+        b.tick(&[at(p, 0)], 16);
+        assert!(*la.borrow() == *lb.borrow());
+    }
     for e in [&mut a, &mut b] {
         e.tick(&[InputEvent::Key(Key::Char('z'))], 16);
         e.tick(&[], 16);
     }
     assert!(*a.state() == *b.state(), "the same game state");
+    assert!(*la.borrow() == *lb.borrow(), "the same input taken");
     assert!(same_frame(&a.published_frame(), &b.published_frame()));
     assert!(
         same_frame(a.frame(), b.frame()),
@@ -562,24 +751,45 @@ fn viewing_changes_no_state() {
 }
 
 #[test]
-fn a_window_over_the_message_window_clears_the_shadow() {
+fn a_window_over_the_message_window_scrolling_clears_the_shadow() {
+    // The message window prints and scrolls; then the whole screen's window (over it) prints
+    // until it scrolls, through the game's print path; then the message window prints again.
     let e = run(game_state(), &[], 6, |st, io| async move {
-        for _ in 0..12 {
-            printf(&st, &io, b"m\n", &[]).await;
+        for i in 0..12u16 {
+            printf(&st, &io, b"m%d\n", &[Arg::Word(i)]).await;
         }
-        let w = TextWindow::new(0, 0, 0x27, 0x18, INK, PAPER, text::SCROLL);
-        let mut s = st.borrow_mut();
-        io.draw(|fb| scrollback::scrolled(&mut s.ui, fb, &w));
-        drop(s);
+        io.present();
+        {
+            let mut s = st.borrow_mut();
+            s.ui.text.current = WindowId::Screen;
+            s.ui.text.win_mut().flags |= text::SCROLL;
+        }
+        for _ in 0..26 {
+            printf(&st, &io, b"s\n", &[]).await;
+        }
+        io.present();
+        let shadow = st.borrow().ui.scrollback.rows().len();
+        assert_eq!(shadow, 0, "the screen's scroll cleared the shadow");
+        st.borrow_mut().ui.text.current = WindowId::Messages;
+        for _ in 0..3 {
+            printf(&st, &io, b"n\n", &[]).await;
+        }
         io.present();
     });
     let s = e.state();
-    assert!(s.ui.scrollback.rows().is_empty());
-    assert_eq!(s.ui.scrollback.total(), 3, "the kept lines stay");
+    let sb = &s.ui.scrollback;
+    let kept: Vec<String> = sb.lines().iter().map(|l| line_text(l)).collect();
+    // The message window's 3 lines kept before; its three scrolls after keep the rows as the
+    // shadow has them since (blank where the screen's window drew: what the message window drew
+    // is no longer shown there).
+    assert_eq!(kept[..3], ["m0", "m1", "m2"]);
+    assert_eq!(sb.total(), 6, "the screen's scrolls keep nothing");
+    assert!(kept[3..].iter().all(String::is_empty), "{kept:?}");
+    assert_eq!(sb.rows().len(), 10);
 }
 
 #[test]
-fn the_hd_frame_shows_the_view_and_at_the_live_bottom_is_the_frame_without_it() {
+fn the_hd_frame_shows_the_history_rows_as_the_font_draws_them() {
     use crate::hd::HdView;
     use u6_render::Framebuffer;
     use u6_render::hd::Scale;
@@ -596,41 +806,292 @@ fn the_hd_frame_shows_the_view_and_at_the_live_bottom_is_the_frame_without_it() 
     for _ in 0..usize::from(n) + 4 {
         e.tick(&[], 16);
     }
+    let kept = e.state().ui.scrollback.lines().len();
+    assert_eq!(kept, 21);
+    let palette = e.published_frame().palette;
+    // The oracle: the words the HD frame shows at a screen row of the window's first 16 cell
+    // columns (the bar's column aside) where the synthetic font drew `text`: glyph `c` is eight
+    // rows of the byte `c`, the ink where a bit is set, the paper elsewhere; past the text the
+    // row's colour then (`rest`: the paper of a row the window cleared, 0 in a row of the
+    // first screen, which nothing cleared); a pixel of a glyph or a fill (no image) is an S × S
+    // block of its colour (u6_render::hd).
+    let word = |c: u8| {
+        let p = palette[usize::from(c)];
+        u32::from_le_bytes([p.r, p.g, p.b, 255])
+    };
+    let expected = |text: &str, rest: u8, s: usize| -> Vec<u32> {
+        let bytes = text.as_bytes();
+        let mut row = Vec::new();
+        for x in 0..128 * s {
+            let (col, dx) = (x / s / 8, x / s % 8);
+            row.push(word(match bytes.get(col) {
+                Some(c) if c & (0x80 >> dx) != 0 => INK,
+                Some(_) => PAPER,
+                None => rest,
+            }));
+        }
+        row.repeat(8 * s)
+    };
+    let shown = |hd: &HdView, row: usize, s: usize| -> Vec<u32> {
+        let w = u6_render::WIDTH * s;
+        let rgba = hd.rgba();
+        (row * 8 * s..(row + 1) * 8 * s)
+            .flat_map(|y| {
+                rgba[y * w + 176 * s..y * w + (176 + 128) * s]
+                    .iter()
+                    .copied()
+            })
+            .collect()
+    };
     let blank = Framebuffer::new();
-    for scale in [Scale::X2, Scale::X4] {
+    for (scale, s) in [(Scale::X2, 2), (Scale::X4, 4)] {
         let mut hd = HdView::new();
         hd.set(true, scale);
         hd.present(Some(&e), &blank);
-        let live = hd.rgba().to_vec();
-        // A fresh view of the published frame alone composes the same live frame.
-        let mut plain = HdView::new();
-        plain.set(true, scale);
-        plain.present(Some(&e), &blank);
-        assert!(
-            plain.rgba() == live.as_slice(),
-            "live: the frame without the view"
-        );
+        // Live: l21..l29, the cursor's row blank.
+        for r in 0..10 {
+            let text = if r < 9 {
+                format!("l{}", kept + r)
+            } else {
+                String::new()
+            };
+            assert!(
+                shown(&hd, 14 + r, s) == expected(&text, PAPER, s),
+                "{s}x live row {r}"
+            );
+        }
+        // Three back: l18..l20 kept, then the live rows l21..l27 below them.
         assert!(e.wheel(IN.0, IN.1, -3));
-        assert!(
-            hd.present(Some(&e), &blank),
-            "scrolled back: composed again"
-        );
-        let back = hd.rgba().to_vec();
-        assert!(back != live, "the HD frame shows the history");
-        // The same frame as an HD view of the view frame composed from nothing.
-        let mut fresh = HdView::new();
-        fresh.set(true, scale);
-        fresh.present(Some(&e), &blank);
-        assert!(
-            fresh.rgba() == back.as_slice(),
-            "the view frame's composition"
-        );
-        assert!(e.wheel(IN.0, IN.1, 3));
+        assert!(hd.present(Some(&e), &blank), "{s}x: composed again");
+        for r in 0..10 {
+            let text = format!("l{}", kept - 3 + r);
+            assert!(
+                shown(&hd, 14 + r, s) == expected(&text, PAPER, s),
+                "{s}x row {r}: {text}"
+            );
+        }
+        // The oldest lines, l0..l9, on the first screen's rows; l10 on a row the window cleared.
+        assert!(e.wheel(IN.0, IN.1, -100));
+        hd.present(Some(&e), &blank);
+        for r in 0..10 {
+            let text = format!("l{r}");
+            assert!(
+                shown(&hd, 14 + r, s) == expected(&text, 0, s),
+                "{s}x: {text}"
+            );
+        }
+        assert!(e.wheel(IN.0, IN.1, 1));
+        hd.present(Some(&e), &blank);
+        assert!(shown(&hd, 23, s) == expected("l10", PAPER, s), "{s}x: l10");
+        assert!(e.wheel(IN.0, IN.1, 100));
         assert_eq!(e.history_offset(), 0);
         hd.present(Some(&e), &blank);
-        assert!(
-            hd.rgba() == live.as_slice(),
-            "back at the live bottom: the frame without it"
-        );
+        let live = expected(&format!("l{kept}"), PAPER, s);
+        assert!(shown(&hd, 14, s) == live, "{s}x: live again");
+    }
+}
+
+/// A thumb drag with `interrupt` in the middle: the game takes the interrupt (`delivered`) and no
+/// button, and the drag after it moves nothing (the interrupt left the history).
+fn drag_interrupted(interrupt: InputEvent, delivered: Seen) {
+    let (mut e, log) = recorded();
+    assert!(e.wheel(IN.0, IN.1, -5));
+    let (top, len) = scrollback::thumb(80, 10, 30, 5);
+    let grab = 112 + (top + len / 2) as i16;
+    let steps = [
+        vec![at((BAR_X, grab), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 10), POINTER_LEFT)],
+        vec![interrupt],
+        vec![at((BAR_X, grab - 20), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 30), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 30), 0)],
+    ];
+    let (mut held, mut holding) = (Vec::new(), Vec::new());
+    for step in &steps {
+        e.tick(step, 16);
+        held.push(e.io().handler_pointer().buttons);
+        holding.push(e.history_holding());
+    }
+    let seen = log.borrow();
+    assert!(held.iter().all(|&b| b == 0), "handler {held:?}");
+    assert_eq!(
+        holding,
+        [true, true, true, true, true, false],
+        "the press the view's until the release (the platforms pace as held)"
+    );
+    assert!(
+        presses(&seen).iter().all(|&b| b == 0),
+        "the game took {seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|s| **s == delivered).count(),
+        1,
+        "the interrupt reached the game"
+    );
+    assert_eq!(
+        e.history_offset(),
+        0,
+        "the interrupt left the history; the drag after it moved nothing"
+    );
+}
+
+#[test]
+fn a_key_during_a_thumb_drag_never_hands_the_game_the_button() {
+    let q = Key::Char('q');
+    drag_interrupted(InputEvent::Key(q), Seen::Key(q));
+}
+
+#[test]
+fn a_repeat_during_a_thumb_drag_never_hands_the_game_the_button() {
+    let q = Key::Char('q');
+    drag_interrupted(InputEvent::Repeat(q), Seen::Key(q));
+}
+
+#[test]
+fn text_during_a_thumb_drag_never_hands_the_game_the_button() {
+    drag_interrupted(InputEvent::Text('a'), Seen::Text('a'));
+}
+
+#[test]
+fn a_thumb_drag_that_leaves_the_bar_never_hands_the_game_the_button() {
+    let (mut e, log) = recorded();
+    assert!(e.wheel(IN.0, IN.1, -5));
+    let (top, len) = scrollback::thumb(80, 10, 30, 5);
+    let grab = 112 + (top + len / 2) as i16;
+    let steps = [
+        vec![at((BAR_X, grab), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 10), POINTER_LEFT)],
+        vec![at(IN, POINTER_LEFT)],
+        vec![at(MAP, POINTER_LEFT)],
+        vec![at(MAP, POINTER_LEFT | POINTER_RIGHT)],
+        vec![at(MAP, POINTER_RIGHT)],
+        vec![at(MAP, 0)],
+    ];
+    let mut held = Vec::new();
+    for step in &steps {
+        e.tick(step, 16);
+        held.push(e.io().handler_pointer().buttons);
+    }
+    assert!(held.iter().all(|&b| b == 0), "handler {held:?}");
+    assert!(presses(&log.borrow()).iter().all(|&b| b == 0));
+    // The next press is the game's.
+    e.tick(&[at(MAP, POINTER_LEFT)], 16);
+    assert_eq!(presses(&log.borrow()), [0, POINTER_LEFT]);
+}
+
+#[test]
+fn a_press_while_the_game_holds_a_button_is_the_games() {
+    let (mut e, log) = recorded();
+    // Left down on the map, the game's (a walk); the wheel back while it is held.
+    e.tick(&[at(MAP, POINTER_LEFT)], 16);
+    assert!(e.wheel(IN.0, IN.1, -5));
+    e.tick(&[at((BAR_X, 150), POINTER_LEFT)], 16);
+    assert_eq!(
+        e.history_offset(),
+        5,
+        "a move with the game's button keeps the view"
+    );
+    // Right on the bar: the game holds left, so the press is the game's too, and the view live.
+    let mut held = Vec::new();
+    for b in [POINTER_LEFT | POINTER_RIGHT, POINTER_LEFT, 0] {
+        e.tick(&[at((BAR_X, 150), b)], 16);
+        held.push(e.io().handler_pointer().buttons);
+    }
+    assert_eq!(held, [POINTER_LEFT | POINTER_RIGHT, POINTER_LEFT, 0]);
+    assert_eq!(e.history_offset(), 0);
+    assert_eq!(
+        presses(&log.borrow()),
+        [POINTER_LEFT, POINTER_LEFT | POINTER_RIGHT, POINTER_LEFT, 0],
+        "the game took every change the player made, and no other"
+    );
+}
+
+#[test]
+fn at_the_bound_a_source_only_publish_keeps_the_view() {
+    let mut s = game_state();
+    s.ui.paper = Some(speck_paper().0);
+    let n = (HISTORY + 20) as u16;
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        let (_, bmp) = speck_paper();
+        let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+        io.draw(|fb| crate::gfx::blit::blit_bmp(&identity, fb, &bmp, 0, 0, BITMAP_PAPER));
+        for i in 0..n {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+            io.present();
+            io.vblank().await;
+        }
+        // A line drawn and its sources alone presented: the frame's colours stay, the lines kept
+        // since the last publish are off it.
+        io.sleep(500).await;
+        printf(&st, &io, b"s\n", &[]).await;
+        io.present_sources();
+        loop {
+            io.vblank().await;
+        }
+    });
+    e.enable_src_plane();
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    let total = e.state().ui.scrollback.total();
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    // The view at the oldest line kept.
+    assert!(e.wheel(IN.0, IN.1, -(HISTORY as i32)));
+    assert_eq!(e.history_offset(), HISTORY);
+    let (rows, pixels) = (shown_rows(e.frame()), e.frame().pixels().to_vec());
+    let src_publishes = e.src_publishes();
+    for _ in 0..40 {
+        e.tick(&[], 16);
+        assert_eq!(shown_rows(e.frame()), rows, "the same lines in view");
+        assert!(e.frame().pixels() == pixels.as_slice(), "the same colours");
+        assert_eq!(e.history_offset(), HISTORY);
+    }
+    assert_eq!(e.state().ui.scrollback.total(), total + 1, "the line kept");
+    assert_eq!(
+        e.src_publishes(),
+        src_publishes + 1,
+        "its sources published alone"
+    );
+}
+
+#[test]
+fn another_history_returns_the_view_to_the_live_bottom() {
+    // The game prints 25 lines (16 kept), then after half a second its history is another's (a
+    // new game's state, as a relaunch makes): fewer lines, or as many as the view had (16: the
+    // count alone does not tell, the view's newest line does).
+    for again in [5u16, 16] {
+        let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+            for i in 0..25u16 {
+                printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+                io.present();
+                io.vblank().await;
+            }
+            io.sleep(500).await;
+            st.borrow_mut().ui.scrollback = Default::default();
+            for i in 0..again {
+                printf(&st, &io, b"n%d\n", &[Arg::Word(i)]).await;
+            }
+            io.present();
+            loop {
+                io.vblank().await;
+            }
+        });
+        for _ in 0..29 {
+            e.tick(&[], 16);
+        }
+        assert_eq!(e.state().ui.scrollback.total(), 16);
+        assert!(e.wheel(IN.0, IN.1, -4));
+        assert_eq!(e.history_offset(), 4);
+        for _ in 0..40 {
+            e.tick(&[], 16);
+        }
+        let total = e.state().ui.scrollback.total();
+        assert_eq!(total, u64::from(again), "{again}: the other history");
+        assert_eq!(e.history_offset(), 0, "{again}: the live bottom");
+        assert!(same_frame(e.frame(), &e.published_frame()), "{again}");
+        // Its lines are the view's from then on.
+        assert!(e.wheel(IN.0, IN.1, -100));
+        let kept = e.state().ui.scrollback.lines().len();
+        assert_eq!(e.history_offset(), kept, "{again}");
     }
 }

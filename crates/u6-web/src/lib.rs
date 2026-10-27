@@ -1363,7 +1363,8 @@ impl Game {
     /// older, > 0 newer): over the message window while `game` runs it scrolls the message
     /// history the frame shows, at once ([`Game::present`] shows it), and returns true (the caller
     /// should then `preventDefault`); elsewhere, or before a start, false and nothing changes.
-    /// Never the game's input.
+    /// `dy` 0 moves nothing: whether the wheel is taken there (the page asks before it adds a
+    /// pixel delta to its carry). Never the game's input.
     pub fn wheel(&mut self, x: i32, y: i32, dy: i32) -> bool {
         let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         self.engine
@@ -1669,7 +1670,8 @@ impl Game {
 
     /// A pointer button is down as the input handler has it: the last pointer event queued
     /// since the previous step (newer than the engine's), else the engine's handler pointer
-    /// ([`u6_core::Io::handler_pointer`]). False before a start.
+    /// ([`u6_core::Io::handler_pointer`]), or a press the message history holds (spec 23: the
+    /// handler sees no button then, [`u6_core::Engine::history_holding`]). False before a start.
     fn pointer_held(&self) -> bool {
         let queued = self.pending.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { buttons, .. } => Some(buttons),
@@ -1683,7 +1685,8 @@ impl Game {
                 .as_ref()
                 .map(|e| e.io().handler_pointer().buttons)
         });
-        buttons.is_some_and(|b| b & 3 != 0)
+        let holding = self.engine.as_ref().is_some_and(Engine::history_holding);
+        buttons.is_some_and(|b| b & 3 != 0) || holding
     }
 
     /// `engine`, just started, becomes the game on screen: no Save of it taken yet, no sound
@@ -2770,6 +2773,61 @@ mod tests {
             "a start runs the launcher: `u` first"
         );
         assert!(!game.finished());
+    }
+
+    /// Spec 23 on the user's zip (skipped when absent; read only): passes at the prompt fill the
+    /// message window past its rows; scrolled back, a press on its bar is the history's until the
+    /// release: the game's handler sees no button, the pace runs at 1× as with one held, and the
+    /// speed again after the release.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_press_the_message_history_holds_paces_at_1x() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        let prompt = |game: &mut Game| {
+            for _ in 0..2000 {
+                if game.at_prompt() {
+                    return;
+                }
+                game.step(20);
+            }
+            panic!("the prompt");
+        };
+        prompt(&mut game);
+        for _ in 0..14 {
+            game.key_down("Space", " ", false);
+            game.step(20);
+            prompt(&mut game);
+        }
+        assert!(game.wheel(200, 150, -3), "over the message window");
+        assert_eq!(game.history_offset(), 3);
+        game.set_speed(8.0);
+        let fast = game.pace(100.0);
+        game.ran(fast);
+        assert!(fast >= 40, "{fast} steps free");
+        // On the bar's track, above the thumb (a page older): the press the history's.
+        game.pointer(310, 113, 1);
+        game.step(20);
+        let engine = game.engine.as_ref().unwrap();
+        assert!(engine.history_holding(), "the history's press");
+        assert_eq!(
+            engine.io().handler_pointer().buttons,
+            0,
+            "no button for the game"
+        );
+        assert!(game.pending.is_empty());
+        assert_eq!(game.pace(100.0), 5, "held: 1×");
+        game.ran(5);
+        game.pointer(310, 113, 0);
+        game.step(20);
+        assert!(!game.engine.as_ref().unwrap().history_holding());
+        assert_eq!(game.pace(100.0), fast, "released: the speed");
     }
 
     /// On the user's zip (skipped when absent; read only): a start gives every buffer the source
