@@ -1091,6 +1091,39 @@ impl Game {
         self.pointer_rgba.clone()
     }
 
+    /// The game's pointer, for the page to tell whether it lies under the system's (index.html
+    /// hides the system's there): `[x, y, shown, queued, qx, qy]`. (x, y), the frame pixel the
+    /// engine placed its sprite at in the last step: the input handler's pointer
+    /// ([`u6_core::Io::handler_pointer`], the VBlank server's, which no other call moves);
+    /// `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the pointer not hidden:
+    /// 0x1622d6 parks a hidden one below the frame), else 0, in any program and with HD on or
+    /// off. `queued` 1 while a pointer event waits for the next step (the page's
+    /// [`Game::pointer`], a context-menu entry's [`Game::command_at`]), (qx, qy) the last one's
+    /// pixel as queued; else 0, 0, 0. All 0 before a start.
+    pub fn game_pointer(&self) -> Vec<i32> {
+        let Some(e) = &self.engine else {
+            return vec![0; 6];
+        };
+        let at = e.io().handler_pointer();
+        let shown = e.sprite().is_some() && e.state().ui.pointer.shown;
+        let queued = self.pending.iter().rev().find_map(|ev| match *ev {
+            InputEvent::Pointer { x, y, .. } => Some((x, y)),
+            InputEvent::Key(_)
+            | InputEvent::Repeat(_)
+            | InputEvent::Release(_)
+            | InputEvent::Text(_) => None,
+        });
+        let (q, qx, qy) = queued.map_or((0, 0, 0), |(x, y)| (1, i32::from(x), i32::from(y)));
+        vec![
+            i32::from(at.x),
+            i32::from(at.y),
+            i32::from(shown),
+            q,
+            qx,
+            qy,
+        ]
+    }
+
     /// Address of the HD frame in wasm memory: `WIDTH·S × HEIGHT·S` RGBA8 pixels while HD is on
     /// (S = [`Game::hd_scale`]; [`Game::width`] × [`Game::height`] the frame). Views over it are
     /// invalidated when memory grows.
@@ -4097,6 +4130,56 @@ mod tests {
         game.pointer(x, y, 0);
         game.step(20);
         game.present();
+    }
+
+    /// [`Game::game_pointer`]: where the engine placed its sprite in the last step and whether
+    /// it is drawn, with HD off and on; a pointer queued since is given apart (the last one) and
+    /// moves the place only at the next step; a context-menu entry's presses are queued like the
+    /// page's; hidden, not shown. All 0 before a start.
+    #[test]
+    fn the_game_pointer_is_where_the_engine_placed_its_sprite() {
+        let mut game = Game::new();
+        assert_eq!(game.game_pointer(), vec![0; 6], "before a start: none");
+        game.put_on_screen(pointer_engine());
+        point(&mut game, 100, 60);
+        assert_eq!(
+            game.game_pointer(),
+            [100, 60, 1, 0, 0, 0],
+            "HD off: placed, shown"
+        );
+        let sp = game.engine.as_ref().unwrap().sprite().cloned().unwrap();
+        assert_eq!((sp.x, sp.y), (98, 59), "the sprite drawn from there");
+        game.set_hd(true, 2);
+        assert_eq!(
+            game.game_pointer(),
+            [100, 60, 1, 0, 0, 0],
+            "HD on: the same"
+        );
+        game.pointer(140, 80, 0);
+        game.pointer(141, 82, 0);
+        assert_eq!(
+            game.game_pointer(),
+            [100, 60, 1, 1, 141, 82],
+            "queued: the sprite still where it was, the last queued apart"
+        );
+        game.step(20);
+        assert_eq!(
+            game.game_pointer(),
+            [141, 82, 1, 0, 0, 0],
+            "stepped: placed there"
+        );
+        game.pointer(5, 6, 1);
+        game.pointer(5, 6, 0);
+        assert_eq!(
+            game.game_pointer()[3..],
+            [1, 5, 6],
+            "a press and release queued"
+        );
+        game.step(20);
+        press(&mut game, "h");
+        assert_eq!(game.game_pointer(), [5, 6, 0, 0, 0, 0], "hidden: not shown");
+        press(&mut game, "s");
+        assert_eq!(game.game_pointer()[2], 1, "shown again");
     }
 
     /// Spec 11 Design 7 in the platform: with HD on, the HD frame is composed without the pointer

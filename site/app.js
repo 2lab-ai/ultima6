@@ -316,9 +316,9 @@ let leaving = false; // the page is loading again into the other build: the game
 // data-prompt = 1 while the game waits for a command key, data-program = u / game / ended,
 // data-name = the party leader's name, data-keys = keys not yet taken by the game,
 // data-speed = the chosen speed (1, 1.5, .. 8, max), data-behind = 1 while steps are dropped,
-// data-pointer = game / page (`showGamePointer`: whether the game's pointer is under the
-// mouse's last place, by the last pointer event or frame); on the body data-gain = the music's gain
-// now (0 muted or above 4x, 1), data-hd-pack = the images of the HD pack loaded
+// data-pointer = game / page (`showGamePointer`: whether the engine's sprite is under the
+// mouse's last place, by the last pointer event or frame); on the body data-gain = the music's
+// gain now (0 muted or above 4x, 1), data-hd-pack = the images of the HD pack loaded
 // (tiles,portraits,panels) or none, data-hd-pack-bytes = the bytes
 // its pictures take decoded, data-hd-matched = those the game on screen matches (empty without
 // a game); data-voice = the voices' state (off, terms, checking, loading, ready, failed),
@@ -1652,8 +1652,7 @@ let x4 = null; // the offscreen canvas that holds the ×4 frame while the HD lay
 let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: none, or stale)
 let parchmentShown = null; // the parchment's colour the last whole paint drew (`parchmentNow`)
 let sentButtons = 0; // the pointer's buttons as last sent to the game
-let sentAt = null; // the game pixel the page gave the game's pointer last, null when not known
-let mouseAt = null; // the client point of the last pointer event the window saw, or null
+let mouseAt = null; // the mouse's client point as its last pointer event left it, or null
 // The canvas pixel mapped last (`layoutToGame`, `pixelAt`) shows no pixel of the game's at that
 // place: a gap or a margin round the game's regions, a letterbox side, a Wide window's frame or
 // title strip; the game's pointer is then at the nearest edge or off screen (LAYOUT_REST,
@@ -2992,7 +2991,7 @@ function frame(now) {
     checkSave();
     canvas.dataset.leader = game.leader_position().join(',');
     canvas.dataset.prompt = game.at_prompt() ? '1' : '0';
-    canvas.dataset.program = game.program();
+    put(canvas.dataset, 'program', game.program());
     showGamePointer();
     canvas.dataset.name = game.leader_name();
     canvas.dataset.keys = String(game.keys_pending());
@@ -3059,7 +3058,6 @@ async function boot(next, origin) {
   old?.free();
   drawnGame = null; // the freed game's frame is not this one's
   drawnVersion = -1;
-  sentAt = null; // its pointer is where its own boot put it
   saveSeen = 0;
   paceGame(next);
   try {
@@ -3946,40 +3944,65 @@ function pointerPixel(e) {
 }
 
 // The system's pointer over the canvas (index.html: hidden while `game` runs, where the game's
-// own is under it): the mouse's last place (`mouseAt`), from every pointer event the window sees.
-// The page's elements that can show over the canvas (the hidden input never does: opacity 0).
-const OVER_CANVAS = [badge, fullscreenExit, contextMenu];
+// own is under it): the mouse's last place (`mouseAt`), from the mouse's own pointer events only
+// (a touch or a pen moves the game's pointer, never the mouse); forgotten when the mouse leaves
+// the window, the window loses the focus or the page is hidden (it may come back elsewhere).
+// The page's elements that lie over the canvas and let the pointer through to it, so the canvas's
+// cursor shows over them while they cover the game's pointer: the speed badge (the hidden input
+// never covers it: opacity 0; the Exit button and the context menu take the pointer and show
+// their own).
+const OVER_CANVAS = [badge];
 for (const kind of ['pointerdown', 'pointermove', 'pointerup']) {
   window.addEventListener(kind, (e) => {
-    mouseAt = [e.clientX, e.clientY];
+    if (e.pointerType === 'mouse') mouseAt = [e.clientX, e.clientY];
   }, { capture: true });
 }
+const forgetMouse = () => {
+  mouseAt = null;
+  showGamePointer();
+};
+window.addEventListener('pointerout', (e) => {
+  if (e.pointerType === 'mouse' && e.relatedTarget === null) forgetMouse();
+}, { capture: true });
+window.addEventListener('blur', forgetMouse);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) forgetMouse();
+});
 
-// The game's pointer is under the system's at client point (x, y), as the page shows now: the
-// point on the canvas, under none of the page's elements over it (the speed badge lets the
-// pointer through to the canvas, but covers the game's pointer there; the Exit button and the
-// context menu show their own), in a part of the game (not a gap or a margin of the HD layout,
-// a letterbox side, a Wide window's frame or title strip: `pointerGap`), at the pixel the game's
-// pointer was given last (`sentAt`: a layout, a view, a box changed under a still mouse move
-// what the point reaches, not the game's pointer); never while a press the context menu takes is
-// held or a window is dragged.
+// Where the game's pointer is against the system's at client point (x, y), as the page and the
+// engine show now: `game`, the engine's sprite drawn (Game.game_pointer: shown) at the very game
+// pixel the point reaches, the point on the canvas, under none of OVER_CANVAS, in a part of the
+// game (not a gap or a margin of the HD layout, a letterbox side, a Wide window's frame or title
+// strip: `pointerGap`), and no press the context menu takes held; `hold`, the same but for a
+// pointer event at that pixel queued for the next step (the mouse's own move, which the sprite
+// takes at that step: the cursor stays as it is, so a move never flickers it); else `page`. The
+// engine decides where the sprite is, whatever moved it (the page's moves, a context-menu entry's
+// presses, a window dragged: the rest of the screen), so a layout, a view or a box changed under
+// a still mouse shows the system's pointer until the mouse moves again.
 function gameUnder(x, y) {
-  if (!game || crashed || swallowing || dragged !== null || sentAt === null) return false;
+  if (!game || crashed || leaving || swallowing) return 'page';
   const inside = (r) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
   const box = canvas.getBoundingClientRect();
-  if (!inside(box)) return false;
-  if (OVER_CANVAS.some((el) => !el.hidden && inside(el.getBoundingClientRect()))) return false;
-  const at = pixelAt(x, y, box, false);
-  return !pointerGap && at[0] === sentAt[0] && at[1] === sentAt[1];
+  if (!inside(box)) return 'page';
+  if (OVER_CANVAS.some((el) => !el.hidden && inside(el.getBoundingClientRect()))) return 'page';
+  const [gx, gy] = pixelAt(x, y, box, false);
+  if (pointerGap) return 'page';
+  const [ex, ey, shown, queued, qx, qy] = game.game_pointer();
+  if (!shown) return 'page';
+  if (queued) return qx === gx && qy === gy ? 'hold' : 'page';
+  return ex === gx && ey === gy ? 'game' : 'page';
 }
 
 // The canvas's data-pointer, which the stylesheet reads: `game` while the game's pointer is
-// under the system's at the mouse's last place (`gameUnder`), else `page`. Set at each pointer
-// event the page handles and at each frame of the loop, so a change under a still mouse (the menu
-// closed by a key, a layout, a view or fullscreen in or out, the program, a window or the badge
-// shown or hidden) shows by the next frame.
-const showGamePointer = () => put(canvas.dataset, 'pointer',
-  mouseAt && gameUnder(...mouseAt) ? 'game' : 'page');
+// under the system's at the mouse's last place (`gameUnder`), else `page`, as it was while the
+// mouse's own move waits for a step. Set at each pointer event the page handles and at the end
+// of each frame of the loop, after its steps, so a change under a still mouse (the menu closed by
+// a key, a layout, a view or fullscreen in or out, the program, a window or the badge shown or
+// hidden, the engine moving or hiding its pointer) shows by the next frame.
+function showGamePointer() {
+  const under = mouseAt ? gameUnder(...mouseAt) : 'page';
+  if (under !== 'hold') put(canvas.dataset, 'pointer', under);
+}
 
 function sendPointer(e) {
   if (!game || crashed) return;
@@ -3995,7 +4018,6 @@ function sendPointer(e) {
   const buttons = e.buttons & 3;
   sentButtons = buttons;
   game.pointer(at[0], at[1], buttons);
-  sentAt = at;
   showGamePointer();
 }
 canvas.addEventListener('pointerdown', (e) => {
@@ -4192,10 +4214,8 @@ function chooseEntry(item, key = null) {
     game.pointer(x, y, 1);
     game.pointer(x, y, 0);
     sentButtons = 0;
-    sentAt = [x, y];
   } else {
     game.command_at(code, x, y);
-    sentAt = null; // its presses move the game's pointer (the command's icon, then the target)
   }
 }
 

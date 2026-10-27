@@ -44,12 +44,16 @@
     /* The game draws its own pointer over its screen at the mouse (the engine's sprite; with HD
        the page draws it over the HD frame), so while a game runs `game` (data-program; `u`, the
        opening and the menu, takes no mouse and leaves its pointer where it is) the system's
-       pointer is hidden over the canvas where the game's is under it (data-pointer="game", app.js
-       `gameUnder`); elsewhere it shows: a gap or a margin of the HD layout, a Wide window's frame
-       or title strip, a window dragged, a press the context menu takes, the speed badge (it lets
-       the pointer through to the canvas but covers the game's), a layout changed under a still
-       mouse until it moves. The page's own controls over the screen box (the context menu, the
-       Exit button) and the fullscreen letterbox round the canvas are not the canvas, and keep it. */
+       pointer is hidden over the canvas where the engine's sprite is drawn under the mouse
+       (data-pointer="game", app.js `gameUnder`, from Game.game_pointer); elsewhere it shows: a
+       gap or a margin of the HD layout, a Wide window's frame or title strip, a window dragged,
+       a press the context menu takes, the speed badge (it lets the pointer through to the canvas
+       but covers the game's), the game's pointer hidden or moved by the game itself, a layout
+       changed under a still mouse until it moves, no mouse (a touch or a pen). The page's own
+       controls over the screen box (the context menu, the Exit button) and the fullscreen
+       letterbox round the canvas are not the canvas, and keep it. Near the frame's last column and
+       row the game's arrow is clipped by the frame's edge (in the Original layout's corner pixel
+       only a few of its pixels show), as on the original's screen; the system's stays hidden. */
     body[data-state="running"] #screen[data-program="game"][data-pointer="game"] { cursor: none; }
     /* That input: on the canvas, unseen and out of the pointer's way, but able to take focus. */
     #ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0;
