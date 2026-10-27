@@ -1915,25 +1915,37 @@ test('a held arrow on the canvas: the browser\'s repeats wait while the turn run
 
 // Spec 19 O1c at the page: `key` pressed once on the focused canvas and held with no browser
 // repeat at all (Playwright sends none) until the leader stepped three times, or the game ran
-// 30 s on its clock, or 2 s with no step at all (the way blocked), then the keyup. The game's own step() is watched (the instance's, so the
-// glue's count still runs): after each, the engine clock, the leader and whether the prompt is
-// up. Returns the steps of the leader while held, each with the step() calls from the prompt
-// coming back to it and the engine ms since the step before, the steps after the release (the
-// cells they ended on), and the repeats the canvas saw.
+// 30 s on its clock, or 2 s with no step at all (the way blocked), then the keyup. The game's own
+// step() and set_clock() are watched (the instance's, so the glue's count still runs): before the
+// first step and after each, the engine clock, the leader, whether the prompt is up and the page's
+// clock (the frame's time, on the timeline of the press's `timeStamp`, also kept; so the step that
+// takes the press is compared with the state before it even when it is the first watched). Returns the steps of the leader
+// while held, each with the step() calls from the prompt coming back to it and the engine ms since
+// the step before; the steps after the release (the cells they ended on); the repeats the canvas
+// saw; and, while the key was down (D1', spec 19 O1c), the added presses (a step that took the
+// prompt down after the press itself, each on the page's clock) and the late steps (one that ran
+// with the prompt up and an added press due, the minimum interval past the press and the last
+// added press, and left the prompt up).
 async function heldNoRepeat(page, key) {
   await h.waitPrompt(page);
   await page.evaluate(() => {
     const g = globalThis.__shownGame;
     const c = document.getElementById('screen');
-    const log = { steps: [], repeats: 0, stop: new AbortController() };
+    const log = { steps: [], repeats: 0, pressedAt: null, now: null, stop: new AbortController() };
     window.__k2 = log;
     c.addEventListener('keydown', (e) => {
       if (e.repeat) log.repeats += 1;
+      else if (log.pressedAt === null) log.pressedAt = e.timeStamp;
     }, { signal: log.stop.signal });
+    g.set_clock = function (now) {
+      log.now = now;
+      Object.getPrototypeOf(this).set_clock.call(this, now);
+    };
     g.step = function (ms) {
       Object.getPrototypeOf(this).step.call(this, ms);
-      log.steps.push([globalThis.__clock, this.leader_position().join(','), this.at_prompt()]);
+      log.steps.push([globalThis.__clock, this.leader_position().join(','), this.at_prompt(), log.now]);
     };
+    log.steps.push([globalThis.__clock, g.leader_position().join(','), g.at_prompt(), null]);
   });
   await page.keyboard.down(key);
   const t0 = await page.evaluate(() => globalThis.__clock);
@@ -1957,42 +1969,57 @@ async function heldNoRepeat(page, key) {
     window.__k2 = null;
     k2.stop.abort();
     delete globalThis.__shownGame.step;
-    return { steps: k2.steps, repeats: k2.repeats };
+    delete globalThis.__shownGame.set_clock;
+    return { steps: k2.steps, repeats: k2.repeats, pressedAt: k2.pressedAt };
   });
   const held = [];
   const after = [];
   let prompt = 0;
   let last = log.steps[0]?.[0] ?? 0;
-  // The longest run of steps the prompt stayed up after, while the key was down and past the
-  // tap gate (from 300 engine ms after the press: 1x, so 300 wall ms): a press added at every
-  // prompt allows a run of one, whether the step walks or is blocked (a blocked step's turn
-  // takes the next step, the prompt then up again for one).
-  let run = 0;
-  let longest = 0;
+  const added = [];
+  let late = 0;
+  const lateAt = [];
+  let pressTaken = false;
   for (let i = 1; i < log.steps.length; i += 1) {
-    const [clock, leader, atPrompt] = log.steps[i];
+    const [clock, leader, atPrompt, now] = log.steps[i];
     if (leader !== log.steps[i - 1][1]) {
       if (i < released) held.push({ fromPrompt: i - prompt, ms: clock - last, leader });
       else after.push(leader);
       last = clock;
     }
     if (atPrompt) prompt = i;
-    run = atPrompt ? run + 1 : 0;
-    if (i < released && clock - t0 >= 300) longest = Math.max(longest, run);
+    if (i >= released || log.pressedAt === null || now < log.pressedAt || !log.steps[i - 1][2]) continue;
+    if (!atPrompt) {
+      // The prompt taken: the press itself first, then each an added press.
+      if (pressTaken) added.push(now);
+      pressTaken = true;
+    } else if (pressTaken) {
+      const since = added.length > 0 ? now - added.at(-1) : Infinity;
+      if (now - log.pressedAt >= MIN_STEP_MS && since >= MIN_STEP_MS) {
+        late += 1;
+        // For the receipt: the first few, as wall ms down, since the last added press, and the
+        // engine clock.
+        if (lateAt.length < 3) lateAt.push([Math.round(now - log.pressedAt), Math.round(since), clock]);
+      }
+    }
   }
-  return { held, after, repeats: log.repeats, longest };
+  const gaps = added.map((t, i) => t - (i > 0 ? added[i - 1] : log.pressedAt));
+  return { held, after, repeats: log.repeats, added: added.length, gaps, late, lateAt };
 }
 
+// The held walk's minimum interval (spec 19 O1c, `MIN_STEP_MS` in u6-core), in wall ms.
+const MIN_STEP_MS = 150;
+
 // The start fight as booted, arrows (left first) held with no browser repeat until one walks
-// twice: at every command prompt the held arrow is pressed again at once (the prompt is up for
-// no two steps in a row while it is down, whether its steps walk or the fight blocks them),
-// each step in the step() call after the prompt came back (so the gap between two steps is
-// that turn plus one 20 ms step), and nothing after the keyup. The fight's geometry decides
-// whether any way is open twice (a hero killed wakes on `h.WAKE_CELL`, between the same foes,
-// and may be blocked every way, `h.stepOnce`'s note): the gaps are checked on every hold that
-// walked twice, the prompt runs on every hold. A position change after a keyup is allowed only
-// onto the wake cell.
-test('a held arrow with no browser repeat walks on at every command prompt at once, one step a turn, and stops at its keyup (spec 19 O1c)', async (env) => {
+// twice: at every command prompt the held arrow is pressed again as soon as the minimum interval
+// allows (no step runs with the prompt up and an added press due and leaves it up, whether its
+// steps walk or the fight blocks them: D1', the prompt up at most one step in a row once due),
+// at least one command prompt over all the holds is taken by an added press (the opportunity:
+// the key down past the interval), the added presses at least the interval apart, and nothing
+// after the keyup. The fight's geometry decides whether any way is open twice (a hero killed
+// wakes on `h.WAKE_CELL`, between the same foes, and may be blocked every way, `h.stepOnce`'s
+// note). A position change after a keyup is allowed only onto the wake cell.
+test('a held arrow with no browser repeat walks on at every command prompt once the minimum interval allows, and stops at its keyup (spec 19 O1c)', async (env) => {
   const { page } = await h.openPage(env); // gated: the glue keeps the engine clock and its ticks
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
@@ -2009,10 +2036,14 @@ test('a held arrow with no browser repeat walks on at every command prompt at on
   }
   for (const w of holds) {
     const walked = w.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL);
-    console.log(`  receipt: ${w.key} held, ${w.repeats} browser repeats; ${w.held.length} steps while held, engine ms between them ${walked.map((s) => s.ms).join(', ') || '-'}, step() calls from the prompt to each ${walked.map((s) => s.fromPrompt).join(', ') || '-'}; the prompt up at most ${w.longest} step(s) in a row while held; ${w.after.length} position changes after the keyup`);
+    console.log(`  receipt: ${w.key} held, ${w.repeats} browser repeats; ${w.held.length} steps while held, engine ms between them ${walked.map((s) => s.ms).join(', ') || '-'}, step() calls from the prompt to each ${walked.map((s) => s.fromPrompt).join(', ') || '-'}; ${w.added} prompts taken by an added press, wall ms from the one before ${w.gaps.map((g) => Math.round(g)).join(', ') || '-'}; ${w.late} steps left the prompt up with a press due${w.late > 0 ? ` (down, since, clock: ${JSON.stringify(w.lateAt)})` : ''}; ${w.after.length} position changes after the keyup`);
+  }
+  const taken = holds.reduce((n, w) => n + w.added, 0);
+  assert.ok(taken >= 1, `a command prompt taken by an added press over the holds (${taken})`);
+  for (const w of holds) {
     assert.equal(w.repeats, 0, `${w.key}: no browser repeat was sent`);
-    assert.ok(w.longest <= 1, `${w.key}: pressed again at every prompt while held`);
-    assert.ok(walked.every((s) => s.fromPrompt === 1), `${w.key}: each step in the step() after the prompt came back`);
+    assert.equal(w.late, 0, `${w.key}: pressed again at every prompt once due`);
+    assert.ok(w.gaps.every((g) => g >= MIN_STEP_MS), `${w.key}: the added presses the interval apart`);
     assert.ok(w.after.every((cell) => cell === h.WAKE_CELL), `${w.key}: no step after the keyup (a change only onto the wake cell)`);
   }
   assert.ok(holds.some((w) => w.held.length >= 1), 'a held arrow walked');
@@ -2083,7 +2114,10 @@ test('the context menu opened while an arrow is held lets it go: the hero walks 
 // arrow (down first, else the first that walks) pressed once with no browser repeat until the
 // leader stepped, ten frames more (the turn in flight), then the focus moved; the canvas's blur
 // lets every held key go, so 1200 frames later (20 s of the game: the fight's turn in flight and
-// more) the leader is where the blur found it; the arrow let up afterwards takes nothing.
+// more) the leader is where the blur found it, and the game's own step() (watched as
+// `heldNoRepeat` watches it) shows the command prompt back and never taken down again: no key
+// read after the blur, where the held arrow would have been pressed at the first; the arrow let
+// up afterwards takes nothing.
 test('the focus leaving the canvas while an arrow is held lets it go: the hero walks no further after the canvas\'s blur (spec 19 O1c)', async (env) => {
   const { page } = await menuPage(env);
   await h.virtualDisplay(page, 60);
@@ -2109,13 +2143,33 @@ test('the focus leaving the canvas while an arrow is held lets it go: the hero w
   }
   assert.ok(used !== null, 'a held arrow walked in one of the four directions');
   await h.runFrames(page, 10);
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const log = { prompts: 0, taken: 0, up: g.at_prompt() };
+    window.__k2focus = log;
+    g.step = function (ms) {
+      Object.getPrototypeOf(this).step.call(this, ms);
+      const up = this.at_prompt();
+      if (up) log.prompts += 1;
+      else if (log.up) log.taken += 1;
+      log.up = up;
+    };
+  });
   await page.focus('#mute');
   const at = await leader();
   const after = await h.runFrames(page, 1200);
+  const reads = await page.evaluate(() => {
+    const log = window.__k2focus;
+    window.__k2focus = null;
+    delete globalThis.__shownGame.step;
+    return log;
+  });
   await page.keyboard.up(used);
   const late = await h.runFrames(page, 120);
   const queued = await page.evaluate(() => document.getElementById('screen').dataset.keys);
-  console.log(`  receipt: ${used} held, the focus moved to Mute; position changes after the blur ${after.seen.length - 1}, after the keyup ${late.seen.length - 1}; keys queued at the end ${queued}`);
+  console.log(`  receipt: ${used} held, the focus moved to Mute; after the blur ${reads.prompts} steps with the prompt up, ${reads.taken} prompts taken down; position changes after the blur ${after.seen.length - 1}, after the keyup ${late.seen.length - 1}; keys queued at the end ${queued}`);
+  assert.ok(reads.prompts > 0, 'the prompt came back after the blur (the held arrow\'s chance)');
+  assert.equal(reads.taken, 0, 'no key read after the canvas\'s blur');
   assert.equal(after.seen.length - 1, 0, 'no step after the canvas\'s blur');
   assert.equal(late.seen.length - 1, 0, 'nor after the keyup');
   assert.equal(await leader(), at, 'the hero where the blur found him');

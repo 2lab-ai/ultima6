@@ -54,10 +54,21 @@ impl Key {
     }
 }
 
-/// Port (spec 19 O1c): wall milliseconds a direction key must have been down before the
-/// platform presses it again at a prompt ([`Engine::held_press`]): above 1× a turn can end
-/// within a tap (the castle's 640 ms is 80 wall ms at 8×), and a tap is one step at any speed.
-pub const TAP_MS: u32 = 150;
+/// Port (spec 19 O1c): the shortest wall time between two steps of a held direction key: a
+/// platform adds a press for it ([`Engine::held_press`]) only once it has been down this long
+/// and the press last added for it is this old ([`walk_due`]). Above about 4.3× a turn ends
+/// within it (the castle's 640 ms is 80 wall ms at 8×), so a tap is one step at any speed and
+/// a held walk keeps an even cadence, max(turn / speed, this).
+pub const MIN_STEP_MS: u32 = 150;
+
+/// Port (spec 19 O1c): whether a held direction key is due its next added press: down
+/// `down_ms` wall ms since its press and `since_ms` since the press last added for it (None:
+/// none yet), both at least [`MIN_STEP_MS`]. The press itself is the platform's and comes at
+/// once; this paces only the presses added after it.
+pub fn walk_due(down_ms: f64, since_ms: Option<f64>) -> bool {
+    let min = f64::from(MIN_STEP_MS);
+    down_ms >= min && since_ms.is_none_or(|ms| ms >= min)
+}
 
 /// Port (spec 19 O1c): of the keys a platform has down, oldest first (each with what the
 /// platform keeps beside it, such as its press time), the newest direction key: the one a
@@ -1046,12 +1057,12 @@ impl Engine {
 
     /// Port (spec 19 O1c): the press a platform adds to `input` before a tick for `held`, the
     /// direction key it has down ([`newest_direction`]; pressed without Ctrl, Alt or Meta, and
-    /// down at least [`TAP_MS`]): a repeat of it when the command loop waits for a command key
+    /// due by [`walk_due`]): a repeat of it when the command loop waits for a command key
     /// (A4-0x7a2c set, no cross-hair, A4-0x7a60 clear: no line editor, target or other wait)
     /// and no key waits, neither queued nor in `input` (pointer events may). So a held direction
-    /// key is pressed again at every command prompt at once and walks one step a turn, the
-    /// prompt gating the cadence, with no wait for the platform's own repeat; every other wait
-    /// keeps that repeat. None otherwise, and for any other key.
+    /// key is pressed again at the first command prompt it is due at and walks one step a turn
+    /// or one per [`MIN_STEP_MS`], whichever is longer, with no wait for the platform's own
+    /// repeat; every other wait keeps that repeat. None otherwise, and for any other key.
     pub fn held_press(&self, input: &[InputEvent], held: Option<Key>) -> Option<InputEvent> {
         let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. });
         let held = held.filter(|k| k.is_direction())?;
@@ -1286,6 +1297,23 @@ mod tests {
         e.tick(&[], 16);
         assert!(e.finished());
         assert_eq!(e.held_press(&[], left), None, "finished");
+    }
+
+    /// Spec 19 O1c (D1'): [`walk_due`] at its edges: a key down less than [`MIN_STEP_MS`] is
+    /// not due whatever its last added press; down that long it is due with none added yet or
+    /// the last one that old, and not with one added sooner.
+    #[test]
+    fn a_held_walk_is_due_once_down_and_last_pressed_the_minimum_interval_ago() {
+        let min = f64::from(MIN_STEP_MS);
+        assert!(!walk_due(min - 1.0, None), "a tap");
+        assert!(!walk_due(min - 1.0, Some(1000.0)), "down too short");
+        assert!(walk_due(min, None), "the first added press");
+        assert!(walk_due(1000.0, Some(min)), "the last one old enough");
+        assert!(
+            !walk_due(1000.0, Some(min - 1.0)),
+            "the last one too recent"
+        );
+        assert!(!walk_due(1000.0, Some(0.0)), "one added this frame");
     }
 
     #[test]

@@ -2952,6 +2952,7 @@ function frame(now) {
   last = now;
   if (dt > 0 && dt <= LONG_FRAME_MS) interval += (dt - interval) / 8;
   try {
+    game.set_clock(now);
     const due = game.pace(dt);
     const budget = budget_ms(interval);
     const start = performance.now();
@@ -3681,7 +3682,7 @@ function makeIme() {
       enterAfterCommit = false;
       enterSentAt = e.timeStamp;
       voice.cancel();
-      game.key_down('Enter', 'Enter', false);
+      game.key_down('Enter', 'Enter', false, e.timeStamp);
     }
     ime.value = '';
   });
@@ -3820,22 +3821,31 @@ async function leaveFullscreen() {
 // control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys there, so the browser's own
 // Save page / Reload do not fire. The speed keys (`speedKey`) are the page's and never reach the
 // game. The browser's auto-repeat goes as repeats (spec 19 O1b), which the key's release takes
-// back.
+// back. Each press goes with its event's time (`timeStamp`, the animation frames' timeline: the
+// held walk's interval, spec 19 O1c).
 function gameKey(e) {
   gesture();
   if (!game || crashed) return;
-  if (e.metaKey || e.altKey) {
-    // A chord with Meta or Alt is not the game's, and its keyup may never come (macOS sends none
-    // for a key let go while Cmd is down): every held key is let go (spec 19 O1c).
+  if (e.metaKey) {
+    // A chord with Meta is not the game's, and its keyup may never come (macOS sends none for a
+    // key let go while Cmd is down): every held key is let go (spec 19 O1c).
     releaseKeys();
     return;
   }
+  // Spec 19 O1c: while Ctrl or Alt is down a held walk pauses, as in the native window; nothing
+  // is let go. A chord with Alt is not the game's (the browser's Alt shortcuts).
+  game.set_modifiers(e.ctrlKey || e.altKey);
+  if (e.altKey) return;
   if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
   const by = speedKey(e);
   if (by !== 0) {
     e.preventDefault();
     changeSpeed(by);
-  } else if (e.repeat ? game.key_repeat(e.code, e.key, e.ctrlKey) : game.key_down(e.code, e.key, e.ctrlKey)) {
+  } else if (
+    e.repeat
+      ? game.key_repeat(e.code, e.key, e.ctrlKey, e.timeStamp)
+      : game.key_down(e.code, e.key, e.ctrlKey, e.timeStamp)
+  ) {
     e.preventDefault();
   }
 }
@@ -3847,7 +3857,9 @@ function gameKey(e) {
 // (or the line input in its place) loses the focus a held key must walk no further (spec 19 O1c:
 // the context menu, a toolbar control, Settings, Tab): every held key is let go then.
 function gameKeyUp(e) {
-  if (game && !crashed) game.key_up(e.code);
+  if (!game || crashed) return;
+  game.set_modifiers(e.ctrlKey || e.altKey);
+  game.key_up(e.code);
 }
 function releaseKeys() {
   if (game && !crashed) game.release_keys();

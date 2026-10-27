@@ -300,9 +300,9 @@ globalThis.__presentMs = 0;
     globalThis.__pointerAt = [x, y];
     return pointer.call(this, x, y, buttons);
   };
-  Game.prototype.key_down = function (code, key, ctrl) {
+  Game.prototype.key_down = function (code, key, ...rest) {
     globalThis.__sent.push(key);
-    return keyDown.call(this, code, key, ctrl);
+    return keyDown.call(this, code, key, ...rest);
   };
   const textInput = Game.prototype.text_input;
   Game.prototype.text_input = function (text) {
@@ -1268,8 +1268,10 @@ export async function click(page, x, y, settle) {
 /// script took them at the page's first evaluate, before this). The virtual clock starts at the
 /// real one: a loop already running moves over at its next real frame, which this waits for
 /// (that frame is less than one interval before the first virtual one); with `loop: false`
-/// (before a start) the loop starts on the virtual display. `displayCost` makes the page's own
-/// clock reads cost time (a slow host).
+/// (before a start) the loop starts on the virtual display. Events are stamped on it too (their
+/// `timeStamp`, which a browser keeps on the frames' timeline and the held walk's interval reads,
+/// spec 19 O1c): the time of the frame last run. `displayCost` makes the page's own clock reads
+/// cost time (a slow host).
 export async function virtualDisplay(page, hz, { loop = true } = {}) {
   await page.evaluate((rate) => {
     const v = { hz: rate, base: performance.now(), frames: 0, queue: [], cost: 0, spent: 0 };
@@ -1293,6 +1295,7 @@ export async function virtualDisplay(page, hz, { loop = true } = {}) {
       v.spent += v.cost;
       return t;
     };
+    Object.defineProperty(Event.prototype, 'timeStamp', { configurable: true, get: () => v.now() });
   }, hz);
   if (loop) await page.waitForFunction(() => window.__display.queue.length > 0, null, { timeout: 10_000 });
 }
