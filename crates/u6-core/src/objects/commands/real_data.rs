@@ -3312,10 +3312,12 @@ fn the_shared_copy_gives_every_entry_the_answer_of_a_fresh_copy() {
     }
 }
 
-/// Follow-up F1, item 3: the fresh-copy switch through [`menu::query_fresh`] itself, on a real
-/// press (the closed door's cell by the leader): clear after a `query_fresh` that gave a menu (the
-/// same menu `query` gives); a `query_fresh` inside an outer fresh scope leaves the switch set
-/// for the rest of that scope, and it is clear again after it.
+/// Follow-up F1 (rounds 1 and 2), item 3 and its item 1: the fresh-copy switch through
+/// [`menu::query_fresh`] itself, on a real press (the closed door's cell by the leader): the press
+/// runs its checks on fresh copies (`menu::fresh_copies` goes up), a plain `query` on the same
+/// cell runs none (it does not move); clear after a `query_fresh` that gave a menu (the same menu
+/// `query` gives); a `query_fresh` inside an outer fresh scope leaves the switch set for the rest
+/// of that scope, and it is clear again after it.
 #[test]
 fn query_fresh_puts_the_fresh_copy_switch_back() {
     let Some(files) = files() else { return };
@@ -3327,13 +3329,18 @@ fn query_fresh_puts_the_fresh_copy_switch_back() {
     let mut prompt = s.clone();
     prompt.main.reading = 1;
     assert!(!menu::fresh_now(), "clear before");
+    let copies = menu::fresh_copies();
     let fresh = menu::query_fresh(&prompt, &io, at.0, at.1);
+    let by_fresh = menu::fresh_copies() - copies;
     assert!(fresh.is_some(), "a menu");
     assert!(!menu::fresh_now(), "clear after query_fresh");
-    assert!(
-        fresh == menu::query(&prompt, &io, at.0, at.1),
-        "the menu query gives"
-    );
+    let copies = menu::fresh_copies();
+    let shared = menu::query(&prompt, &io, at.0, at.1);
+    let by_shared = menu::fresh_copies() - copies;
+    eprintln!("checks on a fresh copy: query_fresh {by_fresh}, query {by_shared}");
+    assert!(by_fresh > 0, "query_fresh runs its checks on fresh copies");
+    assert_eq!(by_shared, 0, "query runs none on a fresh copy");
+    assert!(fresh == shared, "the menu query gives");
     let (inner, set) = menu::fresh_scope(|| {
         let m = menu::query_fresh(&prompt, &io, at.0, at.1);
         (m, menu::fresh_now())
@@ -3446,10 +3453,10 @@ fn arrows(s: &State, hero: Slot) -> u16 {
 
 /// The format addresses of the lines combat said after `before`, only those: its queue keeps the
 /// last ones (`combat.said`, the oldest dropped first), so `after` is a tail of `before` followed
-/// by the new ones; the longest such tail is taken as the kept part. The limit: once the queue is
-/// full, new lines that repeat what it already held in the same order cannot be told from it, and
-/// count as none ([`said_since_misses_only_a_full_queues_repeats`]); the Attack checks start
-/// from an empty queue, which one command never fills, so they are exact.
+/// by the new ones; the longest such tail is taken as the kept part. The limit: once lines were
+/// dropped (the queue at its cap), new lines that repeat what it held can be taken for its kept
+/// part, and count as fewer ([`said_since_misses_only_a_full_queues_repeats`]); the Attack checks
+/// start from an empty queue, which one command never fills, so they are exact.
 fn said_since(before: &State, after: &State) -> Vec<u32> {
     let (old, now) = (&before.combat.said, &after.combat.said);
     let kept = (0..=old.len())
@@ -3459,28 +3466,33 @@ fn said_since(before: &State, after: &State) -> Vec<u32> {
     now[kept..].iter().map(|x| x.at).collect()
 }
 
-/// The queue of 0x108658's lines (`combat.said`) as the engine keeps it: at most `SAID_KEPT`
-/// (64, combat/present.rs), the oldest dropped first.
+/// The queue of 0x108658's lines (`combat.said`) after the engine says `ats` in order, through
+/// its own [`crate::combat::present::say`] (the text on, which it needs; outside a poll there is
+/// no `Io`, so nothing is printed): its cap and its dropping are the engine's.
 fn said_queue(ats: &[u32]) -> State {
     let mut s = State::default();
+    s.ui.text.on = true;
     for &at in ats {
-        if s.combat.said.len() >= 64 {
-            s.combat.said.remove(0);
-        }
-        s.combat.said.push(crate::combat::present::Said {
-            at,
-            args: Vec::new(),
-        });
+        crate::combat::present::say(&mut s, at, Vec::new());
     }
     s
 }
 
-/// Follow-up F1, item 2: [`said_since`] on the queue's own keeping (64 at most, the oldest dropped
-/// first): exact while it is not full, and full when the new lines differ from its tail; its one
-/// limit, pinned: a full queue whose new lines repeat it (here a single line said over and over)
-/// gives none, since the queue after is the queue before.
+/// The said queue's cap, as the engine keeps it: what is left after more lines than it holds.
+fn said_cap() -> usize {
+    said_queue(&[0; 200]).combat.said.len()
+}
+
+/// Follow-up F1 (rounds 1 and 2), items 2 and 3: [`said_since`] on the engine's own keeping of the
+/// queue (its cap read from it, the oldest dropped first): exact while nothing was dropped, and
+/// after drops when the new lines differ from what it held; its limit, pinned: once lines were
+/// dropped, new lines that repeat what it held count as fewer: a full queue of one line, that
+/// line again gives none (the queue after is the queue before), that line and another give only
+/// the other.
 #[test]
 fn said_since_misses_only_a_full_queues_repeats() {
+    let cap = said_cap();
+    assert!(cap > 4 && cap < 200, "a cap");
     let (a, b, c) = (1u32, 2, 3);
     let some = said_queue(&[a, b]);
     let more: Vec<u32> = [a, b, c, a].to_vec();
@@ -3490,17 +3502,18 @@ fn said_since_misses_only_a_full_queues_repeats() {
         "not full: exact"
     );
     assert_eq!(said_since(&some, &some), Vec::<u32>::new(), "nothing said");
-    let lines: Vec<u32> = (0..64).map(|k| 100 + k).collect();
+    let lines: Vec<u32> = (0..cap as u32).map(|k| 100 + k).collect();
     let full = said_queue(&lines);
-    assert_eq!(full.combat.said.len(), 64, "at its cap");
+    assert_eq!(full.combat.said.len(), cap, "at its cap");
     let then: Vec<u32> = lines.iter().copied().chain([a, b]).collect();
     assert_eq!(
         said_since(&full, &said_queue(&then)),
         [a, b],
         "full, new lines: exact"
     );
-    let same = said_queue(&[a; 64]);
-    let again = said_queue(&[a; 65]);
+    let ones = vec![a; cap];
+    let same = said_queue(&ones);
+    let again = said_queue(&[ones.as_slice(), &[a]].concat());
     assert!(
         again.combat.said == same.combat.said,
         "one more of the same: the queue as it was"
@@ -3509,6 +3522,12 @@ fn said_since_misses_only_a_full_queues_repeats() {
         said_since(&same, &again),
         Vec::<u32>::new(),
         "the limit: none"
+    );
+    let and_b = said_queue(&[ones.as_slice(), &[a, b]].concat());
+    assert_eq!(
+        said_since(&same, &and_b),
+        [b],
+        "the limit: a, b said, b counted"
     );
 }
 
@@ -3535,6 +3554,7 @@ fn attacks_ammo_and_range_checks_agree_with_attack() {
     let a4 = crate::image::A4;
     let (no_arrows, out_of_range, interferes) = (a4 - 0x76dc, a4 - 0x7512, a4 - 0x75f2);
     let refusals = [no_arrows, out_of_range, interferes];
+    let cap = said_cap();
     type Checkpoint = Box<dyn Fn(&State, &State) -> bool>;
     // A case: its label, its state, the loaf aimed at and its pixel, the menu's answer, the check.
     type Case = (
@@ -3632,7 +3652,7 @@ fn attacks_ammo_and_range_checks_agree_with_attack() {
         assert!(choose(&mut e, menu::ATTACK, at), "{label}: its target read");
         let after = e.state().clone();
         assert!(
-            after.combat.said.len() < 64,
+            after.combat.said.len() < cap,
             "{label}: the said queue never full"
         );
         let reached = checkpoint(&c, &after);

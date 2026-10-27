@@ -4859,11 +4859,12 @@ mod tests {
     /// leader's inventory shown (as Drop's key shows it, 0x92; Drop then let go with Escape),
     /// `context_menu` on every cell of the build's view (Original 11 × 11, Wide 37 × 21, each
     /// pressed at [`cell_point`]), on two inventory slots and on one control point leaves the
-    /// running game's state exactly as it was (the checks run on a copy); every view cell gives a
-    /// menu, the slots give at least one. The slots are the first list cell and an equipment cell
-    /// (the cell lookups 0x111e3c / 0x111eec), inside the side panel's click region (region 2, the
-    /// UI's own rect, the same pixels in both builds); the control (0xc0, 0x80) lies below that
-    /// region and off the map, and gives none.
+    /// running game's state as it was, checked after each query (the checks run on a copy); every
+    /// view cell gives a menu, each slot gives one exactly when it holds something (and at least
+    /// one does). The slots are the first list cell and an equipment cell, the neck (the cell
+    /// lookups 0x111e3c / 0x111eec), inside the side panel's click region (region 2, the UI's own
+    /// rect, the same pixels in both builds); the control (0xc0, 0x80) lies below that region and
+    /// off the map, and gives none.
     #[test]
     fn context_menu_leaves_the_game_as_it_was() {
         use u6_core::geom::{VIEW_H, VIEW_W};
@@ -4878,7 +4879,7 @@ mod tests {
                 break;
             }
         }
-        game.key_up("KeyD");
+        assert!(game.key_up("KeyD"), "Drop's key let go");
         // Escape: the first takes the cursor off (0x106e1e), the next one ends the read.
         for _ in 0..4 {
             if steps_to_prompt_within(&mut game, 50) {
@@ -4886,11 +4887,22 @@ mod tests {
             }
             assert!(game.key_down("Escape", "Escape", false), "Escape taken");
             game.step(20);
-            game.key_up("Escape");
+            assert!(game.key_up("Escape"), "Escape let go");
         }
         assert!(steps_to_prompt(&mut game), "the prompt again");
         let before = game.engine.as_ref().quiet().state().clone();
         assert_eq!(before.ui.panel.mode, 0x92, "the inventory shown");
+        // After each query, the game's state as it was (a write would show at the query that
+        // made it).
+        let query = |x: i32, y: i32| {
+            let menu = game.context_menu(x, y);
+            let same = *game.engine.as_ref().quiet().state() == before;
+            assert!(
+                same,
+                "the game's state as it was after the query at ({x}, {y})"
+            );
+            !menu.is_empty()
+        };
         let mut cells = 0;
         for row in 0..VIEW_H as i32 {
             for col in 0..VIEW_W as i32 {
@@ -4901,7 +4913,7 @@ mod tests {
                     (col as i16, row as i16),
                     "the press point in its own cell"
                 );
-                cells += usize::from(!game.context_menu(x, y).is_empty());
+                cells += usize::from(query(x, y));
             }
         }
         let panel_rect = region(&before.ui.pointer.tables, 2).expect("the side panel's region");
@@ -4909,25 +4921,37 @@ mod tests {
             let [x0, y0, x1, y1] = panel_rect.map(i32::from);
             (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
         };
-        let mut panel = 0;
-        for (x, y) in [(0x100, 0x28), (0xb8, 0x20)] {
+        // What the slots hold: list cell 0, and equipment slot 1 (the neck); an equipment value of
+        // 0, or 1 (the both-hands marker), is an empty slot.
+        let inv = &before.inventory;
+        let neck = inv.equip(1);
+        let slots = [
+            ((0x100, 0x28), inv.cells[0] != 0),
+            ((0xb8, 0x20), neck != 0 && neck != 1),
+        ];
+        let (mut panel, mut held) = (0, 0);
+        for ((x, y), holds) in slots {
             assert!(in_panel(x, y), "a slot inside the side panel's region");
-            panel += usize::from(!game.context_menu(x, y).is_empty());
+            let menu = query(x, y);
+            assert_eq!(
+                menu, holds,
+                "a menu on slot ({x}, {y}) exactly when it holds something"
+            );
+            panel += usize::from(menu);
+            held += usize::from(holds);
         }
         let (cx, cy) = (0xc0, 0x80);
         assert!(
             !in_panel(cx, cy) && !map_column(cx as i16),
             "the control: off the panel and the map"
         );
-        assert!(game.context_menu(cx, cy).is_empty(), "the control: no menu");
+        assert!(!query(cx, cy), "the control: no menu");
         println!(
-            "menus given: view {cells} of {}, panel {panel} of 2",
+            "menus given: view {cells} of {}, panel {panel} of 2 (slots holding something {held})",
             VIEW_W * VIEW_H
         );
         assert_eq!(cells, VIEW_W * VIEW_H, "a menu on every view cell");
-        assert!(panel > 0, "a menu on an inventory slot");
-        let after = game.engine.as_ref().quiet().state().clone();
-        assert!(after == before, "the game's state as it was");
+        assert!(held >= 1, "a slot holds something");
     }
 
     /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip, through `Game::command_at` and

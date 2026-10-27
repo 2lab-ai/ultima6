@@ -300,6 +300,8 @@ impl<'a> Press<'a> {
     fn check(&mut self) -> &mut State {
         if let Some(f) = &self.fresh {
             self.c.clone_from(f);
+            #[cfg(test)]
+            FRESH_COPIES.with(|n| n.set(n.get() + 1));
         }
         self.c.ui.input.selection = self.selection;
         self.c.ui.input.target = self.target;
@@ -311,6 +313,14 @@ impl<'a> Press<'a> {
 thread_local! {
     /// Each check on a fresh copy ([`Press`]): set only by the tests ([`query_fresh`]).
     static FRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The checks a [`Press`] ran on a fresh copy, in all ([`fresh_copies`]).
+    static FRESH_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many checks ran on a fresh copy so far on this thread ([`Press::check`]), for the tests.
+#[cfg(test)]
+pub(crate) fn fresh_copies() -> usize {
+    FRESH_COPIES.with(std::cell::Cell::get)
 }
 
 /// [`query`] with each check on a copy of its own of the press's state (each entry as if it were

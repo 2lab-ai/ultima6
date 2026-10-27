@@ -1338,7 +1338,7 @@ test('the context menu (spec 17): keepFrame refuses a frames directory inside th
     ];
     for (const [what, dir, made] of refused) {
       assert.ok(insideRepo(dir), `${what}: inside`);
-      await assert.rejects(keepFrame(fake, 'frame.png', dir), assert.AssertionError, `${what}: refused`);
+      await assert.rejects(keepFrame(fake, 'frame.png', dir), { name: 'AssertionError', message: /outside the repository and its main checkout/ }, `${what}: refused by the guard`);
       assert.equal(shots.n, 0, `${what}: no screenshot`);
       if (made) assert.ok(!existsSync(made), `${what}: nothing made`);
     }
