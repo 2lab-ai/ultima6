@@ -800,13 +800,13 @@ fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
 
 /// Spec 08 (slice K2, 2026-10-24): the string export of the owner's files holds combat's lines,
 /// by the hashes of the strings at a hit's sites (`combat::damage`): the wound report's critical
-/// line, its three degrees and its wounded word, the graze and the death line; and the two lines
-/// that start with a newline, printed after Attack's held newline whole (the refusal of a
-/// staff's cast, `combat::seams`; the next weapon's prompt, `combat::attack`). Prints pass/fail
-/// only: a failure names the site, never its text.
+/// line, its three degrees and its wounded word, the graze and the death line; the next weapon's
+/// prompt, printed after Attack's held newline whole, and the charm and paralysis reports after
+/// a spellbook's or spell object's cast (`combat::attack`). Prints pass/fail only: a failure
+/// names the site, never its text.
 #[test]
 fn the_string_export_of_the_owners_game_holds_combats_wound_report_graze_and_death() {
-    use crate::combat::{attack, damage, seams};
+    use crate::combat::{attack, damage};
     use crate::image::{A4, GameImage};
     let Some(files) = files() else { return };
     let export = crate::locale::strings::export(&files).quiet();
@@ -819,8 +819,9 @@ fn the_string_export_of_the_owners_game_holds_combats_wound_report_graze_and_dea
         ("WOUNDED", A4 - 0x772e, damage::PRINTED),
         ("GRAZED", A4 - 0x7723, damage::PRINTED),
         ("KILLED", A4 - 0x7716, damage::PRINTED),
-        ("CAST_REFUSED", 0x0011_59f8, seams::PRINTED),
         ("NEXT_WEAPON", A4 - 0x76ac, attack::PRINTED),
+        ("CHARMED", 0x0012_1ba0, attack::PRINTED),
+        ("PARALYZED", 0x0012_1bb0, attack::PRINTED),
     ] {
         assert!(list.contains(&at), "{site} is in its site's list");
         let h = crate::converse::disasm::catalog::hash64(&img.cstr(at).quiet());

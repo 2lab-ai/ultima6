@@ -46,7 +46,7 @@ pub(crate) fn wake_type(s: &mut State, a: i16) {
 }
 
 fn member(s: &State, i: usize) -> u8 {
-    s.actors.party.members.get(i).copied().unwrap_or(0)
+    crate::actors::party::roster_byte(s, i)
 }
 
 /// The party sits in a vehicle (the leader index equals the party size).

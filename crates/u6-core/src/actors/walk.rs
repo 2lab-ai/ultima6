@@ -316,7 +316,7 @@ pub fn can_move_to(s: &mut State, actor: u16, x: u16, y: u16) -> bool {
     s.actors.work.saw_damage = 0;
     let m = mover(s, actor);
     let a = usize::from(actor);
-    let leader = s.actors.party.leader().map_or(0, |l| l.0);
+    let leader = super::party::leader_actor(s);
     let z = party_z(s);
     let f = flags1(s, u16::from(seams::tile_at(s, x, y, z)));
     let mut ok = false;

@@ -102,13 +102,11 @@ pub fn name(s: &State, i: i16) -> Vec<u8> {
         .map_or_else(Vec::new, |n| n.as_bytes().to_vec())
 }
 
-/// The actor slot of party member `i` (A4+0x47ec).
+/// The actor slot of party member `i` (A4+0x47ec + i, [`crate::actors::party::roster_byte`]:
+/// 16 is party slot 16, where Pickpocket cast from a spellbook leaves the panel); 0 for a
+/// negative `i`.
 pub fn member_actor(s: &State, i: i16) -> u8 {
-    usize::try_from(i)
-        .ok()
-        .and_then(|i| s.actors.party.members.get(i))
-        .copied()
-        .unwrap_or(0)
+    usize::try_from(i).map_or(0, |i| crate::actors::party::roster_byte(s, i))
 }
 
 /// Spec 14 Design 7: what the page's actor windows show: the panel mode (the active view while

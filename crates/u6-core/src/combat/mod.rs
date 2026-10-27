@@ -112,6 +112,10 @@ pub struct CombatState {
     pub paced_at_ms: u64,
     /// Port-only: how many waits [`present::pace`] took of each length (ms), for receipts.
     pub paced: std::collections::BTreeMap<u16, u32>,
+    /// Port-only: the cast a spellbook's or spell object's hit (0x124232) leaves for the async
+    /// code that called it (the Attack command, the NPC turn), which runs it
+    /// ([`attack::cast_item`]).
+    pub item_cast: Option<attack::ItemCast>,
 }
 
 impl Default for CombatState {
@@ -135,6 +139,7 @@ impl Default for CombatState {
             due_ms: 0,
             paced_at_ms: u64::MAX,
             paced: std::collections::BTreeMap::new(),
+            item_cast: None,
         }
     }
 }

@@ -415,49 +415,93 @@ fn wounds_stop_at_the_ship() {
     assert_eq!(s.actors.attrs.hp[0x10], 1, "the balloon takes no damage");
 }
 
-/// The magic hunk's refusal line (PC-relative 0x1159f8) a staff or wand attack prints while
-/// its cast (0x11a586) is not wired into the synchronous hit.
+/// The magic hunk's refusal line (PC-relative 0x1159f8), the port's former fallback for a
+/// spellbook's or spell object's cast; the hit 0x124232 never prints it.
 const CAST_REFUSED: u32 = 0x0011_59f8;
 
-/// A readied object of `kind` in slot 0x200 whose quality names spell 0x10 (staff charge 2).
+/// A readied object of `kind` in slot 0x200 whose quality names spell 0x10 (circle 2).
 fn charged_item(s: &mut State, kind: u16) -> i16 {
     s.objects.type_frame[0x200] = kind;
     s.objects.qq[0x200] = 0x10 << 8;
     0x200
 }
 
+/// The cast a hit at the orc 0x10 on (21, 21) leaves: spell 0x10 of the item in slot 0x200 by
+/// actor 1 at the orc.
+const ORC_CAST: attack::ItemCast = attack::ItemCast {
+    attacker: 1,
+    item: 0x200,
+    spell: 0x10,
+    selection: 0x10,
+    target: (21, 21),
+    after: Vec::new(),
+};
+
 #[test]
-fn a_staff_attack_refuses_before_charging_magic() {
+fn a_spellbook_attack_pays_its_circle_and_leaves_its_cast() {
+    // 0x124232 (asm 0x12461c..0x124676): the circle, quality / 16 + 1, comes off the magic
+    // before the cast, which the caller runs once the hit has returned.
     let mut s = world();
     orc(&mut s, 0x10, 21, 21);
     link_placed_objects(&mut s);
     s.actors.attrs.magic[1] = 10;
     s.actors.attrs.level[1] = 5;
-    let staff = charged_item(&mut s, 0x39);
+    let book = charged_item(&mut s, 0x39);
     s.ui.input.selection = 0x10;
     let leader = s.actors.party.leader_index;
-    assert_eq!(attack::hit(&mut s, 1, 21, 21, staff), 0);
-    assert_eq!(
-        s.actors.attrs.magic[1], 10,
-        "no magic paid for a cast not run"
-    );
-    assert!(said(&s).contains(&CAST_REFUSED), "the refusal is shown");
+    assert_eq!(attack::hit(&mut s, 1, 21, 21, book), 0);
+    assert_eq!(s.actors.attrs.magic[1], 8, "the charge, once");
+    assert_eq!(s.combat.item_cast, Some(ORC_CAST));
+    assert!(!said(&s).contains(&CAST_REFUSED), "no refusal");
     assert_eq!(s.actors.party.leader_index, leader);
     assert_eq!(s.actors.attrs.hp[0x10], 20, "the target is untouched");
 }
 
 #[test]
-fn a_wand_attack_refuses_visibly() {
+fn a_spellbook_short_of_its_circle_leaves_no_cast() {
     let mut s = world();
     orc(&mut s, 0x10, 21, 21);
     link_placed_objects(&mut s);
-    let wand = charged_item(&mut s, 0x150);
+    s.actors.attrs.magic[1] = 1;
+    s.actors.attrs.level[1] = 5;
+    let book = charged_item(&mut s, 0x39);
+    s.ui.input.selection = 0x10;
+    assert_eq!(attack::hit(&mut s, 1, 21, 21, book), 0);
+    assert_eq!(s.actors.attrs.magic[1], 1, "nothing taken");
+    assert_eq!(s.combat.item_cast, None);
+}
+
+#[test]
+fn a_spell_object_attack_leaves_its_cast_and_pays_nothing() {
+    let mut s = world();
+    orc(&mut s, 0x10, 21, 21);
+    link_placed_objects(&mut s);
+    s.actors.attrs.magic[1] = 10;
+    let spell = charged_item(&mut s, 0x150);
     s.ui.input.selection = 0x10;
     let leader = s.actors.party.leader_index;
-    assert_eq!(attack::hit(&mut s, 1, 21, 21, wand), 0);
-    assert!(said(&s).contains(&CAST_REFUSED), "the refusal is shown");
+    assert_eq!(attack::hit(&mut s, 1, 21, 21, spell), 0);
+    assert_eq!(s.actors.attrs.magic[1], 10, "a spell object pays nothing");
+    assert_eq!(s.combat.item_cast, Some(ORC_CAST));
+    assert!(!said(&s).contains(&CAST_REFUSED), "no refusal");
     assert_eq!(s.actors.party.leader_index, leader);
     assert_eq!(s.actors.attrs.hp[0x10], 20, "the target is untouched");
+}
+
+#[test]
+fn a_hit_on_party_slot_16_marks_the_panel_showing_member_16() {
+    // 0x1231be marks the stats panel of the member it shows (A4+0x47ec[member]); Pickpocket cast
+    // from a spellbook leaves the panel on member 16, party slot 16 (A4+0x47fc), the caster.
+    let mut s = world();
+    orc(&mut s, 0x10, 21, 21);
+    s.actors.attrs.status[0x10] = 0xc0;
+    s.actors.party.slot16 = 0x10;
+    s.ui.panel.mode = 0x90;
+    s.ui.panel.member = 16;
+    s.ui.panel.dirty = false;
+    damage::hurt(&mut s, 0x10, 1);
+    assert_eq!(s.actors.attrs.hp[0x10], 19);
+    assert!(s.ui.panel.dirty, "the panel of member 16 redrawn");
 }
 
 /// Hit points, status and worktype of actor `a`.

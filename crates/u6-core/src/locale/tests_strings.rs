@@ -769,13 +769,9 @@ const LIGHTLY: u32 = crate::image::A4 - 0x773d;
 const BARELY: u32 = crate::image::A4 - 0x7735;
 const WOUNDED: u32 = crate::image::A4 - 0x772e;
 
-/// The strings combat prints as its format, by its sites' lists (a hit's, the refused cast's).
+/// The strings combat prints as its format, by its sites' list (a hit's).
 fn combat_sites() -> Vec<u32> {
-    crate::combat::damage::PRINTED
-        .iter()
-        .chain(crate::combat::seams::PRINTED)
-        .copied()
-        .collect()
+    crate::combat::damage::PRINTED.to_vec()
 }
 
 /// The synthetic text at each of [`combat_sites`] (`Zc` and two digits: the sites lie 6 bytes
@@ -840,10 +836,11 @@ fn combats_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
             "{at:#x} is in a hit's list"
         );
     }
-    // Both lists in full, as the test's own literals (a constant dropped, added twice or moved
+    // The list in full, as the test's own literals (a constant dropped, added twice or moved
     // fails here): the graze, the death line, dragged, dissolves, robbed, poisoned, the critical
     // line, the three degrees, the wounded word, the slime, the vine, broken, the yell, the name
-    // and space and the number line; and the refusal.
+    // and space and the number line. (The refusal 0x1159f8 that combat's seams printed for a
+    // spellbook's cast is gone with the cast, 2026-10-27: magic's not-possible line, its list.)
     let a4 = crate::image::A4;
     let sorted = |list: &[u32]| {
         let mut v = list.to_vec();
@@ -873,14 +870,9 @@ fn combats_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
         ]),
         "a hit's list"
     );
-    assert_eq!(
-        crate::combat::seams::PRINTED,
-        [0x0011_59f8],
-        "the refused cast's list"
-    );
     let cat = Catalogue::from_game(&combat_game());
     let lines = combat_texts();
-    assert_eq!(lines.len(), 18, "a hit's 17, the refused cast's 1");
+    assert_eq!(lines.len(), 17, "a hit's 17");
     for (at, text) in &lines {
         let kind = cat.of(text).map(|e| e.kind);
         if [NAME_SPACE, HP_NUMBER].contains(at) {
@@ -889,7 +881,7 @@ fn combats_lines_are_catalogued_but_its_formats_of_no_word_of_their_own() {
             assert_eq!(kind, Some(Kind::Message), "the line at {at:#x}");
         }
     }
-    assert_eq!(cat.len(), 16, "every line but the two formats");
+    assert_eq!(cat.len(), 15, "every line but the two formats");
 }
 
 /// The wound report (0x12395a) of party member `Zm` (actor 1, level 2: 60 hit points at most)
@@ -990,21 +982,19 @@ fn the_wound_report_prints_the_packs_forms_in_order_and_without_a_pack_the_engli
     assert_eq!(wound_report(Some(ko()), 60), (String::new(), [0, 0]));
 }
 
-/// The two combat lines whose English starts with a newline, the test's own copies of their
-/// addresses (pinned to their sites' lists in the test): the refusal of a staff's or a wand's
-/// cast (`combat::seams`) and the next weapon's prompt (`combat::attack`).
-const CAST_REFUSED: u32 = 0x0011_59f8;
+/// The combat line whose English starts with a newline, the test's own copy of its address
+/// (pinned to its site's list in the test): the next weapon's prompt (`combat::attack`).
 const NEXT_WEAPON: u32 = crate::image::A4 - 0x76ac;
 
-/// A pack of a form for each line of [`after_a_held_newline`]'s `game`, the newline kept.
+/// A pack of a form for the line of [`after_a_held_newline`]'s `game`, the newline kept.
 fn held_ko() -> Pack {
     Pack::new(Language::Korean, "test/1", fingerprint([]), [])
         .unwrap()
-        .with_strings([string("\nZr1", "\n거부"), string("\nZn %s", "\n%s 차례")])
+        .with_strings([string("\nZn %s", "\n%s 차례")])
         .unwrap()
 }
 
-/// In an engine over a synthetic `game` of the two lines (`\nZr1`, `\nZn %s`), with `pack`
+/// In an engine over a synthetic `game` of the line `\nZn %s`, with `pack`
 /// installed over its catalogue (or no pack): `Zp` printed (no newline after it), Attack's
 /// newline held (`combat.swallow`) when `held`, then `line` run and the lines it queued printed:
 /// the scroll's text, the counts, and whether the newline is still held.
@@ -1013,10 +1003,7 @@ fn after_a_held_newline(
     held: bool,
     line: fn(&mut State),
 ) -> (String, [u32; 2], bool) {
-    let game = game_of(&[
-        (CAST_REFUSED, b"\nZr1".to_vec()),
-        (NEXT_WEAPON, b"\nZn %s".to_vec()),
-    ]);
+    let game = game_of(&[(NEXT_WEAPON, b"\nZn %s".to_vec())]);
     let files = Files::new(BTreeMap::from([("game".to_string(), game.clone())]));
     let mut s = State::empty();
     s.ui = crate::main_loop::test_support::test_ui();
@@ -1067,19 +1054,12 @@ fn scroll(s: &State) -> String {
 #[test]
 fn a_line_after_attacks_held_newline_shows_the_packs_form_without_its_newline() {
     use crate::combat::present::Text;
-    assert!(crate::combat::seams::PRINTED.contains(&CAST_REFUSED));
     assert!(crate::combat::attack::PRINTED.contains(&NEXT_WEAPON));
-    let refused: fn(&mut State) = crate::combat::seams::cast_from_item;
     let next: fn(&mut State) = |s| {
         crate::combat::present::say(s, NEXT_WEAPON, vec![Text::Str(b"Zb".to_vec())]);
     };
-    // Attack's newline held: each line is looked up whole, its pack form put without its
+    // Attack's newline held: the line is looked up whole, its pack form put without its
     // newline, and the newline is no longer held.
-    assert_eq!(
-        after_a_held_newline(Some(held_ko()), true, refused),
-        ("Zp거부".to_string(), [1, 0], false),
-        "the refusal"
-    );
     assert_eq!(
         after_a_held_newline(Some(held_ko()), true, next),
         ("ZpZb 차례".to_string(), [1, 0], false),
@@ -1087,17 +1067,13 @@ fn a_line_after_attacks_held_newline_shows_the_packs_form_without_its_newline() 
     );
     // Without a pack the English without its newline, as before.
     assert_eq!(
-        after_a_held_newline(None, true, refused),
-        ("ZpZr1".to_string(), [0, 0], false)
-    );
-    assert_eq!(
         after_a_held_newline(None, true, next),
         ("ZpZn Zb".to_string(), [0, 0], false)
     );
     // No newline held: the pack's form with its newline.
     assert_eq!(
-        after_a_held_newline(Some(held_ko()), false, refused),
-        ("Zp\n거부".to_string(), [1, 0], false)
+        after_a_held_newline(Some(held_ko()), false, next),
+        ("Zp\nZb 차례".to_string(), [1, 0], false)
     );
 }
 

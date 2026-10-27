@@ -228,8 +228,8 @@ pub fn owner(s: &mut State, obj: i16) -> i16 {
 
 /// Original: 0x124e74 (combat: the weapon `actor` attacks `target` with)
 ///
-/// A readied staff or wand (0x39, 0x150) is used 1 time in 4 when no A4-0x7b65 effect runs and
-/// `random(0, its charge)` is below 16. Otherwise the readied object with the most damage
+/// A readied spellbook or spell object (0x39, 0x150) is used 1 time in 4 when no A4-0x7b65 effect
+/// runs and `random(0, its quality)` is below 16. Otherwise the readied object with the most damage
 /// whose range reaches the target; the actor itself (bare hands) when none does.
 pub fn pick_weapon(s: &mut State, actor: i16, target: i16) -> i16 {
     let mut best = actor;

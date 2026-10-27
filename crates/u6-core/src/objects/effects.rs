@@ -28,7 +28,7 @@ pub fn actor_frame(kind: u16, n: i16) -> i16 {
 pub fn party_member(s: &State, i: usize) -> u8 {
     let p = &s.actors.party;
     let i = if p.leader_index == p.size { 0 } else { i };
-    p.members.get(i).copied().unwrap_or(0)
+    crate::actors::party::roster_byte(s, i)
 }
 
 /// Original: 0x1288ee (objects: x of `slot`, of slot 0 while the leader index equals the party

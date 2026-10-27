@@ -160,7 +160,7 @@ pub(crate) fn dist(a: i16, b: i16) -> i16 {
 
 /// Actor of party member `i` (A4+0x47ec, unchecked index as the original reads it).
 pub(crate) fn member(s: &State, i: usize) -> u8 {
-    s.actors.party.members.get(i).copied().unwrap_or(0)
+    crate::actors::party::roster_byte(s, i)
 }
 
 /// The actor of the leader slot (A4+0x47ec + A4-0x7b7a).

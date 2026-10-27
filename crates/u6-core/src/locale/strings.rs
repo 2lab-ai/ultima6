@@ -9,10 +9,10 @@
 //! list, each on a wrapping line: no budget ([`crate::usecmd::PRINTED`])), Rest's
 //! ([`crate::actors::rest::PRINTED`]), Attack's ([`crate::combat::attack::PRINTED`]), combat's
 //! other lines (2026-10-24: a hit's graze, death line, specials and wound report
-//! ([`crate::combat::damage::PRINTED`]), and the refusal of a staff's or a wand's cast
-//! ([`crate::combat::seams::PRINTED`])), the inventory's Ready and Unready lines (2026-10-24: the
-//! Ready line, a torch's, the three refusals, the Unready line and a burned-out torch's
-//! ([`crate::inventory::PRINTED`]), and the locked chest's line of a click in the inventory
+//! ([`crate::combat::damage::PRINTED`]); 2026-10-27: the charm and paralysis reports after a
+//! spellbook's or spell object's cast are in Attack's), the inventory's Ready and Unready lines
+//! (2026-10-24: the Ready line, a torch's, the three refusals, the Unready line and a burned-out
+//! torch's ([`crate::inventory::PRINTED`]), and the locked chest's line of a click in the inventory
 //! panel ([`crate::ui::click::PRINTED`])), magic's lines (2026-10-24: Cast's and the books'
 //! refusals, the result formats, every spell's own lines and prompts and the typed spell's
 //! not-in-book line ([`crate::magic::PRINTED`])), the lines the actors' and objects' own code
@@ -47,16 +47,15 @@
 //! their own. Every other string of the executable is not catalogued: the spells' incantation
 //! syllables (the game's magic words, which stay English), object names and articles. It is
 //! substituted only where its bytes are a catalogued string's, as the lookup is by content: a
-//! string two sites print is catalogued once (magic's not-possible line is the string of the
-//! staff's refusal, the one address 0x1159f8 in both [`crate::combat::seams::PRINTED`] and
-//! [`crate::magic::PRINTED`]); a direction name, read through [`super::shown`] wherever it is
-//! shown (the spells', Move's, Dig's and the telescope's lines, a scout's warning), follows the
-//! pack everywhere. A string shorter than [`MIN_BYTES`], or with no word of its own (`%s\n`, a
-//! name and a space), is not catalogued either; but (2026-10-21) a label read for display
-//! through [`super::shown`] (a pointer table's, or a panel label at its own address,
-//! [`crate::ui::tables::SHOWN_AT`]) is catalogued from 1 byte (a wind's name is 2, a weight
-//! label 2). The conversation's words keep the minimum: its display reads them as the print
-//! hooks do.
+//! string two sites print is catalogued once (a torch's burned-out line, the one address
+//! A4-0x756f in both [`crate::inventory::PRINTED`] and [`crate::magic::PRINTED`]); a direction
+//! name, read through [`super::shown`] wherever it is shown (the spells', Move's, Dig's and the
+//! telescope's lines, a scout's warning), follows the pack everywhere. A string shorter than
+//! [`MIN_BYTES`], or with no word of its own (`%s\n`, a name and a space), is not catalogued
+//! either; but (2026-10-21) a label read for display through [`super::shown`] (a pointer table's,
+//! or a panel label at its own address, [`crate::ui::tables::SHOWN_AT`]) is catalogued from 1 byte
+//! (a wind's name is 2, a weight label 2). The conversation's words keep the minimum: its display
+//! reads them as the print hooks do.
 //!
 //! **Lookup.** By content: [`hash64`] of the English bytes, only where game code prints them
 //! (`printf`'s format, `puts`, `put_raw_str`; [`super::exe_string`], [`Catalogue::of`]) or reads
@@ -398,7 +397,6 @@ impl Catalogue {
             .chain(crate::actors::rest::PRINTED)
             .chain(crate::combat::attack::PRINTED)
             .chain(crate::combat::damage::PRINTED)
-            .chain(crate::combat::seams::PRINTED)
             .chain(crate::inventory::PRINTED)
             .chain(crate::ui::click::PRINTED)
             .chain(crate::magic::PRINTED.iter().flat_map(|s| s.iter()))

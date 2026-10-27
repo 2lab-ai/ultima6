@@ -77,11 +77,8 @@ pub fn play_area_song(s: &mut State) {
         },
         _ => 9,
     };
-    let kind = s
-        .actors
-        .party
-        .leader()
-        .map_or(0, |id| s.objects.obj_type(id));
+    let leader = crate::actors::party::leader_actor(s);
+    let kind = s.objects.obj_type(crate::objects::ObjectId(leader));
     if TRAVEL_TYPES.contains(&kind) {
         song = 6;
     }

@@ -44,15 +44,25 @@ pub enum StepResult {
     Mismatch,
 }
 
+/// Port-only: party roster byte `i` as the original's unchecked `A4+0x47ec + i` reads it: the
+/// 16 members and party slot 16 ([`crate::actors::Party::slot`]: A4+0x47fc, the attacker while
+/// a spellbook's or spell object's cast runs with the leader index 16, 0x124232), then the
+/// A4+0x47fd array (`unknown_1af1`; 0x1095bc sets the leader index to 0xff, which reads
+/// `unknown_1af1[0xee]`); 0 past that array.
+pub(crate) fn roster_byte(s: &State, i: usize) -> u8 {
+    s.actors.party.slot(i).unwrap_or_else(|| {
+        let k = i - super::PARTY_SLOTS - 1;
+        s.actors.attrs.unknown_1af1.get(k).copied().unwrap_or(0)
+    })
+}
+
+/// Port-only: the actor at the leader index (A4+0x47ec[A4-0x7b7a]), [`roster_byte`].
+pub(crate) fn leader_actor(s: &State) -> u16 {
+    u16::from(roster_byte(s, usize::from(s.actors.party.leader_index)))
+}
+
 fn leader(s: &State) -> u16 {
-    u16::from(
-        s.actors
-            .party
-            .members
-            .get(usize::from(s.actors.party.leader_index))
-            .copied()
-            .unwrap_or(0),
-    )
+    leader_actor(s)
 }
 
 /// Original: 0x11c76e (actors: is (x, y) beside one of the first `rank` actors of the follow

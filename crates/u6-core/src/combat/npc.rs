@@ -48,8 +48,45 @@ fn set_mp(s: &mut State, a: i16, v: u8) {
     s.actors.movement_points[a as usize] = v;
 }
 
+/// Port: what a worktype does after a hit that left a spellbook's or spell object's cast for the
+/// NPC turn to run, in order. The original casts inside the hit (0x124232), so these come after
+/// the cast; [`super::attack::cast_item`] runs them then ([`after_cast`]). Every worktype's code
+/// after the hit is one of them: the movement points after it (0x127162 after each hit and
+/// after 0x125254 in 0x1263a2) and 0x126738's tail; 0x1254d6, 0x125938, 0x1259b0, 0x125e26,
+/// 0x126b28, 0x126cc0 and 0x126f58 return after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum After {
+    /// 0x127162: pay `n` movement points.
+    Spend(i16),
+    /// 0x126738's tail ([`retreat_tail`]).
+    RetreatTail,
+}
+
+/// Queues `step` behind the cast `a`'s hit left, if there is one; false when there is none.
+fn deferred(s: &mut State, a: i16, step: After) -> bool {
+    match s.combat.item_cast.as_mut() {
+        Some(c) if c.attacker == a => {
+            c.after.push(step);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A step [`After`] lists, run once the cast it waited for has run.
+pub(crate) fn after_cast(s: &mut State, a: i16, step: After) {
+    match step {
+        After::Spend(n) => walk::spend_mp(s, a as u16, n),
+        After::RetreatTail => retreat_tail(s, a),
+    }
+}
+
+/// 0x127162: `a` pays `n` movement points ([`walk::spend_mp`]), after a pending cast
+/// ([`After::Spend`]).
 fn spend(s: &mut State, a: i16, n: i16) {
-    walk::spend_mp(s, a as u16, n);
+    if !deferred(s, a, After::Spend(n)) {
+        walk::spend_mp(s, a as u16, n);
+    }
 }
 
 fn go(s: &mut State, a: i16, x: i16, y: i16) -> bool {
@@ -596,6 +633,15 @@ pub fn retreat(s: &mut State, actor: i16) {
     } else {
         wander(s, actor as u16);
     }
+    if !deferred(s, actor, After::RetreatTail) {
+        retreat_tail(s, actor);
+    }
+}
+
+/// 0x126738's tail (asm 0x12691a..0x126986), after a pending cast ([`After::RetreatTail`]):
+/// worktype 7 recovers 1 hit point 1 time in 4 and goes back to its combat mode once out of
+/// the critical quarter.
+fn retreat_tail(s: &mut State, actor: i16) {
     if wt(s, actor) == 7 && s.rng.range(0, 3) == 0 {
         let i = actor as usize;
         let max = crate::actors::leaves::max_hp(s, actor as u16) as i16;
