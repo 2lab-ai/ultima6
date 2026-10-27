@@ -1791,17 +1791,31 @@ mod sight_memory_tests {
         );
     }
 
+    /// Spec 18 (the review's u32 minute): the horizon of a remembered cell's minute, `u32::MAX`
+    /// ([`super::cache`]'s `Remembered`), is thousands of game years after the start of the
+    /// user's game: the game's clock never gets there in play (counts only).
+    #[test]
+    fn real_the_minute_horizon_is_thousands_of_game_years_after_the_start() {
+        let Some(files) = files() else { return };
+        let now = crate::gfx::cache::minutes(&start(&files).actors.calendar);
+        let year = 12 * 28 * 24 * 60;
+        let years = (u64::from(u32::MAX) - now) / year;
+        println!("{years} game years from the start to the horizon");
+        assert!(years > 8000, "thousands of game years away");
+    }
+
     /// Spec 18 (the review's merged-record set): a record rewritten before the cell showing it
     /// was last in sight (its version not 0; here a ground record outside the shore merge's,
     /// rewritten by hand and reported as the merge reports it) is kept as a copy: rewritten again
     /// while the cell is out of sight, the cell keeps the look of its last sight. On the user's
-    /// game, the records the animation rewrites in 64 ticks are counted against the shore set.
+    /// game, the records the animation rewrites in 256 ticks (a whole cycle of its frames: the
+    /// counter's low byte, 0x10202e) are counted against the shore set.
     #[test]
     fn real_a_rewritten_record_outside_the_shore_set_keeps_its_look() {
         let Some(files) = files() else { return };
         let start = start(&files);
         let mut ticked = start.clone();
-        for _ in 0..64 {
+        for _ in 0..256 {
             crate::gfx::anim::anim_tick(&mut ticked);
         }
         let set = merged(&ticked);
@@ -1811,7 +1825,7 @@ mod sight_memory_tests {
             .filter(|&r| !set.contains(&(r as u16)))
             .count();
         println!(
-            "64 ticks: {} records rewritten, {outside} outside the shore set",
+            "256 ticks: {} records rewritten, {outside} outside the shore set",
             rewritten.count()
         );
         assert_eq!(outside, 0, "the animation rewrites only shore records");
@@ -2436,8 +2450,10 @@ mod sight_memory_tests {
     /// the walk is not stopped by a fight. Twice: without a
     /// light, then with one burning (the light spell's timer, timer 0, kept up: at night the
     /// clock's light level is 4, not 0). Per game hour the cells remembered; the minute the old
-    /// bound 131 072 was passed; at the end the cells, those with more than one layer and the
-    /// heap bytes. Five days fit: fewer cells than [`MAX_CELLS`], so the cap forgot none.
+    /// bound 131 072 was passed; at the end the cells, those with more than one layer, the most
+    /// held after a step, the walk's geometric bound (a step shows at most a new row of
+    /// [`VIEW_W`] cells, a teleport a new view) and the heap bytes. Five days fit: the cap forgot
+    /// no cell over the whole run.
     #[cfg(feature = "wide")]
     #[test]
     #[ignore = "a cost receipt, run alone"]
@@ -2501,7 +2517,7 @@ mod sight_memory_tests {
             ];
             let minute = |e: &Engine| minutes(&e.state().actors.calendar);
             let m0 = minute(&e);
-            let (mut hours, mut steps, mut passed) = (Vec::new(), 0usize, None);
+            let (mut hours, mut steps, mut passed, mut most) = (Vec::new(), 0usize, None, 0);
             while minute(&e) - m0 < 5 * 1440 {
                 let mut ready = 0;
                 for _ in 0..600 {
@@ -2536,6 +2552,7 @@ mod sight_memory_tests {
                     steps += 1;
                 }
                 let (t, n) = (minute(&e) - m0, e.state().gfx.cache.memory.len());
+                most = most.max(n);
                 while hours.len() as u64 <= t / 60 {
                     let lit = e.state().actors.objlist_tail[AMBIENT];
                     hours.push((n, lit));
@@ -2560,16 +2577,22 @@ mod sight_memory_tests {
                 w.teleports,
                 per_hour.join(" ")
             );
+            let bound = VIEW_W * steps + VIEW_W * VIEW_H * w.teleports;
             println!(
-                "light {light}: {} cells after five days, {} with more than one layer, {} heap \
-                 bytes; {:.0} cells per full daylight hour; 131072 passed at minute {passed:?}",
+                "light {light}: {} cells after five days, {} with more than one layer, at most \
+                 {most} held, {} forgotten by the cap, {} teleports, geometric bound {bound}, {} \
+                 heap bytes; {:.0} cells per full daylight hour; 131072 passed at minute \
+                 {passed:?}",
                 m.len(),
                 m.stacked(),
+                m.evicted(),
+                w.teleports,
                 m.heap_bytes(),
                 day.iter().sum::<usize>() as f64 / day.len().max(1) as f64
             );
             assert!(minute(&e) - m0 >= 5 * 1440, "five game days walked");
-            assert!(m.len() < MAX_CELLS, "five days fit");
+            assert_eq!(m.evicted(), 0, "five days fit: the cap forgot no cell");
+            assert!(most < MAX_CELLS, "five days fit: under the cap all along");
         }
     }
 }

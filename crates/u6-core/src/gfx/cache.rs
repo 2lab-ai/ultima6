@@ -193,6 +193,9 @@ pub struct SightMemory {
     swept: Option<u64>,
     /// Scratch: the layers of a cell being remembered.
     scratch: Vec<Layer>,
+    /// The cells the cap forgot so far (the receipts count them).
+    #[cfg(test)]
+    evicted: usize,
 }
 
 impl Default for SightMemory {
@@ -207,14 +210,21 @@ impl Default for SightMemory {
             latest: HashMap::new(),
             swept: None,
             scratch: Vec::new(),
+            #[cfg(test)]
+            evicted: 0,
         }
     }
 }
 
-/// One remembered cell, 16 bytes: the time of its last sight ([`minutes`], at most `u32::MAX`:
-/// the year 8 877 of the calendar), its first layer (the base tile's draw), and whether it has
-/// more ([`SightMemory::stacks`] then holds them all). Most cells have one: of the 169 762 cells
-/// five game days of a walk over the owner's land remember, 876 have more (spec 18, Cost).
+/// One remembered cell, 16 bytes: the time of its last sight ([`minutes`] as a `u32`), its first
+/// layer (the base tile's draw), and whether it has more ([`SightMemory::stacks`] then holds them
+/// all). Most cells have one: of the 169 762 cells five game days of a walk over the owner's
+/// land remember, 876 have more (spec 18, Cost).
+///
+/// The minute's horizon is `u32::MAX`, in the calendar's year 8 876: a sight before it ages as
+/// any ([`age`]); a sight at or past it, and the time then, saturate there, so such a sight stays
+/// at day 0 until load state or the cap forgets it. The game's clock, which starts thousands of
+/// years before it, never gets there in play.
 #[derive(Clone, Copy, Debug)]
 struct Remembered {
     seen: u32,
@@ -238,9 +248,16 @@ fn key_cell(k: u32) -> (u8, u16, u16) {
     )
 }
 
-/// Minute `now` ([`minutes`]) as a cell keeps it: at most `u32::MAX`.
+/// Minute `now` ([`minutes`]) as a cell keeps it: at most `u32::MAX`, the horizon
+/// ([`Remembered`]).
 fn minute32(now: u64) -> u32 {
     u32::try_from(now).unwrap_or(u32::MAX)
+}
+
+/// The fade of a sight at minute `seen` at minute `now` ([`fade_of`]), both as a cell keeps them
+/// ([`minute32`]).
+fn age(seen: u32, now: u64) -> Option<u8> {
+    fade_of(u64::from(seen), u64::from(minute32(now)))
 }
 
 /// A record's pixels and transparency as a remembered layer shows them, and the record they were
@@ -257,14 +274,18 @@ struct Frozen {
 /// compositor's images take it from [`RenderCache::frozen_image`]).
 pub const FROZEN_BASE: u16 = TILE_COUNT as u16;
 
-/// Spec 18: the most cells the remembered sight keeps (the oldest sight is forgotten first):
-/// seven eighths of 2^19, the most a table of 2^19 buckets holds (11 MB of cells of one layer).
-/// Five game days of a walk over unseen land in Wide, a light burning at night, remember fewer
-/// (spec 18, Cost: `receipt_five_days_of_a_wide_walk_fit_the_remembered_cells`).
-pub const MAX_CELLS: usize = 7 << 16;
+/// Spec 18: the most cells the remembered sight holds at any time (the oldest sight is forgotten
+/// first): seven eighths of 2^18, the most a table of 2^18 buckets holds. [`SightMemory::cap`]
+/// acts after a render once a further render's cells ([`BOXES`]) could pass it, so a render
+/// never does. The table may grow once to 2^19 buckets (21 bytes each, 11 MB) and no further: a
+/// cap never shrinks it, and with at most `MAX_CELLS` cells, half of 2^19's load, std's
+/// hashbrown rehashes in place, never grows. Five game days of a walk over unseen land in
+/// Wide, a light burning at night, remember 74 % of it (spec 18, Cost:
+/// `receipt_five_days_of_a_wide_walk_fit_the_remembered_cells`).
+pub const MAX_CELLS: usize = 7 << 15;
 
-/// Spec 18: the most copies of rewritten records it keeps (about 0.5 KiB each, 4 MiB in all; 32
-/// times the 255 the owner's game makes).
+/// Spec 18: the most copies of rewritten records it keeps (about 0.6 KiB each with its index,
+/// 5.39 MB in all; 32 times the 255 the owner's game makes).
 pub const MAX_COPIES: usize = 1 << 13;
 
 /// Spec 18 (the owner's follow-up): whole game days after which a remembered cell is black and
@@ -410,8 +431,7 @@ impl SightMemory {
         }
         let k = cell_key(Self::key(state, at));
         let cell = self.cells.get(&k)?;
-        let now = u64::from(minute32(minutes(&state.actors.calendar)));
-        let fade = fade_of(u64::from(cell.seen), now)?;
+        let fade = age(cell.seen, minutes(&state.actors.calendar))?;
         Some((fade, self.layers_of(k, cell)?))
     }
 
@@ -423,9 +443,15 @@ impl SightMemory {
         }
     }
 
-    /// Remembers cell `k` ([`cell_key`]) as `layers` (at least one), seen at `seen`.
+    /// Remembers cell `k` ([`cell_key`]) as `layers` (at least one: the base tile's), seen at
+    /// `seen`; with none, forgets it.
     fn put(&mut self, k: u32, layers: &[Layer], seen: u32) {
+        debug_assert!(
+            !layers.is_empty(),
+            "a remembered cell has its base tile's layer"
+        );
         let Some(&first) = layers.first() else {
+            self.forget(k);
             return;
         };
         let stacked = layers.len() > 1;
@@ -506,18 +532,16 @@ impl SightMemory {
             return;
         }
         self.swept = Some(now / 60);
-        let now = u64::from(minute32(now));
-        self.cells
-            .retain(|_, c| fade_of(u64::from(c.seen), now).is_some());
+        self.cells.retain(|_, c| age(c.seen, now).is_some());
         self.drop_stacks();
     }
 
-    /// Past [`MAX_CELLS`], forgets the oldest sights down to seven eighths of it (a scan of every
-    /// cell); of the sights of the cutoff's own minute, those of the lowest keys ([`cell_key`]),
-    /// so the cells kept do not hang on the table's order. The copies they named stay in the
-    /// store.
+    /// Once the next render's cells ([`BOXES`], at most that many new) could pass [`MAX_CELLS`],
+    /// forgets the oldest sights down to seven eighths of it (a scan of every cell); of the
+    /// sights of the cutoff's own minute, those of the lowest keys ([`cell_key`]), so the cells
+    /// kept do not hang on the table's order. The copies they named stay in the store.
     fn cap(&mut self) {
-        if self.cells.len() <= MAX_CELLS {
+        if self.cells.len() + BOXES <= MAX_CELLS {
             return;
         }
         let target = MAX_CELLS - MAX_CELLS / 8;
@@ -533,6 +557,10 @@ impl SightMemory {
         tied.sort_unstable();
         for k in tied.into_iter().take(over) {
             self.cells.remove(&k);
+        }
+        #[cfg(test)]
+        {
+            self.evicted += seen.len() - self.cells.len();
         }
         self.drop_stacks();
     }
@@ -691,6 +719,22 @@ impl SightMemory {
     #[cfg(test)]
     pub(super) fn stacked(&self) -> usize {
         self.stacks.len()
+    }
+
+    /// The cells the cap forgot so far (the receipts count them).
+    #[cfg(test)]
+    pub(super) fn evicted(&self) -> usize {
+        self.evicted
+    }
+
+    /// The buckets of the cells' table: a power of two, its capacity at most seven eighths of it
+    /// (std's hashbrown; the bound test prints it).
+    #[cfg(test)]
+    pub(super) fn cell_buckets(&self) -> usize {
+        match self.cells.capacity() {
+            0 => 0,
+            n => (n * 8 / 7).next_power_of_two(),
+        }
     }
 
     /// The slot of the copy of `record`'s pixels now, as a remembered layer takes it (the
@@ -1081,8 +1125,8 @@ mod sight_tests {
     use u6_testkit::Quiet;
 
     use super::{
-        FORGET_DAYS, Frozen, Layer, MAX_CELLS, MAX_COPIES, SightMemory, cell_key, content_hash,
-        fade_of, keeps,
+        BOXES, FORGET_DAYS, Frozen, Layer, MAX_CELLS, MAX_COPIES, SightMemory, age, cell_key,
+        content_hash, fade_of, keeps, minute32, minutes,
     };
     use crate::gfx::GfxState;
 
@@ -1190,30 +1234,104 @@ mod sight_tests {
         assert_eq!(m.freeze(&g, 5), Some(a), "taken again: the same slot");
     }
 
-    /// Spec 18 (the compact cells): a cell of one layer keeps it in its entry; of several, all of
-    /// them in its stack; seen again with one, its stack goes; forgotten by the sweep (or the
-    /// cap), its stack with it.
+    /// Spec 18 (the compact cells, the review's lifecycle): one cell, `(0, 2, 1)`, through every
+    /// path. Of one layer it keeps it in its entry; seen again with several (1 to many) it holds
+    /// them all in its stack; seen again with one, the stack goes; with several again, evicted by
+    /// the cap as the oldest sight, it goes with its stack; with several again, forgotten by
+    /// [`SightMemory::forget`] (a full copy store), the same; with several again, forgotten by
+    /// the sweep, the same. Another cell of one layer is never stacked.
     #[test]
-    fn a_cell_of_several_layers_keeps_them_all() {
+    fn one_cell_through_one_and_many_layers_and_every_way_out() {
         let l = |record| Layer {
             record,
             masktype: 0,
             frame: 0,
             frozen: None,
         };
+        let cell = (0, 2, 1);
         let mut m = SightMemory::default();
         m.remember((0, 1, 1), vec![l(1)], 0);
-        m.remember((0, 2, 1), vec![l(1), l(2), l(3)], 0);
-        assert_eq!(m.stacked(), 1, "one cell of several layers");
-        assert_eq!(m.at(2, 1), Some(&[l(1), l(2), l(3)][..]), "all its layers");
-        assert_eq!(m.at(1, 1), Some(&[l(1)][..]), "the cell of one");
-        m.remember((0, 2, 1), vec![l(4)], 10);
-        assert_eq!(m.stacked(), 0, "seen again with one layer: no stack");
-        assert_eq!(m.at(2, 1), Some(&[l(4)][..]));
-        m.remember((0, 3, 1), vec![l(1), l(2)], 0);
-        m.sweep(FORGET_DAYS * 1440);
-        assert!(!m.holds_on(0, 3, 1), "five days old: forgotten");
-        assert_eq!(m.stacked(), 0, "its stack with it");
+        m.remember(cell, vec![l(1)], 0);
+        assert_eq!(m.stacked(), 0, "cells of one layer: no stack");
+        m.remember(cell, vec![l(1), l(2), l(3)], 1);
+        assert_eq!(
+            m.at(2, 1),
+            Some(&[l(1), l(2), l(3)][..]),
+            "1 to many: all its layers"
+        );
+        assert!(m.stacks.contains_key(&cell_key(cell)), "in the side table");
+        m.remember(cell, vec![l(4)], 2);
+        assert_eq!(m.at(2, 1), Some(&[l(4)][..]), "many to 1: the one");
+        assert_eq!(m.stacked(), 0, "many to 1: out of the side table");
+        m.remember(cell, vec![l(5), l(6)], 3);
+        m.remember((0, 1, 1), vec![l(1)], 10);
+        m.fill_synthetic(MAX_CELLS, 1, 0, 7, 10);
+        m.cap();
+        assert!(!m.holds_on(0, 2, 1), "the cap: the oldest sight, evicted");
+        assert!(
+            m.at(2, 1).is_none() && m.stacked() == 0,
+            "the cap: its stack with it"
+        );
+        let mut m = SightMemory::default();
+        m.remember(cell, vec![l(5), l(6)], 3);
+        m.forget(cell_key(cell));
+        assert!(!m.holds_on(0, 2, 1), "forget: gone");
+        assert!(m.stacks.is_empty(), "forget: its stack with it");
+        m.remember(cell, vec![l(5), l(6)], 3);
+        m.sweep(3 + FORGET_DAYS * 1440);
+        assert!(!m.holds_on(0, 2, 1), "the sweep: five days old, gone");
+        assert!(m.stacks.is_empty(), "the sweep: its stack with it");
+    }
+
+    /// Spec 18 (the review's u32 minute): the horizon of a cell's minute, `u32::MAX`, falls in the
+    /// calendar's year 8 876. A sight five days before it ages through days 0..4 (a minute short
+    /// of each next day still the day before) and is forgotten on day 5 as any. A sight at or past
+    /// the horizon saturates there with the time, so it stays at day 0: the documented limit.
+    #[test]
+    fn a_sight_before_the_minute_horizon_ages_through_day_5() {
+        use crate::actors::Calendar;
+        let horizon = u64::from(u32::MAX);
+        let year = |year| Calendar {
+            minute: 0,
+            hour: 0,
+            day: 1,
+            month: 1,
+            year,
+        };
+        assert!(
+            minutes(&year(8876)) < horizon,
+            "the year 8 876 starts before it"
+        );
+        assert!(
+            minutes(&year(8877)) > horizon,
+            "the year 8 877 starts past it"
+        );
+        let seen = horizon - FORGET_DAYS * 1440;
+        let mut m = SightMemory::default();
+        let ground = Layer {
+            record: 1,
+            masktype: 0,
+            frame: 0,
+            frozen: None,
+        };
+        m.remember((0, 1, 1), vec![ground], seen);
+        let kept = m.cells[&cell_key((0, 1, 1))].seen;
+        assert_eq!(u64::from(kept), seen, "kept exactly");
+        for d in 0..FORGET_DAYS {
+            let day = seen + d * 1440;
+            assert_eq!(age(kept, day), Some(d as u8), "day {d}");
+            assert_eq!(
+                age(kept, day + 1439),
+                Some(d as u8),
+                "day {d}, a minute short"
+            );
+        }
+        assert_eq!(age(kept, horizon), None, "day 5: none");
+        m.sweep(horizon);
+        assert!(!m.holds_on(0, 1, 1), "day 5: forgotten");
+        let past = minute32(horizon + 10);
+        assert_eq!(past, u32::MAX, "past the horizon: saturated");
+        assert_eq!(age(past, horizon + 10 * 1440), Some(0), "past it: no age");
     }
 
     /// Spec 18 (the review's tie-break): two memories of the same cells, all seen in one minute
@@ -1311,19 +1429,50 @@ mod sight_tests {
         );
     }
 
-    /// Spec 18's bounds as heap bytes ([`SightMemory::heap_bytes`], this build's layouts):
-    /// [`MAX_CELLS`] cells of one layer each (a table of 2^19 buckets of 21 bytes, 11 MB) and
-    /// [`MAX_COPIES`] copies (about 0.6 KiB each, 4.8 MB) stay under 16 MiB, spec 18's ceiling
-    /// for the remembered sight: a change of either bound or of a cell's size has to move it.
+    /// Spec 18's bounds as heap bytes ([`SightMemory::heap_bytes`], this build's layouts, with
+    /// the table's buckets printed): with [`MAX_COPIES`] copies, renders of a view's worth of new
+    /// cells each ([`BOXES`], one in a hundred with a stack of two layers), each followed by
+    /// [`SightMemory::cap`] as [`SightMemory::layers`] calls it, until twice [`MAX_CELLS`] cells
+    /// were remembered (the cap acting several times). The heap stays under 16 MiB, spec 18's
+    /// ceiling, the cells at most [`MAX_CELLS`] at any time and the table at most 2^19 buckets
+    /// (21 bytes each). A change of either bound or of a cell's size has to move it.
     #[test]
     fn the_bounds_hold_the_heap_under_16_mib() {
+        let l = |record| Layer {
+            record,
+            masktype: 0,
+            frame: 0,
+            frozen: None,
+        };
         let mut m = SightMemory::default();
-        m.fill_synthetic(MAX_CELLS, 0, 0, 1, 10);
-        let cells = m.heap_bytes();
         m.fill_copies(MAX_COPIES, 9);
-        let all = m.heap_bytes();
-        println!("{MAX_CELLS} cells: {cells} heap bytes; with {MAX_COPIES} copies: {all}");
-        assert!(all < 16 << 20, "under 16 MiB");
+        let (mut put, mut most, mut minute) = (0usize, 0, 0);
+        while put < 2 * MAX_CELLS {
+            minute += 1;
+            for _ in 0..BOXES {
+                let (z, i) = ((put >> 20) as u8, put & 0xf_ffff);
+                let k = cell_key((z, (i & 0x3ff) as u16, (i >> 10) as u16));
+                match put % 100 {
+                    0 => m.put(k, &[l(1), l(2)], minute),
+                    _ => m.put(k, &[l(1)], minute),
+                }
+                put += 1;
+                most = most.max(m.len());
+            }
+            m.cap();
+        }
+        let (buckets, bytes) = (m.cell_buckets(), m.heap_bytes());
+        println!(
+            "{put} cells remembered, at most {most} held, {} evicted, {} held now, {} stacked; \
+             {buckets} buckets; {bytes} heap bytes with {} copies",
+            m.evicted(),
+            m.len(),
+            m.stacked(),
+            m.copies()
+        );
+        assert!(bytes < 16 << 20, "under 16 MiB");
+        assert!(most <= MAX_CELLS, "at most MAX_CELLS cells at any time");
+        assert!(buckets <= 1 << 19, "at most 2^19 buckets");
     }
 
     /// The fade's days: whole days of 1440 minutes, none from [`FORGET_DAYS`]; the pattern keeps
