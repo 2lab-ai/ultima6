@@ -57,6 +57,100 @@ pub fn refused_aboard(s: &State, io: &Io, obj: Slot) -> bool {
     !(s.objects.kind(lead) == 0x19e && ty == 0x19c)
 }
 
+/// 0x1305e0 (pseudocode l.15-34): the target the selection stands for, written back to the
+/// selection: its actor (0x1240fa); an actor other than a horse or cow used while not aboard with
+/// a map cell selected, or an object whose tile has flags3 bit 4 (a cover), gives the object
+/// under it (0x12948a); that one's actor again. Returns it (-1 for none) and the type of the
+/// first actor.
+pub(crate) fn resolve(s: &mut State) -> (Slot, u16) {
+    let cur = s.ui.input.selection;
+    let sel = seams::actor_of(s, cur);
+    s.ui.input.selection = sel;
+    let ty = s.objects.kind(sel);
+    let actor_case = sel < ACTOR_SLOTS as Slot
+        && s.ui.input.target.0 != -1
+        && !matches!(ty, 0x1ae | 0x1af | 0x1ac)
+        && !aboard(s);
+    let mut sel = sel;
+    if sel >= 0 && (actor_case || flags3_of(s, sel) & 0x10 != 0) {
+        sel = seams::object_under(s, sel);
+        s.ui.input.selection = sel;
+    }
+    if sel == -1 {
+        return (-1, ty);
+    }
+    let sel = seams::actor_of(s, sel);
+    s.ui.input.selection = sel;
+    (sel, ty)
+}
+
+/// 0x1305e0 (pseudocode l.55-95): `sel` lies on the map more than one tile from the leader on
+/// either axis of the selected cell (the out-of-range message).
+pub(crate) fn out_of_reach(s: &State, sel: Slot) -> bool {
+    if s.objects.place(sel) != 0 {
+        return false;
+    }
+    let lead = Slot::from(leader(s));
+    let (lx, ly) = (s.objects.x(lead) as i16, s.objects.y(lead) as i16);
+    let (tx, ty) = s.ui.input.target;
+    dist(tx, lx) > 1 || dist(ty, ly) > 1
+}
+
+/// 0x1305e0 (pseudocode l.96-107): `sel` is a door with an object on top that is neither a door
+/// nor a cover, or a secret door (0x14e) that is not on top (the not-now line 0x12cee2).
+pub(crate) fn not_now(s: &mut State, sel: Slot) -> bool {
+    let ty = s.objects.kind(sel);
+    let z = u16::from(s.map.centre.z);
+    let (x, y) = (s.objects.x(sel), s.objects.y(sel));
+    let top = super::first_at(s, x, y, z);
+    let top_ty = s.objects.kind(top);
+    let door = seams::is_door(s, ty) && !seams::is_door(s, top_ty) && flags3_of(s, top) & 0x10 == 0;
+    door || (ty == 0x14e && top_ty != 0x14e)
+}
+
+/// 0x1305e0 (pseudocode l.108-113): `sel` is readied (status 0x18) while the panel shows another
+/// member than the leader, and it is not a torch (the in-hand line 0x12cfa8).
+pub(crate) fn in_other_hand(s: &State, sel: Slot) -> bool {
+    let other = i16::from(s.actors.party.leader_index) != s.ui.panel.member;
+    other && s.objects.place(sel) == READIED && s.objects.kind(sel) != 0x5a
+}
+
+/// What a case of the type switch refuses before it acts (`cases.rs`, 0x13095e..0x130efa).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaseRefusal {
+    /// The not-usable, not-readied or no-effect line of the case.
+    Case,
+    /// The solo-mode line (the ladder).
+    Solo,
+}
+
+/// 0x1305e0's switch (pseudocode l.114 on, `cases.rs`): the refusal a case of type `ty` gives
+/// `obj` of frame `frame` from the state alone, before any draw or prompt: the vortex cube off
+/// the shrine (0x3e, A4-0x7afb set), a wand on the map or not readied (0x4e), an orb on the map
+/// (0x57), a sextant or balloon basket off levels 0 and 5 (0x5d, 0x1a4), a chest carried (0x62),
+/// a shovel or pick not readied (0x67, 0x68), a brazier of frame bit 1 (0xce), a crate of frame
+/// other than 1 (0xba, 0xc0), a vessel carried (0x19c, 0x19e, 0x19f, 0x1a7), a ladder in solo
+/// mode (0x131). The switch keeps its own copy of these tests; the menu's test runs the switch
+/// to hold the two together.
+pub(crate) fn case_refusal(s: &State, obj: Slot, ty: u16, frame: u16) -> Option<CaseRefusal> {
+    let place = s.objects.place(obj);
+    let off_levels = !matches!(s.map.centre.z, 0 | 5);
+    let refused = match ty {
+        0x3e => s.map.flag_7afb != 0,
+        0x4e | 0x67 | 0x68 => place != READIED,
+        0x57 => place == 0,
+        0x5d | 0x1a4 => off_levels,
+        0x62 | 0x19c | 0x19e | 0x19f | 0x1a7 => place != 0,
+        0xce => frame & 2 != 0,
+        0xba | 0xc0 => frame != 1,
+        0x131 => {
+            return (crate::ui::globals::solo_member(&s.actors) != -1).then_some(CaseRefusal::Solo);
+        }
+        _ => false,
+    };
+    refused.then_some(CaseRefusal::Case)
+}
+
 /// What the checks of 0x1305e0 decided before the switch.
 enum Checked {
     /// Refused: the command ends without the end-of-use step.
@@ -97,35 +191,11 @@ pub async fn use_command(state: &RefCell<State>, io: &Io) {
 
 /// 0x1305e0 up to the switch.
 async fn check(ux: Ux<'_>) -> Checked {
-    let first = {
-        let mut s = ux.s();
-        let cur = s.ui.input.selection;
-        let sel = seams::actor_of(&mut s, cur);
-        s.ui.input.selection = sel;
-        let ty = s.objects.kind(sel);
-        let actor_case = sel < ACTOR_SLOTS as Slot
-            && s.ui.input.target.0 != -1
-            && !matches!(ty, 0x1ae | 0x1af | 0x1ac)
-            && !aboard(&s);
-        let mut sel = sel;
-        if sel >= 0 && (actor_case || flags3_of(&s, sel) & 0x10 != 0) {
-            sel = seams::object_under(&mut s, sel);
-            s.ui.input.selection = sel;
-        }
-        (sel, ty)
-    };
-    let (sel, first_ty) = first;
+    let (sel, first_ty) = resolve(&mut ux.s());
     if sel == -1 {
         ux.say(FMT_LINE, MSG_NOTHING).await;
         return Checked::Refused;
     }
-    let sel = {
-        let mut s = ux.s();
-        let cur = s.ui.input.selection;
-        let sel = seams::actor_of(&mut s, cur);
-        s.ui.input.selection = sel;
-        sel
-    };
     if first_ty == 0x1af {
         ux.print(STR_HORSE, &[]).await;
     } else {
@@ -149,24 +219,11 @@ async fn check(ux: Ux<'_>) -> Checked {
     if !in_reach(ux, sel).await {
         return Checked::Refused;
     }
-    let (not_now, in_hand) = {
-        let mut s = ux.s();
-        let z = u16::from(s.map.centre.z);
-        let (x, y) = (s.objects.x(sel), s.objects.y(sel));
-        let top = super::first_at(&mut s, x, y, z);
-        let top_ty = s.objects.kind(top);
-        let door =
-            seams::is_door(&s, ty) && !seams::is_door(&s, top_ty) && flags3_of(&s, top) & 0x10 == 0;
-        let secret = ty == 0x14e && top_ty != 0x14e;
-        let other = i16::from(s.actors.party.leader_index) != s.ui.panel.member;
-        let readied = s.objects.place(sel) == READIED;
-        (door || secret, other && readied && ty != 0x5a)
-    };
-    if not_now {
+    if not_now(&mut ux.s(), sel) {
         ux.print(STR_NOT_NOW, &[]).await;
         return Checked::Refused;
     }
-    if in_hand {
+    if in_other_hand(&ux.s(), sel) {
         ux.print(STR_IN_HAND, &[]).await;
         return Checked::Refused;
     }
@@ -188,10 +245,7 @@ async fn in_reach(ux: Ux<'_>, sel: Slot) -> bool {
             crate::actors::walk::face(&mut s, u16::from(lead), dir as u16);
             crate::map::view::update_view(&mut s);
         }
-        let lead = Slot::from(lead);
-        let (lx, ly) = (s.objects.x(lead) as i16, s.objects.y(lead) as i16);
-        let (tx, ty) = s.ui.input.target;
-        dist(tx, lx) > 1 || dist(ty, ly) > 1
+        out_of_reach(&s, sel)
     };
     if far {
         ux.say(FMT_BANG, MSG_OUT_OF_RANGE).await;

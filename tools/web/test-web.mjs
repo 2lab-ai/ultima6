@@ -1265,6 +1265,145 @@ test('the mouse: a press held on the map walks at the original\'s pace: 100 ms o
   assert.ok(notSooner(click.shown, floor) && notSooner(held.shown, floor), 'no repeat sooner than the original\'s fastest');
 }, { needs: h.haveHfes });
 
+// Spec 17: the frame of the open context menu (Original, S 4), kept outside the repository for
+// the dispatcher to read (the user's game text: the object's name).
+const MENU_FRAME = '/Users/zhugehyuk/Games/ultima6/work/dispatch/r1027-r2/m2-frames/menu.png';
+const USE = 0x88;
+// The game pixel at the middle of view cell (col, row) of the Original map window (11 x 11 from
+// (8, 8)); the leader's is (5, 5).
+const viewCell = (col, row) => [16 + 16 * col, 16 + 16 * row];
+
+// The view cells whose menu offers Use, with whether it can run (an object out of reach: far).
+async function usableCells(page) {
+  const found = [];
+  for (let row = 0; row < 11; row += 1) {
+    for (let col = 0; col < 11; col += 1) {
+      const menu = await h.contextMenuAt(page, ...viewCell(col, row));
+      const use = menu?.sections.flatMap((s) => s.entries).find((e) => e.code === USE);
+      if (use && (use.enabled || use.reason === 'far')) found.push({ col, row, enabled: use.enabled });
+    }
+  }
+  return found;
+}
+
+// Walks the leader by arrows next to the nearest object in view the menu offers Use on, until
+// its Use can run (along the farther axis first, the other when blocked, a pass when both are);
+// returns its view cell.
+async function besideUsable(page) {
+  for (let tries = 0; tries < 40; tries += 1) {
+    await h.waitPrompt(page);
+    const found = await usableCells(page);
+    assert.ok(found.length > 0, 'an object to use in view');
+    const near = found.find((c) => c.enabled);
+    if (near) return near;
+    const far = (c) => Math.max(Math.abs(c.col - 5), Math.abs(c.row - 5));
+    const goal = found.sort((a, b) => far(a) - far(b))[0];
+    const [dx, dy] = [goal.col - 5, goal.row - 5];
+    const xKey = dx > 0 ? 'ArrowRight' : dx < 0 ? 'ArrowLeft' : null;
+    const yKey = dy > 0 ? 'ArrowDown' : dy < 0 ? 'ArrowUp' : null;
+    const keys = (Math.abs(dx) >= Math.abs(dy) ? [xKey, yKey] : [yKey, xKey]).filter(Boolean);
+    let moved = false;
+    for (const key of keys) {
+      const from = (await h.state(page)).leader;
+      await page.keyboard.press(key);
+      await h.waitTaken(page);
+      await h.waitPrompt(page);
+      if ((await h.state(page)).leader !== from) {
+        moved = true;
+        break;
+      }
+    }
+    if (!moved) await h.passTurn(page);
+  }
+  return assert.fail('no object to use reached');
+}
+
+// The RGBA of view cell (col, row) in a frame (`h.frame`).
+function cellPixels(frame, col, row) {
+  const out = [];
+  for (let y = 8 + 16 * row; y < 24 + 16 * row; y += 1) {
+    out.push(...frame.slice((y * 320 + 8 + 16 * col) * 4, (y * 320 + 24 + 16 * col) * 4));
+  }
+  return out.join(',');
+}
+
+// The pictures view cell (col, row) shows over `n` samples three frames apart (an animated
+// object shows several).
+async function cellPictures(page, col, row, n = 8) {
+  const seen = new Set();
+  for (let i = 0; i < n; i += 1) {
+    seen.add(cellPixels(await h.frame(page), col, row));
+    await h.waitFrames(page, 3);
+  }
+  return seen;
+}
+
+test('the context menu (spec 17): a right press at the prompt opens it with the focus, and held and moved over the map it gives the game no press; Escape and a press outside close it and give the game nothing (no key, no turn); on an object beside the leader it shows the object\'s section, and Use chosen there uses it (screenshot)', async (env) => {
+  const { page } = await h.openPage(env); // gated: the glue counts what the game took
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  await h.waitPrompt(page);
+  const menu = page.locator('#context-menu');
+  const buttons = () => page.evaluate(() => globalThis.__buttons.length);
+  const sent = () => page.evaluate(() => globalThis.__sent.length);
+  const leader = async () => (await h.state(page)).leader;
+  const inMenu = () => page.evaluate(() => document.getElementById('context-menu').contains(document.activeElement));
+
+  const [b0, at0] = [await buttons(), await leader()];
+  await h.rightPress(page, 88, 88);
+  for (const [x, y] of [[104, 88], [120, 104], [56, 72], [88, 120]]) {
+    await page.mouse.move(...(await h.screenPoint(page, x, y)), { steps: 3 });
+  }
+  await page.mouse.up({ button: 'right' });
+  await h.waitTicks(page, 20);
+  assert.equal(await buttons(), b0, 'the held right button gave the game no press');
+  assert.equal(await leader(), at0, 'no walk');
+  assert.ok(await menu.isVisible() && await inMenu(), 'open, with the focus');
+  assert.ok(await menu.locator('[role="menuitem"]').count() > 0, 'entries');
+
+  // No turn: a turn at the prompt needs an event the game takes (the loop waits in its key read),
+  // and none reached it: no key, no button; the hero where he was, the prompt still up.
+  const s0 = await sent();
+  await page.keyboard.press('Escape');
+  await menu.waitFor({ state: 'hidden' });
+  await h.waitTicks(page, 30);
+  assert.equal(await sent(), s0, 'Escape gave the game no key');
+  assert.equal(await buttons(), b0, 'nor a button');
+  assert.equal(await leader(), at0, 'the hero where he was');
+  await h.waitPrompt(page);
+  assert.equal((await h.state(page)).focused, 'screen', 'the canvas has the focus again');
+
+  await h.rightPress(page, 88, 88);
+  await page.mouse.up({ button: 'right' });
+  const box = await page.locator('#status').boundingBox();
+  await page.mouse.click(box.x + 4, box.y + 4);
+  await menu.waitFor({ state: 'hidden' });
+  await h.waitTicks(page, 10);
+  assert.equal(await buttons(), b0, 'the press outside gave the game nothing');
+
+  const { col, row } = await besideUsable(page);
+  const shown = await cellPictures(page, col, row);
+  await h.rightPress(page, ...viewCell(col, row));
+  await page.mouse.up({ button: 'right' });
+  const heads = await menu.locator('.head').allTextContents();
+  assert.ok(heads.some((x) => x.length > 0), 'the object\'s section, named');
+  const use = menu.locator(`[role="menuitem"][data-code="${USE}"]`);
+  assert.equal(await use.count(), 1, 'Use offered');
+  assert.equal(await use.getAttribute('aria-disabled'), null, 'and it can run');
+  await mkdir(MENU_FRAME.slice(0, MENU_FRAME.lastIndexOf('/')), { recursive: true });
+  await writeFile(MENU_FRAME, await page.locator('#screen-box').screenshot());
+  const s1 = await sent();
+  await use.click();
+  await menu.waitFor({ state: 'hidden' });
+  await h.waitTaken(page);
+  await h.waitPrompt(page);
+  assert.equal(await sent(), s1, 'no key: the icon and the target, by the mouse');
+  const now = await cellPictures(page, col, row);
+  assert.ok([...now].every((p) => !shown.has(p)), 'the object changed: none of its pictures before');
+}, { needs: h.haveHfes });
+
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);

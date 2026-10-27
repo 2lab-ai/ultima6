@@ -15,15 +15,15 @@
 //! gatehouse give its key on Look), `seams` (calls into modules not ported yet).
 
 mod data;
-mod drop;
+pub(crate) mod drop;
 mod eggs;
 mod gatehouse;
-mod get;
+pub(crate) mod get;
 mod horse;
 mod keys;
 mod light;
 mod look;
-mod push;
+pub(crate) mod push;
 mod seams;
 mod text;
 mod world;

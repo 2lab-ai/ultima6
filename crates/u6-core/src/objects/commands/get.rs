@@ -84,6 +84,85 @@ fn panel_actor(s: &State) -> Slot {
     Slot::from(s.actors.party.members[m])
 }
 
+/// 0x12a7a4 (pseudocode l.20-28): the selection becomes the object under it (0x12948a) when it
+/// is an actor or nothing with a map cell selected, or an object whose tile has flags3 bit 4 (a
+/// cover).
+pub(crate) fn resolve(s: &mut State) {
+    let sel = s.ui.input.selection;
+    let cover = |s: &State, o: Slot| {
+        let tile = tile_of(&s.tables, s.objects.tf(o));
+        s.tables
+            .tileflags
+            .flags3
+            .get(usize::from(tile))
+            .is_some_and(|f| f & 0x10 != 0)
+    };
+    if (sel <= 0xff && s.ui.input.target.0 != -1) || cover(s, sel) {
+        let under = world::object_under(s, sel);
+        s.ui.input.selection = under;
+    }
+}
+
+/// 0x12a7a4 (pseudocode l.45-60): the selected cell is more than one tile from `actor` on
+/// either axis (the out-of-range message).
+pub(crate) fn out_of_reach(s: &State, actor: Slot) -> bool {
+    let (ax, ay, (tx, ty)) = (s.objects.x(actor), s.objects.y(actor), s.ui.input.target);
+    let far = |t: i16, a: u16| t.wrapping_sub(a as i16).wrapping_abs() > 1;
+    far(tx, ax) || far(ty, ay)
+}
+
+/// 0x12a7a4 (pseudocode l.62-70): the tile of `sel` has flags1 bit 3 (it harms the taker).
+pub(crate) fn hazard(s: &State, sel: Slot) -> bool {
+    let tile = tile_of(&s.tables, s.objects.tf(sel));
+    s.tables
+        .tileflags
+        .flags1
+        .get(usize::from(tile))
+        .is_some_and(|f| f & 0x08 != 0)
+}
+
+/// 0x12a7a4 (pseudocode l.72-82): the weight of `sel` with its contents (0x1110f6 + 0x1111ca),
+/// after `actor`'s sums are redone (0x11121e) unless the leader's inventory panel shows.
+pub(crate) fn weigh(s: &mut State, actor: Slot, sel: Slot) -> i16 {
+    let wt = seams::weight(s, sel).wrapping_add(seams::contents_weight(s, sel));
+    if !shows_leader_inventory(s) {
+        seams::sum_inventory(s, actor);
+    }
+    wt
+}
+
+/// 0x12a7a4 (pseudocode l.84-86): `sel` of weight `wt` cannot be taken: weightless (unless a
+/// type weighed in tenths, 0x1110c8), 10000 or more, an actor or a dragon part.
+pub(crate) fn cannot_take(s: &State, sel: Slot, wt: i16) -> bool {
+    let kind = s.objects.kind(sel);
+    let weightless = wt == 0 && !seams::weighed_in_tenths(s, kind);
+    weightless || wt >= 10000 || sel < 0x100 || kind == DRAGON
+}
+
+/// 0x12a7a4 (pseudocode l.88-90): weight `wt` with what the sums say `actor` holds is above 20 ×
+/// its strength (the too-heavy line).
+pub(crate) fn too_heavy(s: &State, actor: Slot, wt: i16) -> bool {
+    let strength = i16::from(s.actors.attrs.strength[actor as usize]);
+    let (readied, carried) = (s.inventory.equip_weight, s.inventory.carried_weight);
+    wt.wrapping_add(carried).wrapping_add(readied) > strength.wrapping_mul(20)
+}
+
+/// 0x12a7a4 (pseudocode l.96-108): `sel` is a lit torch (0x5a frame 1), the leader's panel is
+/// shown and both its hands hold something (the no-free-hand line).
+pub(crate) fn no_free_hand(s: &State, sel: Slot) -> bool {
+    s.objects.kind(sel) == TORCH
+        && s.objects.tf(sel) >> 10 == 1
+        && i16::from(s.actors.party.leader_index) == s.ui.panel.member
+        && s.inventory.equip(2) != 0
+        && s.inventory.equip(5) != 0
+}
+
+/// 0x12a7a4 (pseudocode l.151-168): taking `sel` is a theft: it is not the party's (0x128aa4)
+/// and the party is on the surface (level 0): karma lost, a witness cries thief.
+pub(crate) fn theft(s: &State, sel: Slot) -> bool {
+    !takeable(s, sel) && s.map.centre.z == 0
+}
+
 /// Original: 0x12a7a4 (objects: the Get command on the confirmed target)
 ///
 /// The leader takes the selected object; past a cover (flags3 bit 4), or for an actor's tile,
@@ -100,22 +179,7 @@ fn panel_actor(s: &State) -> Slot {
 /// stealing line (0x1285f0).
 pub async fn get(state: &RefCell<State>, io: &Io) {
     let actor = leader(&state.borrow());
-    {
-        let mut s = state.borrow_mut();
-        let sel = s.ui.input.selection;
-        let cover = |s: &State, o: Slot| {
-            let tile = tile_of(&s.tables, s.objects.tf(o));
-            s.tables
-                .tileflags
-                .flags3
-                .get(usize::from(tile))
-                .is_some_and(|f| f & 0x10 != 0)
-        };
-        if (sel <= 0xff && s.ui.input.target.0 != -1) || cover(&s, sel) {
-            let under = world::object_under(&mut s, sel);
-            s.ui.input.selection = under;
-        }
-    }
+    resolve(&mut state.borrow_mut());
     let sel = state.borrow().ui.input.selection;
     if sel == -1 || state.borrow().objects.place(sel) != 0 {
         let msg = message(&state.borrow(), P_NOTHING);
@@ -135,25 +199,13 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
     let name = shown_name(&state.borrow(), sel).into_bytes();
     print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
-    let (ax, ay, (tx, ty)) = {
-        let s = state.borrow();
-        (s.objects.x(actor), s.objects.y(actor), s.ui.input.target)
-    };
-    let far = |t: i16, a: u16| t.wrapping_sub(a as i16).wrapping_abs() > 1;
-    if far(tx, ax) || far(ty, ay) {
+    if out_of_reach(&state.borrow(), actor) {
         let msg = message(&state.borrow(), P_OUT_OF_RANGE);
         print_at(state, io, S_BANG_LINE, &[Arg::Str(&msg)]).await;
         return;
     }
     let tile = tile_of(&state.borrow().tables, state.borrow().objects.tf(sel));
-    let hazard = state
-        .borrow()
-        .tables
-        .tileflags
-        .flags1
-        .get(usize::from(tile))
-        .is_some_and(|f| f & 0x08 != 0);
-    if hazard {
+    if hazard(&state.borrow(), sel) {
         let msg = message(&state.borrow(), P_NOT_POSSIBLE);
         print_at(state, io, S_NL_LINE, &[Arg::Str(&msg)]).await;
         crate::actors::party::tile_effect(&mut state.borrow_mut(), actor as u16, tile);
@@ -170,26 +222,14 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
 /// From the weight test on; false when Get ended at the no-free-hand line (no end-of-command
 /// bookkeeping then).
 async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
-    let (wt, strength, kind) = {
-        let mut s = state.borrow_mut();
-        let wt = seams::weight(&s, sel).wrapping_add(seams::contents_weight(&s, sel));
-        let strength = i16::from(s.actors.attrs.strength[actor as usize]);
-        if !shows_leader_inventory(&s) {
-            seams::sum_inventory(&mut s, actor);
-        }
-        (wt, strength, s.objects.kind(sel))
-    };
-    let weightless = wt == 0 && !seams::weighed_in_tenths(&state.borrow(), kind);
-    if weightless || wt >= 10000 || sel < 0x100 || kind == DRAGON {
+    let wt = weigh(&mut state.borrow_mut(), actor, sel);
+    let kind = state.borrow().objects.kind(sel);
+    if cannot_take(&state.borrow(), sel, wt) {
         let msg = message(&state.borrow(), P_NOT_POSSIBLE);
         print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
         return true;
     }
-    let (readied, carried) = {
-        let inv = &state.borrow().inventory;
-        (inv.equip_weight, inv.carried_weight)
-    };
-    if wt.wrapping_add(carried).wrapping_add(readied) > strength.wrapping_mul(20) {
+    if too_heavy(&state.borrow(), actor, wt) {
         print_at(state, io, S_TOO_HEAVY, &[]).await;
         return true;
     }
@@ -211,14 +251,12 @@ fn store(s: &mut State, actor: Slot, sel: Slot, kind: u16) -> bool {
             remove(s, sel);
         }
     } else if kind == TORCH && frame == 1 {
+        if no_free_hand(s, sel) {
+            return false;
+        }
         if i16::from(s.actors.party.leader_index) == s.ui.panel.member {
-            if s.inventory.equip(2) == 0 {
-                s.inventory.set_equip(2, sel);
-            } else if s.inventory.equip(5) == 0 {
-                s.inventory.set_equip(5, sel);
-            } else {
-                return false;
-            }
+            let hand = if s.inventory.equip(2) == 0 { 2 } else { 5 };
+            s.inventory.set_equip(hand, sel);
         }
         move_into(s, sel, actor, READIED);
     } else {
@@ -241,7 +279,7 @@ fn store(s: &mut State, actor: Slot, sel: Slot, kind: u16) -> bool {
         let a = panel_actor(s);
         seams::inventory_contents(s, a);
     }
-    if !takeable(s, sel) && s.map.centre.z == 0 {
+    if theft(s, sel) {
         mark_takeable(&mut s.objects, sel);
         seams::lose_karma(s, 1);
         let witness = (1..0xe0).any(|a| {

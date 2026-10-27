@@ -59,6 +59,11 @@ pub struct InputState {
     pub target_void: bool,
     /// Original: A4-0x7a56 (refresh the map view while the cursor idles)
     pub idle_refresh: bool,
+    /// Port-only (spec 17): the engine is blocked inside the event wait 0x106bbc
+    /// ([`super::target::wait_event`]): set at its entry, put back as it was on its return (a
+    /// more prompt waits inside an outer wait). A context menu's held target press goes in only
+    /// while it is set ([`super::menu::target_read`]).
+    pub in_wait: bool,
 }
 
 impl InputState {

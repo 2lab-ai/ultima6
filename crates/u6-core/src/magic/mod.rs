@@ -30,7 +30,7 @@
 
 mod area;
 mod book;
-mod cast;
+pub(crate) mod cast;
 mod creatures;
 mod detect;
 mod dispatch;

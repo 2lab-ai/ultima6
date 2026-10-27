@@ -138,6 +138,28 @@ fn reset_pointer(s: &mut State) {
     crate::ui::pointer::update_shape(s);
 }
 
+/// 0x12ae04 (pseudocode l.32-50): the selected cell is more than one tile from the view centre
+/// (A4-0x7b78 / -0x7b76) on either axis (the out-of-range message).
+pub(crate) fn out_of_reach(s: &State) -> bool {
+    let (c, (tx, ty)) = (s.map.centre, s.ui.input.target);
+    let far = |t: i16, c: u16| t.wrapping_sub(c as i16).wrapping_abs() > 1;
+    far(tx, c.x) || far(ty, c.y)
+}
+
+/// 0x12ae04 (pseudocode l.82-85): the type's weight byte (0x13a540) is 0, or it is a dragon part
+/// (0x19b): the not-possible message.
+pub(crate) fn immovable(s: &State, sel: Slot) -> bool {
+    let kind = s.objects.kind(sel);
+    let weight = s.tables.tileflags.weight.get(usize::from(kind)).copied();
+    weight.unwrap_or(0) == 0 || kind == 0x19b
+}
+
+/// 0x12ae04 (pseudocode l.90-92): actor `sel` lies down (frame & 3 = 3, not type 0x153): the
+/// failed message.
+pub(crate) fn lying_down(s: &State, sel: Slot) -> bool {
+    sel < 0x100 && s.objects.tf(sel) >> 10 & 3 == 3 && s.objects.kind(sel) != 0x153
+}
+
 /// Original: 0x12ae04 (objects: the Move command on the confirmed target)
 ///
 /// Nothing selected or the shown container: the nothing message (A4-0x6c58). The name. On the
@@ -164,12 +186,11 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         move_carried(state, io, sel).await;
         return;
     }
-    let (cx, cy, (tx, ty)) = {
+    let (cx, cy) = {
         let s = state.borrow();
-        (s.map.centre.x, s.map.centre.y, s.ui.input.target)
+        (s.map.centre.x, s.map.centre.y)
     };
-    let far = |t: i16, c: u16| t.wrapping_sub(c as i16).wrapping_abs() > 1;
-    if far(tx, cx) || far(ty, cy) {
+    if out_of_reach(&state.borrow()) {
         let msg = message(&state.borrow(), P_OUT_OF_RANGE);
         print_at(state, io, S_BANG_LINE, &[Arg::Str(&msg)]).await;
         return;
@@ -204,21 +225,11 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
     };
     print_at(state, io, S_DIR_LINE, &[Arg::Str(&dir_name)]).await;
     let pusher = leader(&state.borrow());
-    let (wt, kind) = {
+    let wt = {
         let s = state.borrow();
-        let wt = seams::weight(&s, sel).wrapping_add(seams::contents_weight(&s, sel));
-        (wt, s.objects.kind(sel))
+        seams::weight(&s, sel).wrapping_add(seams::contents_weight(&s, sel))
     };
-    let weightless = state
-        .borrow()
-        .tables
-        .tileflags
-        .weight
-        .get(usize::from(kind))
-        .copied()
-        .unwrap_or(0)
-        == 0;
-    if weightless || kind == 0x19b {
+    if immovable(&state.borrow(), sel) {
         let msg = message(&state.borrow(), P_NOT_POSSIBLE);
         print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
         reset_pointer(&mut state.borrow_mut());
@@ -230,7 +241,7 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
             let mut s = state.borrow_mut();
             crate::magic::strength_contest(&mut s, pusher as u16, sel as u16)
                 || sel == pusher
-                || (s.objects.tf(sel) >> 10 & 3 == 3 && kind != 0x153)
+                || lying_down(&s, sel)
         };
         if failed {
             let msg = message(&state.borrow(), P_FAILED);

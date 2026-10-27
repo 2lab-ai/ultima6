@@ -143,6 +143,12 @@ fn amount(s: &State, kind: u16, obj: Slot, n: i16) -> u16 {
     }
 }
 
+/// 0x12a226: nothing selected, an object on the map, or the container the panel shows (the
+/// nothing message).
+pub(crate) fn nothing_to_drop(s: &State, sel: Slot) -> bool {
+    sel == -1 || s.objects.place(sel) == 0 || sel as u16 == s.ui.panel.container
+}
+
 /// Original: 0x12a226 (objects: the Drop command on the confirmed inventory object)
 ///
 /// Nothing selected, an object on the map, or the container the panel shows: the nothing
@@ -157,11 +163,7 @@ fn amount(s: &State, kind: u16, obj: Slot, n: i16) -> u16 {
 /// is a new object).
 pub async fn drop_object(state: &RefCell<State>, io: &Io) {
     let sel = state.borrow().ui.input.selection;
-    let refused = {
-        let s = state.borrow();
-        sel == -1 || s.objects.place(sel) == 0 || sel as u16 == s.ui.panel.container
-    };
-    if refused {
+    if nothing_to_drop(&state.borrow(), sel) {
         let msg = message(&state.borrow(), P_NOTHING);
         print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
         return;

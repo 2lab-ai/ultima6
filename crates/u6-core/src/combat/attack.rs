@@ -151,6 +151,13 @@ pub fn list_weapons(s: &mut State) {
     }
 }
 
+/// 0x124caa (pseudocode l.10-18): the party is aboard (A4-0x7b7a = the party size) a vessel other
+/// than a ship with cannons (0x19c): refused before the target is read.
+pub(crate) fn refused_aboard(s: &State) -> bool {
+    let p = &s.actors.party;
+    p.leader_index == p.size && kind(s, leader(s)) != 0x19c
+}
+
 /// Original: 0x124caa (combat: the Attack command)
 ///
 /// The command word (A4-0x769b); refused aboard ship unless the vessel has cannons (0x19c),
@@ -166,8 +173,7 @@ pub async fn attack(state: &RefCell<State>, io: &Io) {
     let aboard = {
         let mut s = state.borrow_mut();
         say(&mut s, ATTACK_WORD, vec![]);
-        let p = &s.actors.party;
-        let aboard = p.leader_index == p.size && kind(&s, leader(&s)) != 0x19c;
+        let aboard = refused_aboard(&s);
         if aboard {
             say(&mut s, DASH, vec![]);
             say(&mut s, NOT_ABOARD, vec![]);

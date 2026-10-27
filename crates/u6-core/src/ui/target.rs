@@ -76,7 +76,10 @@ const DIRECTION_KEYS: [(u16, i16); 8] = [
 /// ([`pointer_click`]); else a key: commands, directions, the cross-hair, the panel cursor and
 /// the panel keys. The result is non-zero. The inline spell syllable entry and the spellbook
 /// keys are magic's ([`crate::magic::spell_key`], [`crate::magic::book_panel_key`]).
+///
+/// Port-only (spec 17): [`super::InputState::in_wait`] is set while it runs.
 pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
+    let outer = std::mem::replace(&mut state.borrow_mut().ui.input.in_wait, true);
     if state.borrow().ui.input.accept {
         #[cfg(test)]
         crate::converse::disasm::trace::wait_put();
@@ -90,6 +93,7 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
     }
     loop {
         if key != 0 {
+            state.borrow_mut().ui.input.in_wait = outer;
             return key;
         }
         key = pointer_click(state, io).await;

@@ -35,7 +35,7 @@
 
 mod cases;
 pub mod defs;
-mod dispatch;
+pub(crate) mod dispatch;
 mod food;
 mod mech;
 mod misc;

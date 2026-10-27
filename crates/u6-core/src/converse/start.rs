@@ -36,18 +36,12 @@ fn byte(v: &[u8], a: i16) -> u8 {
 /// (talk flag bit 0), else its display name. Then 0x1125b8.
 pub async fn talk(cx: &Cx<'_>, talker: u8, target: i16, print_name: bool) {
     let ty = cx.st(|s| obj_type(s, target));
-    let target = if HORSES.contains(&ty) {
-        cx.st(|s| seams::rider(s, target))
-    } else {
-        target
-    };
-    let special = ty == SHRINE || STATUES.contains(&ty);
-    if !(0..0x100).contains(&target) && !special {
+    let Some(target) = cx.st(|s| talk_target(s, target)) else {
         load_text(cx);
         let m = cx.msg(Msg::Nothing);
         seams::print(cx, &m).await;
         return;
-    }
+    };
     if print_name {
         load_text(cx);
         let name = if ty == SHRINE {
@@ -63,6 +57,27 @@ pub async fn talk(cx: &Cx<'_>, talker: u8, target: i16, print_name: bool) {
         seams::print(cx, &name).await;
     }
     begin(cx, talker, target).await;
+}
+
+/// 0x1127c4 (pseudocode l.11-17): what Talk talks to for `target`: a horse's rider (0x1240fa),
+/// else the target; `None` when that is neither an actor slot (0..0x100) nor a shrine or statue
+/// (the nothing line).
+pub(crate) fn talk_target(s: &mut State, target: i16) -> Option<i16> {
+    let ty = obj_type(s, target);
+    let target = if HORSES.contains(&ty) {
+        seams::rider(s, target)
+    } else {
+        target
+    };
+    let special = ty == SHRINE || STATUES.contains(&ty);
+    ((0..0x100).contains(&target) || special).then_some(target)
+}
+
+/// 0x114afa (pseudocode l.62-66): NPC `npc` of object type `ty` may have a script to load: not
+/// NPC 0, and below 0xe0 unless one of the talking objects. (The script's presence, 0x133e5e, is
+/// the load itself.)
+pub(crate) fn may_have_script(npc: i16, ty: u16) -> bool {
+    npc != 0 && (npc < 0xe0 || TALKING_OBJECTS.contains(&ty))
 }
 
 /// Reads the message table out of `game` on first use (a missing or unknown `game` leaves it
@@ -186,7 +201,7 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
         s.converse.npc
     });
     let ty = cx.st(|s| obj_type(s, target));
-    let loaded = (npc != 0 && (npc < 0xe0 || TALKING_OBJECTS.contains(&ty)))
+    let loaded = may_have_script(npc, ty)
         && cx.st(|s| {
             let files = cx.io.files();
             load_script(s, files, npc, ScriptDst::Main) != 0
@@ -250,8 +265,9 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
     });
 }
 
-/// The refusal message of 0x114afa's checks, or `None`; sets the talker / NPC words.
-fn refusal(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
+/// The refusal message of 0x114afa's checks (pseudocode l.25-54), or `None`; sets the talker /
+/// NPC words.
+pub(crate) fn refusal(s: &mut State, talker: i16, target: i16) -> Option<Msg> {
     s.converse.talker = talker;
     s.converse.npc = target;
     if status(s, target) & 0x80 != 0 && !on_screen(s, target) {
