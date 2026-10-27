@@ -453,6 +453,16 @@ impl HeldKeys {
         out
     }
 
+    /// Spec 19 O1c: the newest direction key held, which the game presses again at the command
+    /// prompt ([`Engine::held_press`]).
+    fn direction(&self) -> Option<Key> {
+        self.0
+            .iter()
+            .rev()
+            .map(|&(_, k)| k)
+            .find(|k| k.is_direction())
+    }
+
     /// The releases of every key held (the window lost the focus: their releases may not come).
     fn release_all(&mut self) -> Vec<InputEvent> {
         self.0
@@ -489,15 +499,20 @@ fn route(key: minifb::Key, ctrl: bool) -> Option<Route> {
 
 /// One step of the window: the engine ticks [`STEP_MS`] with the input not yet delivered (a
 /// frame's input goes to its first step, as the page queues keys for its next step; a frame
-/// that runs none keeps it for the next), the store writes what a Save in the step committed,
-/// and the sound machine replays the step's calls (after every step: the call log holds one
-/// step's). False once the game ended.
+/// that runs none keeps it for the next), and the direction key `held` down pressed again when
+/// the command prompt is up (spec 19 O1c, [`Engine::held_press`]); the store writes what a Save
+/// in the step committed, and the sound machine replays the step's calls (after every step:
+/// the call log holds one step's). False once the game ended.
 fn window_step(
     engine: &mut Engine,
     pending: &mut Vec<InputEvent>,
+    held: Option<Key>,
     saves: Option<&mut Saves>,
     audio: Option<&mut Audio>,
 ) -> Result<bool, String> {
+    if let Some(press) = engine.held_press(pending, held) {
+        pending.push(press);
+    }
     engine.tick(pending, STEP_MS);
     pending.clear();
     if let Some(saves) = saves {
@@ -550,7 +565,7 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     let mut last = Instant::now();
     let mut mouse = None;
     let mut pending: Vec<InputEvent> = Vec::new();
-    let mut held = HeldKeys::default();
+    let mut keys = HeldKeys::default();
     while window.is_open() {
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
@@ -560,17 +575,17 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
             // as a repeat, which the key's release takes back.
             let repeat = !window.is_key_pressed(key, KeyRepeat::No);
             match route(key, ctrl) {
-                Some(Route::Game(k)) => pending.push(held.press(key, k, repeat)),
+                Some(Route::Game(k)) => pending.push(keys.press(key, k, repeat)),
                 Some(Route::Faster) => speed = pace::faster(speed),
                 Some(Route::Slower) => speed = pace::slower(speed),
                 None => {}
             }
         }
         for key in window.get_keys_released() {
-            pending.extend(held.release(key));
+            pending.extend(keys.release(key));
         }
         if !window.is_active() {
-            pending.extend(held.release_all());
+            pending.extend(keys.release_all());
         }
         if speed != pacer.speed() {
             pacer.set_speed(speed);
@@ -595,6 +610,22 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         // The handler's buttons after this frame's input: the last pointer state queued (still
         // pending or taken).
         let held = mouse.is_some_and(|(_, _, buttons)| buttons != 0);
+        // Spec 19 O1c: the direction key down, unless a modifier is (Ctrl, Alt or the system
+        // key with an arrow is no direction key).
+        let modifier = {
+            use minifb::Key as K;
+            [
+                K::LeftCtrl,
+                K::RightCtrl,
+                K::LeftAlt,
+                K::RightAlt,
+                K::LeftSuper,
+                K::RightSuper,
+            ]
+            .into_iter()
+            .any(|k| window.is_key_down(k))
+        };
+        let direction = keys.direction().filter(|_| !modifier);
         let frame_at = Instant::now();
         let wall_dt_ms = frame_at.duration_since(last).as_secs_f64() * 1000.0;
         last = frame_at;
@@ -607,6 +638,7 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
                 window_step(
                     &mut engine,
                     &mut pending,
+                    direction,
                     saves.as_mut(),
                     sound.as_mut().map(|(audio, _)| audio),
                 )
@@ -911,6 +943,44 @@ mod tests {
         assert_eq!(route(K::F1, false), None);
     }
 
+    /// Spec 19 O1c: the window step presses the held direction key again whenever the command
+    /// prompt is up (a game that reads one key with A4-0x7a2c set, then waits 100 ms): at every
+    /// read, with no key from the window after the first; a held letter, none.
+    #[test]
+    fn the_window_step_presses_a_held_direction_key_at_the_prompt() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let taken = |held: Option<Key>| {
+            let seen = Rc::new(RefCell::new(0));
+            let out = Rc::clone(&seen);
+            let mut engine = Engine::with_game(
+                u6_core::State::default(),
+                Files::default(),
+                move |st, io| async move {
+                    loop {
+                        st.borrow_mut().main.reading = 1;
+                        io.next_key().await;
+                        st.borrow_mut().main.reading = 0;
+                        *out.borrow_mut() += 1;
+                        io.sleep(100).await;
+                    }
+                },
+            );
+            let mut pending = Vec::new();
+            for _ in 0..60 {
+                window_step(&mut engine, &mut pending, held, None, None).unwrap();
+            }
+            *seen.borrow()
+        };
+        assert!(taken(Some(Key::Left)) >= 8, "at every read");
+        assert_eq!(
+            taken(Some(Key::Char('x'))),
+            0,
+            "a letter is not pressed again"
+        );
+        assert_eq!(taken(None), 0);
+    }
+
     /// A frame's input goes to its first step only, and a frame that runs no step keeps it
     /// for the next: a game that takes every event as it comes records the step (the tick
     /// count, from 1) each one reached it in.
@@ -948,7 +1018,7 @@ mod tests {
                 dt,
                 false,
                 || 0.0,
-                || window_step(engine, &mut pending, None, None),
+                || window_step(engine, &mut pending, None, None, None),
             )
             .unwrap();
             (k, pending.len())

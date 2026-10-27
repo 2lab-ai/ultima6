@@ -4036,6 +4036,9 @@ function openContextMenu(e) {
     contextMenu.append(head);
     for (const entry of entries) contextMenu.append(menuItem(entry, ''));
   }
+  // Spec 19 O1c: the menu takes the focus, so a key held on the canvas walks no further under it:
+  // every held key is let go here (its keyup later takes nothing).
+  releaseKeys();
   menuAt = at;
   swallowing = true;
   contextMenu.hidden = false;

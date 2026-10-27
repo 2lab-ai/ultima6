@@ -945,6 +945,16 @@ impl Game {
     pub fn step(&mut self, ms: u32) {
         self.step_run();
         if let Some(engine) = &mut self.engine {
+            // Spec 19 O1c: a held direction key is pressed again at the command prompt.
+            let held = self
+                .held
+                .iter()
+                .rev()
+                .map(|&(_, k)| k)
+                .find(|k| k.is_direction());
+            if let Some(press) = engine.held_press(&self.pending, held) {
+                self.pending.push(press);
+            }
             engine.tick(&self.pending, ms);
             self.log.extend(engine.take_log());
             if let Some(driver) = &mut self.audio {
@@ -2877,6 +2887,8 @@ mod tests {
         assert!((game.save_generation(), game.save_collect()) == (0, 0));
         let start = game.leader_position();
         game.key_down("ArrowRight", "ArrowRight", false);
+        // A tap: a key still down is pressed again at every prompt (spec 19 O1c).
+        game.key_up("ArrowRight");
         ticks(&mut game, 400);
         let moved = game.leader_position();
         assert!(moved != start, "one step east");
@@ -5011,5 +5023,223 @@ mod tests {
             }
         }
         assert_eq!(read, 1, "Look read its target");
+    }
+
+    /// Spec 19 O1c on the user's zip: the castle start state of u6-core's held-key tests
+    /// (`ui/tests/held_key.rs`: `game` at once with seed 0, the actors in the assault worktype 8
+    /// passed over with status bit 0x10, the fight broken off with `b`), at the prompt.
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn in_the_castle() -> Option<Game> {
+        use std::cell::RefCell;
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return None;
+        }
+        let r = intake(vec![InputFile {
+            name: "ultima-vi.zip".into(),
+            data: std::fs::read(ZIP).quiet(),
+        }]);
+        let files = Files::new(r.files);
+        let mut state = u6_core::State::new_game(&files).quiet();
+        state.rng.seed(0);
+        let keep = Rc::new(RefCell::new(None));
+        let k = Rc::clone(&keep);
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(state, files, move |st, io| {
+            *k.borrow_mut() = Some(Rc::clone(&st));
+            u6_core::main_loop::game_first(st, io)
+        }));
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        let st = keep.borrow_mut().take().quiet();
+        {
+            let mut s = st.borrow_mut();
+            for a in 0..0x100 {
+                if s.actors.worktype[a] == 8 {
+                    s.actors.attrs.status[a] |= 0x10;
+                }
+            }
+        }
+        assert!(game.key_down("KeyB", "b", false));
+        assert!(game.key_up("KeyB"));
+        for _ in 0..24 {
+            game.step(20);
+        }
+        assert!(steps_to_prompt(&mut game), "the prompt after the break-off");
+        Some(game)
+    }
+
+    /// The command loop reads a command key (A4-0x7a2c set).
+    fn reading(game: &Game) -> bool {
+        game.engine
+            .as_ref()
+            .is_some_and(|e| e.state().main.reading == 1)
+    }
+
+    /// What a hold of the down arrow did ([`hold_south`]): per step of the leader, the step()
+    /// calls from the command loop reading again to the step (None where it never read between
+    /// two steps, a key already waiting), and the engine ms since the step before; the steps
+    /// after the release; the events still queued at the end.
+    #[derive(Debug)]
+    struct Hold {
+        from_prompt: Vec<Option<usize>>,
+        gaps_ms: Vec<u64>,
+        after: usize,
+        queued: usize,
+    }
+
+    /// Holds the down arrow from the prompt (south, the way open for about ten cells in both
+    /// builds; `key_down`, its release by `key_up`; with `repeats`, the browser's repeat too: the
+    /// first 225 ms after the press, then one every 30 ms) until the leader has stepped `steps`
+    /// times or 30 s passed, lets it go, and steps 1.5 s more.
+    fn hold_south(game: &mut Game, steps: usize, repeats: bool) -> Hold {
+        let now = |g: &Game| g.engine.as_ref().map_or(0, |e| e.io().now_ms());
+        let t0 = now(game);
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        let mut next_repeat = 225;
+        let mut at = game.leader_position();
+        let (mut read_at, mut last_ms) = (Some(0), t0);
+        let mut h = Hold {
+            from_prompt: Vec::new(),
+            gaps_ms: Vec::new(),
+            after: 0,
+            queued: 0,
+        };
+        for i in 1..=1500 {
+            if h.from_prompt.len() == steps {
+                break;
+            }
+            while repeats && now(game) - t0 + 20 > next_repeat {
+                assert!(game.key_repeat("ArrowDown", "ArrowDown", false));
+                next_repeat += 30;
+            }
+            game.step(20);
+            if game.leader_position() != at {
+                at = game.leader_position();
+                h.from_prompt.push(read_at.take().map(|r| i - r));
+                h.gaps_ms.push(now(game) - last_ms);
+                last_ms = now(game);
+            } else if read_at.is_none() && reading(game) {
+                read_at = Some(i);
+            }
+        }
+        assert!(game.key_up("ArrowDown"));
+        for _ in 0..75 {
+            game.step(20);
+            if game.leader_position() != at {
+                at = game.leader_position();
+                h.after += 1;
+            }
+        }
+        h.queued = game.keys_pending() as usize;
+        h
+    }
+
+    /// Spec 19 O1c (the owner, 2026-10-27: a held arrow steps once, waits out the OS repeat
+    /// delay, then walks on; "누르면 즉시 계속 이동하도록해줘"): the down arrow held with no
+    /// repeat from the browser walks three steps in three turns, the second and the third each
+    /// in the step() call after the command loop reads again; its release ends the walk.
+    #[test]
+    fn a_held_arrow_walks_on_at_each_prompt_without_the_browsers_repeat() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        let h = hold_south(&mut game, 3, false);
+        println!("held down, no repeats: {h:?}");
+        assert_eq!(h.from_prompt.len(), 3, "three steps while held");
+        assert_eq!(
+            h.from_prompt[1..],
+            [Some(1), Some(1)],
+            "each taken in the step after the prompt came back"
+        );
+        assert_eq!((h.after, h.queued), (0, 0), "none after the release");
+    }
+
+    /// Spec 19 O1c with the browser's repeat arriving too: still one step a turn (no two
+    /// within the shortest castle turn, 620 ms), and nothing left queued or walked after the
+    /// release.
+    #[test]
+    fn a_held_arrow_with_the_browsers_repeat_still_steps_once_a_turn() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        let h = hold_south(&mut game, 3, true);
+        println!("held down, with repeats: {h:?}");
+        assert_eq!(h.from_prompt.len(), 3, "three steps while held");
+        assert!(
+            h.gaps_ms[1..].iter().all(|&ms| ms >= 600),
+            "one step a turn: {:?}",
+            h.gaps_ms
+        );
+        assert_eq!((h.after, h.queued), (0, 0), "none after the release");
+    }
+
+    /// Spec 19 O1c: a tap of the arrow (its press and release in one step) is one step.
+    #[test]
+    fn a_tapped_arrow_steps_once() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        let mut at = game.leader_position();
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        assert!(game.key_up("ArrowDown"));
+        let mut steps = 0;
+        for _ in 0..150 {
+            game.step(20);
+            if game.leader_position() != at {
+                at = game.leader_position();
+                steps += 1;
+            }
+        }
+        assert_eq!(steps, 1, "one step");
+        assert!(game.at_prompt(), "the prompt again");
+    }
+
+    /// Spec 19 O1c on a game that stands for the waits: it reads one key (with `prompt`,
+    /// A4-0x7a2c set: the command prompt; without, another wait such as the line editor's),
+    /// then waits 100 ms, over and over. With the key `code` / `key` pressed (`key_down`, no
+    /// browser repeat) and held for 1.2 s: how many keys it read.
+    fn keys_read(prompt: bool, code: &str, key: &str) -> u32 {
+        use std::cell::RefCell;
+        let seen = Rc::new(RefCell::new(0));
+        let out = Rc::clone(&seen);
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            move |st, io| async move {
+                loop {
+                    st.borrow_mut().main.reading = u16::from(prompt);
+                    io.next_typed().await;
+                    st.borrow_mut().main.reading = 0;
+                    *out.borrow_mut() += 1;
+                    io.sleep(100).await;
+                }
+            },
+        ));
+        game.step(20);
+        assert!(game.key_down(code, key, false));
+        for _ in 0..60 {
+            game.step(20);
+        }
+        *seen.borrow()
+    }
+
+    /// Spec 19 O1c: at the command prompt a held arrow is pressed again at every read.
+    #[test]
+    fn a_held_arrow_at_the_command_prompt_is_pressed_at_every_read() {
+        assert!(keys_read(true, "ArrowLeft", "ArrowLeft") >= 8);
+    }
+
+    /// Spec 19 O1c: a held letter at the command prompt is read once (only the browser's
+    /// repeat would repeat it).
+    #[test]
+    fn a_held_letter_at_the_command_prompt_is_read_once() {
+        assert_eq!(keys_read(true, "KeyX", "x"), 1);
+    }
+
+    /// Spec 19 O1c: a held arrow at any other wait (the line editor's) is read once.
+    #[test]
+    fn a_held_arrow_at_another_wait_is_read_once() {
+        assert_eq!(keys_read(false, "ArrowLeft", "ArrowLeft"), 1);
     }
 }

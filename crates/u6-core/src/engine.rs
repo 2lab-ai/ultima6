@@ -46,6 +46,14 @@ pub enum Key {
     Char(char),
 }
 
+impl Key {
+    /// Port (spec 19 O1c): one of the four direction keys, the ones a held key walks with at
+    /// the game's pace ([`Engine::held_press`]).
+    pub fn is_direction(self) -> bool {
+        matches!(self, Key::Up | Key::Down | Key::Left | Key::Right)
+    }
+}
+
 /// One input event, queued by the platform and consumed in order by the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InputEvent {
@@ -1021,6 +1029,21 @@ impl Engine {
             return 0;
         }
         self.io.keys_owned() | crate::ui::target::keys_owned(&self.state.borrow())
+    }
+
+    /// Port (spec 19 O1c): the press a platform adds to `input` before a tick for `held`, the
+    /// direction key it has down (the newest, pressed without Ctrl, Alt or Meta): a repeat of
+    /// it when the command loop waits for a command key (A4-0x7a2c set: no line editor,
+    /// cross-hair or other wait) and no key waits, neither queued nor in `input` (pointer events
+    /// may). So a held direction key is pressed again at every command prompt at once and walks
+    /// one step a turn, the prompt gating the cadence, with no wait for the platform's own
+    /// repeat; every other wait keeps that repeat. None otherwise, and for any other key.
+    pub fn held_press(&self, input: &[InputEvent], held: Option<Key>) -> Option<InputEvent> {
+        let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. });
+        let held = held.filter(|k| k.is_direction())?;
+        let prompt = !self.finished && self.state.borrow().main.reading == 1;
+        let waiting = input.iter().any(key) || self.io.events.borrow().iter().any(key);
+        (prompt && !waiting).then_some(InputEvent::Repeat(held))
     }
 }
 

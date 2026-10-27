@@ -1903,6 +1903,161 @@ test('a held arrow on the canvas: the browser\'s repeats wait while the turn run
   }
 }, { needs: h.haveHfes });
 
+// Spec 19 O1c at the page: `key` pressed once on the focused canvas and held with no browser
+// repeat at all (Playwright sends none) until the leader stepped three times, or the game ran
+// 30 s on its clock, or 2 s with no step at all (the way blocked), then the keyup. The game's own step() is watched (the instance's, so the
+// glue's count still runs): after each, the engine clock, the leader and whether the prompt is
+// up. Returns the steps of the leader while held, each with the step() calls from the prompt
+// coming back to it and the engine ms since the step before, the steps after the release (the
+// cells they ended on), and the repeats the canvas saw.
+async function heldNoRepeat(page, key) {
+  await h.waitPrompt(page);
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const c = document.getElementById('screen');
+    const log = { steps: [], repeats: 0, stop: new AbortController() };
+    window.__k2 = log;
+    c.addEventListener('keydown', (e) => {
+      if (e.repeat) log.repeats += 1;
+    }, { signal: log.stop.signal });
+    g.step = function (ms) {
+      Object.getPrototypeOf(this).step.call(this, ms);
+      log.steps.push([globalThis.__clock, this.leader_position().join(','), this.at_prompt()]);
+    };
+  });
+  await page.keyboard.down(key);
+  const t0 = await page.evaluate(() => globalThis.__clock);
+  let released = 0;
+  try {
+    await page.waitForFunction((from) => {
+      const s = window.__k2.steps;
+      let n = 0;
+      for (let i = 1; i < s.length; i += 1) if (s[i][1] !== s[i - 1][1]) n += 1;
+      const ran = globalThis.__clock - from;
+      return n >= 3 || ran >= 30_000 || (n === 0 && ran >= 2_000);
+    }, t0, { timeout: 120_000, polling: 'raf' });
+  } finally {
+    released = await page.evaluate(() => window.__k2.steps.length);
+    await page.keyboard.up(key);
+  }
+  await h.waitTaken(page);
+  await h.waitPrompt(page);
+  const log = await page.evaluate(() => {
+    const k2 = window.__k2;
+    window.__k2 = null;
+    k2.stop.abort();
+    delete globalThis.__shownGame.step;
+    return { steps: k2.steps, repeats: k2.repeats };
+  });
+  const held = [];
+  const after = [];
+  let prompt = 0;
+  let last = log.steps[0]?.[0] ?? 0;
+  for (let i = 1; i < log.steps.length; i += 1) {
+    const [clock, leader, atPrompt] = log.steps[i];
+    if (leader !== log.steps[i - 1][1]) {
+      if (i < released) held.push({ fromPrompt: i - prompt, ms: clock - last, leader });
+      else after.push(leader);
+      last = clock;
+    }
+    if (atPrompt) prompt = i;
+  }
+  return { held, after, repeats: log.repeats };
+}
+
+// The start fight as booted, the first arrow (left first) whose press walks: held with no
+// browser repeat, it walks on at every command prompt, each step in the step() call after the
+// prompt came back (so the gap between two steps is that turn plus one 20 ms step), and stops
+// at the keyup. The fight can kill the hero after the release (he wakes on `h.WAKE_CELL`, as
+// `h.stepResult` allows); a position change after it is allowed there only.
+test('a held arrow with no browser repeat walks on at every command prompt at once, one step a turn, and stops at its keyup (spec 19 O1c)', async (env) => {
+  const { page } = await h.openPage(env); // gated: the glue keeps the engine clock and its ticks
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  const keys = ['ArrowLeft', ...h.STEPS.map((s) => s.key).filter((k) => k !== 'ArrowLeft')];
+  let walk = null;
+  let used = null;
+  for (let round = 0; round < h.STEP_ROUNDS && walk === null; round += 1) {
+    if (round > 0) await h.passTurn(page);
+    for (const key of keys) {
+      const w = await heldNoRepeat(page, key);
+      if (w.held.length >= 2) {
+        [walk, used] = [w, key];
+        break;
+      }
+    }
+  }
+  assert.ok(walk !== null, 'a held arrow walked on in one of the four directions');
+  const walked = walk.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL);
+  const gaps = walked.map((s) => s.ms);
+  const fromPrompt = walked.map((s) => s.fromPrompt);
+  console.log(`  receipt: ${used} held, ${walk.repeats} browser repeats; ${walk.held.length} steps while held, engine ms between them ${gaps.join(', ')}, step() calls from the prompt to each ${fromPrompt.join(', ')}; ${walk.after.length} position changes after the keyup`);
+  assert.equal(walk.repeats, 0, 'no browser repeat was sent');
+  assert.ok(walked.length >= 1 && fromPrompt.every((n) => n === 1), 'each step in the step() after the prompt came back');
+  assert.ok(walk.after.every((cell) => cell === h.WAKE_CELL), 'no step after the keyup (a change only onto the wake cell)');
+}, { needs: h.haveHfes });
+
+// Spec 19 O1c with the context menu (spec 17), on the virtual display (frames run only when the
+// test runs them): an arrow (down first, else the first that walks) pressed once and held with
+// no browser repeat until the leader stepped; frames then run until the prompt is up between
+// two of them (the held arrow would be pressed again in the next step), and the map is
+// right-pressed there with the arrow still down. The menu opens with the focus and lets every
+// held key go, so 600 frames later (10 s of the game, several turns) the leader is where it
+// was; the arrow let up (its keyup takes nothing) and the menu closed with Escape, still there.
+test('the context menu opened while an arrow is held lets it go: the hero walks no further under the menu or after it (spec 19 O1c, spec 17)', async (env) => {
+  const { page } = await menuPage(env);
+  const menu = page.locator('#context-menu');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const leader = () => page.evaluate(() => document.getElementById('screen').dataset.leader);
+  const keys = ['ArrowDown', ...h.STEPS.map((s) => s.key).filter((k) => k !== 'ArrowDown')];
+  let used = null;
+  for (let round = 0; round < h.STEP_ROUNDS && used === null; round += 1) {
+    if (round > 0) {
+      await page.keyboard.press('Space');
+      await h.runFramesToPrompt(page, 5000);
+    }
+    for (const key of keys) {
+      await h.runFramesToPrompt(page, 5000);
+      await page.keyboard.down(key);
+      const { seen } = await h.runFrames(page, 30);
+      if (seen.length > 1) {
+        used = key;
+        break;
+      }
+      await page.keyboard.up(key);
+    }
+  }
+  assert.ok(used !== null, 'a held arrow walked in one of the four directions');
+  const frames = await page.evaluate((limit) => {
+    const v = window.__display;
+    const c = document.getElementById('screen');
+    for (let i = 0; i < limit; i += 1) {
+      v.run();
+      if (c.dataset.prompt === '1') return i + 1;
+    }
+    return -1;
+  }, 5000);
+  assert.ok(frames > 0, 'the prompt came back with the arrow still down');
+  const at = await leader();
+  await h.rightPress(page, 88, 88);
+  await page.mouse.up({ button: 'right' });
+  const under = await h.runFrames(page, 600);
+  const open = await menu.isVisible();
+  await page.keyboard.up(used);
+  await page.keyboard.press('Escape');
+  await menu.waitFor({ state: 'hidden' });
+  const after = await h.runFrames(page, 120);
+  const queued = await page.evaluate(() => document.getElementById('screen').dataset.keys);
+  console.log(`  receipt: ${used} held, the prompt back ${frames} frames after its step; position changes while the menu was open ${under.seen.length - 1}, after it ${after.seen.length - 1}; keys queued at the end ${queued}`);
+  assert.ok(open, 'the menu stayed open');
+  assert.equal(under.seen.length - 1, 0, 'no step under the menu');
+  assert.equal(after.seen.length - 1, 0, 'nor after it');
+  assert.equal(await leader(), at, 'the hero where the menu opened');
+  assert.equal(queued, '0', 'nothing queued');
+}, { needs: h.haveHfes });
+
 test('zip: the first press on the canvas is one game click and starts the sound; Look, walk, Mute (receipt)', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);
