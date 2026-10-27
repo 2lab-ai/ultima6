@@ -56,7 +56,11 @@ fn shake_copy(ox: i16, oy: i16) -> [i16; 6] {
 
 /// Original: 0x133a96 (ui: forget the map window's caches: every cell's tile 0xff (unknown),
 /// every cell's object list empty, the node list free again (node n links to n + 1))
+///
+/// Port (spec 18): the remembered sight is forgotten too
+/// ([`crate::gfx::cache::RenderCache::forget_sight`]): the redraw shows black, as the original.
 pub fn reset_window(s: &mut State) {
+    s.gfx.cache.forget_sight();
     let d = &mut s.objects.draw;
     d.base.iter_mut().for_each(|t| *t = 0xff);
     d.reset_nodes();

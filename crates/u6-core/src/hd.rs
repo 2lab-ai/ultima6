@@ -2,7 +2,10 @@
 //! the HD compositor ([`u6_render::hd::Compositor`]).
 //!
 //! - A tile: its record's pixels and transparency ([`crate::gfx::GfxState::records`]) at the
-//!   record's version now ([`crate::gfx::cache::RenderCache::version`]).
+//!   record's version now ([`crate::gfx::cache::RenderCache::version`]). Spec 18: an id from
+//!   [`crate::gfx::cache::FROZEN_BASE`] on names a copy the remembered sight keeps of a merged
+//!   shore record's pixels ([`crate::gfx::cache::RenderCache::frozen_image`]), version 0, which
+//!   a pack keys as that record ([`Images::pack_id`]).
 //! - A portrait and a panel bitmap: decoded as [`crate::converse::draw_portrait`],
 //!   [`crate::main_loop::draw_paper`] and [`crate::magic::draw_book`] decode them, through the
 //!   bitmap colour table as `blit_bitmap` draws them, opaque, version 0. [`ImageCache`] keeps
@@ -282,6 +285,15 @@ impl EngineImages<'_> {
 impl Images for EngineImages<'_> {
     fn image(&mut self, kind: Kind, id: u16) -> Option<Image<'_>> {
         if kind == Kind::Tile {
+            if let Some((pixels, transparent)) = self.state.gfx.cache.frozen_image(id) {
+                return Some(Image {
+                    ver: 0,
+                    width: TILE_W,
+                    height: TILE_H,
+                    pixels,
+                    transparent: Some(transparent),
+                });
+            }
             let i = usize::from(id);
             let rec = self.state.gfx.records.get(i)?;
             return Some(Image {
@@ -330,9 +342,21 @@ impl Images for EngineImages<'_> {
         })
     }
 
+    /// Spec 18: a copy the remembered sight keeps ([`crate::gfx::cache::FROZEN_BASE`] on) is the
+    /// pack's image of the record it was taken from.
+    fn pack_id(&self, kind: Kind, id: u16) -> (Kind, u16) {
+        match self.state.gfx.cache.frozen_record(id) {
+            Some(record) if kind == Kind::Tile => (Kind::Tile, record),
+            _ => (kind, id),
+        }
+    }
+
     /// The content key of (kind, id) as [`EngineImages::image`] just gave it.
     fn key(&mut self, kind: Kind, id: u16) -> Option<u64> {
         if kind == Kind::Tile {
+            if let Some((pixels, transparent)) = self.state.gfx.cache.frozen_image(id) {
+                return tile_hash(pixels, transparent);
+            }
             let rec = self.state.gfx.records.get(usize::from(id))?;
             return tile_hash(&rec.pixels, &rec.transparent);
         }

@@ -6,6 +6,7 @@
 //! chain). Cell (cx, cy) is entry `cy * VIEW_W + cx` of `base` and `cell`.
 
 use super::iter::{begin_area, flags2, next_in_area, tile_of};
+use super::moves::moves_with_actor;
 use super::{ACTOR_SLOTS, Slot, seams};
 use crate::geom::{self, HALF_H, HALF_W, VIEW_H, VIEW_W};
 use crate::state::State;
@@ -59,6 +60,15 @@ pub struct DrawLists {
     /// Original: A4-0x77a0 / A4-0x779f (bytes: reset when an object 0x188 comes into view; the
     /// second gets a random 0..=1)
     pub anim_188: [u8; 2],
+    /// Port-only (spec 18), no original address: per node, its tile is a still object's (not an
+    /// actor's, nor a part that moves with one), which the remembered sight keeps
+    /// ([`crate::gfx::cache::SightMemory`]). [`add_tile`] writes it on the node it links from
+    /// [`DrawLists::tag_still`]. [`DRAW_NODES`] entries.
+    pub node_still: Vec<bool>,
+    /// Port-only (spec 18): what [`add_tile`] writes into [`DrawLists::node_still`]; set only
+    /// around the draws of an object in 0x10e81e's object pass, so the light overlays and the
+    /// flashes are never still.
+    pub tag_still: bool,
 }
 
 impl Default for DrawLists {
@@ -71,6 +81,8 @@ impl Default for DrawLists {
             volcano_probe: 0,
             saw_188: 0,
             anim_188: [0; 2],
+            node_still: vec![false; DRAW_NODES],
+            tag_still: false,
         }
     }
 }
@@ -194,6 +206,7 @@ pub fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
     let d = &mut s.objects.draw;
     d.node_next[0] = d.node_next[usize::from(node)];
     d.node_tile[usize::from(node)] = word;
+    d.node_still[usize::from(node)] = d.tag_still;
     let after = read(d, at);
     d.node_next[usize::from(node)] = after;
     match at {
@@ -323,6 +336,7 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
     let cx = wx.wrapping_sub(lx) + HALF_W as i16;
     let cy = wy.wrapping_sub(ly) + HALF_H as i16;
     let z = o.z(c);
+    s.objects.draw.tag_still = !(actor || moves_with_actor(kind));
     if effect != 0 {
         add_object_tiles(s, tile, effect, cx, cy);
     }
@@ -350,6 +364,7 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
             add_tile(s, left, cx - 1, cy, 1);
         }
     }
+    s.objects.draw.tag_still = false;
 }
 
 /// The second pass of 0x10e81e over the view's cells (view flags and light overlays).

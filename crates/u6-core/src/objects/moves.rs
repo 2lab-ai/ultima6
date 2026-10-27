@@ -21,6 +21,15 @@ pub(crate) fn has_parts(kind: u16) -> bool {
     matches!(kind, 0x176 | 0x19b | 0x19c) || kind >= 0x1aa
 }
 
+/// Port-only (spec 18): an object of `kind` in an object slot moves with an actor: a part of a
+/// multi-tile monster ([`has_parts`]: the dragon's 0x19b, the tailed types' own), the eight parts
+/// 0x1a9 of a 0x176 (0x131646 creates them, 0x10b9ca moves them, the idle frames 0x10202e walk
+/// them), a silver serpent's segment ([`SERPENT`]). The remembered sight leaves them out, as it
+/// leaves out the actors.
+pub(crate) fn moves_with_actor(kind: u16) -> bool {
+    has_parts(kind) || kind == 0x1a9 || kind == SERPENT
+}
+
 /// Sets [`Objects::carried_changed`] when command 0x92 runs and `test` holds for the member
 /// the command acts for (the check at the top of 0x10c1d6, 0x10c9d2 and 0x10be02).
 fn note_carried(s: &mut State, test: impl Fn(&Objects, Slot) -> bool) {

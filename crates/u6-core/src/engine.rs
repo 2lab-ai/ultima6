@@ -164,6 +164,8 @@ pub struct Io {
     back_writes: Cell<u64>,
     /// Port-only: [`Io::set_window_cache`].
     window_cache: Cell<bool>,
+    /// Port-only: [`Io::set_sight_memory`].
+    sight_memory: Cell<bool>,
 }
 
 impl Io {
@@ -184,6 +186,7 @@ impl Io {
             serial: NEXT_IO.fetch_add(1, Ordering::Relaxed),
             back_writes: Cell::new(0),
             window_cache: Cell::new(true),
+            sight_memory: Cell::new(false),
         }
     }
 
@@ -410,6 +413,20 @@ impl Io {
     /// [`Io::set_window_cache`].
     pub fn window_cache(&self) -> bool {
         self.window_cache.get()
+    }
+
+    /// Port-only (spec 18): with `on` the map window shows each cell in view that was seen and
+    /// is out of sight now as it last showed it, its ground and still objects in dark grey
+    /// ([`crate::gfx::cache::SightMemory`]); off (the default), such a cell is black, as on the
+    /// original, and the frames are the original's. The page turns it on; the tests, the oracle
+    /// comparisons and the receipts run with it off.
+    pub fn set_sight_memory(&self, on: bool) {
+        self.sight_memory.set(on);
+    }
+
+    /// [`Io::set_sight_memory`].
+    pub fn sight_memory(&self) -> bool {
+        self.sight_memory.get()
     }
 
     /// Port-only (spec 07 HD0): every pixel of the back buffer's, the screen's and the published
