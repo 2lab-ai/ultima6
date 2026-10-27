@@ -37,7 +37,7 @@ const _: () = assert!(
     "the map's corner on a cell boundary"
 );
 /// Object type whose tile gets clock hands (0x13aa7e = basetile 0x13a940 + 2·0x9f).
-const CLOCK_TYPE: usize = 0x9f;
+pub(super) const CLOCK_TYPE: usize = 0x9f;
 
 /// What 0x102c90 draws: the window tile cache A4-0x1476 (11×11 words in Original, built by
 /// 0x109e74) and per cell the object tile words in draw order (the lists at A4-0x15f0 heads,

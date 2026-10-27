@@ -39,11 +39,18 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
    - Why 360: under the 427 ms floor between world-turn pictures; no sampled fight move was cut; 55–58 % of the quiet
      step, near Ultima VII's medium walk of 400 ms per 16 px cell. Modern tile games use 100–270 ms but block input
      during the slide; this port must not block. Sources: W1 §2–§3.
-2. **The scene.** At each framed map present the engine records a port-only `MapScene`:
+2. **The scene.** At each framed map present the engine records a port-only `MapScene` (`Scene` in u6-render's
+   `motion` module; u6-core's `Shot` (`gfx/motion.rs`) holds it with what the render drew in place of a base):
    - the publication's engine time, the leader's cell and z, the view origin and size;
    - per cell the base word and the node words in list order, each with its rank (top, part, overlay) and its object
      slot (a `node_slot` table beside `node_tile`, filled in `draw_object`);
    - a "foreign" mark on a publication without a new scene: a missile, a flash, a quake, sparkle.
+   - Foreign pictures are found by the picture, not marked where they are drawn: each kept render carries a hash of
+     the shown map's colours, and a publication whose shown map changed names the newest kept render of the same hash,
+     or none (foreign). A fight's frames play back renders made earlier, so only the picture tells which render a
+     publication shows; this covers missiles, flashes, quakes, the map overview and any later effect without a mark
+     at each draw site. A render with the sparkle's XOR plots or presented dissolving holds a scene that is marked to
+     snap: no slide into it.
 
    The scene is a read-only copy; nothing in `State` or the RNG changes.
 3. **The presenter** (`u6-render`, a `motion` module shared by web and native) holds the previous and the current
@@ -53,13 +60,17 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
    - **Movers:** a slot drawn in both scenes, one cell apart, same z and same type, slides. Anything else snaps: it
      appears, disappears or changes type.
    - **Occlusion:** draw the static words without the movers, then the movers ordered by their in-between y then x, then
-     the occluders over them. The occluders are the words after the mover in its old and new cells, and on a diagonal
-     the side cells' top tiles, multi-tile parts and light overlays.
+     the occluders over them. The occluders are the words after the mover in a cell it is drawn in, and in every other
+     cell its draws cover from the slide's start to its end (its old cell, a diagonal's side cells, the cells a restart
+     up to 1.5 cells away sweeps) the top tiles, multi-tile parts and light overlays.
    - **Over the map:** the border and the rest of the UI come from the engine frame unchanged.
    - **New publications during a slide:**
      - a foreign one ends every slide;
      - a scene with the same positions lets slides run on;
-     - a new move during a slide restarts from the drawn position, or snaps if that is over 1.5 cells away.
+     - a new move during a slide restarts from the drawn position, or snaps if that is over 1.5 cells away;
+     - a preview held for 2000 ms (`PREVIEW_MS`) with no picture of the engine's, or a foreign picture after it, shows
+       the engine's frame: the party is drawn where the engine's picture has it (it jumps back) until the turn's
+       picture comes.
 4. **The early picture (spec 19 O2, pure form).** Right after the leader's step (`actors/walk.rs:76-88`), the engine
    builds a scene on a clone of `State` (`update_view` and the draw lists on the clone; the clone is dropped). It hands
    that scene to the presenter at once.
@@ -67,13 +78,37 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
    - The authoritative publication at the first pick's refresh is then a scene with the same party positions, so
      their slides run on; NPCs that moved in that pick slide from there.
    - The preview never writes `Io`'s buffers or the window cache.
-   - Its cost is one `State` clone per step, measured before it is kept (budget: under 1 ms at 8× with the held walk).
+   - Its cost is one `State` clone and the view and draw lists on it per step (budget: under 1 ms at 8× with the held
+     walk; the cost per step does not depend on the speed). Measured 2026-10-27: natively 0.19 ms median in Original
+     and 0.29 ms in Wide (the early picture alone, 200 on the state after the start fight and the town steps, gate
+     profile, `bench_the_state_clone_of_the_early_picture`); in Wide's wasm (the Game driven in Node, each step's whole
+     tick, the least of 3 runs over 23 steps) a step's tick takes 1.35 ms median and 1.70 ms worst with smooth motion
+     on against 0.94 and 1.24 ms off, so the early picture adds about 0.4–0.5 ms there.
+   - There is no early picture in combat mode: a fight's frames (a missile's flight, a hit flash) can be published
+     between the step and the turn's picture and show the party where it stood, so the party would slide, jump back
+     and jump forward (seen in Wide at seed 7). In combat mode the party slides from the turn's picture.
 5. **Renderers.**
    - **Original, classic:** during a slide, re-render the map rect each display frame in software (about 12 × 12 cells).
-   - **HD (Original and Wide):** per publication the engine blits the scene with a one-cell margin through
-     `blit_back` (`gfx/blit.rs:98`) into scene-sized layers: static, movers and occluders. The compositor composes each
-     layer once; each display frame then draws them with the camera offset, clipped to the shown rect, under the
-     frame's border and UI.
+   - **HD (Original and Wide):** once per generation of the slides the engine blits the scene with a one-cell margin
+     through `blit_at` (`gfx/motion.rs`: the draws of `blit_back`, `gfx/blit.rs:98`, at any pixel; equal to the engine's
+     picture in the 422 scenes the slide-end receipt draws again from scratch) into scene-sized layers: static, movers
+     and occluders. The compositor composes each layer once; each display frame then draws them with the camera
+     offset, clipped to the shown rect, under the frame's border and UI.
+     - The layers are the static words (the newest scene's view and a cell round it, one rect whatever cells the
+       scenes hold; over colour 0, every pixel drawn), the cursor and border, and per mover its own words and the words
+       over it. A layer pixel that the frame's composition wrote from the same colour and source takes that
+       composition's block.
+     - The words over a mover are drawn over the static layer's pixels: where one ORs into the pixel under it (an
+       animated overlay), the pixel takes the ground's colour, not the mover's, for the slide; its end shows the
+       engine's frame.
+     - The layers are made again when what slides changes (see the edge case "Animation during a slide"), when the
+       HD view changes (its switch, scale or pack) and when the palette changes.
+     - The static and the frame layers go to the page as their changes from the ones the page holds: moved with the
+       camera, then the 16 × 16 blocks that differ (a run of blocks under one of the same columns merged into it).
+       The page reports the version it holds, applies changes only to that version, and asks for whole layers when it
+       holds none (a new canvas, a pack, a scale or a layout change); a report of layers made before the last ones,
+       or made before such a reset, holds nothing.
+     - The HD frame itself stays the engine's; at a slide's end the page puts its map back.
    - **Page:** `draw()` also runs while a slide is active. The wasm exports the presentation clock.
 6. **Switch.** Smooth motion on by default in the page, off in the engine and the web harness by default (as spec 18's
    switch). Off is today's picture exactly.
@@ -101,6 +136,7 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
 | The party in a line | Moves in the leader's picture, all slide together. Tracking is by slot, so swaps work. |
 | An object pushed with Move | Its slot slides. |
 | Walk-cycle frame | The published frame is shown for the whole slide. A mid-slide stride frame is a later option. |
+| Animation during a slide | The HD layers are made again only when what slides changes: a camera slide starts or restarts, a mover joins, restarts or leaves, the presenter starts again (a foreign picture, a snap, the switch). A publication that only lets the slides run on keeps them, so an animated tile or the clock keeps its frame for at most one slide; the slide's end shows the engine's frame. |
 | Actor entering or leaving sight | It is in one scene only, so it pops (spec 18's memory never holds actors). |
 | A click during a slide | Mapped through the published cell grid. The held walk is relative to the centred leader, so it is unaffected. |
 | Key type-ahead | Fixed by spec 19 O1 (unit K1), which lands before this. Otherwise one hold queues up to 49 slides. |

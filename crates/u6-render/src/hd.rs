@@ -61,6 +61,12 @@
 //!
 //! The output is packed RGBA words, `u32::from_le_bytes([r, g, b, a])`: in wasm memory (little
 //! endian) the bytes the page's `ImageData` takes.
+//!
+//! Spec 20 Design 5: [`Compositor::compose_layer`] composes a layer of a slide (a rect of pixels
+//! of its own size, [`crate::motion::LayerPixels`]) the way a composition writes the frame's
+//! pixels outside the text, its clear pixels transparent, with the images and the palette
+//! generation of the frame composed last; it keeps no inputs (a slide's layers are made once a
+//! publication).
 
 mod mmpx;
 #[cfg(test)]
@@ -883,6 +889,11 @@ pub struct Compositor {
     glyphs: Vec<HdGlyph>,
     /// The rows of each symbol among them ([`Compositor::symbol_rows`]).
     symbol_rows: Vec<[u8; CELL]>,
+    /// Spec 20: a layer was composed in a palette the last composition had not: the next writes
+    /// every block ([`Compositor::compose_layer`]).
+    palette_changed: bool,
+    /// The palette generation `palette` was taken for (by a composition or a layer's).
+    generation_of: Option<[Rgb; 256]>,
 }
 
 impl Default for Compositor {
@@ -920,6 +931,8 @@ impl Compositor {
             cells: Vec::new(),
             glyphs: Vec::new(),
             symbol_rows: Vec::new(),
+            palette_changed: false,
+            generation_of: None,
         }
     }
 
@@ -1025,12 +1038,14 @@ impl Compositor {
         if full {
             self.out = vec![0; ow * HEIGHT * s];
         }
-        let same_palette = self
-            .last
-            .as_ref()
-            .is_some_and(|l| l.palette == frame.palette);
-        if !same_palette {
+        let same_palette = !std::mem::take(&mut self.palette_changed)
+            && self
+                .last
+                .as_ref()
+                .is_some_and(|l| l.palette == frame.palette);
+        if !same_palette || self.generation_of != Some(frame.palette) {
             self.palette += 1;
+            self.generation_of = Some(frame.palette);
         }
         let font = self.font;
         full |= std::mem::take(&mut self.font_changed);
@@ -1208,6 +1223,130 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// Spec 20 Design 5: composes `layer` (`palette` its colours) at `scale` into `out`:
+    /// `layer.width·S × layer.height·S` packed words, each pixel its S × S block as
+    /// [`Compositor::compose`] writes a pixel that is no glyph's (the image's HD block over its
+    /// classic colour, a remembered one's from the grey copy, else the classic colour), each
+    /// pixel no draw wrote transparent. A palette other than the one the palette generation was
+    /// taken for (by the last composition or layer) takes a new one, as a composition does, and
+    /// one other than the last composition's has the next composition write every block. A pixel whose
+    /// place in the frame (the layer's top left at frame pixel (`layer.x`, `layer.y`)) the last
+    /// composition, at this scale and palette, wrote from the same colour and source outside a
+    /// listed cell takes that composition's block as it is (the same block: the images and the
+    /// pack are those it was resolved under).
+    pub fn compose_layer(
+        &mut self,
+        layer: &crate::motion::LayerPixels,
+        palette: &[Rgb; 256],
+        images: &mut dyn Images,
+        scale: Scale,
+        out: &mut Vec<u32>,
+    ) {
+        let reuse = self
+            .last
+            .as_ref()
+            .is_some_and(|l| l.palette == *palette && l.scale == scale && !self.palette_changed);
+        if self.last.as_ref().is_none_or(|l| l.palette != *palette) {
+            self.palette_changed = true;
+        }
+        if self.generation_of != Some(*palette) {
+            self.palette += 1;
+            self.generation_of = Some(*palette);
+        }
+        let s = scale.factor();
+        let (w, h) = (layer.width, layer.height);
+        let ow = w * s;
+        let fw = WIDTH * s;
+        let last = self.last.as_ref().filter(|_| reuse);
+        let frame = &self.out;
+        out.clear();
+        out.resize(ow * h * s, CLEAR);
+        self.hd.stamp += 1;
+        let pal: [u32; 256] = std::array::from_fn(|i| word(palette[i]));
+        let mut res = Resolver {
+            hd: &mut self.hd,
+            tiles: &mut self.tiles,
+            others: &mut self.others,
+            input: &mut self.input,
+            images,
+            pack: self.pack.as_deref(),
+            pal: &pal,
+            palette: self.palette,
+            pack_gen: self.pack_gen,
+            scale,
+        };
+        let mut key: Option<(Kind, u16)> = None;
+        let mut cur = Resolved::CLASSIC;
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if !layer.drawn[i] {
+                    continue;
+                }
+                let src = layer.src[i];
+                let o = y * s * ow + x * s;
+                let (fx, fy) = (layer.x + x as i32, layer.y + y as i32);
+                if let Some(l) = last
+                    && (0..WIDTH as i32).contains(&fx)
+                    && (0..HEIGHT as i32).contains(&fy)
+                {
+                    let (fx, fy) = (fx as usize, fy as usize);
+                    let f = fy * WIDTH + fx;
+                    if l.src[f] == src
+                        && l.pixels[f] == layer.pixels[i]
+                        && l.cells[fy / CELL * COLS + fx / CELL].is_none()
+                    {
+                        let b = fy * s * fw + fx * s;
+                        for k in 0..s {
+                            out[o + k * ow..o + k * ow + s]
+                                .copy_from_slice(&frame[b + k * fw..b + k * fw + s]);
+                        }
+                        continue;
+                    }
+                }
+                let flat = pal[usize::from(layer.pixels[i])];
+                let mut shown = None;
+                if !matches!(src.kind, Kind::Classic | Kind::Glyph) && src.flags & !FLAG_MEMORY == 0
+                {
+                    if key != Some((src.kind, src.id)) {
+                        key = Some((src.kind, src.id));
+                        cur = res.resolve(src.kind, src.id);
+                    }
+                    let (u, v) = (usize::from(src.u), usize::from(src.v));
+                    if cur.token != NONE && src.ver == cur.ver && u < cur.width && v < cur.height {
+                        shown = Some((cur, (u, v)));
+                    }
+                }
+                match shown {
+                    None => {
+                        for r in 0..s {
+                            out[o + r * ow..o + r * ow + s].fill(flat);
+                        }
+                    }
+                    Some((r, (u, v))) => {
+                        let hd = if src.flags & FLAG_MEMORY != 0 {
+                            res.hd.grey(r.slot)
+                        } else {
+                            res.hd.entry(r.slot).hd.as_slice()
+                        };
+                        let hw = r.width * s;
+                        let b = v * s * hw + u * s;
+                        for k in 0..s {
+                            let from = &hd[b + k * hw..b + k * hw + s];
+                            let to = &mut out[o + k * ow..o + k * ow + s];
+                            for (d, &c) in to.iter_mut().zip(from) {
+                                *d = over(c, flat);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.hd.shrink();
+    }
+}
+
 /// Resolves the images of one composition ([`Compositor::compose`]).
 struct Resolver<'a> {
     hd: &'a mut HdImages,
@@ -1337,6 +1476,11 @@ mod memory_tests {
     /// The tile drawn at (32, 48), each pixel named the record with `flags` and its colour plus
     /// `add`; a palette of distinct colours, entry [`GREY`] + i the grey of entry i.
     fn frame(t: &Tile7, flags: u8, add: u8) -> Framebuffer {
+        frame_at(t, flags, add, (32, 48))
+    }
+
+    /// [`frame`] with the tile drawn at `at`.
+    fn frame_at(t: &Tile7, flags: u8, add: u8, at: (usize, usize)) -> Framebuffer {
         let mut fb = Framebuffer::new();
         fb.enable_src();
         for (i, c) in fb.palette.iter_mut().enumerate().take(32) {
@@ -1355,18 +1499,40 @@ mod memory_tests {
                 kind: Kind::Tile,
                 flags,
             };
-            fb.set_src(32 + u, 48 + v, p | add, src);
+            fb.set_src(at.0 + u, at.1 + v, p | add, src);
         }
         fb
     }
 
     /// The composed words of the tile's place.
     fn block(c: &Compositor, s: usize) -> Vec<u32> {
+        block_at(c, s, (32, 48))
+    }
+
+    /// The composed words of the 16 × 16 pixels from `at`.
+    fn block_at(c: &Compositor, s: usize, at: (usize, usize)) -> Vec<u32> {
         let ow = WIDTH * s;
-        (48 * s..64 * s)
-            .flat_map(|y| (32 * s..48 * s).map(move |x| y * ow + x))
+        (at.1 * s..(at.1 + 16) * s)
+            .flat_map(|y| (at.0 * s..(at.0 + 16) * s).map(move |x| y * ow + x))
             .map(|i| c.rgba()[i])
             .collect()
+    }
+
+    /// A layer of the 16 × 16 pixels of `fb` from `from`, at frame pixel `at`, every pixel drawn.
+    fn layer_of(
+        fb: &Framebuffer,
+        from: (usize, usize),
+        at: (i32, i32),
+    ) -> crate::motion::LayerPixels {
+        let mut layer = crate::motion::LayerPixels::clear(at.0, at.1, 16, 16);
+        for v in 0..16 {
+            for u in 0..16 {
+                layer.pixels[v * 16 + u] = fb.get(from.0 + u, from.1 + v).unwrap();
+                layer.src[v * 16 + u] = fb.src_at(from.0 + u, from.1 + v).unwrap();
+                layer.drawn[v * 16 + u] = true;
+            }
+        }
+        layer
     }
 
     /// A pixel of the remembered sight shows the grey of the HD block the same pixel shows
@@ -1406,6 +1572,145 @@ mod memory_tests {
             assert!(block(&grey_c, s) == want && grey_c.cache().bytes() == bytes);
             grey_c.compose(&frame(&t, FLAG_MEMORY | FLAG_OVERLAY, GREY), &mut t, scale);
             assert!(block(&grey_c, s) == flat, "×{s}: an overlay pixel classic");
+        }
+    }
+
+    /// Spec 20 Design 5: a layer holding the frame's pixels of the tile's place (and a clear
+    /// column beside it) composes as the frame does there, at both scales: the live tile, the
+    /// remembered tile's grey copy, a flagged pixel classic; its clear pixels transparent; and the
+    /// next composition of the frame writes every block again, under a new palette generation,
+    /// when the layer's palette was another.
+    #[test]
+    fn a_layer_composes_its_pixels_as_the_frame_does_and_its_clear_ones_transparent() {
+        for scale in [Scale::X2, Scale::X4] {
+            let s = scale.factor();
+            for (flags, add) in [(0, 0), (FLAG_MEMORY, GREY), (FLAG_OVERLAY, 0)] {
+                let mut t = tile7();
+                let fb = frame(&t, flags, add);
+                let mut c = Compositor::new();
+                c.compose(&fb, &mut t, scale);
+                let mut layer = crate::motion::LayerPixels::clear(32, 48, 17, 16);
+                for v in 0..16 {
+                    for u in 0..16 {
+                        let i = v * 17 + u;
+                        layer.pixels[i] = fb.get(32 + u, 48 + v).unwrap();
+                        layer.src[i] = fb.src_at(32 + u, 48 + v).unwrap();
+                        layer.drawn[i] = true;
+                    }
+                }
+                let mut out = Vec::new();
+                c.compose_layer(&layer, &fb.palette, &mut t, scale, &mut out);
+                assert_eq!(out.len(), 17 * s * 16 * s);
+                let mine: Vec<u32> = (0..16 * s)
+                    .flat_map(|y| (0..16 * s).map(move |x| (x, y)))
+                    .map(|(x, y)| out[y * 17 * s + x])
+                    .collect();
+                assert!(
+                    mine == block(&c, s),
+                    "×{s} flags {flags}: the frame's block"
+                );
+                let clear = (0..16 * s).all(|y| (16 * s..17 * s).all(|x| out[y * 17 * s + x] == 0));
+                assert!(clear, "×{s}: the clear column transparent");
+            }
+            let mut t = tile7();
+            let fb = frame(&t, 0, 0);
+            let mut c = Compositor::new();
+            c.compose(&fb, &mut t, scale);
+            let mut other = fb.palette;
+            other[1] = Rgb::new(1, 2, 3);
+            let mut layer = crate::motion::LayerPixels::clear(0, 0, 1, 1);
+            layer.drawn[0] = true;
+            layer.pixels[0] = 1;
+            let mut out = Vec::new();
+            c.compose_layer(&layer, &other, &mut t, scale, &mut out);
+            assert!(
+                out.iter().all(|&w| w == word(Rgb::new(1, 2, 3))),
+                "×{s}: in its palette"
+            );
+            assert!(c.take_dirty().is_some());
+            assert!(
+                c.compose(&fb, &mut t, scale),
+                "×{s}: the frame written again"
+            );
+            assert!(
+                block(&c, s)
+                    == block(
+                        &{
+                            let mut fresh = Compositor::new();
+                            fresh.compose(&fb, &mut t, scale);
+                            fresh
+                        },
+                        s
+                    ),
+                "×{s}: as a new compositor"
+            );
+        }
+    }
+
+    /// Spec 20 Design 5: a layer composed where no composition of the frame drew its pixels (a
+    /// new compositor, or the layer elsewhere than the tile in the frame composed) is the block the
+    /// frame composes with the tile at the layer's place, at both scales: the live tile, the
+    /// remembered one's grey copy, a flagged pixel classic.
+    #[test]
+    fn a_layer_composed_without_the_frames_blocks_is_the_block_of_its_pixels() {
+        for scale in [Scale::X2, Scale::X4] {
+            let s = scale.factor();
+            for (flags, add) in [(0, 0), (FLAG_MEMORY, GREY), (FLAG_OVERLAY, 0)] {
+                let mut t = tile7();
+                let there = (96, 16);
+                let want = {
+                    let mut c = Compositor::new();
+                    c.compose(&frame_at(&t, flags, add, there), &mut t, scale);
+                    block_at(&c, s, there)
+                };
+                let fb = frame(&t, flags, add);
+                let layer = layer_of(&fb, (32, 48), (there.0 as i32, there.1 as i32));
+                let mut out = Vec::new();
+                Compositor::new().compose_layer(&layer, &fb.palette, &mut t, scale, &mut out);
+                assert!(out == want, "×{s} flags {flags}: a new compositor");
+                let mut c = Compositor::new();
+                c.compose(&fb, &mut t, scale);
+                c.compose_layer(&layer, &fb.palette, &mut t, scale, &mut out);
+                assert!(out == want, "×{s} flags {flags}: the layer elsewhere");
+            }
+        }
+    }
+
+    /// Spec 20 Design 5: a layer in palette A after one in palette B after the frame's in A shows
+    /// A's colours (the images of B's generation are not A's), at both scales; the next
+    /// composition of the frame is that of a new compositor.
+    #[test]
+    fn a_layer_in_the_frames_palette_after_one_in_another_takes_its_own_colours() {
+        for scale in [Scale::X2, Scale::X4] {
+            let s = scale.factor();
+            let mut t = tile7();
+            let fb = frame(&t, 0, 0);
+            let mut b = fb.palette;
+            for k in [1, 2, 5] {
+                b[k] = Rgb::new(200, 10 * k as u8, 3);
+            }
+            let layer = layer_of(&fb, (32, 48), (96, 16));
+            let fresh = |palette: &[Rgb; 256], t: &mut Tile7| {
+                let mut out = Vec::new();
+                Compositor::new().compose_layer(&layer, palette, t, scale, &mut out);
+                out
+            };
+            let (in_a, in_b) = (fresh(&fb.palette, &mut t), fresh(&b, &mut t));
+            assert!(in_a != in_b, "×{s}: the palettes show apart");
+            let mut c = Compositor::new();
+            c.compose(&fb, &mut t, scale);
+            let mut out = Vec::new();
+            c.compose_layer(&layer, &b, &mut t, scale, &mut out);
+            assert!(out == in_b, "×{s}: B");
+            c.compose_layer(&layer, &fb.palette, &mut t, scale, &mut out);
+            assert!(out == in_a, "×{s}: A again");
+            c.compose(&fb, &mut t, scale);
+            let mut new = Compositor::new();
+            new.compose(&fb, &mut t, scale);
+            assert!(
+                c.rgba() == new.rgba(),
+                "×{s}: the frame as a new compositor's"
+            );
         }
     }
 

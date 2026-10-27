@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::Framebuffer;
+use std::collections::BTreeMap;
 
 /// The view of the scenes here: 11 × 11 cells from frame pixel (0, 0), Original's.
 const SIDE: usize = 11;
@@ -478,4 +479,410 @@ fn a_preview_slides_at_once_is_held_until_the_engine_shows_its_places_and_then_o
         p.view(1000.0).is_none() && !p.active(1000.0),
         "no preview at Max"
     );
+}
+
+#[test]
+fn the_layers_split_the_plan_by_how_it_moves_and_placed_they_are_the_plan() {
+    // The doorway step of the occlusion test: the mover's word in its own layer, the arch over it
+    // in its occluders, neither among the static words; each part placed is the plan.
+    let (above, door) = ((100, 97), (100, 98));
+    let build = |at| {
+        let mut s = scene(
+            (100, 100),
+            0,
+            &[(LEADER, (100, 100), 0x180), (2, at, 0x181)],
+        );
+        add(&mut s, door, ARCH, Some(9), Rank::Top);
+        place(&mut s, 9, door, 0x10);
+        s
+    };
+    let mut p = Presenter::new();
+    let g0 = p.generation();
+    p.publish(Rc::new(build(above)), 0.0, true);
+    p.publish(Rc::new(build(door)), 0.0, true);
+    assert!(p.generation() > g0, "a publication is a new generation");
+    let layers = p.layers();
+    let words = |ops: &[Op], w: u16| ops.iter().filter(|o| o.draw == Draw::Word(w)).count();
+    assert_eq!(layers.movers.len(), 1);
+    let m = &layers.movers[0];
+    assert_eq!(
+        (m.slot, words(&m.ops, ACTOR), words(&m.over, ARCH)),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        (words(&layers.statics, ACTOR), words(&layers.statics, ARCH)),
+        (1, 1)
+    );
+    for t in [0.0, 90.0, 180.0, SLIDE_MS] {
+        let view = p.view(t).expect("a slide");
+        let mut placed = Vec::new();
+        for (part, (dx, dy)) in layers.placed(&view) {
+            let ops = match part {
+                Part::Static => &layers.statics,
+                Part::Mover(i) => &layers.movers[i].ops,
+                Part::Over(i) => &layers.movers[i].over,
+            };
+            placed.extend(ops.iter().map(|o| Op {
+                x: o.x + dx,
+                y: o.y + dy,
+                ..*o
+            }));
+        }
+        assert_eq!(placed, p.plan(&view), "at {t}");
+    }
+    let g = p.generation();
+    p.end(SLIDE_MS);
+    assert_eq!(p.generation(), g, "a slide's end keeps the generation");
+    p.foreign();
+    assert!(p.generation() > g, "a foreign publication is a new one");
+}
+
+#[test]
+fn a_layer_tells_the_blocks_it_changed_from_another_moved_by_a_shift() {
+    let mut old = LayerPixels::clear(-16, -16, 64, 48);
+    for (i, p) in old.pixels.iter_mut().enumerate() {
+        *p = (i % 64 / 16 + 4 * (i / 64 / 16)) as u8;
+    }
+    old.drawn.fill(true);
+    assert_eq!(
+        old.changed_since(&old, (0, 0)),
+        Some(vec![]),
+        "the same: nothing"
+    );
+    let mut new = old.clone();
+    new.pixels[20 * 64 + 40] = 99;
+    assert_eq!(
+        new.changed_since(&old, (0, 0)),
+        Some(vec![[32, 16, 16, 16]]),
+        "one block"
+    );
+    // Moved one block west: each block shows its east neighbour's old pixels; the east column has
+    // none and is dirty, a block of other pixels too.
+    let mut moved = LayerPixels::clear(-16, -16, 64, 48);
+    moved.drawn.fill(true);
+    for i in 0..64 * 48 {
+        let (x, y) = (i % 64, i / 64);
+        moved.pixels[i] = if x + 16 < 64 {
+            old.pixels[y * 64 + x + 16]
+        } else {
+            7
+        };
+    }
+    moved.pixels[40 * 64] = 98;
+    assert_eq!(
+        moved.changed_since(&old, (-16, 0)),
+        Some(vec![[48, 0, 16, 48], [0, 32, 16, 16]]),
+        "the east column one rect"
+    );
+    assert_eq!(
+        moved.changed_since(&LayerPixels::clear(0, 0, 64, 48), (0, 0)),
+        None,
+        "elsewhere"
+    );
+    let r = moved.rect([16, 16, 32, 16]);
+    assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 32, 16));
+    assert_eq!(r.pixels[0], moved.pixels[16 * 64 + 16]);
+}
+
+/// The blocks a layer changed, told pixel by pixel: block (bx, by) of `new` differs when a pixel
+/// of it has no pixel of `old` at its place less `shift`, or another drawn bit, or (drawn) another
+/// colour or source.
+fn dirty_blocks(
+    new: &LayerPixels,
+    old: &LayerPixels,
+    shift: (i32, i32),
+) -> BTreeSet<(usize, usize)> {
+    let mut out = BTreeSet::new();
+    for y in 0..new.height {
+        for x in 0..new.width {
+            let (ox, oy) = (x as i32 - shift.0, y as i32 - shift.1);
+            let i = y * new.width + x;
+            let same =
+                (0..old.width as i32).contains(&ox) && (0..old.height as i32).contains(&oy) && {
+                    let o = oy as usize * old.width + ox as usize;
+                    new.drawn[i] == old.drawn[o]
+                        && (!new.drawn[i]
+                            || new.pixels[i] == old.pixels[o] && new.src[i] == old.src[o])
+                };
+            if !same {
+                out.insert((x / 16, y / 16));
+            }
+        }
+    }
+    out
+}
+
+/// The blocks rects cover, each block once (none covered twice), the rects inside the layer.
+fn covered(rects: &[[usize; 4]], layer: &LayerPixels) -> BTreeSet<(usize, usize)> {
+    let mut out = BTreeSet::new();
+    for &[x, y, w, h] in rects {
+        assert!(
+            x % 16 == 0 && y % 16 == 0 && w > 0 && h > 0,
+            "{rects:?}: on the blocks"
+        );
+        assert!(
+            x + w <= layer.width && y + h <= layer.height,
+            "{rects:?}: inside"
+        );
+        for by in y / 16..(y + h).div_ceil(16) {
+            for bx in x / 16..(x + w).div_ceil(16) {
+                assert!(out.insert((bx, by)), "{rects:?}: block ({bx}, {by}) twice");
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_layers_changes_are_the_blocks_that_differ_at_any_shift_edge_blocks_and_bits_included() {
+    // 70 × 45: a partial column and row of blocks at the east and south edges.
+    let (w, h) = (70, 45);
+    let mut seed = 1u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        seed >> 16
+    };
+    let mut old = LayerPixels::clear(-16, -16, w, h);
+    for i in 0..w * h {
+        old.pixels[i] = (next() % 4) as u8;
+        old.drawn[i] = next() % 8 != 0;
+        old.src[i].id = (next() % 3) as u16;
+    }
+    let at = |x: i32, y: i32| {
+        ((0..w as i32).contains(&x) && (0..h as i32).contains(&y))
+            .then(|| y as usize * w + x as usize)
+    };
+    let shifts = [
+        (0, 0),
+        (0, -16),
+        (0, 32),
+        (-16, 16),
+        (16, -16),
+        (-5, 3),
+        (7, 0),
+        (0, -9),
+    ];
+    let mut seen = [0usize; 4];
+    for shift in shifts {
+        // The old pixels moved by the shift, then changes of each kind in a few places.
+        let mut new = LayerPixels::clear(-16, -16, w, h);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let i = at(x, y).unwrap();
+                if let Some(o) = at(x - shift.0, y - shift.1) {
+                    new.pixels[i] = old.pixels[o];
+                    new.drawn[i] = old.drawn[o];
+                    new.src[i] = old.src[o];
+                }
+            }
+        }
+        for _ in 0..6 {
+            let i = next() as usize % (w * h);
+            match next() % 4 {
+                0 => new.pixels[i] ^= 8,
+                1 => new.drawn[i] = !new.drawn[i],
+                2 => new.src[i].id ^= 4,
+                // A clear pixel's colour and source are no one's.
+                _ if !new.drawn[i] => {
+                    new.pixels[i] ^= 16;
+                    new.src[i].id ^= 2;
+                }
+                _ => {}
+            }
+        }
+        let want = dirty_blocks(&new, &old, shift);
+        let rects = new.changed_since(&old, shift).unwrap();
+        assert_eq!(covered(&rects, &new), want, "shift {shift:?}: {rects:?}");
+        seen[0] += usize::from(want.iter().any(|&(bx, _)| bx == w / 16));
+        seen[1] += usize::from(want.iter().any(|&(_, by)| by == h / 16));
+        seen[2] += usize::from(rects.iter().any(|r| r[3] > 16));
+        seen[3] += usize::from(want.len() < w.div_ceil(16) * h.div_ceil(16));
+    }
+    assert!(
+        seen.iter().all(|&n| n > 0),
+        "edge blocks, merged rects and clean blocks seen: {seen:?}"
+    );
+    // Each kind alone: one pixel's colour, drawn bit or source changes its block, as does nothing
+    // when the pixel is clear in both.
+    for kind in 0..4 {
+        let i = 20 * w + 37;
+        let mut base = old.clone();
+        base.drawn[i] = kind != 3;
+        let mut new = base.clone();
+        match kind {
+            0 => new.pixels[i] ^= 8,
+            1 => new.drawn[i] = false,
+            2 => new.src[i].id ^= 4,
+            _ => {
+                new.pixels[i] ^= 8;
+                new.src[i].id ^= 4;
+            }
+        }
+        let want = if kind == 3 {
+            vec![]
+        } else {
+            vec![[32, 16, 16, 16]]
+        };
+        assert_eq!(new.changed_since(&base, (0, 0)), Some(want), "kind {kind}");
+    }
+}
+
+#[test]
+fn a_restarted_slide_stays_under_the_top_tiles_of_every_cell_it_sweeps() {
+    // From 96 to 97, restarted half way (drawn at 96.5) toward 98: the mover overlaps cell 96 at
+    // the restart, two cells from its new cell; a top tile there covers it.
+    let at = |x: i32| {
+        let mut s = scene(
+            (100, 100),
+            0,
+            &[(LEADER, (100, 100), 0x180), (2, (x, 95), 0x181)],
+        );
+        add(&mut s, (96, 95), WALL, Some(10), Rank::Top);
+        place(&mut s, 10, (96, 95), 0x20);
+        s
+    };
+    let mut p = two(at(96), at(97), 0.0);
+    p.publish(Rc::new(at(98)), 180.0, true);
+    let s = at(98);
+    let fb = frame_at(&p, 180.0);
+    let px = |cell, col: i32| {
+        let (x, y) = s.pixel(cell);
+        fb.get((x + col) as usize, (y + 8) as usize)
+    };
+    assert_eq!(
+        px((96, 95), 12),
+        Some(4),
+        "under the top tile of the cell it left"
+    );
+    assert_eq!(px((97, 95), 4), Some(BODY), "drawn in the next cell");
+}
+
+#[test]
+fn the_layers_generation_moves_only_when_what_slides_changes() {
+    let at = |c: i32, npc: i32| {
+        scene(
+            (c, 100),
+            0,
+            &[(LEADER, (c, 100), 0x180), (2, (npc, 95), 0x181)],
+        )
+    };
+    let mut p = Presenter::new();
+    p.publish(Rc::new(at(100, 96)), 0.0, true);
+    let g = p.generation();
+    p.publish(Rc::new(at(101, 96)), 10.0, true);
+    assert!(p.generation() > g, "the camera starts sliding");
+    let g = p.generation();
+    p.publish(Rc::new(at(101, 96)), 50.0, true);
+    assert_eq!(
+        p.generation(),
+        g,
+        "the same places: the slides run on, the layers kept"
+    );
+    p.publish(Rc::new(at(101, 97)), 90.0, true);
+    assert!(p.generation() > g, "a mover joins");
+    let g = p.generation();
+    p.publish(Rc::new(at(101, 97)), 120.0, true);
+    assert_eq!(p.generation(), g);
+    p.publish(Rc::new(at(102, 97)), 200.0, true);
+    assert!(p.generation() > g, "the camera restarts");
+    let g = p.generation();
+    p.publish(Rc::new(at(110, 107)), 210.0, true);
+    assert!(p.generation() > g, "a snap restarts the presenter");
+    let g = p.generation();
+    p.foreign();
+    assert!(p.generation() > g, "a foreign picture");
+}
+
+/// Spec 20 Design 5, against an oracle of its own: with the leader stepping east (the camera
+/// slides), movers 2 and 3 crossing rows going south and north, and 4 and 5 swapping cells along a
+/// row, at each eighth of the slide every mover's layer is placed where the linear move of its cell
+/// puts it on the screen (its world pixel less the camera's, the view's corner at the camera), the
+/// movers in the order of those places (y, then x), the static words and the words over each at
+/// the camera's offset.
+#[test]
+fn the_movers_are_placed_where_their_cells_put_them_crossing_under_a_sliding_camera() {
+    let objects = |leader: i32, moved: bool| {
+        let (two, three) = if moved { (100, 99) } else { (99, 100) };
+        let (four, five) = if moved { (98, 97) } else { (97, 98) };
+        [
+            (LEADER, (leader, 100), 0x180),
+            (2, (98, two), 0x181),
+            (3, (99, three), 0x182),
+            (4, (four, 102), 0x183),
+            (5, (five, 102), 0x184),
+        ]
+    };
+    let a = scene((100, 100), 0, &objects(100, false));
+    let b = scene((101, 100), 0, &objects(101, true));
+    let p = two(a.clone(), b.clone(), 0.0);
+    let layers = p.layers();
+    let half = (SIDE / 2) as i32;
+    let mut crossed = [false; 2];
+    for k in 0..=8 {
+        let f = f64::from(k) / 8.0;
+        let at = |from: i32, to: i32| f64::from(16 * from) + f * f64::from(16 * (to - from));
+        let cam = (at(a.centre.0, b.centre.0), at(a.centre.1, b.centre.1));
+        let view = p.view(SLIDE_MS * f).expect("a slide");
+        let want_cam = (
+            (cam.0 - f64::from(16 * b.centre.0)) as i32,
+            (cam.1 - f64::from(16 * b.centre.1)) as i32,
+        );
+        assert_eq!(view.camera, want_cam, "at {k}/8: the camera");
+        // Each mover's screen pixel by the oracle: its world pixel less the camera's, from the
+        // view's corner at the camera.
+        let mut want = BTreeMap::new();
+        for slot in [LEADER, 2, 3, 4, 5] {
+            let (from, to) = (a.find(slot).unwrap().cell, b.find(slot).unwrap().cell);
+            let w = (at(from.0, to.0), at(from.1, to.1));
+            let screen = (
+                b.corner.0 + (w.0 - cam.0) as i32 + 16 * half,
+                b.corner.1 + (w.1 - cam.1) as i32 + 16 * half,
+            );
+            want.insert(slot, screen);
+        }
+        let placed = layers.placed(&view);
+        let n = layers.movers.len();
+        assert_eq!(
+            placed.len(),
+            1 + 2 * n,
+            "at {k}/8: the static part, the movers, the overs"
+        );
+        assert_eq!(placed[0], (Part::Static, (-view.camera.0, -view.camera.1)));
+        let mut got = BTreeMap::new();
+        let mut order = Vec::new();
+        for &(part, (dx, dy)) in &placed[1..=n] {
+            let Part::Mover(i) = part else {
+                panic!("at {k}/8: a mover's part");
+            };
+            let m = &layers.movers[i];
+            let screen = (m.home.0 + dx, m.home.1 + dy);
+            got.insert(m.slot, screen);
+            order.push((screen.1, screen.0));
+        }
+        assert_eq!(got, want, "at {k}/8: the movers' places");
+        assert!(
+            order.is_sorted(),
+            "at {k}/8: drawn by their places: {order:?}"
+        );
+        for (j, &(part, d)) in placed[n + 1..].iter().enumerate() {
+            let Part::Mover(i) = placed[1 + j].0 else {
+                unreachable!()
+            };
+            assert_eq!(
+                (part, d),
+                (Part::Over(i), (-view.camera.0, -view.camera.1)),
+                "at {k}/8"
+            );
+        }
+        // 2 above 3 before the crossing, below after; 4 west of 5 before, east after.
+        let index =
+            |slot: u16| {
+                (placed[1..=n].iter())
+            .position(|&(part, _)| matches!(part, Part::Mover(i) if layers.movers[i].slot == slot))
+            .unwrap()
+            };
+        crossed[0] |= k < 4 && index(2) < index(3) || k > 4 && index(2) > index(3);
+        crossed[1] |= k < 4 && index(4) < index(5) || k > 4 && index(4) > index(5);
+    }
+    assert!(crossed == [true, true], "the crossings change the order");
 }

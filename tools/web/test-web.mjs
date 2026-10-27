@@ -27,7 +27,8 @@
 // conversation), the remembered sight (spec 18: on in the page, off in the harness, grey on
 // the canvas where the engine's frame remembers a cell out of sight), and smooth motion (spec 20:
 // on in the page, off in the harness; steps by key and by click slide through in-between
-// positions in Original, HD and Wide, and reach the prompt when a run without it does).
+// positions in Original, HD, the HD layout and Wide, and reach the prompt when a run without it
+// does; with HD the slide's layers cost the page little a display frame).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
@@ -11586,12 +11587,23 @@ const MOTION_DIRS = [
   { key: 'ArrowUp', dx: 0, dy: -1 },
 ];
 
-// A gated page of `mode` ('original': HD off; 'hd': HD on, the Original layout; 'wide': the Wide
-// build) with smooth motion `motion`, seeded from `seedTime`, on a virtual 60 Hz display from its
-// boot, the wasm memory kept (`wasmMemoryHook`), at the game's prompt.
+// A gated page of `mode` with `opts` (h.openPage's): 'original' and 'hd' the Original layout, 'layout'
+// the HD layout (spec 10: the 1280 x 720 canvas composed from the x4 frame), in a 1400 x 900 window
+// as `bootLayout`'s, 'wide' the Wide build.
+async function motionOpen(env, mode, opts) {
+  if (mode === 'wide') return h.openWide(env, opts);
+  const opened = await h.openPage(env, { ...opts, layout: mode === 'layout' ? 'hd' : 'original' });
+  if (mode === 'layout') await opened.page.setViewportSize({ width: 1400, height: 900 });
+  return opened;
+}
+
+// A gated page of `mode` ('original': HD off; 'hd': HD on, the Original layout; 'layout': the HD
+// layout; 'wide': the Wide build; `motionOpen`) with smooth motion `motion`, seeded from `seedTime`,
+// on a virtual 60 Hz display from its boot, the wasm memory kept (`wasmMemoryHook`), at the game's
+// prompt.
 async function motionPage(env, mode, motion, seedTime) {
   const opts = { motion: motion ? 'on' : 'off', font: 'pixel' };
-  const { context, page } = mode === 'wide' ? await h.openWide(env, opts) : await h.openPage(env, opts);
+  const { context, page } = await motionOpen(env, mode, opts);
   await context.addInitScript((t) => { Date.now = () => t; }, seedTime);
   await context.addInitScript(wasmMemoryHook);
   if (mode === 'original') {
@@ -11610,7 +11622,8 @@ async function motionPage(env, mode, motion, seedTime) {
   await page.focus('#screen');
   await h.runFramesToPrompt(page, 60_000);
   const shown = await page.evaluate(() => [globalThis.__shownGame.hd_on(), globalThis.__shownGame.motion(), document.body.dataset.layout]);
-  assert.deepEqual(shown, [mode !== 'original', motion, mode === 'wide' ? 'wide' : 'original'], `${mode}: HD, motion and the layout`);
+  const layout = { original: 'original', hd: 'original', layout: 'hd', wide: 'wide' }[mode];
+  assert.deepEqual(shown, [mode !== 'original', motion, layout], `${mode}: HD, motion and the layout`);
   return { context, page };
 }
 
@@ -11639,23 +11652,33 @@ async function motionWalkSouth(page, cells) {
   assert.fail(`the party did not reach the cell ${cells} south of the start`);
 }
 
-// Keeps in the page the shown map as the canvas's frame shows it now (the RGBA frame with HD off,
-// the HD frame with it on: each game pixel's top-left device pixel, read in place).
+// Keeps in the page the shown map as the canvas shows it now: per game pixel of the shown map, the
+// canvas pixel that shows it (with HD and the Original layout the top-left device pixel of its
+// S x S block; in Wide where the layout maps its centre, `__u6Layout.toCanvas`), none where a
+// window covers it.
 const motionReference = (page) => page.evaluate(() => {
   const g = globalThis.__shownGame;
-  globalThis.__motionMap = () => {
-    const hd = g.hd_on();
-    const s = hd ? g.hd_scale() : 1;
-    const mem = window.__wasmMemory.buffer;
-    const v = hd ? new Uint8Array(mem, g.hd_frame_ptr(), g.hd_frame_len()) : new Uint8Array(mem, g.frame_ptr(), g.frame_len());
-    const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
-    const out = new Uint32Array(mw * mh);
-    for (let y = 0; y < mh; y += 1) {
-      for (let x = 0; x < mw; x += 1) {
-        const i = ((my + y) * s * g.width() * s + (mx + x) * s) * 4;
-        out[y * mw + x] = (v[i] << 16) | (v[i + 1] << 8) | v[i + 2];
-      }
+  const c = document.getElementById('screen');
+  const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+  const L = globalThis.__u6Layout;
+  const wide = ['hd', 'wide'].includes(document.body.dataset.layout);
+  const s = c.width / g.width();
+  const covered = (x, y) => L.windows.some(({ outer: [wx, wy, ww, wh] }) => x >= wx && x < wx + ww && y >= wy && y < wy + wh);
+  const at = new Int32Array(mw * mh).fill(-1);
+  for (let y = 0; y < mh; y += 1) {
+    for (let x = 0; x < mw; x += 1) {
+      let p;
+      if (wide) {
+        const q = L.toCanvas(mx + x, my + y);
+        p = q && !covered(q[0], q[1]) ? [Math.floor(q[0]), Math.floor(q[1])] : null;
+      } else p = [(mx + x) * s, (my + y) * s];
+      if (p && p[0] >= 0 && p[1] >= 0 && p[0] < c.width && p[1] < c.height) at[y * mw + x] = (p[1] * c.width + p[0]) * 4;
     }
+  }
+  globalThis.__motionMap = () => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const out = new Int32Array(mw * mh);
+    for (let i = 0; i < out.length; i += 1) out[i] = at[i] < 0 ? -1 : (d[at[i]] << 16) | (d[at[i] + 1] << 8) | d[at[i] + 2];
     return { out, mw, mh };
   };
   globalThis.__motionRef = globalThis.__motionMap();
@@ -11696,7 +11719,8 @@ const motionFrames = (page, dx, dy, keep, max = 3000) => page.evaluate(([ax, ay,
       let same = 0;
       for (let y = 16; y < now.mh - 16; y += 2) {
         for (let x = 16; x < now.mw - 16; x += 2) {
-          same += now.out[y * now.mw + x] === ref.out[(y + d * ay) * ref.mw + x + d * ax] ? 1 : 0;
+          const [p, q] = [now.out[y * now.mw + x], ref.out[(y + d * ay) * ref.mw + x + d * ax]];
+          same += p >= 0 && p === q ? 1 : 0;
         }
       }
       if (same > best[0]) best = [same, d];
@@ -11765,7 +11789,7 @@ async function motionRun(env, mode, motion, seedTime) {
   return Object.assign(steps, { scale });
 }
 
-for (const mode of ['original', 'hd', 'wide']) {
+for (const mode of ['original', 'hd', 'layout', 'wide']) {
   test(`smooth motion (spec 20), ${mode}: by key and by click, every step's map passes through in-between positions on the virtual 60 Hz display (offsets printed per frame), the doorway step's frames kept; the steps and the frames to the prompt are those of the same run with it off, which shows none`, async (env) => {
     const seedTime = Date.now();
     const on = await motionRun(env, mode, true, seedTime);
@@ -11798,6 +11822,216 @@ for (const mode of ['original', 'hd', 'wide']) {
     }
   }, { needs: h.haveHfes });
 }
+
+// Keeps in the page `__motionRing()`: the canvas pixels of the ring two canvas pixels outside the
+// shown map's rect on the canvas (the frame's border round it, in the Wide layouts the layout's
+// own, the windows left out), the rect found as `motionReference` maps the map; and counts the
+// page's draws of a slide (each one reads Game.slide) in `__slideCalls`.
+const motionRing = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+  const L = globalThis.__u6Layout;
+  const wide = ['hd', 'wide'].includes(document.body.dataset.layout);
+  const s = c.width / g.width();
+  const covered = (x, y) => L.windows.some(({ outer: [wx, wy, ww, wh] }) => x >= wx && x < wx + ww && y >= wy && y < wy + wh);
+  // The map's rect on the canvas: its corner pixels' centres where the layout puts them, half a
+  // game pixel out (in the Wide layouts the frame round the map is the layout's own).
+  let [l, t, r, b] = [mx * s, my * s, (mx + mw) * s, (my + mh) * s];
+  if (wide) {
+    // The map pixels the layout puts on the canvas, their centres' bounds.
+    let box = null;
+    for (let y = my; y < my + mh; y += 1) {
+      for (let x = mx; x < mx + mw; x += 1) {
+        const q = L.toCanvas(x, y);
+        if (q) box = box ? [Math.min(box[0], q[0]), Math.min(box[1], q[1]), Math.max(box[2], q[0]), Math.max(box[3], q[1])] : [q[0], q[1], q[0], q[1]];
+      }
+    }
+    if (!box) return 0;
+    const [kx, ky] = [c.width / g.width(), c.height / g.height()];
+    [l, t, r, b] = [box[0] - kx / 2, box[1] - ky / 2, box[2] + kx / 2, box[3] + ky / 2];
+  }
+  [l, t, r, b] = [Math.floor(l) - 2, Math.floor(t) - 2, Math.ceil(r) + 1, Math.ceil(b) + 1];
+  const ring = [];
+  for (let x = l; x <= r; x += 1) ring.push([x, t], [x, b]);
+  for (let y = t; y <= b; y += 1) ring.push([l, y], [r, y]);
+  const at = [];
+  for (const [x, y] of ring) {
+    if (wide && covered(x, y)) continue;
+    if (x >= 0 && y >= 0 && x < c.width && y < c.height) at.push((y * c.width + x) * 4);
+  }
+  globalThis.__motionRing = () => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    return at.map((i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+  };
+  const proto = Object.getPrototypeOf(g);
+  if (!proto.__counted) {
+    const slide = proto.slide;
+    proto.slide = function () {
+      globalThis.__slideCalls += 1;
+      return slide.call(this);
+    };
+    proto.__counted = true;
+  }
+  globalThis.__slideCalls = 0;
+  return at.length;
+});
+
+// On the virtual display: frames until `until` (`'sliding'`: a slide drawn from layers;
+// `'settled'`: the prompt back for five frames and no slide), at most `max`; per frame of a slide
+// whether the ring (`motionRing`) differs from `ref`. Returns the frames, the frames drawing a
+// slide, the ring's differing frames, whether `until` was met and the leader.
+const motionUntil = (page, until, ref, max = 3000) => page.evaluate(([want, base, limit]) => {
+  const v = window.__display;
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  let [frames, sliding, ring, run] = [0, 0, 0, 0];
+  const met = () => (want === 'sliding' ? g.sliding() && g.slide().length > 0 : run >= 5 && !g.sliding());
+  while (frames < limit && !met()) {
+    v.run();
+    frames += 1;
+    run = c.dataset.prompt === '1' && c.dataset.keys === '0' ? run + 1 : 0;
+    if (g.slide().length > 0) {
+      sliding += 1;
+      const now = globalThis.__motionRing();
+      ring += now.some((p, i) => p !== base[i]) ? 1 : 0;
+    }
+  }
+  return { frames, sliding, ring, met: met(), leader: c.dataset.leader };
+}, [until, ref, max]);
+
+for (const mode of ['hd', 'wide']) {
+  test(`smooth motion (spec 20 Design 5), ${mode} in fullscreen: a key pressed while a step's slide runs is taken (the party walks back, a slide again); the border round the shown map keeps its pixels in every frame of the slides; once settled the page draws no slide (60 frames)`, async (env) => {
+    const { context, page } = await motionPage(env, mode, true, Date.now());
+    await page.click('#fullscreen');
+    await waitFull(page, 'on');
+    await page.focus('#screen');
+    await h.runFramesToPrompt(page, 60_000);
+    assert.ok((await motionRing(page)) > 100, `${mode}: the ring found`);
+    const ref = await page.evaluate(() => globalThis.__motionRing());
+    const from = await motionLeader(page);
+    let step = null;
+    for (const dir of MOTION_DIRS) {
+      await page.keyboard.press(dir.key);
+      const out = await motionUntil(page, 'sliding', ref, 600);
+      if (out.met && (await motionLeader(page)) !== from) {
+        step = { dir, out };
+        break;
+      }
+      await motionUntil(page, 'settled', ref);
+    }
+    assert.ok(step, `${mode}: a step slid`);
+    // The way back, pressed while the slide runs.
+    const back = MOTION_DIRS.find((d) => d.dx === -step.dir.dx && d.dy === -step.dir.dy);
+    assert.ok(await page.evaluate(() => globalThis.__shownGame.sliding()), `${mode}: the key comes during the slide`);
+    await page.keyboard.press(back.key);
+    const after = await motionUntil(page, 'settled', ref);
+    assert.ok(after.met, `${mode}: settled`);
+    assert.equal(await motionLeader(page), from, `${mode}: the key taken, the party back`);
+    assert.ok(step.out.sliding + after.sliding > 2 && after.sliding > 0, `${mode}: slides drawn for both steps`);
+    assert.equal(step.out.ring + after.ring, 0, `${mode}: the border's pixels in every frame of the slides`);
+    const settled = await page.evaluate(() => {
+      const g = globalThis.__shownGame;
+      globalThis.__slideCalls = 0;
+      const version = g.slide_version();
+      for (let i = 0; i < 60; i += 1) window.__display.run();
+      return [globalThis.__slideCalls, g.slide_version() === version, g.sliding()];
+    });
+    assert.deepEqual(settled, [0, true, false], `${mode}: no slide drawn once settled`);
+    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + after.sliding} frames drawing slides, the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
+    await context.close();
+  }, { needs: h.haveHfes });
+}
+
+// Page init script: per display frame of the page's loop (`frame`) while `__slideTimes` is an
+// array, [the frame's wall ms less the ms its steps and its present took (the page's own: the
+// slide's layers taken, the draws), whether a slide was drawn or put back (Game.slide_version
+// moved), whether the slide's layers were made again (Game.slide_layers_version moved), the ms its
+// present took (the wasm's: the HD frame's composition and the layers made), whether the static
+// layer came whole (not as changes: the first after the page took none)].
+function timeSlideFrames() {
+  window.__slideTimes = null;
+  const raf = window.requestAnimationFrame.bind(window);
+  let wrapped = null;
+  let stepMs = 0;
+  window.requestAnimationFrame = (callback) => raf((now) => {
+    const g = globalThis.__shownGame;
+    if (callback.name !== 'frame' || !Array.isArray(window.__slideTimes) || !g) return callback(now);
+    const proto = Object.getPrototypeOf(g);
+    if (wrapped !== proto) {
+      const step = proto.step;
+      proto.step = function (ms) {
+        const t = performance.now();
+        step.call(this, ms);
+        stepMs += performance.now() - t;
+      };
+      wrapped = proto;
+    }
+    const [slide, layers, present] = [g.slide_version(), g.slide_layers_version(), globalThis.__presentMs];
+    stepMs = 0;
+    const t = performance.now();
+    const out = callback(now);
+    const presentMs = globalThis.__presentMs - present;
+    const ms = performance.now() - t - stepMs - presentMs;
+    const made = g.slide_layers_version() !== layers;
+    const whole = made && g.slide_layer_count() > 0 && g.slide_layer_patch(0).length === 0;
+    window.__slideTimes.push([ms, g.slide_version() !== slide, made, presentMs, whole]);
+    return out;
+  });
+}
+
+// The page's cost per display frame of a slide (spec 20 Design 5): the party walks on the real
+// display (h.stepOnce) until the page drew `slides` frames of slides and made the layers as changes
+// `builds` times, at most `deadline` ms, each frame timed (`timeSlideFrames`); returns the line and
+// the rows.
+async function slideCost(page, label, { slides = 60, builds = 20, deadline = 120_000 } = {}) {
+  await page.evaluate(() => { window.__slideTimes = []; });
+  const end = Date.now() + deadline;
+  let walked = 0;
+  const counts = () => page.evaluate(() => window.__slideTimes.reduce((c, r) => [c[0] + (r[1] && !r[2] ? 1 : 0), c[1] + (r[2] && !r[4] ? 1 : 0)], [0, 0]));
+  for (let c = [0, 0]; (c[0] < slides || c[1] < builds) && Date.now() < end; c = await counts()) {
+    await h.stepOnce(page);
+    walked += 1;
+  }
+  const times = await page.evaluate(() => {
+    const t = window.__slideTimes;
+    window.__slideTimes = null;
+    return t;
+  });
+  const stats = (rows, k = 0) => {
+    const v = rows.map((r) => r[k]).sort((a, b) => a - b);
+    return v.length === 0 ? 'none' : `${v.length}: median ${quantile(v, 0.5).toFixed(2)} ms, p95 ${quantile(v, 0.95).toFixed(2)} ms, max ${v.at(-1).toFixed(2)} ms`;
+  };
+  const sliding = times.filter((r) => r[1] && !r[2]);
+  const made = times.filter((r) => r[2] && !r[4]);
+  const first = times.filter((r) => r[2] && r[4]);
+  const whole = made.map((r) => [r[0] + r[3]]);
+  assert.ok(sliding.length >= slides && made.length >= builds, `${label}: the page drew slides and made their layers within the deadline`);
+  const line = `${label}: ${walked} steps; frames drawing a slide: page ${stats(sliding)}, present ${stats(sliding, 3)}; frames making the layers as changes: whole ${stats(whole)}, present (the HD frame and the layers) ${stats(made, 3)}, page (the changes taken, the draws) ${stats(made)}; frames making them whole: ${stats(first.map((r) => [r[0] + r[3]]))}; other frames: page ${stats(times.filter((r) => !r[1] && !r[2]))}`;
+  return { line, sliding, made, whole };
+}
+
+test('smooth motion (spec 20 Design 5), the page\'s cost per display frame of a slide with HD on: Original at its S, the HD layout and Wide at S 4, the party walking on the real display in the fight and out of combat; the slide drawn from layers made once a publication, their making split between the present and the page (receipt)', async (env) => {
+  const lines = [];
+  for (const mode of ['hd', 'layout', 'wide']) {
+    const { context, page } = await motionOpen(env, mode, { motion: 'on', font: 'pixel' });
+    await context.addInitScript(timeSlideFrames);
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await page.focus('#screen');
+    await h.waitPrompt(page);
+    const s = await page.evaluate(() => globalThis.__shownGame.hd_scale());
+    const name = { hd: 'Original HD', layout: 'HD 16:9 layout', wide: 'Wide' }[mode];
+    lines.push((await slideCost(page, `${name} at S ${s}, in the fight`)).line);
+    // Combat broken off (B): the steps out of combat mode slide from their early pictures.
+    await h.press(page, 'b', 20);
+    await h.waitPrompt(page);
+    lines.push((await slideCost(page, `${name} at S ${s}, out of combat`)).line);
+    await context.close();
+  }
+  for (const line of lines) console.log(`  receipt: ${line}`);
+}, { needs: h.haveHfes });
 
 const filter = process.argv[2];
 const env = await h.setup();

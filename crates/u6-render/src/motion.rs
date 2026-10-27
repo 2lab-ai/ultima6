@@ -17,11 +17,16 @@
 //!   appears, disappears or changes in place.
 //! - **Order:** the static words (every node but the movers'), then the movers by their in-between
 //!   y then x, then the occluders over them: in a cell the mover is drawn in, the words after it;
-//!   in the cells it overlaps besides (its old cell, a diagonal's side cells) the top tiles, the
-//!   multi-tile parts and the light overlays ([`Rank`]). At the end of a slide the plan draws the
-//!   engine's picture exactly: a static pass and the occluders drawn again over the movers give
-//!   each pixel the colour of the cell's draws in list order (opaque, transparent, OR and outline
-//!   pixels are all the same drawn twice).
+//!   in every other cell its draws cover from the slide's start to its end (its old cell, a
+//!   diagonal's side cells, the cells a restart up to 1.5 cells away sweeps) the words from the
+//!   first top tile, multi-tile part or light overlay on ([`Rank`]). At the end of a slide the plan
+//!   draws the engine's picture exactly: the occluders are each a cell's last words, so a static
+//!   pass and the occluders drawn again over the movers give each pixel the colour of the cell's
+//!   draws in list order (opaque, transparent, OR and outline pixels are all the same drawn twice).
+//! - **Layers** ([`Presenter::layers`], spec 20 Design 5): the same draws at rest, split by how
+//!   they move (the static words and the occluders with the camera, each mover with itself), for a
+//!   renderer that composes each part once a publication and only places them each display frame
+//!   ([`Layers::placed`]); [`Presenter::plan`] is them placed.
 //! - **New publications during a slide:** a foreign one ([`Presenter::foreign`]: a missile, a
 //!   flash, a quake) ends every slide; a scene with the same positions lets the slides run on; a
 //!   move restarts from where the object is drawn, or snaps when that is more than 1.5 cells from
@@ -243,6 +248,8 @@ pub struct Presenter<T> {
     movers: Vec<(u16, Track)>,
     /// The newest scene is a preview the engine has not shown yet, held until this time.
     held: Option<f64>,
+    /// [`Presenter::generation`].
+    generation: u64,
 }
 
 impl<T: AsRef<Scene>> Default for Presenter<T> {
@@ -259,6 +266,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
             camera: None,
             movers: Vec::new(),
             held: None,
+            generation: 0,
         }
     }
 
@@ -277,6 +285,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
         self.camera = None;
         self.movers.clear();
         self.held = None;
+        self.generation += 1;
     }
 
     /// Drops the slides ended at `t` (each then stands where it slid to).
@@ -311,6 +320,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
     pub fn publish(&mut self, shot: Rc<T>, time: f64, slides: bool) {
         self.end(time);
         self.held = None;
+        let before = (self.camera, self.movers.clone());
         let new = (*shot).as_ref();
         let follows = |prev: &Scene| {
             prev.leader == new.leader
@@ -361,6 +371,9 @@ impl<T: AsRef<Scene>> Presenter<T> {
         self.movers = movers;
         self.history.insert(0, shot);
         self.history.truncate(HISTORY);
+        if (self.camera, &self.movers) != (before.0, &before.1) {
+            self.generation += 1;
+        }
     }
 
     /// `shot` alone, nothing sliding: what the engine shows.
@@ -396,22 +409,55 @@ impl<T: AsRef<Scene>> Presenter<T> {
         })
     }
 
-    /// What to draw for `view`, in order (the module docs): the cells of the newest scene and a
-    /// cell round it (each from the newest scene that holds it; one held only by an older scene
-    /// without the objects the newest one draws), the movers, the occluders.
+    /// What to draw for `view`, in order (the module docs): [`Presenter::layers`] placed for it,
+    /// the static words with the camera, the movers by their in-between y then x, each with its
+    /// offset, then the words that cover each mover with the camera.
     pub fn plan(&self, view: &View) -> Vec<Op> {
+        let layers = self.layers();
+        let mut ops: Vec<Op> = Vec::new();
+        for (layer, (dx, dy)) in layers.placed(view) {
+            let from = match layer {
+                Part::Static => &layers.statics,
+                Part::Mover(i) => &layers.movers[i].ops,
+                Part::Over(i) => &layers.movers[i].over,
+            };
+            ops.extend(from.iter().map(|op| Op {
+                x: op.x + dx,
+                y: op.y + dy,
+                ..*op
+            }));
+        }
+        ops
+    }
+
+    /// Bumped whenever what slides changes: a camera slide starts or restarts, a mover joins,
+    /// restarts or leaves the slides, the presenter starts again ([`Presenter::foreign`],
+    /// [`Presenter::clear`], a snap). A publication that only lets the slides run on (the same
+    /// places: an animation, the turn's picture after its early one) keeps it, and the layers
+    /// ([`Presenter::layers`]) of a generation stay those it was made with: what changed in place
+    /// shows at the slide's end, in the engine's frame.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Spec 20 Design 5: what the slides draw, at rest (the camera and every mover at its place in
+    /// the newest scene), split by how it moves: the static words (the cells of the newest scene
+    /// and a cell round it, each from the newest scene that holds it; one held only by an older
+    /// scene without the objects the newest one draws), which move with the camera; per mover its
+    /// own words, which move with it, and the words that cover it, which move with the camera: in a
+    /// cell it is drawn in the words after the first mover's, in the cells it passes besides (every
+    /// cell its draws cover from the slide's start to its end: its old cell, a diagonal's side cells,
+    /// a restart's cells) the words from the first top tile, multi-tile part or light overlay on.
+    /// Each is a cell's last words, so drawn again over the static words they leave the cell as it
+    /// was.
+    pub fn layers(&self) -> Layers {
         let Some(newest) = self.history.first() else {
-            return Vec::new();
+            return Layers::default();
         };
         let n = (**newest).as_ref();
-        let moving =
-            |slot: Option<u16>| slot.is_some_and(|s| view.movers.iter().any(|m| m.slot == s));
+        let moving = |slot: Option<u16>| slot.is_some_and(|s| self.movers.iter().any(|m| m.0 == s));
         let shown_here = |k: usize, slot: Option<u16>| {
             moving(slot) || (k > 0 && slot.is_some_and(|s| n.find(s).is_some()))
-        };
-        let screen = |at: (i32, i32)| {
-            let (x, y) = n.pixel(at);
-            (x - view.camera.0, y - view.camera.1)
         };
         let source = |at: (i32, i32)| {
             self.history
@@ -425,7 +471,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
             x,
             y,
         };
-        let mut ops = Vec::new();
+        let mut statics = Vec::new();
         let (xs, ys) = (
             n.origin.0 - 1..=n.origin.0 + n.cols as i32,
             n.origin.1 - 1..=n.origin.1 + n.rows as i32,
@@ -435,69 +481,270 @@ impl<T: AsRef<Scene>> Presenter<T> {
                 let Some((k, i)) = source((x, y)) else {
                     continue;
                 };
-                let at = screen((x, y));
-                ops.push(Op {
+                let at = n.pixel((x, y));
+                statics.push(Op {
                     draw: Draw::Base { scene: k, cell: i },
                     x: at.0,
                     y: at.1,
                 });
                 for node in scene(k).cells[i].nodes.iter() {
                     if !shown_here(k, node.slot) {
-                        ops.push(word(node.word, at));
+                        statics.push(word(node.word, at));
                     }
                 }
             }
         }
-        let mut order: Vec<((i32, i32), &Mover)> = (view.movers.iter())
-            .filter_map(|m| {
-                let (x, y) = screen(n.find(m.slot)?.cell);
-                Some(((y + m.offset.1, x + m.offset.0), m))
-            })
-            .collect();
-        order.sort_by_key(|&(at, _)| at);
-        let mut over = BTreeSet::new();
-        for (_, m) in order {
+        let mut movers = Vec::new();
+        for &(slot, track) in &self.movers {
             // An object's nodes lie in its own cell and the cells west and north of it (its other
             // parts), or east (a doorway's side tile).
-            let Some(home) = n.find(m.slot).map(|p| p.cell) else {
+            let Some(home) = n.find(slot).map(|p| p.cell) else {
                 continue;
             };
+            // The pixels the mover is drawn from its place, start to end: each cell it covers on
+            // the way, a restart's start up to 1.5 cells off and a diagonal's side cells included.
+            let way = (track.from.0 - track.to.0, track.from.1 - track.to.1);
+            let swept = |c: i32, d: f64| {
+                let (lo, hi) = (
+                    f64::from(c * CELL) + d.min(0.0),
+                    f64::from(c * CELL) + d.max(0.0),
+                );
+                let first = (lo / f64::from(CELL)).floor() as i32;
+                let last = ((hi + f64::from(CELL) - 1.0) / f64::from(CELL)).floor() as i32;
+                first..=last
+            };
+            let (mut ops, mut cells) = (Vec::new(), BTreeSet::new());
             for (cx, cy) in
                 (home.1 - 1..=home.1).flat_map(|y| (home.0 - 1..=home.0 + 1).map(move |x| (x, y)))
             {
                 let Some(i) = n.index((cx, cy)) else {
                     continue;
                 };
-                let mine = n.cells[i].nodes.iter().filter(|nd| nd.slot == Some(m.slot));
+                let mine = n.cells[i].nodes.iter().filter(|nd| nd.slot == Some(slot));
                 let mut any = false;
                 for node in mine {
-                    let (x, y) = screen((cx, cy));
-                    ops.push(word(node.word, (x + m.offset.0, y + m.offset.1)));
+                    ops.push(word(node.word, n.pixel((cx, cy))));
                     any = true;
                 }
                 if any {
-                    let (sx, sy) = (m.offset.0.signum(), m.offset.1.signum());
-                    for (dx, dy) in [(0, 0), (sx, 0), (0, sy), (sx, sy)] {
-                        over.insert((cy + dy, cx + dx));
+                    for y in swept(cy, way.1) {
+                        for x in swept(cx, way.0) {
+                            cells.insert((y, x));
+                        }
                     }
                 }
             }
+            let mut over = Vec::new();
+            for (y, x) in cells {
+                let Some((k, i)) = source((x, y)) else {
+                    continue;
+                };
+                let at = n.pixel((x, y));
+                let nodes = &scene(k).cells[i].nodes;
+                let from = match nodes.iter().position(|nd| moving(nd.slot)) {
+                    Some(f) => Some(f + 1),
+                    None => nodes.iter().position(|nd| nd.rank != Rank::Own),
+                };
+                for node in &nodes[from.unwrap_or(nodes.len())..] {
+                    if !shown_here(k, node.slot) {
+                        over.push(word(node.word, at));
+                    }
+                }
+            }
+            movers.push(MoverLayer {
+                slot,
+                home: n.pixel(home),
+                ops,
+                over,
+            });
         }
-        for (y, x) in over {
-            let Some((k, i)) = source((x, y)) else {
-                continue;
-            };
-            let at = screen((x, y));
-            let nodes = &scene(k).cells[i].nodes;
-            let first = nodes.iter().position(|nd| moving(nd.slot));
-            for (j, node) in nodes.iter().enumerate() {
-                let after = first.map_or(node.rank != Rank::Own, |f| j > f);
-                if after && !shown_here(k, node.slot) {
-                    ops.push(word(node.word, at));
+        Layers { statics, movers }
+    }
+}
+
+/// Spec 20 Design 5: the slides' draws by how they move ([`Presenter::layers`]), every op at rest.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Layers {
+    /// The static words: drawn at the camera's offset.
+    pub statics: Vec<Op>,
+    /// The movers, in the order of [`Presenter`]'s slides.
+    pub movers: Vec<MoverLayer>,
+}
+
+/// One mover's draws ([`Layers`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoverLayer {
+    pub slot: u16,
+    /// The frame pixel of its own cell at rest (the draw order sorts by it, slid).
+    pub home: (i32, i32),
+    /// Its own words: drawn at the camera's offset plus its own.
+    pub ops: Vec<Op>,
+    /// The words that cover it: drawn at the camera's offset.
+    pub over: Vec<Op>,
+}
+
+/// Which part of [`Layers`] a placement draws ([`Layers::placed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Static,
+    /// The own words of mover `i` (an index of [`Layers::movers`]).
+    Mover(usize),
+    /// The words that cover mover `i`.
+    Over(usize),
+}
+
+impl Layers {
+    /// The parts in their draw order for `view`, each with its offset from rest in pixels: the
+    /// static words at `-camera`; the movers by their in-between y then x (their place in the
+    /// newest scene slid by their offset), at `-camera` plus their offset (a mover `view` does
+    /// not slide, its slide ended, at rest); then the words that cover each, in the same order, at
+    /// `-camera`.
+    pub fn placed(&self, view: &View) -> Vec<(Part, (i32, i32))> {
+        let cam = (-view.camera.0, -view.camera.1);
+        let offset = |slot: u16| {
+            view.movers
+                .iter()
+                .find(|m| m.slot == slot)
+                .map_or((0, 0), |m| m.offset)
+        };
+        // Per mover: where it is drawn (y, x), its index, its offset from rest.
+        let mut order: Vec<_> = (self.movers.iter().enumerate())
+            .map(|(i, m)| {
+                let (dx, dy) = offset(m.slot);
+                let at = (m.home.1 + cam.1 + dy, m.home.0 + cam.0 + dx);
+                (at, i, (cam.0 + dx, cam.1 + dy))
+            })
+            .collect();
+        order.sort_by_key(|&(at, i, _)| (at, i));
+        let mut out = vec![(Part::Static, cam)];
+        out.extend(order.iter().map(|&(_, i, d)| (Part::Mover(i), d)));
+        out.extend(order.iter().map(|&(_, i, _)| (Part::Over(i), cam)));
+        out
+    }
+}
+
+/// Spec 20 Design 5: one layer of a slide as the engine rasterized it, for the HD compositor: a
+/// `width` × `height` pixel rect whose top left is at frame pixel (`x`, `y`) at rest, its colour
+/// indices and sources, and which pixels its draws wrote (the others are clear).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerPixels {
+    pub x: i32,
+    pub y: i32,
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+    pub src: Vec<crate::Src>,
+    pub drawn: Vec<bool>,
+}
+
+impl LayerPixels {
+    /// A clear layer of `width` × `height` pixels from frame pixel (`x`, `y`).
+    pub fn clear(x: i32, y: i32, width: usize, height: usize) -> Self {
+        let n = width * height;
+        Self {
+            x,
+            y,
+            width,
+            height,
+            pixels: vec![0; n],
+            src: vec![crate::Src::CLASSIC; n],
+            drawn: vec![false; n],
+        }
+    }
+
+    /// The index of frame pixel (`x`, `y`) in the layer at rest, if it holds it.
+    pub fn index(&self, (x, y): (i32, i32)) -> Option<usize> {
+        let (c, r) = (x - self.x, y - self.y);
+        ((0..self.width as i32).contains(&c) && (0..self.height as i32).contains(&r))
+            .then(|| r as usize * self.width + c as usize)
+    }
+
+    /// The 16 × 16 blocks (from the top left) where this layer differs from `old` with `old`'s
+    /// pixels moved by `shift` (its pixel p shows at p + `shift`; a block whose pixels it does not
+    /// cover differs), merged along each row of blocks, then a run under one of the same columns
+    /// into it, into rects (x, y, width, height) in pixels from the top left, by their top row;
+    /// `None` when the two lie at other places or have other sizes.
+    pub fn changed_since(&self, old: &LayerPixels, shift: (i32, i32)) -> Option<Vec<[usize; 4]>> {
+        if (self.x, self.y, self.width, self.height) != (old.x, old.y, old.width, old.height) {
+            return None;
+        }
+        let b = CELL as usize;
+        let (cols, rows) = (self.width.div_ceil(b), self.height.div_ceil(b));
+        // Row by row of the block: the old row's pixels at the place they show, compared as runs.
+        let same = |bx: usize, by: usize| {
+            let (x0, x1) = (bx * b, ((bx + 1) * b).min(self.width));
+            let ox = x0 as i32 - shift.0;
+            if ox < 0 || ox as usize + (x1 - x0) > old.width {
+                return false;
+            }
+            (by * b..((by + 1) * b).min(self.height)).all(|y| {
+                let oy = y as i32 - shift.1;
+                if !(0..old.height as i32).contains(&oy) {
+                    return false;
+                }
+                let (i, o) = (y * self.width + x0, oy as usize * old.width + ox as usize);
+                let n = x1 - x0;
+                let (drawn, was) = (&self.drawn[i..i + n], &old.drawn[o..o + n]);
+                let (pixels, src) = (&self.pixels[i..i + n], &self.src[i..i + n]);
+                let (old_pixels, old_src) = (&old.pixels[o..o + n], &old.src[o..o + n]);
+                // Equal as stored, or equal where drawn (a clear pixel's colour is no one's).
+                drawn == was
+                    && (pixels == old_pixels && src == old_src
+                        || (drawn.iter().zip(pixels.iter().zip(src)))
+                            .zip(old_pixels.iter().zip(old_src))
+                            .all(|((&d, (p, s)), (q, t))| !d || p == q && s == t))
+            })
+        };
+        let mut rects = Vec::new();
+        for by in 0..rows {
+            let mut run: Option<usize> = None;
+            for bx in 0..=cols {
+                let dirty = bx < cols && !same(bx, by);
+                match (dirty, run) {
+                    (true, None) => run = Some(bx),
+                    (false, Some(from)) => {
+                        let (x, y) = (from * b, by * b);
+                        let w = (bx * b).min(self.width) - x;
+                        let h = ((by + 1) * b).min(self.height) - y;
+                        // Under a rect of the row above with the same columns: one rect.
+                        match rects
+                            .iter_mut()
+                            .rev()
+                            .find(|r: &&mut [usize; 4]| r[0] == x && r[2] == w && r[1] + r[3] == y)
+                        {
+                            Some(r) => r[3] += h,
+                            None => rects.push([x, y, w, h]),
+                        }
+                        run = None;
+                    }
+                    _ => {}
                 }
             }
         }
-        ops
+        Some(rects)
+    }
+
+    /// The pixels of rect (x, y, width, height) from the top left, as a layer of their own at their
+    /// frame pixels.
+    pub fn rect(&self, [x, y, w, h]: [usize; 4]) -> LayerPixels {
+        let mut out = LayerPixels::clear(self.x + x as i32, self.y + y as i32, w, h);
+        for r in 0..h {
+            let from = (y + r) * self.width + x;
+            let to = r * w;
+            out.pixels[to..to + w].copy_from_slice(&self.pixels[from..from + w]);
+            out.src[to..to + w].copy_from_slice(&self.src[from..from + w]);
+            out.drawn[to..to + w].copy_from_slice(&self.drawn[from..from + w]);
+        }
+        out
+    }
+
+    /// The bounding rect (x, y, width, height) of 16-pixel draws at `ops`' places, if any.
+    pub fn bounds(ops: &[Op]) -> Option<(i32, i32, usize, usize)> {
+        let x0 = ops.iter().map(|o| o.x).min()?;
+        let y0 = ops.iter().map(|o| o.y).min()?;
+        let x1 = ops.iter().map(|o| o.x + CELL).max()?;
+        let y1 = ops.iter().map(|o| o.y + CELL).max()?;
+        Some((x0, y0, (x1 - x0) as usize, (y1 - y0) as usize))
     }
 }
 

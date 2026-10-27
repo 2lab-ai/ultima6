@@ -91,6 +91,12 @@ impl HdView {
         self.on
     }
 
+    /// Moves at every change of the switch, the scale, the pack or the font mode: what the
+    /// images of one composition are made under.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Spec 07 H2: the pack whose images go in front of MMPX (`None`: none). The setting moves,
     /// so the next [`HdView::present`] composes (when on), exactly as a new view with this pack
     /// would.
@@ -168,19 +174,25 @@ impl HdView {
         wrote
     }
 
-    /// Port-only (spec 20): with HD on, composes `frame` (a slide's picture of the map over a
-    /// copy of `engine`'s published frame) from the engine's images. The HD frame then holds no
-    /// published frame, so the next [`HdView::present`] composes the published one again. Returns
-    /// whether a block changed.
-    pub fn present_frame(&mut self, engine: &Engine, frame: &Framebuffer) -> bool {
+    /// Port-only (spec 20 Design 5): composes a layer of a slide of `engine`'s map
+    /// ([`crate::gfx::motion::slide_layers`]) at the scale set, in the published frame's palette,
+    /// from the engine's images ([`Compositor::compose_layer`]) into `out`; nothing (`out` empty)
+    /// with HD off.
+    pub fn compose_layer(
+        &mut self,
+        engine: &Engine,
+        layer: &u6_render::motion::LayerPixels,
+        out: &mut Vec<u32>,
+    ) {
+        out.clear();
         if !self.on {
-            return false;
+            return;
         }
         let state = engine.state();
         let mut images = self.images.images(&state, engine.io());
-        let wrote = self.compositor.compose(frame, &mut images, self.scale);
-        self.holds = None;
-        wrote
+        let palette = engine.published_frame().palette;
+        self.compositor
+            .compose_layer(layer, &palette, &mut images, self.scale, out);
     }
 
     /// The HD frame: `WIDTH·S × HEIGHT·S` packed RGBA words (`u6_render::hd`), the last

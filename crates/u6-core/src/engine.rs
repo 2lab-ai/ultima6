@@ -175,6 +175,8 @@ pub struct Io {
     last_shot: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
     /// Port-only (spec 20 Design 4): the early picture of the leader's step made in this poll.
     preview: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
+    /// Port-only (spec 20 Design 4): [`Io::warm_early_picture`] answered.
+    warmed: Cell<bool>,
 }
 
 impl Io {
@@ -200,6 +202,7 @@ impl Io {
             shots: RefCell::new(VecDeque::new()),
             last_shot: RefCell::new(None),
             preview: RefCell::new(None),
+            warmed: Cell::new(false),
         }
     }
 
@@ -442,13 +445,10 @@ impl Io {
         self.sight_memory.get()
     }
 
-    /// Port-only (spec 20): with `on` each framed render of the map window keeps its scene
-    /// ([`crate::gfx::motion::Shot`]), and the engine hands a platform, with each publication
-    /// whose shown map changed, the scene it shows ([`Engine::take_motion`]); off (the default)
-    /// nothing is kept. Either way the state, the RNG and the frames published are the same: the
-    /// page turns it on and slides between the scenes; the tests, the oracle comparisons and the
-    /// receipts run with it off.
-    pub fn set_motion(&self, on: bool) {
+    /// Port-only (spec 20): the `Io`'s side of [`Engine::set_motion`]: with `on` each framed
+    /// render of the map window keeps its scene ([`crate::gfx::motion::Shot`]); off (the default)
+    /// nothing is kept and what was is dropped.
+    pub(crate) fn set_motion(&self, on: bool) {
         self.motion.set(on);
         if !on {
             self.shots.borrow_mut().clear();
@@ -473,6 +473,15 @@ impl Io {
         }
     }
 
+    /// Port-only (spec 20 Design 4): true the first time it is asked: the first framed render
+    /// with smooth motion on makes and drops a copy of the state, so the heap holds a state's worth
+    /// before the first step's early picture copies it ([`crate::gfx::motion::preview`]). Without
+    /// it that step's tick grew the wasm memory (192–256 KiB) and took 3.7–4.0 ms, against about
+    /// 0.6 ms for the steps after; with it 1.0–1.2 ms (wasm, Original, 8×).
+    pub(crate) fn warm_early_picture(&self) -> bool {
+        !self.warmed.replace(true)
+    }
+
     /// Port-only (spec 20): the framed render kept last ([`Io::keep_shot`]).
     pub(crate) fn last_shot(&self) -> Option<Rc<crate::gfx::motion::Shot>> {
         self.last_shot.borrow().clone()
@@ -484,11 +493,12 @@ impl Io {
         *self.preview.borrow_mut() = Some(shot);
     }
 
-    /// Port-only (spec 20): the newest shot kept whose shown map hashes to `hash`, taken with
-    /// the shots kept before it (a publication shows the renders in their order).
+    /// Port-only (spec 20): the oldest shot kept whose shown map hashes to `hash`, taken with
+    /// the shots kept before it: publications show the renders in their order, so of renders A, B,
+    /// A a publication of A takes the first and leaves B for the next.
     fn take_shot(&self, hash: u64) -> Option<Rc<crate::gfx::motion::Shot>> {
         let mut shots = self.shots.borrow_mut();
-        let i = shots.iter().rposition(|s| s.hash == hash)?;
+        let i = shots.iter().position(|s| s.hash == hash)?;
         shots.drain(..=i).next_back()
     }
 
@@ -1002,8 +1012,23 @@ impl Engine {
         }
     }
 
+    /// Port-only (spec 20): with `on` each framed render of the map window keeps its scene
+    /// ([`crate::gfx::motion::Shot`]), and the engine hands a platform, with each publication
+    /// whose shown map changed, the scene it shows ([`Engine::take_motion`]); off (the default)
+    /// nothing is kept, and what was (renders, publications not taken yet, the last picture
+    /// published) is dropped, so on again starts afresh. Either way the state, the authoritative
+    /// RNG and the frames published are the same: the page turns it on and slides between the
+    /// scenes; the tests, the oracle comparisons and the receipts run with it off.
+    pub fn set_motion(&mut self, on: bool) {
+        self.io.set_motion(on);
+        if !on {
+            self.motion.clear();
+        }
+        self.motion_map = None;
+    }
+
     /// Port-only (spec 20): the publications since the previous call whose shown map changed, in
-    /// order, with the scene each shows (with [`Io::set_motion`] on; none with it off). A
+    /// order, with the scene each shows (with [`Engine::set_motion`] on; none with it off). A
     /// platform's presenter slides between them ([`u6_render::motion::Presenter`]).
     pub fn take_motion(&mut self) -> Vec<Published> {
         std::mem::take(&mut self.motion)
@@ -1657,5 +1682,57 @@ mod tests {
         assert_eq!(e.ticks(), 3);
         // Input after the end is still only queued.
         assert_eq!(e.io().pending_events(), 1);
+    }
+    /// A game that draws pixel `n` of the shown map's first row in colour 1 and presents, once a
+    /// tick, `n` counting up: every publication changes the shown map.
+    fn painting_game() -> Engine {
+        engine_with(move |_state, io| async move {
+            let (x0, y0, _, _) = crate::geom::SHOWN;
+            let mut n = 0;
+            loop {
+                io.draw(|fb| fb.set(usize::from(x0) + n, usize::from(y0), 1));
+                io.present();
+                n += 1;
+                io.vblank().await;
+            }
+        })
+    }
+
+    /// Spec 20: the switch off drops what the engine held for the platform: a publication queued
+    /// before it is not handed over after it, and on again the next one is reported even when its
+    /// shown map hashes as the last one published did.
+    #[test]
+    fn smooth_motion_off_drops_the_queued_publications_and_on_reports_afresh() {
+        let mut e = painting_game();
+        e.set_motion(true);
+        e.tick(&[], 20);
+        e.tick(&[], 20);
+        e.set_motion(false);
+        assert!(
+            e.take_motion().is_empty(),
+            "queued before the switch went off"
+        );
+        e.tick(&[], 20);
+        assert!(e.take_motion().is_empty(), "off: nothing");
+        e.set_motion(true);
+        assert!(e.motion_map.is_none(), "the last picture forgotten");
+        e.tick(&[], 20);
+        assert_eq!(e.take_motion().len(), 1, "on again: the next publication");
+    }
+
+    /// Spec 20: a publication takes the oldest render kept of its picture, with the renders kept
+    /// before it: renders A, B, A published in that order are each their own render.
+    #[test]
+    fn a_publication_takes_the_oldest_render_of_its_picture() {
+        let io = Io::new(Files::default());
+        let shots: Vec<_> = [1, 2, 1].map(crate::gfx::motion::Shot::for_test).into();
+        for s in &shots {
+            io.keep_shot(Rc::clone(s));
+        }
+        for (i, hash) in [1, 2, 1].into_iter().enumerate() {
+            let taken = io.take_shot(hash).expect("kept");
+            assert!(Rc::ptr_eq(&taken, &shots[i]), "publication {i}: render {i}");
+        }
+        assert!(io.take_shot(1).is_none(), "none left");
     }
 }

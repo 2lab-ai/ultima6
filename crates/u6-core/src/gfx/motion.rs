@@ -1,6 +1,6 @@
 //! Port-only (spec 20), no original address: smooth motion between cells, the engine's side.
 //!
-//! With [`Io::set_motion`] on, each framed render of the map window (0x102c90 with D0 = 1, and the
+//! With [`crate::Engine::set_motion`] on, each framed render of the map window (0x102c90 with D0 = 1, and the
 //! cached refresh's present) keeps a [`Shot`]: the scene it drew ([`Scene`], read out of the draw
 //! lists 0x10e81e built, each node with its object slot,
 //! [`crate::objects::DrawLists::node_slot`]), what it drew in place of a base (the remembered
@@ -15,20 +15,23 @@
 //! which is dropped) and hands that scene to the platform at once, so the party's slide starts at
 //! the key, not at the world turn's picture some 540 ms later.
 //!
-//! Nothing here writes the game state or draws from the RNG: a scene is read out of the draw lists
-//! the render had built, after its present, or out of those of the copy, and the shots live in the
-//! [`Io`], so the state, the RNG and the frames the engine publishes are those with the switch off.
+//! Nothing here writes the game state or draws from the authoritative RNG (the early picture's
+//! draws, if any, are the copy's): a scene is read out of the draw lists the render had built, after
+//! its present, or out of those of the copy, and the shots live in the [`Io`], so the state, the
+//! RNG and the frames the engine publishes are those with the switch off.
 
 use std::rc::Rc;
 
 use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, Span, TILE_H, TILE_W, TileKind};
-use u6_render::motion::{Cell, Draw, Node, Placed, Presenter, Rank, Scene, View};
+use u6_render::motion::{
+    Cell, Draw, LayerPixels, Layers, Node, Op, Part, Placed, Presenter, Rank, Scene, View,
+};
 use u6_render::{FLAG_MEMORY, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, GREY, Kind, Src};
 
 use super::GfxState;
 use super::blit::outline_colour;
 use super::cache::Layer;
-use super::view::{border_tiles, clock_points};
+use super::view::{CLOCK_TYPE, border_tiles, clock_points};
 use crate::engine::Io;
 use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
 use crate::objects::{DRAW_NODES, OBJECT_SLOTS};
@@ -36,8 +39,6 @@ use crate::state::State;
 
 /// Light overlay tiles (0x10e81e's second pass: 0x1bc + level 1..3).
 const OVERLAYS: std::ops::RangeInclusive<u16> = 0x1bd..=0x1bf;
-/// The clock's object type (0x102c90 gives its tile hands, [`super::view`]).
-const CLOCK_TYPE: usize = 0x9f;
 
 /// One framed render of the map window, as a platform's presenter keeps it.
 #[derive(Debug)]
@@ -55,6 +56,41 @@ pub struct Shot {
     frame: u8,
     /// [`shown_hash`] of the screen after the present.
     pub(crate) hash: u64,
+}
+
+impl Shot {
+    /// Port-only (a platform's synthetic scenes, tests): a shot of `scene` with no remembered
+    /// sight, cursor or clock, its animated tiles in overlay frame 0.
+    pub fn of_scene(scene: Scene) -> Shot {
+        Shot {
+            scene,
+            memory: Vec::new(),
+            cursor: None,
+            clock: None,
+            frame: 0,
+            hash: 0,
+        }
+    }
+
+    /// A shot of an empty scene whose shown map hashes to `hash` (tests).
+    #[cfg(test)]
+    pub(crate) fn for_test(hash: u64) -> Rc<Shot> {
+        let scene = Scene {
+            leader: None,
+            centre: (0, 0, 0),
+            origin: (0, 0),
+            cols: 0,
+            rows: 0,
+            corner: (0, 0),
+            cells: Vec::new(),
+            placed: Vec::new(),
+            snap: false,
+        };
+        Rc::new(Shot {
+            hash,
+            ..Shot::of_scene(scene)
+        })
+    }
 }
 
 impl AsRef<Scene> for Shot {
@@ -102,6 +138,9 @@ pub(super) fn record(
 ) {
     if !io.motion() {
         return;
+    }
+    if io.warm_early_picture() {
+        drop(std::hint::black_box(state.clone()));
     }
     let hash = io.draw(|fb| shown_hash(fb));
     if let Some(last) = io.last_shot().filter(|l| same && l.hash == hash && !snap) {
@@ -255,13 +294,39 @@ impl Clip {
     }
 }
 
-/// Writes pixel (x, y) as `f` of what it holds, naming `src`, inside the shown map only.
-fn put(fb: &mut Framebuffer, (x, y): (i32, i32), src: Src, f: impl FnOnce(u8) -> u8) {
-    if Clip::SHOWN.holds(x, y) {
-        let (x, y) = (x as usize, y as usize);
-        let p = fb.get(x, y).unwrap_or(0);
-        fb.set_src(x, y, f(p), src);
+/// What the draws at any pixel write into: the shown map of a frame ([`Shown`]), or a layer of a
+/// slide ([`LayerPixels`]).
+trait Canvas {
+    /// Writes pixel (x, y), in frame pixels, as `f` of what it holds, naming `src`, where the
+    /// canvas holds it.
+    fn put(&mut self, at: (i32, i32), src: Src, f: impl FnOnce(u8) -> u8);
+}
+
+/// A frame drawn inside its shown map only.
+struct Shown<'a>(&'a mut Framebuffer);
+
+impl Canvas for Shown<'_> {
+    fn put(&mut self, (x, y): (i32, i32), src: Src, f: impl FnOnce(u8) -> u8) {
+        if Clip::SHOWN.holds(x, y) {
+            let (x, y) = (x as usize, y as usize);
+            let p = self.0.get(x, y).unwrap_or(0);
+            self.0.set_src(x, y, f(p), src);
+        }
     }
+}
+
+impl Canvas for LayerPixels {
+    fn put(&mut self, at: (i32, i32), src: Src, f: impl FnOnce(u8) -> u8) {
+        if let Some(i) = self.index(at) {
+            self.pixels[i] = f(self.pixels[i]);
+            self.src[i] = src;
+            self.drawn[i] = true;
+        }
+    }
+}
+
+fn put(fb: &mut impl Canvas, at: (i32, i32), src: Src, f: impl FnOnce(u8) -> u8) {
+    fb.put(at, src, f);
 }
 
 fn tile_src(id: u16, ver: u32, (u, v): (usize, usize), flags: u8) -> Src {
@@ -277,8 +342,8 @@ fn tile_src(id: u16, ver: u32, (u, v): (usize, usize), flags: u8) -> Src {
 
 /// The blitter's body 0x153008 ([`super::blit::blit_back`]) at any pixel (x, y), the record's
 /// pixels, overlay (at overlay frame `frame`) and outline as it draws them, and their sources;
-/// only inside the shown map.
-fn blit_at(gfx: &GfxState, fb: &mut Framebuffer, word: u16, (x, y): (i32, i32), frame: u8) {
+/// only where `fb` holds them.
+fn blit_at(gfx: &GfxState, fb: &mut impl Canvas, word: u16, (x, y): (i32, i32), frame: u8) {
     let (rec, overlay, masktype) = gfx.record(word);
     let id = gfx.record_of[usize::from(word & 0x7ff)];
     let ver = gfx.cache.version(usize::from(id));
@@ -322,7 +387,7 @@ fn blit_at(gfx: &GfxState, fb: &mut Framebuffer, word: u16, (x, y): (i32, i32), 
 }
 
 /// The window render's grey draw of a remembered layer (spec 18, `blit_memory`) at any pixel.
-fn memory_at(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, x: i32, y: i32) {
+fn memory_at(gfx: &GfxState, fb: &mut impl Canvas, layer: Layer, x: i32, y: i32) {
     let r = usize::from(layer.record);
     let (Some((pixels, transparent, id, ver)), Some(overlay)) =
         (layer.image(gfx), gfx.overlays.get(r))
@@ -359,7 +424,7 @@ fn memory_at(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, x: i32, y: i32)
 /// The clock hands (0x102bf2, [`clock_points`]) of a clock tile at any pixel, in the clock's
 /// colour (a plot sets the pixel; a colour past 15 plots nothing). The game's plot colour is not
 /// touched.
-fn hands_at(state: &State, fb: &mut Framebuffer, x: i32, y: i32) {
+fn hands_at(state: &State, fb: &mut impl Canvas, x: i32, y: i32) {
     const AT: u16 = 0x4000;
     let t = &state.gfx.tables;
     let Ok(colour) = u8::try_from(t.clock_colour) else {
@@ -382,15 +447,26 @@ pub fn paint(state: &State, presenter: &Presenter<Shot>, view: &View, fb: &mut F
     let Some(newest) = presenter.history().first() else {
         return;
     };
-    let gfx = &state.gfx;
     let c = Clip::SHOWN;
     for y in c.y0..=c.y1 {
         for x in c.x0..=c.x1 {
             fb.set(x as usize, y as usize, 0);
         }
     }
+    let fb = &mut Shown(fb);
+    draw_ops(state, presenter, &presenter.plan(view), fb);
+    frame_over(state, newest, fb);
+}
+
+/// The ops of a plan or a layer ([`Presenter::plan`], [`Presenter::layers`]) into `fb`, in the
+/// newest render's overlay frame.
+fn draw_ops(state: &State, presenter: &Presenter<Shot>, ops: &[Op], fb: &mut impl Canvas) {
+    let Some(newest) = presenter.history().first() else {
+        return;
+    };
+    let gfx = &state.gfx;
     let frame = newest.frame;
-    for op in presenter.plan(view) {
+    for op in ops {
         let at = (op.x, op.y);
         match op.draw {
             Draw::Base { scene, cell } => {
@@ -412,10 +488,139 @@ pub fn paint(state: &State, presenter: &Presenter<Shot>, view: &View, fb: &mut F
             }
         }
     }
-    if let Some((tile, x, y)) = newest.cursor {
-        blit_at(gfx, fb, tile, (i32::from(x), i32::from(y)), frame);
+}
+
+/// What 0x102c90 draws last over the cells of `shot`'s render: its target cursor, then the border.
+fn frame_over(state: &State, shot: &Shot, fb: &mut impl Canvas) {
+    let gfx = &state.gfx;
+    if let Some((tile, x, y)) = shot.cursor {
+        blit_at(gfx, fb, tile, (i32::from(x), i32::from(y)), shot.frame);
     }
     for (tile, x, y) in border_tiles() {
-        blit_at(gfx, fb, tile, (i32::from(x), i32::from(y)), frame);
+        blit_at(gfx, fb, tile, (i32::from(x), i32::from(y)), shot.frame);
     }
+}
+
+/// Spec 20 Design 5: what a layer of a slide shows ([`slide_layers`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The static words, at the camera's offset.
+    Static,
+    /// Mover `i`'s own words ([`u6_render::motion::Layers::movers`]), at its offset.
+    Mover(usize),
+    /// The words over mover `i`, at the camera's offset.
+    Over(usize),
+    /// The cursor and the border, at rest.
+    Frame,
+}
+
+/// Spec 20 Design 5: one layer of a slide: what it shows and its pixels at rest.
+#[derive(Clone, Debug)]
+pub struct SlideLayer {
+    pub role: Role,
+    /// Shared: a platform keeps the static and frame layers' pixels of the layers it made last
+    /// to tell what the next ones change.
+    pub pixels: Rc<LayerPixels>,
+}
+
+/// Spec 20 Design 5: a slide's layers ([`slide_layers`]) and the parts of the presenter's layers
+/// they were made of ([`Presenter::layers`]: the movers' places order them).
+#[derive(Clone, Debug)]
+pub struct Slide {
+    pub layers: Layers,
+    pub parts: Vec<SlideLayer>,
+}
+
+/// Spec 20 Design 5: the slide's layers for the HD path, rasterized once per generation of
+/// `presenter` ([`Presenter::generation`]) by the draws [`paint`] makes, at rest
+/// ([`Presenter::layers`]), in this order: the static words over the newest scene's view and a
+/// cell round it, over colour 0 (as [`paint`] clears the shown map), every pixel drawn (one rect
+/// whatever cells the scenes hold, so the next layers' changes are found against it); the cursor
+/// and the border over the drawn grid; per mover its own words over clear pixels, and the words
+/// over it drawn over the static layer's pixels there (an overlay's OR takes the colour under it),
+/// only those words' pixels kept. None without a scene.
+pub fn slide_layers(state: &State, presenter: &Presenter<Shot>) -> Option<Slide> {
+    let newest = presenter.history().first()?;
+    let layers = presenter.layers();
+    let n = &newest.scene;
+    let raster = |ops: &[Op], under: Option<&LayerPixels>| {
+        let (x, y, w, h) = LayerPixels::bounds(ops)?;
+        let mut px = LayerPixels::clear(x, y, w, h);
+        if let Some(under) = under {
+            for (i, p) in px.pixels.iter_mut().enumerate() {
+                let at = (x + (i % w) as i32, y + (i / w) as i32);
+                if let Some(j) = under.index(at) {
+                    *p = under.pixels[j];
+                }
+            }
+        }
+        draw_ops(state, presenter, ops, &mut px);
+        Some(px)
+    };
+    let mut statics = LayerPixels::clear(
+        n.corner.0 - 16,
+        n.corner.1 - 16,
+        (n.cols + 2) * 16,
+        (n.rows + 2) * 16,
+    );
+    statics.drawn.fill(true);
+    draw_ops(state, presenter, &layers.statics, &mut statics);
+    let (w, h) = (VIEW_W * 16, VIEW_H * 16);
+    let mut frame = LayerPixels::clear(i32::from(MAP_X), i32::from(MAP_Y), w, h);
+    frame_over(state, newest, &mut frame);
+    let mut out = Vec::new();
+    for (i, m) in layers.movers.iter().enumerate() {
+        if let Some(pixels) = raster(&m.ops, None) {
+            out.push(SlideLayer {
+                role: Role::Mover(i),
+                pixels: Rc::new(pixels),
+            });
+        }
+        if let Some(pixels) = raster(&m.over, Some(&statics)) {
+            out.push(SlideLayer {
+                role: Role::Over(i),
+                pixels: Rc::new(pixels),
+            });
+        }
+    }
+    out.splice(
+        0..0,
+        [
+            SlideLayer {
+                role: Role::Static,
+                pixels: Rc::new(statics),
+            },
+            SlideLayer {
+                role: Role::Frame,
+                pixels: Rc::new(frame),
+            },
+        ],
+    );
+    Some(Slide { layers, parts: out })
+}
+
+/// Spec 20 Design 5: where each layer of `slide` is drawn for `view`, in draw order: (index in
+/// [`Slide::parts`], frame pixel of its top left). The static layer at `-camera`, the movers by
+/// their in-between y then x at `-camera` plus their offset, the words over each at `-camera`, the
+/// cursor and border at rest; the order and the offsets [`Presenter::plan`] places its parts at.
+pub fn slide_placements(slide: &Slide, view: &View) -> Vec<(usize, i32, i32)> {
+    let layers = &slide.parts;
+    let find = |role: Role| layers.iter().position(|l| l.role == role);
+    let mut out = Vec::new();
+    for (part, (dx, dy)) in slide.layers.placed(view) {
+        let role = match part {
+            Part::Static => Role::Static,
+            Part::Mover(i) => Role::Mover(i),
+            Part::Over(i) => Role::Over(i),
+        };
+        if let Some(k) = find(role) {
+            let p = &layers[k].pixels;
+            out.push((k, p.x + dx, p.y + dy));
+        }
+    }
+    if let Some(k) = find(Role::Frame) {
+        let p = &layers[k].pixels;
+        out.push((k, p.x, p.y));
+    }
+    out
 }

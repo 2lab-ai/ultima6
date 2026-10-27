@@ -44,12 +44,16 @@
 //! off (the default, the original's black), the frames are those without it.
 //!
 //! Smooth motion (spec 20): with [`Game::set_motion`] on, the engine hands over the scene of each
-//! picture of the map window it publishes ([`u6_core::Io::set_motion`]) and each present while a
-//! slide runs draws the map as the slides have it at the presentation clock
-//! ([`Game::presentation_ms`]: the engine's time and the pacer's carried fraction): the leader's
-//! step and every object one cell from where it was move there over 18 PAL frames of that clock
-//! (`u6_render::motion`). The page presents every display frame while [`Game::sliding`]. Off (the
-//! default), the frames are the engine's.
+//! picture of the map window it publishes ([`u6_core::Engine::set_motion`]), and while a slide runs the
+//! map shows as the slides have it at the presentation clock ([`Game::presentation_ms`]: the
+//! engine's time and the pacer's carried fraction): the leader's step and every object one cell
+//! from where it was move there over 18 PAL frames of that clock (`u6_render::motion`). With HD off
+//! each present draws it into the RGBA frame. With HD on the HD frame stays the engine's: the
+//! slide's layers (the static map with a cell round it, the cursor and border, each mover and what
+//! covers it) are composed once a publication, the static and frame layers as their changes from
+//! those the page holds, and each present only places them ([`Game::slide`]); the page draws them
+//! over its HD frame's map. The page presents every display frame while [`Game::sliding`]. Off
+//! (the default), the frames are the engine's.
 //!
 //! Korean (spec 08, slice K1): the page loads a dropped `ko.u6lp` once as a [`LocalePack`]
 //! (the engine's strict reader: at most [`max_locale_pack_bytes`]) and, in Korean mode, sets it
@@ -527,6 +531,8 @@ pub struct Game {
     sight_memory: bool,
     /// Spec 20: smooth motion ([`Game::set_motion`]).
     motion: Motion<Shot>,
+    /// Spec 20 Design 5: the slide's layers over the HD frame ([`Game::slide`]).
+    layers: SlideImages,
 }
 
 impl Default for Game {
@@ -571,6 +577,7 @@ impl Game {
             held: Vec::new(),
             sight_memory: false,
             motion: Motion::new(),
+            layers: SlideImages::default(),
         };
         game.redraw();
         game
@@ -927,10 +934,14 @@ impl Game {
     /// composes nothing, spec 11 Design 7), and takes the pointer the page draws over it
     /// ([`Game::hd_pointer`]).
     ///
-    /// Spec 20: with smooth motion on, while a slide runs it shows the slide's picture instead
-    /// ([`Game::present_slide`]); the present after the last one shows the engine's frame again.
+    /// Spec 20: with smooth motion on, it hands the engine's publications to the presenter. While
+    /// a slide runs with HD off it shows the slide's picture in the RGBA frame instead
+    /// ([`Game::present_slide`]), and the present after the last one converts the engine's frame
+    /// again. With HD on the HD frame stays the engine's, and the slide's layers, composed once a
+    /// generation of the slides, are placed for the page to draw over its map ([`Game::slide`]).
     pub fn present(&mut self) {
-        if self.present_slide() {
+        let view = self.slide_view();
+        if !self.hd.on() && self.present_slide(view.as_ref()) {
             self.track_pointer();
             return;
         }
@@ -941,6 +952,7 @@ impl Game {
         if self.engine.is_some() {
             self.compose_hd();
         }
+        self.place_slide(view.as_ref());
         self.track_pointer();
     }
 
@@ -1364,8 +1376,7 @@ impl Game {
         self.motion.on = on;
         self.motion.presenter.clear();
         if let Some(engine) = &mut self.engine {
-            engine.io().set_motion(on);
-            engine.take_motion();
+            engine.set_motion(on);
         }
     }
 
@@ -1386,7 +1397,120 @@ impl Game {
     /// Spec 20: whether the next present draws a slide, or ends one (the page presents then with
     /// no step too).
     pub fn sliding(&self) -> bool {
-        self.motion.drawn || self.motion.presenter.active(self.presentation_ms())
+        self.motion.drawn
+            || !self.layers.placed.is_empty()
+            || self.motion.presenter.active(self.presentation_ms())
+    }
+
+    /// Spec 20 Design 5: moves whenever what the page draws of a slide over the HD frame's map
+    /// changed ([`Game::slide`]): its layers, where they are, or the end of a slide (the page puts
+    /// the HD frame's map back).
+    pub fn slide_version(&self) -> f64 {
+        self.layers.version as f64
+    }
+
+    /// Spec 20 Design 5: with HD on, the slide the page draws over the HD frame's map now, clipped
+    /// to the shown map ([`shown_map`]), as (layer, x, y) triples in draw order, (x, y) the frame
+    /// pixel of the layer's top left ([`Game::slide_layer_size`]); empty when no slide runs (the HD
+    /// frame shows the map).
+    pub fn slide(&self) -> Vec<i32> {
+        self.layers.placed.clone()
+    }
+
+    /// Spec 20 Design 5: moves whenever the slide's layers are made again (their count, sizes and
+    /// pixels).
+    pub fn slide_layers_version(&self) -> f64 {
+        self.layers.made as f64
+    }
+
+    /// Spec 20 Design 5: the slide's layers made last.
+    pub fn slide_layer_count(&self) -> u32 {
+        self.layers.images.len() as u32
+    }
+
+    /// Spec 20 Design 5: the layers version ([`Game::slide_layers_version`]) of the static and
+    /// frame layers the changes of the layers made last apply to ([`Game::slide_layer_patch`]):
+    /// the last the page said it holds ([`Game::slide_applied`]); -1 for none.
+    pub fn slide_layers_base(&self) -> f64 {
+        self.layers.held.as_ref().map_or(-1.0, |k| k.made as f64)
+    }
+
+    /// Spec 20 Design 5: the page holds the layers of version `version` (its static and frame
+    /// layers are what the next changes apply to).
+    pub fn slide_applied(&mut self, version: f64) {
+        if self
+            .layers
+            .pending
+            .as_ref()
+            .is_some_and(|k| k.made as f64 == version)
+        {
+            self.layers.held = self.layers.pending.take();
+        }
+    }
+
+    /// Spec 20 Design 5: the page does not hold the layers the changes apply to (a new canvas):
+    /// the next present makes every layer whole, and no report of layers made before counts.
+    pub fn slide_reset(&mut self) {
+        self.layers.held = None;
+        self.layers.pending = None;
+        self.layers.made_for = None;
+    }
+
+    /// Spec 20 Design 5: layer `i` as changes from the one of the same place the page holds
+    /// ([`Game::slide_layers_base`]): its pixels moved by (x, y), then `n` rects (x, y, width,
+    /// height in frame pixels from its top left) whose pixels follow ([`Game::slide_patch_ptr`]):
+    /// `[x, y, n, rects…]`; empty when the layer is given whole ([`Game::slide_layer_ptr`]).
+    pub fn slide_layer_patch(&self, i: u32) -> Vec<i32> {
+        let Some(p) = self
+            .layers
+            .images
+            .get(i as usize)
+            .and_then(|l| l.patch.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut out = vec![p.shift.0, p.shift.1, p.rects.len() as i32];
+        out.extend(p.rects.iter().flat_map(|(r, _)| r.map(|v| v as i32)));
+        out
+    }
+
+    /// Spec 20 Design 5: the address of rect `k`'s RGBA8 pixels of layer `i`'s changes (at the HD
+    /// scale; views over it are invalidated when memory grows).
+    pub fn slide_patch_ptr(&self, i: u32, k: u32) -> *const u8 {
+        self.patch_words(i, k)
+            .map_or(std::ptr::null(), |w| w.as_ptr().cast())
+    }
+
+    /// Spec 20 Design 5: the length in bytes of rect `k`'s pixels of layer `i`'s changes.
+    pub fn slide_patch_len(&self, i: u32, k: u32) -> usize {
+        self.patch_words(i, k).map_or(0, |w| w.len() * 4)
+    }
+
+    /// Spec 20 Design 5: layer `i`'s size in frame pixels (width, height); its pixels are that
+    /// times the HD scale ([`Game::hd_scale`]) each way. Empty past the last layer.
+    pub fn slide_layer_size(&self, i: u32) -> Vec<u32> {
+        self.layers
+            .images
+            .get(i as usize)
+            .map_or_else(Vec::new, |l| vec![l.width as u32, l.height as u32])
+    }
+
+    /// Spec 20 Design 5: the address of layer `i`'s RGBA8 pixels in wasm memory (transparent where
+    /// it draws nothing; views over it are invalidated when memory grows); none for a layer given
+    /// as changes ([`Game::slide_layer_patch`]).
+    pub fn slide_layer_ptr(&self, i: u32) -> *const u8 {
+        self.layers
+            .images
+            .get(i as usize)
+            .map_or(std::ptr::null(), |l| l.rgba.as_ptr().cast())
+    }
+
+    /// Spec 20 Design 5: the length in bytes of layer `i`'s pixels.
+    pub fn slide_layer_len(&self, i: u32) -> usize {
+        self.layers
+            .images
+            .get(i as usize)
+            .map_or(0, |l| l.rgba.len() * 4)
     }
 
     /// Spec 09 Design 1: the utterances NPCs said since the previous call, as a JSON array of
@@ -1631,8 +1755,9 @@ impl Game {
     fn put_on_screen(&mut self, mut engine: Engine) {
         engine.set_speech(self.voices);
         engine.io().set_sight_memory(self.sight_memory);
-        engine.io().set_motion(self.motion.on);
+        engine.set_motion(self.motion.on);
         self.motion.presenter.clear();
+        self.slide_reset();
         self.motion.drawn = false;
         self.motion.shown = None;
         self.saved_gen = 0;
@@ -1653,6 +1778,7 @@ impl Game {
     fn attach_pack(&mut self, pack: Option<Rc<u6_core::hd::HdPack>>) {
         self.hd_pack = pack.clone();
         self.hd.set_pack(pack);
+        self.slide_reset();
         if self.hd.on() {
             self.conversions += 1;
             self.compose_hd();
@@ -1674,47 +1800,82 @@ impl Game {
         }
     }
 
-    /// Spec 20: hands the presenter the engine's publications since the last present, then, while
-    /// a slide runs at the presentation clock, puts the published frame with the map as the slides
-    /// have it ([`u6_core::gfx::motion::paint`]) on screen: composed into the HD frame with HD on,
-    /// else with the pointer sprite over it into the RGBA frame. Returns whether it did; the first
-    /// present after the last slide converts the engine's frame again.
-    fn present_slide(&mut self) -> bool {
-        let Some(engine) = &mut self.engine else {
+    /// Spec 20: hands the presenter the engine's publications since the last present; the slides
+    /// as drawn at the presentation clock while one runs.
+    fn slide_view(&mut self) -> Option<View> {
+        let engine = self.engine.as_mut()?;
+        let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
+        self.motion.take(engine, self.pacer.pace_rate(), t)
+    }
+
+    /// Spec 20, HD off: with a slide (`view`), puts the published frame with the map as the
+    /// slides have it ([`u6_core::gfx::motion::paint`]) and the pointer sprite over it into the
+    /// RGBA frame (nothing when it holds that picture already: a preview held at rest). Returns
+    /// whether it did; the first present after the last slide converts the engine's frame again.
+    fn present_slide(&mut self, view: Option<&View>) -> bool {
+        let Some(engine) = &self.engine else {
             return false;
         };
-        let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
-        let Some(view) = self.motion.take(engine, self.pacer.pace_rate(), t) else {
+        let Some(view) = view else {
             if std::mem::take(&mut self.motion.drawn) {
                 self.rgba_holds = None;
                 self.motion.shown = None;
             }
             return false;
         };
-        // The same slide picture over the same frame (a preview held at rest), at the same HD
-        // setting: drawn already.
         let newest = self.motion.presenter.history().first().map(Rc::as_ptr);
-        let hd = (self.hd.on(), self.hd.scale().factor());
-        let shown = (view.clone(), newest, engine.frame_version(), hd);
+        let shown = (view.clone(), newest, engine.frame_version());
         if self.motion.drawn && self.motion.shown.as_ref() == Some(&shown) {
             return true;
         }
         self.motion.shown = Some(shown);
         let fb = &mut self.motion.frame;
         fb.clone_from(&engine.published_frame());
-        u6_core::gfx::motion::paint(&engine.state(), &self.motion.presenter, &view, fb);
-        if self.hd.on() {
-            self.conversions += u64::from(self.hd.present_frame(engine, fb));
-        } else {
-            if let Some(sprite) = engine.sprite() {
-                sprite.draw(fb);
-            }
-            fb.write_rgba(&mut self.rgba);
-            self.rgba_holds = None;
-            self.conversions += 1;
+        u6_core::gfx::motion::paint(&engine.state(), &self.motion.presenter, view, fb);
+        if let Some(sprite) = engine.sprite() {
+            sprite.draw(fb);
         }
+        fb.write_rgba(&mut self.rgba);
+        self.rgba_holds = None;
+        self.conversions += 1;
         self.motion.drawn = true;
         true
+    }
+
+    /// The words of rect `k` of layer `i`'s changes ([`Game::slide_layer_patch`]).
+    fn patch_words(&self, i: u32, k: u32) -> Option<&[u32]> {
+        let layer = self.layers.images.get(i as usize)?;
+        let (_, words) = layer.patch.as_ref()?.rects.get(k as usize)?;
+        Some(words)
+    }
+
+    /// Spec 20 Design 5, HD on: with a slide (`view`), the slide's layers made for the presenter's
+    /// generation and the HD scale ([`u6_core::gfx::motion::slide_layers`], each composed once,
+    /// [`HdView::compose_layer`]), and where the page draws them now
+    /// ([`u6_core::gfx::motion::slide_placements`]); without one none placed. A slide drawn in the
+    /// RGBA frame before HD came on is the engine's frame again at the next conversion.
+    fn place_slide(&mut self, view: Option<&View>) {
+        if std::mem::take(&mut self.motion.drawn) {
+            self.rgba_holds = None;
+            self.motion.shown = None;
+        }
+        let placed = match (&self.engine, view) {
+            (Some(engine), Some(view)) if self.hd.on() => {
+                let made_for = (self.motion.presenter.generation(), self.hd.version());
+                if self.layers.made_for != Some(made_for) {
+                    self.layers
+                        .make(engine, &self.motion.presenter, &mut self.hd);
+                    self.layers.made_for = Some(made_for);
+                    self.layers.version += 1;
+                }
+                self.layers.placements(view)
+            }
+            _ => Vec::new(),
+        };
+        if placed != self.layers.placed {
+            self.layers.placed = placed;
+            self.layers.version += 1;
+        }
     }
 
     /// With HD on: composes the HD frame from the engine's published frame (black before a start)
@@ -1739,9 +1900,144 @@ impl Game {
     }
 }
 
-/// Spec 20: what a present drew of a slide: the slides, the newest scene, the engine frame's
-/// version and the HD setting (on, scale).
-type Drawn<T> = (View, Option<*const T>, u64, (bool, usize));
+/// Spec 20: what a present drew of a slide in the RGBA frame: the slides, the newest scene and the
+/// engine frame's version.
+type Drawn<T> = (View, Option<*const T>, u64);
+
+/// Spec 20 Design 5: the slide's layers the page draws over the HD frame's map.
+#[derive(Default)]
+struct SlideImages {
+    /// What they were made for: the presenter's generation and the HD view's version (its scale,
+    /// pack and switch).
+    made_for: Option<(u64, u64)>,
+    slide: Option<u6_core::gfx::motion::Slide>,
+    images: Vec<LayerImage>,
+    /// Bumped each time they are made ([`Game::slide_layers_version`]).
+    made: u64,
+    /// The static and frame layers as the page holds them ([`Game::slide_applied`]), and those of
+    /// the layers made last, until the page says it holds them.
+    held: Option<Kept>,
+    pending: Option<Kept>,
+    /// Where they are drawn now ([`Game::slide`]) and its version ([`Game::slide_version`]).
+    placed: Vec<i32>,
+    version: u64,
+}
+
+/// The static and frame layers' pixels of the layers made at `made`, composed under HD view
+/// version `hd` (its scale, pack and switch) in `palette`, the static ones round the view centred
+/// on world cell `centre`: changes from them are changes of colour index and source only while
+/// all of those stay.
+struct Kept {
+    made: u64,
+    hd: u64,
+    palette: [u6_render::Rgb; 256],
+    centre: (i32, i32),
+    statics: Rc<u6_render::motion::LayerPixels>,
+    frame: Rc<u6_render::motion::LayerPixels>,
+}
+
+/// One composed layer: its size in frame pixels and its packed RGBA words at the HD scale, or the
+/// changes from the one the page holds ([`Patch`]).
+struct LayerImage {
+    width: usize,
+    height: usize,
+    rgba: Vec<u32>,
+    patch: Option<Patch>,
+}
+
+/// The changes of a static or frame layer from the one the page holds: its pixels moved by
+/// `shift` (frame pixels), then these rects (x, y, width, height in frame pixels from its top
+/// left) with their words.
+struct Patch {
+    shift: (i32, i32),
+    rects: Vec<([usize; 4], Vec<u32>)>,
+}
+
+impl SlideImages {
+    /// Rasterizes the slide's layers of `presenter` from `engine`'s state and composes them in
+    /// `hd`: the static layer and the frame layer as their changes from those the page holds
+    /// (the static one moved with the camera from the view the page's was made round; whole when
+    /// it holds none made under this HD view version and palette), the others whole.
+    fn make(&mut self, engine: &Engine, presenter: &Presenter<Shot>, hd: &mut HdView) {
+        use u6_core::gfx::motion::Role;
+        let slide = u6_core::gfx::motion::slide_layers(&engine.state(), presenter);
+        let parts = slide.as_ref().map_or(&[][..], |s| &s.parts[..]);
+        let version = hd.version();
+        let palette = engine.published_frame().palette;
+        let centre = presenter
+            .history()
+            .first()
+            .map_or((0, 0), |s| (s.scene.centre.0, s.scene.centre.1));
+        let held = self
+            .held
+            .as_ref()
+            .filter(|k| k.hd == version && k.palette == palette);
+        self.images = parts
+            .iter()
+            .map(|part| {
+                let px = &part.pixels;
+                let since = match (part.role, held) {
+                    (Role::Static, Some(k)) => {
+                        let shift = ((k.centre.0 - centre.0) * 16, (k.centre.1 - centre.1) * 16);
+                        px.changed_since(&k.statics, shift).map(|r| (shift, r))
+                    }
+                    (Role::Frame, Some(k)) => {
+                        px.changed_since(&k.frame, (0, 0)).map(|r| ((0, 0), r))
+                    }
+                    _ => None,
+                };
+                let mut rgba = Vec::new();
+                let patch = match since {
+                    Some((shift, rects)) => Some(Patch {
+                        shift,
+                        rects: rects
+                            .into_iter()
+                            .map(|r| {
+                                let mut words = Vec::new();
+                                hd.compose_layer(engine, &px.rect(r), &mut words);
+                                (r, words)
+                            })
+                            .collect(),
+                    }),
+                    None => {
+                        hd.compose_layer(engine, px, &mut rgba);
+                        None
+                    }
+                };
+                LayerImage {
+                    width: px.width,
+                    height: px.height,
+                    rgba,
+                    patch,
+                }
+            })
+            .collect();
+        self.made += 1;
+        self.pending = slide.as_ref().and_then(|s| {
+            let (statics, frame) = (s.parts.first()?, s.parts.get(1)?);
+            Some(Kept {
+                made: self.made,
+                hd: version,
+                palette,
+                centre,
+                statics: Rc::clone(&statics.pixels),
+                frame: Rc::clone(&frame.pixels),
+            })
+        });
+        self.slide = slide;
+    }
+
+    /// Where the layers are drawn for `view`, as [`Game::slide`] gives them.
+    fn placements(&self, view: &View) -> Vec<i32> {
+        let Some(slide) = &self.slide else {
+            return Vec::new();
+        };
+        u6_core::gfx::motion::slide_placements(slide, view)
+            .into_iter()
+            .flat_map(|(i, x, y)| [i as i32, x, y])
+            .collect()
+    }
+}
 
 /// Spec 20: smooth motion's side of the page: the switch, the presenter of the engine's scenes,
 /// the display's frame interval and the frame a slide is drawn in.
@@ -4929,8 +5225,8 @@ mod tests {
     }
     /// Timings only (run with `--ignored --nocapture`, gate profile; native, not wasm): with
     /// smooth motion on and HD on at 4×, the wall time of each present while a step east slides
-    /// (the slide's picture composed into the HD frame every display frame), against the presents
-    /// of the same frames with smooth motion off.
+    /// (the slide's layers placed, and made once a publication: none taken by a page here, so made
+    /// whole), against the presents of the same frames with smooth motion off.
     #[test]
     #[ignore]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // reads the zip; a timing
@@ -4983,5 +5279,729 @@ mod tests {
                 at(1.0)
             );
         }
+    }
+    /// One canvas of the page: its size in device pixels and its words.
+    type Canvas = (usize, usize, Vec<u32>);
+
+    /// How the page reports the layers it took ([`Game::slide_applied`]) in a case.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Ack {
+        /// At once, as site/app.js does.
+        Now,
+        /// Twice.
+        Twice,
+        /// Never (lost).
+        Never,
+        /// Held back until the case sends it ([`Page::late`]).
+        Late,
+    }
+
+    /// The page's side of spec 20 Design 5 as site/app.js's drawSlide and takeLayer do it, through
+    /// the exports only (sizes, the patch metadata [`Game::slide_layer_patch`], the pixels at
+    /// [`Game::slide_layer_ptr`] / [`Game::slide_patch_ptr`] and their lengths): the layers it
+    /// holds as canvases, taken whole or as their changes over those it holds (moved, then the
+    /// rects put), reported held as `ack` says; with `check_base` off it applies changes whatever
+    /// layers they were made from (a safeguard removed).
+    struct Page {
+        held: Option<(f64, usize, Vec<Canvas>)>,
+        ack: Ack,
+        check_base: bool,
+        late: Vec<f64>,
+        /// Takes of the static layer whole and as changes, and the takes that found changes of
+        /// layers it does not hold (the slide not drawn that frame, the layers asked for whole).
+        whole: usize,
+        changes: usize,
+        misses: usize,
+    }
+
+    /// The bytes `len` from `ptr` (an export's address and length).
+    fn exported<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+        if len == 0 {
+            return &[];
+        }
+        // The game's export: `len` bytes at `ptr`, read before the game changes again.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
+    fn words_of(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+
+    /// The poison the page's map is filled with before a slide is drawn over it (no layer word).
+    const POISON: u32 = 0x00ab_cdef;
+
+    impl Page {
+        fn new() -> Self {
+            Self {
+                held: None,
+                ack: Ack::Now,
+                check_base: true,
+                late: Vec::new(),
+                whole: 0,
+                changes: 0,
+                misses: 0,
+            }
+        }
+
+        /// Layer `i` at scale `s` into a canvas: whole, or its changes over `old` when the page
+        /// `holds` the layers they apply to; `None` when it does not.
+        fn take_layer(
+            game: &Game,
+            i: u32,
+            s: usize,
+            old: Option<&Canvas>,
+            holds: bool,
+        ) -> Option<(Canvas, bool)> {
+            let size = game.slide_layer_size(i);
+            let (w, h) = (size[0] as usize * s, size[1] as usize * s);
+            let patch = game.slide_layer_patch(i);
+            if patch.is_empty() {
+                let bytes = exported(game.slide_layer_ptr(i), game.slide_layer_len(i));
+                let words = if bytes.len() == w * h * 4 {
+                    words_of(bytes)
+                } else {
+                    vec![0; w * h]
+                };
+                return Some(((w, h, words), true));
+            }
+            let (_, _, old) = old.filter(|o| holds && (o.0, o.1) == (w, h))?;
+            let (dx, dy) = (patch[0] as i64 * s as i64, patch[1] as i64 * s as i64);
+            // Moved with `copy`: nothing of the old pixels outside the moved ones.
+            let mut words = vec![0u32; w * h];
+            for y in 0..h as i64 {
+                for x in 0..w as i64 {
+                    let (ox, oy) = (x - dx, y - dy);
+                    if (0..w as i64).contains(&ox) && (0..h as i64).contains(&oy) {
+                        words[y as usize * w + x as usize] = old[oy as usize * w + ox as usize];
+                    }
+                }
+            }
+            for k in 0..patch[2] as usize {
+                let r = &patch[3 + 4 * k..7 + 4 * k];
+                let [x, y, rw, rh] = [r[0], r[1], r[2], r[3]].map(|v| v as usize * s);
+                let bytes = exported(
+                    game.slide_patch_ptr(i, k as u32),
+                    game.slide_patch_len(i, k as u32),
+                );
+                if bytes.len() == rw * rh * 4 {
+                    let rect = words_of(bytes);
+                    for row in 0..rh {
+                        words[(y + row) * w + x..(y + row) * w + x + rw]
+                            .copy_from_slice(&rect[row * rw..(row + 1) * rw]);
+                    }
+                }
+            }
+            Some(((w, h, words), false))
+        }
+
+        /// One display frame after [`Game::present`]: takes the layers when they are new, as
+        /// drawSlide does (with HD on: off, the page shows the RGBA frame); whether a slide is
+        /// drawn.
+        fn take(&mut self, game: &mut Game) -> bool {
+            if !game.hd_on() || game.slide().is_empty() {
+                return false;
+            }
+            let (version, s) = (game.slide_layers_version(), game.hd_scale() as usize);
+            if self.held.as_ref().map(|h| (h.0, h.1)) == Some((version, s)) {
+                return true;
+            }
+            let (kept, was) = match self.held.take() {
+                Some((v, at, canvases)) if at == s => (canvases, Some(v)),
+                _ => (Vec::new(), None),
+            };
+            let holds =
+                !kept.is_empty() && (!self.check_base || was == Some(game.slide_layers_base()));
+            let mut canvases = Vec::new();
+            for i in 0..game.slide_layer_count() {
+                let Some((canvas, whole)) =
+                    Self::take_layer(game, i, s, kept.get(i as usize), holds)
+                else {
+                    game.slide_reset();
+                    self.misses += 1;
+                    return false;
+                };
+                if i == 0 {
+                    *if whole {
+                        &mut self.whole
+                    } else {
+                        &mut self.changes
+                    } += 1;
+                }
+                canvases.push(canvas);
+            }
+            self.held = Some((version, s, canvases));
+            match self.ack {
+                Ack::Now => game.slide_applied(version),
+                Ack::Twice => {
+                    game.slide_applied(version);
+                    game.slide_applied(version);
+                }
+                Ack::Never => {}
+                Ack::Late => self.late.push(version),
+            }
+            true
+        }
+
+        /// The HD frame (from its export) with the shown map poisoned and the layers held drawn
+        /// over it where `placed` (layer, x, y triples) puts them, clipped to the shown map.
+        fn draw(&self, game: &Game, placed: &[i32]) -> Vec<u32> {
+            let s = game.hd_scale() as usize;
+            let fw = u6_render::WIDTH * s;
+            let mut out = words_of(exported(game.hd_frame_ptr(), game.hd_frame_len()));
+            let m = shown_map();
+            let (mx, my, mw, mh) = (
+                m[0] as usize * s,
+                m[1] as usize * s,
+                m[2] as usize * s,
+                m[3] as usize * s,
+            );
+            for y in my..my + mh {
+                out[y * fw + mx..y * fw + mx + mw].fill(POISON);
+            }
+            let canvases = self.held.as_ref().map_or(&[][..], |h| &h.2[..]);
+            for p in placed.chunks_exact(3) {
+                let (w, h, words) = &canvases[p[0] as usize];
+                let (px, py) = (p[1] as i64 * s as i64, p[2] as i64 * s as i64);
+                for r in 0..*h {
+                    let ty = py + r as i64;
+                    if !(my as i64..(my + mh) as i64).contains(&ty) {
+                        continue;
+                    }
+                    for c in 0..*w {
+                        let tx = px + c as i64;
+                        let word = words[r * w + c];
+                        if word >> 24 != 0 && (mx as i64..(mx + mw) as i64).contains(&tx) {
+                            out[ty as usize * fw + tx as usize] = word;
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        /// The canvases it holds against the slide's layers made last composed whole, here
+        /// apart from the exports; panics on a difference.
+        fn check(&self, game: &mut Game, label: &str) {
+            let slide = game.layers.slide.clone().quiet();
+            let engine = game.engine.as_ref().quiet();
+            let held = self.held.as_ref().quiet();
+            assert_eq!(
+                held.0,
+                game.slide_layers_version(),
+                "{label}: the version made last"
+            );
+            assert_eq!(held.2.len(), slide.parts.len(), "{label}: every layer");
+            for (i, part) in slide.parts.iter().enumerate() {
+                let mut want = Vec::new();
+                game.hd.compose_layer(engine, &part.pixels, &mut want);
+                assert!(held.2[i].2 == want, "{label}: layer {i} as made whole");
+            }
+        }
+    }
+
+    /// The page's map words of `frame` (the shown map), and whether any is the poison.
+    fn map_words(game: &Game, frame: &[u32]) -> (Vec<u32>, bool) {
+        let s = game.hd_scale() as usize;
+        let fw = u6_render::WIDTH * s;
+        let m = shown_map();
+        let (mx, my, mw, mh) = (
+            m[0] as usize * s,
+            m[1] as usize * s,
+            m[2] as usize * s,
+            m[3] as usize * s,
+        );
+        let words: Vec<u32> = (my..my + mh)
+            .flat_map(|y| frame[y * fw + mx..y * fw + mx + mw].iter().copied())
+            .collect();
+        let poisoned = words.contains(&POISON);
+        (words, poisoned)
+    }
+
+    /// Spec 20 Design 5's synthetic map for the page's tests: the view round world cell `centre`
+    /// at the map's corner, each cell's base record 1 or 2 by its world cell (so it moves with the
+    /// camera), and `movers` (slot, world cell) drawn with record 3; the leader slot 1.
+    fn grid_scene(centre: (i32, i32), movers: &[(u16, (i32, i32))]) -> Scene {
+        use u6_core::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, VIEW_H, VIEW_W};
+        use u6_render::motion::{Cell, Node, Placed, Rank};
+        let origin = (centre.0 - HALF_W as i32, centre.1 - HALF_H as i32);
+        let mut cells: Vec<Cell> = (0..VIEW_W * VIEW_H)
+            .map(|i| {
+                let (x, y) = (
+                    origin.0 + (i % VIEW_W) as i32,
+                    origin.1 + (i / VIEW_W) as i32,
+                );
+                Cell {
+                    base: 1 + u16::from((x * 3 + y * 5).rem_euclid(7) == 0),
+                    nodes: Vec::new(),
+                }
+            })
+            .collect();
+        let mut placed = Vec::new();
+        for &(slot, (x, y)) in movers {
+            let (c, r) = ((x - origin.0) as usize, (y - origin.1) as usize);
+            cells[r * VIEW_W + c].nodes.push(Node {
+                word: 3,
+                slot: Some(slot),
+                rank: Rank::Own,
+            });
+            placed.push(Placed {
+                slot,
+                cell: (x, y),
+                kind: 0x180,
+            });
+        }
+        placed.sort_by_key(|p| p.slot);
+        Scene {
+            leader: Some(1),
+            centre: (centre.0, centre.1, 0),
+            origin,
+            cols: VIEW_W,
+            rows: VIEW_H,
+            corner: (i32::from(MAP_X), i32::from(MAP_Y)),
+            cells,
+            placed,
+            snap: false,
+        }
+    }
+
+    /// Scene `n` of the synthetic walk: the leader a cell east each scene, an NPC (slot 2) a cell
+    /// north or south by turns three cells west of it.
+    fn walk_scene(n: i32) -> Scene {
+        let at = 40 + n;
+        grid_scene((at, 40), &[(1, (at, 40)), (2, (at - 3, 40 + n % 2))])
+    }
+
+    /// The engine of the page's tests: records 1..=3 of other pixels each, opaque, a palette
+    /// of distinct colours presented once, then frames with no draw (the tests hand the
+    /// presenter their scenes).
+    fn walk_engine() -> Engine {
+        let mut state = u6_core::State::empty();
+        for r in 1..=3u32 {
+            let rec = &mut state.gfx.records[r as usize];
+            rec.pixels = (0..256u32)
+                .map(|i| ((i / 16 * r + i % 16 + r) % 5) as u8 + 1)
+                .collect();
+            rec.transparent = vec![false; 256];
+        }
+        let mut engine = Engine::with_game(state, Files::default(), |_state, io| async move {
+            io.draw(|fb| {
+                for (i, c) in fb.palette.iter_mut().enumerate() {
+                    let v = i as u8;
+                    *c = u6_core::Rgb::new(v.wrapping_mul(40), v.wrapping_mul(90), 255 - v);
+                }
+            });
+            io.present();
+            loop {
+                io.vblank().await;
+            }
+        });
+        engine.enable_src_plane();
+        engine
+    }
+
+    /// The synthetic game for the page's tests: [`walk_engine`] on screen, HD on at 2×, smooth
+    /// motion on in the page (the engine's presents take no scenes: the test hands the
+    /// presenter the walk's scenes), the walk's first scene published.
+    fn walk_game() -> Game {
+        let mut game = Game::new();
+        game.put_on_screen(walk_engine());
+        game.set_hd(true, 2);
+        game.motion.on = true;
+        publish_walk(&mut game, 0);
+        game
+    }
+
+    fn publish_walk(game: &mut Game, n: i32) {
+        let t = game.presentation_ms();
+        let shot = u6_core::gfx::motion::Shot::of_scene(walk_scene(n));
+        game.motion.presenter.publish(Rc::new(shot), t, true);
+    }
+
+    /// A display frame of the page: a step of the engine, the present, the page's take; the hook
+    /// `between` runs after the present and before the take.
+    fn page_frame(
+        game: &mut Game,
+        page: &mut Page,
+        between: &mut dyn FnMut(&mut Game, &mut Page),
+    ) -> bool {
+        game.step(pacer::STEP_MS);
+        game.present();
+        between(game, page);
+        page.take(game)
+    }
+
+    /// What a case of the page's tests saw: the takes' checks passed, and per frame whether a
+    /// slide was drawn while the presenter held one.
+    struct Seen {
+        frames: usize,
+        drawn: usize,
+        missed: usize,
+    }
+
+    /// Runs the synthetic walk's scenes 1..=`scenes` on `page`, each slid to its end, `act` called
+    /// with the scene's number and the frame's within it after each present; every new take
+    /// checked against the layers made whole, and the drawn map free of poison.
+    fn run_walk(
+        game: &mut Game,
+        page: &mut Page,
+        scenes: i32,
+        act: &mut dyn FnMut(i32, usize, &mut Game, &mut Page),
+        label: &str,
+    ) -> Seen {
+        let mut seen = Seen {
+            frames: 0,
+            drawn: 0,
+            missed: 0,
+        };
+        let frames = (u6_render::motion::SLIDE_MS / f64::from(pacer::STEP_MS)).ceil() as usize + 2;
+        for n in 1..=scenes {
+            publish_walk(game, n);
+            for f in 0..frames {
+                let taken = page.held.as_ref().map(|h| h.0);
+                let drawn = page_frame(game, page, &mut |g: &mut Game, p: &mut Page| {
+                    let before = (g.slide_layers_version(), g.slide_version());
+                    act(n, f, g, p);
+                    // New layers at the same places (made in the case's present) are a new slide
+                    // for the page to draw.
+                    assert!(
+                        g.slide_layers_version() == before.0 || g.slide_version() != before.1,
+                        "{label} scene {n} frame {f}: the slide's version moved with its layers"
+                    );
+                });
+                seen.frames += 1;
+                seen.drawn += usize::from(drawn);
+                seen.missed += usize::from(!drawn && game.hd_on() && !game.slide().is_empty());
+                if drawn {
+                    if page.held.as_ref().map(|h| h.0) != taken {
+                        page.check(game, &format!("{label} scene {n} frame {f}"));
+                    }
+                    let frame = page.draw(game, &game.slide());
+                    assert!(
+                        !map_words(game, &frame).1,
+                        "{label} scene {n} frame {f}: the map covered"
+                    );
+                }
+            }
+        }
+        seen
+    }
+
+    /// Spec 20 Design 5 on synthetic scenes (no game files): the page's side done through the
+    /// exports as site/app.js does it ([`Page`]) takes each layers version whole once and then as
+    /// changes (moved with the camera), each equal to the layers made whole, the shown map covered
+    /// every frame of a slide; and it recovers, with the layers equal again, from a lost, a late
+    /// and a repeated report, from a reset followed by a report of layers made before it, from the
+    /// switch off and on, from a pack set, and from the HD scale changed and HD off and on, each
+    /// mid-slide. The cases' safeguards are named where they are checked.
+    #[test]
+    fn the_page_takes_the_slide_layers_through_the_exports_and_recovers_from_every_break() {
+        let none = &mut |_: i32, _: usize, _: &mut Game, _: &mut Page| {};
+        // The happy path: whole once, then changes; the slide drawn each frame of a slide.
+        let (mut game, mut page) = (walk_game(), Page::new());
+        let seen = run_walk(&mut game, &mut page, 6, none, "happy");
+        assert_eq!((page.whole, page.misses), (1, 0), "happy: whole once");
+        assert!(
+            page.changes >= 5 && seen.drawn > 0 && seen.missed == 0,
+            "happy: changes taken"
+        );
+        // Lost: scene 2's report never sent. The next changes are of the layers the game holds
+        // as the page's (base) and the page holds others: it asks for them whole (safeguard: the
+        // page's base check) and the layers are equal again.
+        let lost = |page: &mut Page| {
+            let mut game = walk_game();
+            run_walk(
+                &mut game,
+                page,
+                6,
+                &mut |n, f, _, p: &mut Page| {
+                    p.ack = if n == 2 && f == 0 {
+                        Ack::Never
+                    } else {
+                        Ack::Now
+                    };
+                },
+                "lost",
+            );
+        };
+        let mut page = Page::new();
+        lost(&mut page);
+        assert_eq!(
+            (page.misses, page.whole),
+            (1, 2),
+            "lost: one miss, whole again"
+        );
+        // Late: scene 2's report sent after scene 3's layers were made (made over scene 1's):
+        // not taken as theirs (slide_applied matches the version made last), and the page asks
+        // for scene 3's whole (safeguard: the page's base check).
+        let late = |page: &mut Page| {
+            let mut game = walk_game();
+            run_walk(
+                &mut game,
+                page,
+                6,
+                &mut |n, f, g: &mut Game, p: &mut Page| {
+                    p.ack = if n == 2 && f == 0 {
+                        Ack::Late
+                    } else {
+                        Ack::Now
+                    };
+                    if n == 3 && f == 0 {
+                        for v in std::mem::take(&mut p.late) {
+                            g.slide_applied(v);
+                        }
+                    }
+                },
+                "late",
+            );
+        };
+        let mut page = Page::new();
+        late(&mut page);
+        assert_eq!(
+            (page.misses, page.whole),
+            (1, 2),
+            "late: one miss, whole again"
+        );
+        // Without the page's base check both apply changes to layers they were not made from.
+        for (name, case) in [("lost", &lost as &dyn Fn(&mut Page)), ("late", &late)] {
+            let broken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut page = Page::new();
+                page.check_base = false;
+                case(&mut page);
+            }));
+            assert!(
+                broken.is_err(),
+                "{name} without the base check: other layers than made"
+            );
+        }
+        // Twice: every report sent twice, and each sent again after the next layers were made
+        // (before the page took them): neither takes anything (safeguard: slide_applied takes
+        // the layers made last only, and once), so no layers are made whole again.
+        let (mut game, mut page) = (walk_game(), Page::new());
+        page.ack = Ack::Twice;
+        run_walk(
+            &mut game,
+            &mut page,
+            6,
+            &mut |_, f, g: &mut Game, p: &mut Page| {
+                if let (0, Some(held)) = (f, &p.held) {
+                    g.slide_applied(held.0);
+                }
+            },
+            "twice",
+        );
+        assert_eq!((page.misses, page.whole), (0, 1), "twice: whole once");
+        // A reset (the page lost its canvases) then scene 2's report sent late, then the next
+        // present: the report counts for nothing (safeguard: slide_reset drops the pending
+        // layers), the layers come whole, and the page draws them with no miss.
+        let (mut game, mut page) = (walk_game(), Page::new());
+        run_walk(
+            &mut game,
+            &mut page,
+            5,
+            &mut |n, f, g: &mut Game, p: &mut Page| {
+                p.ack = if n == 2 && f == 0 {
+                    Ack::Late
+                } else {
+                    Ack::Now
+                };
+                if n == 2 && f == 3 {
+                    p.held = None;
+                    g.slide_reset();
+                    for v in std::mem::take(&mut p.late) {
+                        g.slide_applied(v);
+                    }
+                    g.present();
+                }
+            },
+            "reset",
+        );
+        assert_eq!(
+            (page.misses, page.whole),
+            (0, 2),
+            "reset: whole again, no miss"
+        );
+        // The switch off half way through scene 2's slide: nothing drawn from the next present
+        // (safeguard: the switch clears the presenter), on again the next slides drawn from
+        // layers equal to those made whole.
+        let (mut game, mut page) = (walk_game(), Page::new());
+        let mut off = 0;
+        run_walk(
+            &mut game,
+            &mut page,
+            6,
+            &mut |n, f, g: &mut Game, _: &mut Page| {
+                if n == 2 && f == 5 {
+                    g.set_motion(false);
+                    g.present();
+                    off += usize::from(g.slide().is_empty() && !g.sliding());
+                    g.set_motion(true);
+                    g.motion.on = true;
+                }
+            },
+            "switch",
+        );
+        assert_eq!(off, 1, "switch: off, no slide");
+        assert_eq!(page.misses, 0, "switch: no miss");
+        // A pack set half way through scene 2: the layers made again whole in it (safeguards:
+        // the pack resets the layers the page holds, and changes are only of layers made under
+        // the same HD view version and palette), equal to those made whole with it.
+        let (mut game, mut page) = (walk_game(), Page::new());
+        let (pack, _) = loaded(&[
+            pack_tile(1, key_of(&game, 1), 7),
+            pack_tile(3, key_of(&game, 3), 5),
+        ]);
+        run_walk(
+            &mut game,
+            &mut page,
+            4,
+            &mut |n, f, g: &mut Game, _: &mut Page| {
+                if (n, f) == (2, 5) {
+                    g.set_hd_pack(&pack);
+                    g.present();
+                }
+            },
+            "pack",
+        );
+        assert_eq!((page.whole, page.misses), (2, 0), "pack: whole again");
+        // HD 4× half way through scene 2, HD off through scene 3, 2× again from scene 4: the
+        // layers made again at each (safeguard: the layers are made for the HD view's version)
+        // and taken whole at the new scale (the page holds none at it).
+        let (mut game, mut page) = (walk_game(), Page::new());
+        run_walk(
+            &mut game,
+            &mut page,
+            6,
+            &mut |n, f, g: &mut Game, _: &mut Page| {
+                match (n, f) {
+                    (2, 5) => g.set_hd(true, 4),
+                    (3, 0) => g.set_hd(false, 4),
+                    (4, 0) => g.set_hd(true, 2),
+                    _ => return,
+                }
+                g.present();
+            },
+            "scale",
+        );
+        assert_eq!(
+            (page.whole, page.misses),
+            (3, 0),
+            "scale: whole at each scale"
+        );
+    }
+
+    /// Spec 20 Design 5 on the user's zip (skipped when absent): with HD on at 2× and smooth motion
+    /// on, steps in the start fight, the page's side done through the exports ([`Page`]); each
+    /// layers version drawn at rest (the camera and every mover at its place) over the HD frame is
+    /// the HD frame's map, word for word, with no poison left; the slide's frames cover the shown
+    /// map; and after a pack set between two slides (records of the shown map) the layers are
+    /// made again and drawn at rest equal the HD frame in it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn the_hd_slide_layers_and_their_changes_draw_the_hd_frame_at_rest() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", data).quiet();
+        game.set_motion(true);
+        game.set_hd(true, 2);
+        game.boot(3, true).quiet();
+        let mut page = Page::new();
+        let (mut versions, mut checked, mut covered) = (0, [0, 0], 0);
+        let dt = 1000.0 / 60.0;
+        let mut keys = 0;
+        let mut packed = None;
+        for i in 0..30_000 {
+            if keys < 8 && game.at_prompt() && i > 3000 {
+                if keys == 4 && packed.is_none() {
+                    // Between two slides: a pack of the records the shown map draws most.
+                    let mut counts = BTreeMap::new();
+                    {
+                        let e = game.engine.as_ref().quiet();
+                        let f = e.published_frame();
+                        let (x0, y0, x1, y1) = u6_core::geom::SHOWN;
+                        for y in usize::from(y0)..=usize::from(y1) {
+                            for x in usize::from(x0)..=usize::from(x1) {
+                                let src = f.src_at(x, y).filter(|s| s.kind == u6_core::Kind::Tile);
+                                if let Some(src) = src {
+                                    *counts.entry(src.id).or_insert(0usize) += 1;
+                                }
+                            }
+                        }
+                    }
+                    let mut most: Vec<(usize, u16)> =
+                        counts.into_iter().map(|(r, n)| (n, r)).collect();
+                    most.sort_unstable_by(|a, b| b.cmp(a));
+                    let images: Vec<_> = (most.iter().take(3).enumerate())
+                        .map(|(k, &(_, r))| pack_tile(r, key_of(&game, r), 3 + k as u8))
+                        .collect();
+                    let (pack, _) = loaded(&images);
+                    game.set_hd_pack(&pack);
+                    packed = Some(versions);
+                }
+                game.key_down("ArrowRight", "ArrowRight", false);
+                keys += 1;
+            }
+            let k = game.pace(dt);
+            for _ in 0..k {
+                game.step(pacer::STEP_MS);
+            }
+            game.ran(k);
+            if k == 0 && !game.sliding() {
+                continue;
+            }
+            game.present();
+            let taken = page.held.as_ref().map(|h| h.0);
+            if !page.take(&mut game) {
+                continue;
+            }
+            let (_, poisoned) = map_words(&game, &page.draw(&game, &game.slide()));
+            assert!(!poisoned, "the slide's frame covers the shown map");
+            covered += 1;
+            if page.held.as_ref().map(|h| h.0) == taken {
+                continue;
+            }
+            versions += 1;
+            page.check(&mut game, &format!("version {versions}"));
+            // At rest over the HD frame, when the newest scene is the engine's view now.
+            let slide = game.layers.slide.as_ref().quiet();
+            let rest = View {
+                camera: (0, 0),
+                movers: Vec::new(),
+            };
+            let placed: Vec<i32> = u6_core::gfx::motion::slide_placements(slide, &rest)
+                .into_iter()
+                .flat_map(|(l, x, y)| [l as i32, x, y])
+                .collect();
+            if game.motion.presenter.history().first().is_some_and(|n| {
+                let e = game.engine.as_ref().quiet();
+                e.state().map.centre.x as i32 == n.scene.centre.0
+                    && e.state().map.centre.y as i32 == n.scene.centre.1
+            }) {
+                let (words, poisoned) = map_words(&game, &page.draw(&game, &placed));
+                let (want, _) = map_words(&game, game.hd.rgba());
+                assert!(
+                    !poisoned && words == want,
+                    "version {versions}: at rest, the HD frame's map"
+                );
+                checked[usize::from(packed.is_some())] += 1;
+            }
+        }
+        assert!(
+            keys == 8 && checked[0] > 0 && checked[1] > 0 && page.changes > 0,
+            "versions checked before and after the pack, and changes taken: {checked:?}"
+        );
+        assert!(page.whole >= 2, "the pack's layers made whole");
+        println!(
+            "{versions} layers versions taken ({} whole, {} as changes, {} misses); {} drawn at \
+             rest equal to the HD frame before the pack and {} after; {covered} frames with the \
+             map covered",
+            page.whole, page.changes, page.misses, checked[0], checked[1]
+        );
     }
 }
