@@ -514,8 +514,12 @@ pub struct Game {
     /// target ([`Game::command_at`]).
     run: Option<u6_core::ui::menu::Run>,
     /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
-    /// repeats were queued as, so its release takes back those ([`Game::key_up`]).
-    held: Vec<(String, Key)>,
+    /// repeats were queued as, so its release takes back those ([`Game::key_up`]); spec 19 O1c:
+    /// with the page's frame clock ([`Game::wall_ms`]) at its first press.
+    held: Vec<(String, Key, f64)>,
+    /// Spec 19 O1c: the wall milliseconds [`Game::pace`] was given so far (the page's frame
+    /// clock), against which a held key's time down is read ([`u6_core::engine::TAP_MS`]).
+    wall_ms: f64,
     /// Spec 18: the remembered sight on ([`Game::set_sight_memory`]).
     sight_memory: bool,
 }
@@ -561,6 +565,7 @@ impl Game {
             voices: false,
             run: None,
             held: Vec::new(),
+            wall_ms: 0.0,
             sight_memory: false,
         };
         game.redraw();
@@ -945,13 +950,13 @@ impl Game {
     pub fn step(&mut self, ms: u32) {
         self.step_run();
         if let Some(engine) = &mut self.engine {
-            // Spec 19 O1c: a held direction key is pressed again at the command prompt.
-            let held = self
-                .held
-                .iter()
-                .rev()
-                .map(|&(_, k)| k)
-                .find(|k| k.is_direction());
+            // Spec 19 O1c: a held direction key is pressed again at the command prompt, once
+            // it has been down `TAP_MS` on the page's clock.
+            let (now, tap) = (self.wall_ms, f64::from(u6_core::engine::TAP_MS));
+            let held =
+                u6_core::engine::newest_direction(self.held.iter().map(|(_, k, at)| (*k, *at)))
+                    .filter(|&(_, at)| now - at >= tap)
+                    .map(|(k, _)| k);
             if let Some(press) = engine.held_press(&self.pending, held) {
                 self.pending.push(press);
             }
@@ -1255,6 +1260,9 @@ impl Game {
     /// are worth at the speed, or at 1× while a pointer button is held
     /// ([`u6_core::pacer::Pacer::due`]); nothing is taken off until [`Game::ran`].
     pub fn pace(&mut self, dt: f64) -> u32 {
+        if dt.is_finite() && dt > 0.0 {
+            self.wall_ms += dt;
+        }
         let held = self.pointer_held();
         self.pacer.due(dt, held)
     }
@@ -1326,7 +1334,7 @@ impl Game {
     pub fn key_up(&mut self, code: &str) -> bool {
         let (pending, running) = (&mut self.pending, self.engine.is_some());
         let before = self.held.len();
-        self.held.retain(|(held, k)| {
+        self.held.retain(|(held, k, _)| {
             if held != code {
                 return true;
             }
@@ -1341,7 +1349,7 @@ impl Game {
     /// Spec 19 O1b: every held key let go ([`Game::key_up`]), for when the page can no longer
     /// see their releases (the window lost the focus or the page was hidden).
     pub fn release_keys(&mut self) {
-        let codes: Vec<String> = self.held.iter().map(|(code, _)| code.clone()).collect();
+        let codes: Vec<String> = self.held.iter().map(|(code, ..)| code.clone()).collect();
         for code in codes {
             self.key_up(&code);
         }
@@ -1647,8 +1655,8 @@ impl Game {
             Some(k) => {
                 if self.engine.is_some() {
                     self.pending.push(event(k));
-                    if !self.held.iter().any(|(c, h)| c == code && *h == k) {
-                        self.held.push((code.to_string(), k));
+                    if !self.held.iter().any(|(c, h, _)| c == code && *h == k) {
+                        self.held.push((code.to_string(), k, self.wall_ms));
                     }
                 }
                 true
@@ -1689,6 +1697,7 @@ impl Game {
         self.audio = None;
         self.engine = Some(engine);
         self.pending.clear();
+        self.held.clear();
         self.redraw();
         self.hd.restart();
         self.compose_hd();
@@ -5099,6 +5108,25 @@ mod tests {
             .is_some_and(|e| e.state().main.reading == 1)
     }
 
+    /// One step at 1× as the page runs it: 20 wall ms on the page's frame clock
+    /// ([`Game::pace`]), the step, [`Game::ran`].
+    fn step_1x(game: &mut Game) {
+        game.pace(20.0);
+        game.step(20);
+        game.ran(1);
+    }
+
+    /// One display frame of `dt` wall ms as the page runs it (spec 06): the steps [`Game::pace`]
+    /// gives at the speed, each followed by `seen`, then [`Game::ran`].
+    fn frame(game: &mut Game, dt: f64, seen: &mut impl FnMut(&Game)) {
+        let k = game.pace(dt);
+        for _ in 0..k {
+            game.step(20);
+            seen(game);
+        }
+        game.ran(k);
+    }
+
     /// What a hold of the down arrow did ([`hold_south`]): per step of the leader, the step()
     /// calls from the command loop reading again to the step (None where it never read between
     /// two steps, a key already waiting), and the engine ms since the step before; the steps
@@ -5111,10 +5139,10 @@ mod tests {
         queued: usize,
     }
 
-    /// Holds the down arrow from the prompt (south, the way open for about ten cells in both
-    /// builds; `key_down`, its release by `key_up`; with `repeats`, the browser's repeat too: the
-    /// first 225 ms after the press, then one every 30 ms) until the leader has stepped `steps`
-    /// times or 30 s passed, lets it go, and steps 1.5 s more.
+    /// Holds the down arrow from the prompt at 1× (south, the way open for about ten cells in
+    /// both builds; `key_down`, its release by `key_up`; with `repeats`, the browser's repeat
+    /// too: the first 225 ms after the press, then one every 30 ms) until the leader has stepped
+    /// `steps` times or 30 s passed, lets it go, and steps 1.5 s more.
     fn hold_south(game: &mut Game, steps: usize, repeats: bool) -> Hold {
         let now = |g: &Game| g.engine.as_ref().map_or(0, |e| e.io().now_ms());
         let t0 = now(game);
@@ -5136,7 +5164,7 @@ mod tests {
                 assert!(game.key_repeat("ArrowDown", "ArrowDown", false));
                 next_repeat += 30;
             }
-            game.step(20);
+            step_1x(game);
             if game.leader_position() != at {
                 at = game.leader_position();
                 h.from_prompt.push(read_at.take().map(|r| i - r));
@@ -5148,7 +5176,7 @@ mod tests {
         }
         assert!(game.key_up("ArrowDown"));
         for _ in 0..75 {
-            game.step(20);
+            step_1x(game);
             if game.leader_position() != at {
                 at = game.leader_position();
                 h.after += 1;
@@ -5208,7 +5236,7 @@ mod tests {
         assert!(game.key_up("ArrowDown"));
         let mut steps = 0;
         for _ in 0..150 {
-            game.step(20);
+            step_1x(&mut game);
             if game.leader_position() != at {
                 at = game.leader_position();
                 steps += 1;
@@ -5218,37 +5246,200 @@ mod tests {
         assert!(game.at_prompt(), "the prompt again");
     }
 
-    /// Spec 19 O1c on a game that stands for the waits: it reads one key (with `prompt`,
-    /// A4-0x7a2c set: the command prompt; without, another wait such as the line editor's),
-    /// then waits 100 ms, over and over. With the key `code` / `key` pressed (`key_down`, no
-    /// browser repeat) and held for 1.2 s: how many keys it read.
-    fn keys_read(prompt: bool, code: &str, key: &str) -> u32 {
-        use std::cell::RefCell;
-        let seen = Rc::new(RefCell::new(0));
-        let out = Rc::clone(&seen);
-        let mut game = Game::new();
-        game.engine = Some(Engine::with_game(
+    /// 60 Hz display frames, in wall ms.
+    const FRAME: f64 = 1000.0 / 60.0;
+
+    /// The down arrow pressed at `speed` and let go after `hold` wall ms of 60 Hz frames, then
+    /// 2 s of frames more: the cells walked while it was down and after.
+    fn press_for(game: &mut Game, speed: f64, hold: f64) -> (u32, u32) {
+        game.set_speed(speed);
+        let start = game.leader_position();
+        let mut at = start.clone();
+        let mut cells = [0u32; 2];
+        let mut count = |g: &Game, part: usize| {
+            if g.leader_position() != at {
+                at = g.leader_position();
+                cells[part] += 1;
+            }
+        };
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        let mut wall = 0.0;
+        while wall < hold {
+            frame(game, FRAME, &mut |g| count(g, 0));
+            wall += FRAME;
+        }
+        assert!(game.key_up("ArrowDown"));
+        for _ in 0..120 {
+            frame(game, FRAME, &mut |g| count(g, 1));
+        }
+        (cells[0], cells[1])
+    }
+
+    /// Spec 19 O1c, the tap gate ([`u6_core::engine::TAP_MS`]): a tap over several frames,
+    /// shorter than a turn at 1× and than 150 wall ms, is one cell at 1× and at 8× (where the
+    /// castle's 640 ms turn is 80 wall ms, so a prompt comes back within the tap); a hold of
+    /// 600 wall ms at 8× walks on at the speed's pace.
+    #[test]
+    fn a_multi_frame_tap_is_one_cell_at_any_speed_and_a_hold_walks_on() {
+        for (speed, hold) in [(1.0, 120.0), (8.0, 120.0)] {
+            let Some(mut game) = in_the_castle() else {
+                return;
+            };
+            let (held, after) = press_for(&mut game, speed, hold);
+            println!("tap {hold} wall ms at {speed}x: {held} cell(s) while down, {after} after");
+            assert_eq!(held + after, 1, "one cell at {speed}x");
+        }
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        let (held, after) = press_for(&mut game, 8.0, 600.0);
+        println!("hold 600 wall ms at 8x: {held} cell(s) while down, {after} after");
+        assert!(held >= 3, "the hold walks on at 8x: {held}");
+        assert!(after <= 1, "at most the turn in flight after the release");
+    }
+
+    /// Spec 19 O1c (review S3), the owner's symptom: the browser's repeat (the first 225 wall ms
+    /// after the press, then every 30 ms) at 4×, the castle's turns 160 to 215 wall ms there.
+    /// Per step of the leader, the steps it waited after the prompt came back: on the old code
+    /// the second waits out the OS delay (the first repeat comes after the prompt), the third
+    /// not (repeats wait in the queue); with O1c the second waits at most one step. The turns'
+    /// own lengths alternate (640 / 860 engine ms with the clock minute), so the waits after the
+    /// prompt are compared, not the gaps between steps.
+    #[test]
+    fn at_4x_a_held_arrow_with_the_browsers_repeat_waits_no_os_delay() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        game.set_speed(4.0);
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        let mut at = game.leader_position();
+        let (mut read_at, mut i) = (Some(0usize), 0usize);
+        let mut waits: Vec<Option<usize>> = Vec::new();
+        let (mut wall, mut next_repeat) = (0.0, 225.0);
+        while waits.len() < 3 && wall < 5000.0 {
+            while wall + FRAME > next_repeat {
+                assert!(game.key_repeat("ArrowDown", "ArrowDown", false));
+                next_repeat += 30.0;
+            }
+            frame(&mut game, FRAME, &mut |g| {
+                i += 1;
+                if g.leader_position() != at {
+                    at = g.leader_position();
+                    waits.push(read_at.take().map(|r| i - r));
+                } else if read_at.is_none() && reading(g) {
+                    read_at = Some(i);
+                }
+            });
+            wall += FRAME;
+        }
+        assert!(game.key_up("ArrowDown"));
+        println!("held down at 4x with repeats: steps after the prompt {waits:?}");
+        assert_eq!(waits.len(), 3, "three steps");
+        assert!(
+            waits[1..].iter().all(|w| w.is_none_or(|n| n <= 1)),
+            "no wait for the OS repeat after the prompt: {waits:?}"
+        );
+    }
+
+    /// Spec 19 O1c (review S1): a letter pressed while an arrow is held is read at the prompt
+    /// it comes to, not dropped for the arrow's added press: held down until two steps, then `l`
+    /// (Look) the moment the prompt is up; Look waits for its target (A4-0x7a60 set) and the
+    /// leader did not step.
+    #[test]
+    fn a_letter_pressed_while_an_arrow_is_held_is_read() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        let mut at = game.leader_position();
+        let mut cells = 0;
+        for _ in 0..1500 {
+            step_1x(&mut game);
+            if game.leader_position() != at {
+                at = game.leader_position();
+                cells += 1;
+            } else if cells >= 2 && reading(&game) {
+                break;
+            }
+        }
+        assert!(cells >= 2 && reading(&game), "two steps, the prompt up");
+        assert!(game.key_down("KeyL", "l", false));
+        step_1x(&mut game);
+        let targeting = game.engine.as_ref().quiet().state().ui.input.targeting;
+        assert_eq!(game.leader_position(), at, "no step for the arrow");
+        assert_ne!(targeting, 0, "Look read, waiting for its target");
+        game.key_up("KeyL");
+        game.key_up("ArrowDown");
+    }
+
+    /// Spec 19 O1c (review S2): `release_keys` lets the held arrow go, so no press is added
+    /// after it: the walk ends with the turn in flight; a new game put on screen holds no key.
+    #[test]
+    fn release_keys_ends_a_held_walk_and_a_new_game_holds_nothing() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        let mut at = game.leader_position();
+        let mut cells = 0;
+        for _ in 0..1500 {
+            if cells == 2 {
+                break;
+            }
+            step_1x(&mut game);
+            if game.leader_position() != at {
+                at = game.leader_position();
+                cells += 1;
+            }
+        }
+        assert_eq!(cells, 2, "two steps while held");
+        game.release_keys();
+        assert!(game.held.is_empty(), "nothing held");
+        for _ in 0..150 {
+            step_1x(&mut game);
+            assert_eq!(game.leader_position(), at, "no step after the release");
+        }
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        let engine = game.engine.take().quiet();
+        game.put_on_screen(engine);
+        assert!(game.held.is_empty(), "a new game holds no key");
+    }
+
+    /// A game that stands for the waits: it reads one key (with `prompt`, A4-0x7a2c set: the
+    /// command prompt; without, another wait such as the line editor's), then waits 100 ms,
+    /// over and over; the keys it read go to `out`.
+    fn reader(prompt: bool, out: Rc<std::cell::RefCell<Vec<u6_core::engine::Typed>>>) -> Engine {
+        Engine::with_game(
             u6_core::State::empty(),
             Files::default(),
             move |st, io| async move {
                 loop {
                     st.borrow_mut().main.reading = u16::from(prompt);
-                    io.next_typed().await;
+                    let t = io.next_typed().await;
                     st.borrow_mut().main.reading = 0;
-                    *out.borrow_mut() += 1;
+                    out.borrow_mut().push(t);
                     io.sleep(100).await;
                 }
             },
-        ));
-        game.step(20);
-        assert!(game.key_down(code, key, false));
-        for _ in 0..60 {
-            game.step(20);
-        }
-        *seen.borrow()
+        )
     }
 
-    /// Spec 19 O1c: at the command prompt a held arrow is pressed again at every read.
+    /// Spec 19 O1c on [`reader`]: with the key `code` / `key` pressed (`key_down`, no browser
+    /// repeat) and held for 1.6 s at 1×: how many keys it read.
+    fn keys_read(prompt: bool, code: &str, key: &str) -> usize {
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut game = Game::new();
+        game.engine = Some(reader(prompt, Rc::clone(&seen)));
+        step_1x(&mut game);
+        assert!(game.key_down(code, key, false));
+        for _ in 0..80 {
+            step_1x(&mut game);
+        }
+        seen.borrow().len()
+    }
+
+    /// Spec 19 O1c: at the command prompt a held arrow is pressed again at every read, once it
+    /// has been down 150 ms.
     #[test]
     fn a_held_arrow_at_the_command_prompt_is_pressed_at_every_read() {
         assert!(keys_read(true, "ArrowLeft", "ArrowLeft") >= 8);
@@ -5265,5 +5456,36 @@ mod tests {
     #[test]
     fn a_held_arrow_at_another_wait_is_read_once() {
         assert_eq!(keys_read(false, "ArrowLeft", "ArrowLeft"), 1);
+    }
+
+    /// Spec 19 O1c (review S2) through the page's tracking (`key_down`, `key_repeat`,
+    /// `key_up`) on [`reader`] at the prompt: of two held arrows the newest press walks; a
+    /// browser repeat of the older does not make it newer; the newer let go, the older walks
+    /// again. Each phase lasts 400 ms at 1×; the last key read in it is the one walking.
+    #[test]
+    fn the_newest_held_arrow_walks_and_the_older_comes_back_at_its_release() {
+        use u6_core::engine::Typed;
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut game = Game::new();
+        game.engine = Some(reader(true, Rc::clone(&seen)));
+        step_1x(&mut game);
+        let phase = |game: &mut Game| {
+            for _ in 0..20 {
+                step_1x(game);
+            }
+            *seen.borrow().last().quiet()
+        };
+        assert!(game.key_down("ArrowDown", "ArrowDown", false));
+        assert_eq!(phase(&mut game), Typed::Key(Key::Down), "the one held");
+        assert!(game.key_down("ArrowLeft", "ArrowLeft", false));
+        assert_eq!(phase(&mut game), Typed::Key(Key::Left), "the newest");
+        assert!(game.key_repeat("ArrowDown", "ArrowDown", false));
+        assert_eq!(
+            phase(&mut game),
+            Typed::Key(Key::Left),
+            "a repeat of the older does not reorder"
+        );
+        assert!(game.key_up("ArrowLeft"));
+        assert_eq!(phase(&mut game), Typed::Key(Key::Down), "the older again");
     }
 }

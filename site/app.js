@@ -3665,6 +3665,7 @@ function makeIme() {
   ime.dataset.i18nLabel = 'imeLabel';
   ime.setAttribute('aria-label', t('imeLabel'));
   ime.addEventListener('keydown', imeKey);
+  ime.addEventListener('blur', releaseKeys);
   ime.addEventListener('compositionstart', () => {
     composing = true;
     dropCommit = false;
@@ -3822,7 +3823,13 @@ async function leaveFullscreen() {
 // back.
 function gameKey(e) {
   gesture();
-  if (!game || crashed || e.metaKey || e.altKey) return;
+  if (!game || crashed) return;
+  if (e.metaKey || e.altKey) {
+    // A chord with Meta or Alt is not the game's, and its keyup may never come (macOS sends none
+    // for a key let go while Cmd is down): every held key is let go (spec 19 O1c).
+    releaseKeys();
+    return;
+  }
   if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
   const by = speedKey(e);
   if (by !== 0) {
@@ -3836,8 +3843,9 @@ function gameKey(e) {
 // so a held key walks no further than the prompt it was let go at. The game releases what that
 // physical key gave (`code`), whatever the modifiers are now; a key it never had takes nothing.
 // Heard on the window, so a release after the focus moved to another control still counts; when
-// the window loses the focus or the page is hidden, a release may never come: every held key is
-// let go then.
+// the window loses the focus or the page is hidden, a release may never come, and when the canvas
+// (or the line input in its place) loses the focus a held key must walk no further (spec 19 O1c:
+// the context menu, a toolbar control, Settings, Tab): every held key is let go then.
 function gameKeyUp(e) {
   if (game && !crashed) game.key_up(e.code);
 }
@@ -3847,6 +3855,7 @@ function releaseKeys() {
 canvas.addEventListener('keydown', gameKey);
 window.addEventListener('keyup', gameKeyUp);
 window.addEventListener('blur', releaseKeys);
+canvas.addEventListener('blur', releaseKeys);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) releaseKeys();
 });
@@ -4036,9 +4045,6 @@ function openContextMenu(e) {
     contextMenu.append(head);
     for (const entry of entries) contextMenu.append(menuItem(entry, ''));
   }
-  // Spec 19 O1c: the menu takes the focus, so a key held on the canvas walks no further under it:
-  // every held key is let go here (its keyup later takes nothing).
-  releaseKeys();
   menuAt = at;
   swallowing = true;
   contextMenu.hidden = false;

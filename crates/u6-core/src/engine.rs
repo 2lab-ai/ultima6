@@ -54,6 +54,19 @@ impl Key {
     }
 }
 
+/// Port (spec 19 O1c): wall milliseconds a direction key must have been down before the
+/// platform presses it again at a prompt ([`Engine::held_press`]): above 1× a turn can end
+/// within a tap (the castle's 640 ms is 80 wall ms at 8×), and a tap is one step at any speed.
+pub const TAP_MS: u32 = 150;
+
+/// Port (spec 19 O1c): of the keys a platform has down, oldest first (each with what the
+/// platform keeps beside it, such as its press time), the newest direction key: the one a
+/// held walk goes on with. A repeat of an older key does not make it newer (a platform keeps
+/// each held key at its first press), and once the newest is let go the one before it walks.
+pub fn newest_direction<T>(held: impl DoubleEndedIterator<Item = (Key, T)>) -> Option<(Key, T)> {
+    held.rev().find(|(k, _)| k.is_direction())
+}
+
 /// One input event, queued by the platform and consumed in order by the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InputEvent {
@@ -1032,16 +1045,20 @@ impl Engine {
     }
 
     /// Port (spec 19 O1c): the press a platform adds to `input` before a tick for `held`, the
-    /// direction key it has down (the newest, pressed without Ctrl, Alt or Meta): a repeat of
-    /// it when the command loop waits for a command key (A4-0x7a2c set: no line editor,
-    /// cross-hair or other wait) and no key waits, neither queued nor in `input` (pointer events
-    /// may). So a held direction key is pressed again at every command prompt at once and walks
-    /// one step a turn, the prompt gating the cadence, with no wait for the platform's own
-    /// repeat; every other wait keeps that repeat. None otherwise, and for any other key.
+    /// direction key it has down ([`newest_direction`]; pressed without Ctrl, Alt or Meta, and
+    /// down at least [`TAP_MS`]): a repeat of it when the command loop waits for a command key
+    /// (A4-0x7a2c set, no cross-hair, A4-0x7a60 clear: no line editor, target or other wait)
+    /// and no key waits, neither queued nor in `input` (pointer events may). So a held direction
+    /// key is pressed again at every command prompt at once and walks one step a turn, the
+    /// prompt gating the cadence, with no wait for the platform's own repeat; every other wait
+    /// keeps that repeat. None otherwise, and for any other key.
     pub fn held_press(&self, input: &[InputEvent], held: Option<Key>) -> Option<InputEvent> {
         let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. });
         let held = held.filter(|k| k.is_direction())?;
-        let prompt = !self.finished && self.state.borrow().main.reading == 1;
+        let prompt = !self.finished && {
+            let s = self.state.borrow();
+            s.main.reading == 1 && s.ui.input.targeting == 0
+        };
         let waiting = input.iter().any(key) || self.io.events.borrow().iter().any(key);
         (prompt && !waiting).then_some(InputEvent::Repeat(held))
     }
@@ -1211,6 +1228,64 @@ mod tests {
             "the key past a full ring is lost"
         );
         assert_eq!(queued.len(), 50, "the pointer event is kept");
+    }
+
+    /// Spec 19 O1c (review S1 and NIT): every branch of [`Engine::held_press`]. At the
+    /// command prompt (A4-0x7a2c set, no cross-hair) with nothing waiting a held direction key
+    /// gives its repeat, pointer events or not; a key queued, a key or a release in this step's
+    /// input, a game finished, another key, no key, another wait (A4-0x7a2c clear) or a
+    /// cross-hair (A4-0x7a60 set) give none.
+    #[test]
+    fn a_held_press_comes_only_at_a_quiet_command_prompt() {
+        let engine = |reading: u16, targeting: u8, ends: bool| {
+            let mut s = State::empty();
+            s.main.reading = reading;
+            s.ui.input.targeting = targeting;
+            Engine::with_game(s, Files::default(), move |_state, io| async move {
+                if !ends {
+                    io.sleep(u32::MAX).await;
+                }
+            })
+        };
+        let left = Some(Key::Left);
+        let pointer = InputEvent::Pointer {
+            x: 1,
+            y: 2,
+            buttons: 0,
+        };
+        let repeat = Some(InputEvent::Repeat(Key::Left));
+        let e = engine(1, 0, false);
+        assert_eq!(e.held_press(&[], left), repeat, "quiet prompt");
+        assert_eq!(e.held_press(&[pointer], left), repeat, "pointer events");
+        assert_eq!(e.held_press(&[key('a')], left), None, "a key in the input");
+        let up = InputEvent::Release(Key::Down);
+        assert_eq!(e.held_press(&[up], left), None, "a release in the input");
+        assert_eq!(
+            e.held_press(&[], Some(Key::Char('x'))),
+            None,
+            "not a direction"
+        );
+        assert_eq!(e.held_press(&[], None), None, "none held");
+        let mut e = engine(1, 0, false);
+        e.tick(&[pointer], 16);
+        assert_eq!(e.held_press(&[], left), repeat, "a pointer event queued");
+        let mut e = engine(1, 0, false);
+        e.tick(&[key('a')], 16);
+        assert_eq!(e.held_press(&[], left), None, "a key queued");
+        assert_eq!(
+            engine(0, 0, false).held_press(&[], left),
+            None,
+            "another wait"
+        );
+        assert_eq!(
+            engine(1, 1, false).held_press(&[], left),
+            None,
+            "a cross-hair"
+        );
+        let mut e = engine(1, 0, true);
+        e.tick(&[], 16);
+        assert!(e.finished());
+        assert_eq!(e.held_press(&[], left), None, "finished");
     }
 
     #[test]

@@ -51,7 +51,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use minifb::{KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use u6_core::pacer::{Pacer, STEP_MS};
@@ -421,17 +421,41 @@ fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// One key held ([`HeldKeys`]): the window key, the game key its presses and repeats were
+/// queued as, and (spec 19 O1c) whether Ctrl, Alt or the system key was down at its first
+/// press and when that was.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    key: minifb::Key,
+    game: Key,
+    modified: bool,
+    at: Instant,
+}
+
 /// Spec 19 O1b: per window key held, each game key its presses and repeats were queued as, so
 /// its release takes back those whatever the modifiers are then (Ctrl let go before S still
 /// releases Ctrl-S).
 #[derive(Debug, Default)]
-struct HeldKeys(Vec<(minifb::Key, Key)>);
+struct HeldKeys(Vec<Held>);
 
 impl HeldKeys {
-    /// The event of a press of `key` routed to the game as `k` (`repeat`: minifb's own repeat).
-    fn press(&mut self, key: minifb::Key, k: Key, repeat: bool) -> InputEvent {
-        if !self.0.contains(&(key, k)) {
-            self.0.push((key, k));
+    /// The event of a press of `key` routed to the game as `k` (`repeat`: minifb's own repeat),
+    /// at `at` with a modifier down or not (`modified`); a key already held keeps its first.
+    fn press(
+        &mut self,
+        key: minifb::Key,
+        k: Key,
+        repeat: bool,
+        modified: bool,
+        at: Instant,
+    ) -> InputEvent {
+        if !self.0.iter().any(|h| h.key == key && h.game == k) {
+            self.0.push(Held {
+                key,
+                game: k,
+                modified,
+                at,
+            });
         }
         if repeat {
             InputEvent::Repeat(k)
@@ -443,31 +467,33 @@ impl HeldKeys {
     /// The releases of the game keys window key `key` gave.
     fn release(&mut self, key: minifb::Key) -> Vec<InputEvent> {
         let mut out = Vec::new();
-        self.0.retain(|&(held, k)| {
-            if held != key {
+        self.0.retain(|h| {
+            if h.key != key {
                 return true;
             }
-            out.push(InputEvent::Release(k));
+            out.push(InputEvent::Release(h.game));
             false
         });
         out
     }
 
-    /// Spec 19 O1c: the newest direction key held, which the game presses again at the command
+    /// Spec 19 O1c: the newest direction key held that was pressed without a modifier
+    /// ([`u6_core::engine::newest_direction`]), once it has been down
+    /// [`u6_core::engine::TAP_MS`] by `now`: the key the game presses again at the command
     /// prompt ([`Engine::held_press`]).
-    fn direction(&self) -> Option<Key> {
-        self.0
-            .iter()
-            .rev()
-            .map(|&(_, k)| k)
-            .find(|k| k.is_direction())
+    fn direction(&self, now: Instant) -> Option<Key> {
+        let tap = Duration::from_millis(u64::from(u6_core::engine::TAP_MS));
+        let plain = self.0.iter().filter(|h| !h.modified);
+        u6_core::engine::newest_direction(plain.map(|h| (h.game, h.at)))
+            .filter(|&(_, at)| now.saturating_duration_since(at) >= tap)
+            .map(|(k, _)| k)
     }
 
     /// The releases of every key held (the window lost the focus: their releases may not come).
     fn release_all(&mut self) -> Vec<InputEvent> {
         self.0
             .drain(..)
-            .map(|(_, k)| InputEvent::Release(k))
+            .map(|h| InputEvent::Release(h.game))
             .collect()
     }
 }
@@ -569,13 +595,30 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     while window.is_open() {
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
+        // Spec 19 O1c: Ctrl, Alt or the system key down (with one an arrow is no direction key).
+        let modifier = {
+            use minifb::Key as K;
+            [
+                K::LeftCtrl,
+                K::RightCtrl,
+                K::LeftAlt,
+                K::RightAlt,
+                K::LeftSuper,
+                K::RightSuper,
+            ]
+            .into_iter()
+            .any(|k| window.is_key_down(k))
+        };
+        let pressed_at = Instant::now();
         let mut speed = pacer.speed();
         for key in window.get_keys_pressed(KeyRepeat::Yes) {
             // Spec 19 O1b: a press minifb's own repeat sent (the key held past its delay) goes
             // as a repeat, which the key's release takes back.
             let repeat = !window.is_key_pressed(key, KeyRepeat::No);
             match route(key, ctrl) {
-                Some(Route::Game(k)) => pending.push(keys.press(key, k, repeat)),
+                Some(Route::Game(k)) => {
+                    pending.push(keys.press(key, k, repeat, modifier, pressed_at));
+                }
                 Some(Route::Faster) => speed = pace::faster(speed),
                 Some(Route::Slower) => speed = pace::slower(speed),
                 None => {}
@@ -610,22 +653,8 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         // The handler's buttons after this frame's input: the last pointer state queued (still
         // pending or taken).
         let held = mouse.is_some_and(|(_, _, buttons)| buttons != 0);
-        // Spec 19 O1c: the direction key down, unless a modifier is (Ctrl, Alt or the system
-        // key with an arrow is no direction key).
-        let modifier = {
-            use minifb::Key as K;
-            [
-                K::LeftCtrl,
-                K::RightCtrl,
-                K::LeftAlt,
-                K::RightAlt,
-                K::LeftSuper,
-                K::RightSuper,
-            ]
-            .into_iter()
-            .any(|k| window.is_key_down(k))
-        };
-        let direction = keys.direction().filter(|_| !modifier);
+        // Spec 19 O1c: the direction key held, unless a modifier is down now too.
+        let direction = keys.direction(Instant::now()).filter(|_| !modifier);
         let frame_at = Instant::now();
         let wall_dt_ms = frame_at.duration_since(last).as_secs_f64() * 1000.0;
         last = frame_at;
@@ -778,11 +807,12 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(route_game(K::S, true), ctrl_s);
+        let t = Instant::now();
         let presses = [
-            held.press(K::S, route_game(K::S, true), false),
-            held.press(K::S, route_game(K::S, true), true),
-            held.press(K::S, route_game(K::S, false), true),
-            held.press(K::Up, route_game(K::Up, false), false),
+            held.press(K::S, route_game(K::S, true), false, true, t),
+            held.press(K::S, route_game(K::S, true), true, true, t),
+            held.press(K::S, route_game(K::S, false), true, false, t),
+            held.press(K::Up, route_game(K::Up, false), false, false, t),
         ];
         assert_eq!(
             presses,
@@ -800,6 +830,51 @@ mod tests {
         assert!(held.release(K::S).is_empty(), "released once");
         assert_eq!(held.release_all(), [InputEvent::Release(Key::Up)]);
         assert!(held.release_all().is_empty());
+    }
+
+    /// Spec 19 O1c (the review's sequence): an arrow pressed with Alt, the system key or Ctrl
+    /// down, the modifier let go and the arrow still down, is never the held direction; the same
+    /// arrow pressed without one is, once it has been down `TAP_MS`, and not before.
+    #[test]
+    fn a_direction_held_from_a_press_with_a_modifier_is_not_pressed_again() {
+        use minifb::Key as K;
+        let t = Instant::now();
+        let later = t + Duration::from_millis(u64::from(u6_core::engine::TAP_MS));
+        for modifier in [K::LeftAlt, K::LeftSuper, K::LeftCtrl] {
+            let mut held = HeldKeys::default();
+            let k = match route(K::Left, modifier == K::LeftCtrl) {
+                Some(Route::Game(k)) => k,
+                other => panic!("{other:?}"),
+            };
+            held.press(K::Left, k, false, true, t);
+            assert_eq!(held.direction(later), None, "{modifier:?} at the press");
+            held.release(K::Left);
+            held.press(K::Left, k, false, false, t);
+            let just = t + Duration::from_millis(u64::from(u6_core::engine::TAP_MS) - 1);
+            assert_eq!(held.direction(just), None, "a tap is not held yet");
+            assert_eq!(held.direction(later), Some(Key::Left), "pressed alone");
+        }
+    }
+
+    /// Spec 19 O1c through HeldKeys: of two held arrows the newest press walks; a repeat of the
+    /// older does not make it newer; the newer let go, the older walks again.
+    #[test]
+    fn the_newest_held_arrow_walks_and_the_older_comes_back_at_its_release() {
+        use minifb::Key as K;
+        let t = Instant::now();
+        let later = t + Duration::from_secs(1);
+        let mut held = HeldKeys::default();
+        held.press(K::Down, Key::Down, false, false, t);
+        held.press(K::Left, Key::Left, false, false, t);
+        assert_eq!(held.direction(later), Some(Key::Left), "the newest");
+        held.press(K::Down, Key::Down, true, false, later);
+        assert_eq!(
+            held.direction(later),
+            Some(Key::Left),
+            "a repeat does not reorder"
+        );
+        held.release(K::Left);
+        assert_eq!(held.direction(later), Some(Key::Down), "the older again");
     }
 
     #[test]
