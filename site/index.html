@@ -87,23 +87,11 @@
     }
     #fullscreen-exit { position: absolute; top: 8px; right: 8px; margin: 0; }
     #fullscreen-exit[hidden] { display: none; }
-    /* The context menu of a right press (spec 17): over the screen box at the press, its sections
-       headed by the object's name, an entry that cannot run greyed with the reason under it. */
-    #context-menu { position: absolute; z-index: 20; min-width: 10em; max-width: 20em; padding: 4px 0;
-                    overflow-y: auto; overscroll-behavior: contain;
-                    border: 1px solid #555a66; border-radius: 6px; background: #141a2a; color: #e6e6eb;
-                    font-size: 0.875rem; line-height: 1.3; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6); }
-    #context-menu[hidden] { display: none; }
-    #context-menu .head { padding: 4px 10px 2px; color: #9ab8ff; font-weight: 600; overflow-wrap: anywhere; }
-    #context-menu .head:empty { display: none; }
-    #context-menu button { display: block; width: 100%; margin: 0; padding: 3px 10px 3px 18px; border: 0;
-                           border-radius: 0; background: none; text-align: left; }
-    #context-menu button:focus { outline: none; background: #2a3350; }
-    #context-menu button:focus-visible { outline: 2px solid #ffd166; outline-offset: -2px; }
-    #context-menu button[aria-disabled="true"] { color: #7a7f8c; }
-    #context-menu .of { margin-left: 0.5em; color: #9ab8ff; }
-    #context-menu .theft { margin-left: 0.5em; color: #ff9a9a; font-size: 0.75rem; }
-    #context-menu .why { display: block; color: #9a9aa6; font-size: 0.75rem; }
+    /* In fullscreen the Exit button and the speed badge keep their boxes while hidden, unseen and
+       out of the pointer's way, so the page keeps the context menu off their parts of the canvas
+       at all times (spec 17: app.js overCanvas); either shows at any time there. */
+    body:is([data-fullscreen="on"], [data-fullscreen="css"]) :is(#fullscreen-exit, #speed-badge)[hidden] {
+      display: inline-block; visibility: hidden; }
     /* The toolbar under the game screen: on a narrow screen its controls wrap; "behind" keeps its
        place while hidden, so a wider label never moves them. */
     #playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
@@ -225,7 +213,6 @@
       <span id="speed-badge" hidden aria-hidden="true" data-i18n-title="badgeTitle"
             title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
       <button id="fullscreen-exit" type="button" hidden data-i18n="exitFullscreen">Exit fullscreen</button>
-      <div id="context-menu" role="menu" hidden data-i18n-label="menuLabel" aria-label="Actions"></div>
     </div>
     <div id="playback" role="toolbar" aria-label="Game" data-i18n-label="toolbar">
       <button id="fullscreen" type="button" aria-pressed="false" data-i18n="fullscreen">Fullscreen</button>

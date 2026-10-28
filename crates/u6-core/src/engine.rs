@@ -94,7 +94,7 @@ pub fn command_prompt(s: &State) -> bool {
 
 /// Port (spec 19 O1c): `e` is taken back at the command prompt: a platform's repeat of a
 /// direction key, with `prompt` ([`command_prompt`]).
-fn taken_back(prompt: bool, e: &InputEvent) -> bool {
+pub(crate) fn taken_back(prompt: bool, e: &InputEvent) -> bool {
     prompt && matches!(e, InputEvent::Repeat(k) if k.is_direction())
 }
 
@@ -305,6 +305,13 @@ impl Io {
     /// Events queued and not yet consumed.
     pub fn pending_events(&self) -> usize {
         self.events.borrow().len()
+    }
+
+    /// Puts `e` at the end of the game's queue as a tick left it there (tests: a queue a tick
+    /// does not make on its own).
+    #[cfg(test)]
+    pub(crate) fn queue_event(&self, e: InputEvent) {
+        self.events.borrow_mut().push_back(e);
     }
 
     /// The screen as it was last published (the picture on display, before this poll's draws).
@@ -828,12 +835,37 @@ pub struct Engine {
     /// Port (spec 21): the keys the travel pressed, with the tick (from 1) each went in at.
     #[cfg(test)]
     travel_log: Vec<(u64, Key)>,
+    /// Port (spec 21 S3): a travel's step is due ([`Engine::set_travel_due`]).
+    travel_due: bool,
     /// The screen's version ([`Io::present`]) the published frame was synced from last.
     published_front: u64,
     /// Bumped each time the published frame is synced again from the screen: its colours and
     /// sources, or its sources alone ([`Engine::published_version`]).
     published_version: u64,
-    /// The published frame with the pointer sprite over it (the frame the platform shows).
+    /// Port-only (spec 17 Presentation, spec 23 Decision 12): the published frame with the message
+    /// history's view and the context menu over it ([`Engine::screen_frame`]): synced from the
+    /// published frame, the one frame `shown` syncs from.
+    layer: Framebuffer,
+    /// Bumped each time `layer` is synced again for a change ([`Engine::screen_version`]).
+    layer_version: u64,
+    /// Port-only (spec 17): the context menu, its run and its share of the input.
+    popup: crate::ui::popup::Popup,
+    /// The [`crate::ui::popup::Popup::version`] drawn into `layer` last.
+    drawn_popup: u64,
+    /// Port-only (spec 17): the record of the cells "Go here" asked travel to.
+    go_here: crate::ui::popup::Travel,
+    /// Port-only (spec 17): the button-down edges of the pointer events the menu let through to
+    /// the game ([`Engine::game_presses`]), and the buttons of the last of them.
+    game_presses: u64,
+    passed_buttons: u8,
+    /// Port-only (spec 17): the key events (presses, repeats, releases) the menu let through to
+    /// the game ([`Engine::game_keys`]).
+    game_keys: u64,
+    /// Port-only (spec 17): the platform's wall clock (ms) as last given
+    /// ([`Engine::set_wall_clock`]), which the context menu times a double click on; `None`
+    /// until then (the engine's clock instead).
+    wall_ms: Option<u64>,
+    /// The screen frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
     /// Bumped each time `shown` is composed again ([`Engine::frame_version`]).
     shown_version: u64,
@@ -848,14 +880,11 @@ pub struct Engine {
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
     /// Port-only (spec 23): the message history the player looks at, drawn over the published
-    /// frame into `shown` while scrolled back ([`crate::ui::scrollback::View`]).
+    /// frame into the screen frame `layer` while scrolled back, under the context menu
+    /// ([`crate::ui::scrollback::View`]).
     view: crate::ui::scrollback::View,
-    /// The view's stamp `shown` was composed with.
+    /// The view's stamp `layer` was composed with.
     view_shown: u64,
-    /// Port-only (spec 23): the published frame with the view over it, for the HD frame, made on
-    /// demand while scrolled back ([`Engine::with_view_frame`]), with the published version and
-    /// the view's stamp it was made at.
-    viewed: RefCell<Option<(Framebuffer, u64, u64)>>,
 }
 
 impl Engine {
@@ -921,8 +950,18 @@ impl Engine {
             travel_own: None,
             #[cfg(test)]
             travel_log: Vec::new(),
+            travel_due: true,
             published_front: 0,
             published_version: 0,
+            layer: Framebuffer::new(),
+            layer_version: 0,
+            popup: crate::ui::popup::Popup::default(),
+            drawn_popup: 0,
+            go_here: crate::ui::popup::Travel::default(),
+            game_presses: 0,
+            passed_buttons: 0,
+            game_keys: 0,
+            wall_ms: None,
             shown: Framebuffer::new(),
             shown_version: 0,
             src_version: 0,
@@ -934,7 +973,6 @@ impl Engine {
             stubs,
             view: crate::ui::scrollback::View::default(),
             view_shown: 0,
-            viewed: RefCell::new(None),
         }
     }
 
@@ -944,15 +982,53 @@ impl Engine {
     /// advance the clock by `elapsed_ms`, poll the game once (also
     /// while it waits; never after it finished), bump the display generation, publish the front
     /// buffer if the game presented, then the vertical-blank work of the display (the pointer
-    /// sprite, at the handler's position, over the published frame,
-    /// [`crate::ui::pointer::vblank`]).
+    /// shape, [`crate::ui::pointer::update_shape`], then its sprite at the pointer shown,
+    /// [`Engine::pointer_at`], over the screen frame).
     ///
-    /// Port (spec 21): first the travel's step, a direction key it adds after `input` at the
-    /// command prompt ([`Engine::travel_press`]); queued as the player's keys are, but not the
-    /// player's input to the message history's view (spec 23 Decision 6: it leaves the view where
-    /// it is).
+    /// Port-only (spec 17): with the context menu on, `input` goes through it first
+    /// ([`crate::ui::popup::Popup::input_with`], on the platform's wall clock,
+    /// [`Engine::set_wall_clock`]): what it takes never reaches the queue, and a choice's presses
+    /// take their place; the menu is drawn over the published frame ([`Engine::screen_frame`]).
+    ///
+    /// Port (spec 21): then the travel's step, a direction key it adds after the events the menu
+    /// passed on at the command prompt ([`Engine::travel_press`], which reads those events and
+    /// ends the travel when the menu took new input); queued as the player's keys are, but neither
+    /// the menu's input nor the player's input to the message history's view (spec 23 Decision 6:
+    /// it leaves the view where it is). "Go here" chosen in this input starts its travel after
+    /// that ([`Engine::travel_to`]), so its first step is the next tick's.
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
-        let step = self.travel_press(input);
+        self.tick_dismissing(input, &[], elapsed_ms);
+    }
+
+    /// [`Engine::tick`] with the platform's presses that reached no frame pixel (off the canvas,
+    /// in the HD layout's gaps or the letterbox) in order among `input`'s events: each closes an
+    /// open context menu where it stands (before `input[i]` for index `i`, after them all for
+    /// `input.len()`; ascending), as [`Engine::dismiss_context_menu`] does at once.
+    pub fn tick_dismissing(&mut self, input: &[InputEvent], dismissals: &[usize], elapsed_ms: u32) {
+        let menu = self.popup.on();
+        let through;
+        let (input, took) = if menu {
+            let (_, quiet) = self.menu_gate();
+            let now = self.wall_ms.unwrap_or_else(|| self.io.now_ms());
+            through = self.popup.input_with(
+                &self.state.borrow(),
+                &self.io,
+                input,
+                quiet,
+                now,
+                dismissals,
+            );
+            (through.as_slice(), self.popup.took_new_input())
+        } else {
+            (input, false)
+        };
+        let step = self.travel_press(input, took);
+        // Spec 21's merge contract: "Go here" chosen in this input starts travel to its cell
+        // after this tick's press of the travel under way; a cell refused now starts none.
+        if let Some(cell) = self.popup.take_go_here() {
+            self.go_here.asked.push(cell);
+            let _ = self.travel_to((cell.0 as u16, cell.1 as u16));
+        }
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -984,6 +1060,26 @@ impl Engine {
                 } else {
                     e
                 };
+                // Spec 17: what of the player's input the menu let through reaches the game, as
+                // the view passes it on (a press the history takes comes with no button).
+                if menu && player {
+                    match e {
+                        InputEvent::Pointer { buttons, .. } => {
+                            let b = buttons & 3;
+                            self.game_presses += u64::from(b & !self.passed_buttons != 0);
+                            self.passed_buttons = b;
+                        }
+                        // The prompt takes it back: it never reaches the game.
+                        InputEvent::Repeat(_) if taken_back(prompt, &e) => {}
+                        InputEvent::Key(_)
+                        | InputEvent::Repeat(_)
+                        | InputEvent::Paced(_)
+                        | InputEvent::Release(_) => {
+                            self.game_keys += 1;
+                        }
+                        InputEvent::Text(_) => {}
+                    }
+                }
                 let (held, room) = match e {
                     _ if taken_back(prompt, &e) => continue,
                     InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Paced(_) => {
@@ -1026,6 +1122,7 @@ impl Engine {
                 self.finished = true;
             }
         }
+        self.popup.after_poll(&self.state.borrow());
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
         let version = self.io.front_version.get();
@@ -1054,12 +1151,69 @@ impl Engine {
                 self.src_publishes += u64::from(src_only);
             }
         }
-        let at = self.io.handler_pointer();
-        let sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
+        crate::ui::pointer::update_shape(&mut self.state.borrow_mut());
+        let first = self.ticks == 1;
+        let sprite = self.sprite_now();
+        self.compose(presented, src_only, first, sprite);
+    }
+
+    /// The pointer sprite as it is now, its shape as last updated
+    /// ([`crate::ui::pointer::update_shape`], the vertical blank's): at the input handler's
+    /// position ([`crate::ui::pointer::sprite`]); spec 17, while the context menu takes the
+    /// pointer, at the menu's instead (the game's sample stays where the game took it), in the
+    /// arrow over the open menu, else (a press it took, held) in the game's own shape.
+    fn sprite_now(&self) -> Option<crate::ui::pointer::SpriteFrame> {
+        let s = self.state.borrow();
+        let ptr = &s.ui.pointer;
+        match self.popup.pointer() {
+            Some(p) => {
+                let shape = if self.popup.open().is_some() {
+                    0
+                } else {
+                    ptr.shape
+                };
+                crate::ui::pointer::sprite_as(ptr, shape, p)
+            }
+            None => crate::ui::pointer::sprite(ptr, self.io.handler_pointer()),
+        }
+    }
+
+    /// Composes the frames the platform reads, the one place both are (a tick's, and a change of
+    /// the drawn menu or of the message history's view outside one, [`Engine::redraw`],
+    /// [`Engine::wheel`]): the screen frame, the published one with the message history the
+    /// player looks at over it (spec 23, only while scrolled back) and the context menu over that
+    /// (spec 17 Presentation), synced again (the view and the menu drawn again over it) when the
+    /// game `presented` (or its sources alone, `src_only`), the drawn menu or the view changed, or
+    /// at the `first` tick; then the shown frame, the screen frame with `sprite` over it, when the
+    /// screen frame changed, the sprite moved or at the first tick. One composition: published,
+    /// view, menu, sprite (spec 23 Decision 12).
+    fn compose(
+        &mut self,
+        presented: bool,
+        src_only: bool,
+        first: bool,
+        sprite: Option<crate::ui::pointer::SpriteFrame>,
+    ) {
+        let drawn = self.popup.version();
+        let menu_moved = drawn != self.drawn_popup;
         let view_moved = self.view.stamp() != self.view_shown;
-        if presented || sprite != self.sprite || self.ticks == 1 || view_moved {
+        let layered = presented || menu_moved || view_moved;
+        if layered || src_only || first {
+            self.layer.sync_from(&mut self.io.published.borrow_mut());
+            self.draw_view();
+            if let Some(open) = self.popup.open() {
+                open.draw(&mut self.layer, &self.state.borrow());
+            }
+            self.drawn_popup = drawn;
+            self.layer_version += u64::from(layered || src_only);
+        }
+        if layered || sprite != self.sprite || first {
+            self.shown.sync_from(&mut self.layer);
+            if let Some(sp) = &sprite {
+                sp.draw(&mut self.shown);
+            }
             self.sprite = sprite;
-            self.compose_shown();
+            self.shown_version += 1;
         } else if src_only {
             // As the composition above, but for the frame version: the published frame's
             // colours are those `shown` was composed from and the sprite has not moved, so the
@@ -1068,8 +1222,7 @@ impl Engine {
             let before = self.shown.src().map(<[crate::Src]>::to_vec);
             #[cfg(debug_assertions)]
             let colours = self.shown.pixels().to_vec();
-            self.shown.sync_from(&mut self.io.published.borrow_mut());
-            self.draw_view();
+            self.shown.sync_from(&mut self.layer);
             if let Some(sp) = &self.sprite {
                 sp.draw(&mut self.shown);
             }
@@ -1088,25 +1241,14 @@ impl Engine {
         }
     }
 
-    /// The shown frame composed again: the published frame, the message history the player looks
-    /// at over it (spec 23, only while scrolled back), the pointer sprite last taken.
-    fn compose_shown(&mut self) {
-        self.shown.sync_from(&mut self.io.published.borrow_mut());
-        self.draw_view();
-        if let Some(sp) = &self.sprite {
-            sp.draw(&mut self.shown);
-        }
-        self.shown_version += 1;
-    }
-
-    /// Spec 23: the view over `shown` (synced from the published frame just now), nothing at the
-    /// live bottom.
+    /// Spec 23: the view over the screen frame (synced from the published frame just now, the
+    /// menu not drawn yet), nothing at the live bottom.
     fn draw_view(&mut self) {
         self.view_shown = self.view.stamp();
         if self.view.offset() > 0 {
             let state = self.state.borrow();
             let live = self.io.published.borrow();
-            crate::ui::scrollback::draw_view(&state.ui, &self.view, &live, &mut self.shown);
+            crate::ui::scrollback::draw_view(&state.ui, &self.view, &live, &mut self.layer);
         }
     }
 
@@ -1121,8 +1263,8 @@ impl Engine {
             let game = s.main.program == main_loop::Program::Game;
             self.view.wheel(&s.ui, game, (x, y), dy)
         };
-        if taken && self.view.stamp() != self.view_shown {
-            self.compose_shown();
+        if taken {
+            self.redraw();
         }
         taken
     }
@@ -1147,37 +1289,11 @@ impl Engine {
         sb.heap_bytes() + self.view.heap_bytes(sb)
     }
 
-    /// Port-only (spec 23): moves whenever the frame the HD view composes
-    /// ([`Engine::with_view_frame`]) may have changed: the published frame, or the message history
-    /// shown over it.
+    /// Port-only (spec 23): moves whenever the published frame was synced again or the message
+    /// history shown over it changed ([`Engine::published_version`] and the view's stamp). The
+    /// screen frame ([`Engine::screen_version`]) moves with both.
     pub fn view_version(&self) -> (u64, u64) {
         (self.published_version, self.view.stamp())
-    }
-
-    /// Port-only (spec 23): `f` of the published frame as the player sees it without the pointer
-    /// sprite: [`Engine::published_frame`] at the live bottom, else a copy of it with the message
-    /// history the view shows over it, made again only when either changed. The HD frame is
-    /// composed from it.
-    pub fn with_view_frame<R>(&self, f: impl FnOnce(&Framebuffer) -> R) -> R {
-        if self.view.offset() == 0 {
-            self.viewed.replace(None);
-            return f(&self.io.published.borrow());
-        }
-        let (version, stamp) = self.view_version();
-        let mut viewed = self.viewed.borrow_mut();
-        let fresh = viewed
-            .as_ref()
-            .is_some_and(|(_, v, s)| (*v, *s) == (version, stamp));
-        if !fresh {
-            let live = self.io.published.borrow();
-            let mut fb = viewed.take().map_or_else(Framebuffer::new, |(fb, _, _)| fb);
-            fb.clone_from(&live);
-            let state = self.state.borrow();
-            crate::ui::scrollback::draw_view(&state.ui, &self.view, &live, &mut fb);
-            *viewed = Some((fb, version, stamp));
-        }
-        let (fb, _, _) = viewed.as_ref().expect("made above");
-        f(fb)
     }
 
     /// Port (spec 21): starts the party's travel to map cell `target` on its level (masked to the
@@ -1208,10 +1324,13 @@ impl Engine {
         self.travel.as_ref()
     }
 
-    /// Port (spec 21): the travel's press for this tick, before `input` is queued: the next step's
-    /// key at the command prompt with no key waiting ([`crate::actors::travel::Travel::next`]);
-    /// none otherwise, and the travel ends at a stop.
-    fn travel_press(&mut self, input: &[InputEvent]) -> Option<InputEvent> {
+    /// Port (spec 21): the travel's press for this tick, before `input` is queued (the events the
+    /// context menu passed on, spec 21's merge contract): the next step's key at the command
+    /// prompt with no key waiting and a step due ([`Engine::set_travel_due`],
+    /// [`crate::actors::travel::Travel::next`]); none otherwise, and the travel ends at a stop,
+    /// `menu` one: the menu took new input in this tick
+    /// ([`crate::ui::popup::Popup::took_new_input`]).
+    fn travel_press(&mut self, input: &[InputEvent], menu: bool) -> Option<InputEvent> {
         use crate::actors::travel::{End, Next, Polled};
         let (waiting, own) = {
             let events = self.io.events.borrow();
@@ -1235,6 +1354,8 @@ impl Engine {
                 buttons: self.io.handler_pointer().buttons,
                 queued: waiting > 0,
                 foreign: waiting > usize::from(own),
+                menu,
+                due: self.travel_due,
             };
             travel.next(&self.state.borrow(), &polled)
         };
@@ -1254,16 +1375,28 @@ impl Engine {
         }
     }
 
+    /// Port (spec 21 S3): whether a step of the travel is due at the next ticks, on the
+    /// platform's clock: a platform that steps the game faster than 1× gives it, false until
+    /// [`MIN_STEP_MS`] of its clock passed since the command prompt last took a press
+    /// ([`Engine::prompt_takes`]: the travel's own key is one, as a held key's paced press), so a
+    /// travel walks as a held arrow does. True by default (every prompt; the native window's 1×
+    /// and the headless runs); the stops stay at once either way.
+    pub fn set_travel_due(&mut self, due: bool) {
+        self.travel_due = due;
+    }
+
     /// Port (spec 21): the keys the travel pressed so far, with the tick (from 1) of each.
     #[cfg(test)]
     pub(crate) fn travel_log(&self) -> &[(u64, Key)] {
         &self.travel_log
     }
 
-    /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at
-    /// the handler's position), if any: its top left in frame pixels and its rows of values
-    /// 0..=3 (0 clear). Port-only use (spec 11 Design 7): a platform that shows the HD frame,
-    /// composed without it ([`Engine::published_frame`]), draws it over that frame itself.
+    /// The pointer sprite drawn over the shown frame last (the tick's vertical-blank work:
+    /// [`crate::ui::pointer::update_shape`], then the sprite at the handler's position; spec 17:
+    /// the arrow at the context menu's pointer while the menu takes the pointer), if any: its top
+    /// left in frame pixels and its rows of values 0..=3 (0 clear). Port-only use (spec 11
+    /// Design 7): a platform that shows the HD frame, composed without it
+    /// ([`Engine::published_frame`]), draws it over that frame itself.
     pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
     }
@@ -1289,7 +1422,8 @@ impl Engine {
         self.src_shows
     }
 
-    /// The last published frame (320×200 indices plus the palette) with the pointer sprite.
+    /// The last published frame (320×200 indices plus the palette), the context menu over it
+    /// while one is open ([`Engine::screen_frame`]), with the pointer sprite.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
     }
@@ -1310,11 +1444,154 @@ impl Engine {
         self.published_version
     }
 
+    /// Port-only (spec 17 Presentation): the published frame with the context menu drawn over
+    /// it, without the pointer sprite: what [`Engine::frame`] is composed from, and the HD frame.
+    /// The published frame itself while no menu is open.
+    pub fn screen_frame(&self) -> &Framebuffer {
+        &self.layer
+    }
+
+    /// Port-only (spec 17): changes whenever [`Engine::screen_frame`] was synced again for a
+    /// change: a publish ([`Engine::published_version`]) or a change of the drawn menu; 0 before.
+    pub fn screen_version(&self) -> u64 {
+        self.layer_version
+    }
+
+    /// Port-only (spec 17): the context menu on or off (off by default: a right press is the
+    /// original's; off closes an open menu and drops a run). A platform that runs the game faster
+    /// than 1× gives [`Engine::set_wall_clock`] too: without it a double click is timed on the
+    /// engine's clock, which runs as fast as the game is stepped.
+    pub fn set_context_menu(&mut self, on: bool) {
+        self.popup.set_on(on);
+        self.redraw();
+    }
+
+    /// Port-only (spec 17 Presentation): the frame rects (x0, y0, x1, y1 inclusive) the platform
+    /// shows something else over: a context menu opened from then keeps off them where it can,
+    /// and one open now is laid out again for them and drawn again at once
+    /// ([`crate::ui::popup::Popup::set_hidden`]).
+    pub fn set_context_menu_hidden(&mut self, rects: Vec<crate::ui::popup::Rect>) {
+        self.popup.set_hidden(rects, &self.state.borrow());
+        self.redraw();
+    }
+
+    /// Port-only (spec 17 Presentation): the hidden frame rects the context menu keeps off now
+    /// (the last [`Engine::set_context_menu_hidden`]'s; none before).
+    pub fn context_menu_hidden(&self) -> &[crate::ui::popup::Rect] {
+        self.popup.hidden()
+    }
+
+    /// Port-only (spec 17 Presentation): closes an open context menu as a press outside it
+    /// would, for a press of the platform's that reaches no frame pixel (off the canvas, in the
+    /// HD layout's gaps or the letterbox); true when one was open.
+    pub fn dismiss_context_menu(&mut self) -> bool {
+        let open = self.popup.dismiss();
+        self.redraw();
+        open
+    }
+
+    /// The screen frame and the shown frame again after a change of the menu (laid out again,
+    /// dismissed, turned off) or of the message history's view (the wheel) outside a tick, as a
+    /// tick composes them ([`Engine::compose`]): the sprite as it is now ([`Engine::sprite_now`],
+    /// so a dismissed menu's arrow gives way to the game's pointer in the same frame). Nothing
+    /// before the first tick, which composes both.
+    fn redraw(&mut self) {
+        if self.ticks == 0 {
+            return;
+        }
+        let sprite = self.sprite_now();
+        self.compose(false, false, false, sprite);
+    }
+
+    /// Port-only (spec 17): the platform's wall clock now (ms on any timeline that only moves
+    /// forward), which the context menu times a double click on: a click is the player's, so
+    /// its window is the player's time at any speed, where the engine's clock runs as fast as
+    /// the game is stepped. Until given, the engine's clock (the player's at 1×).
+    pub fn set_wall_clock(&mut self, ms: u64) {
+        self.wall_ms = Some(ms);
+    }
+
+    /// Port-only (spec 17): the presses the context menu let through to the game (button-down
+    /// edges of the pointer events it gave the queue, as the message history's view passed them
+    /// on: a press the history takes reaches the game with no button, spec 23), counted while it is
+    /// on; the travel's steps are not the player's and are left out.
+    pub fn game_presses(&self) -> u64 {
+        self.game_presses
+    }
+
+    /// Port-only (spec 17): the key events (presses, repeats, paced presses and releases) the
+    /// context menu let through to the game, counted while it is on; the keys it takes itself,
+    /// the repeats the command prompt takes back and the travel's steps are left out.
+    pub fn game_keys(&self) -> u64 {
+        self.game_keys
+    }
+
+    /// Port-only (spec 17): a chosen command's target press waits for its target read.
+    pub fn context_menu_waits(&self) -> bool {
+        self.popup.run().is_some()
+    }
+
+    /// Port-only (spec 11 Design 7, K3): where the pointer is shown: the menu's while it takes
+    /// the pointer's events, else the input handler's.
+    pub fn pointer_at(&self) -> Pointer {
+        self.popup
+            .pointer()
+            .unwrap_or_else(|| self.io.handler_pointer())
+    }
+
+    /// Port-only (spec 17 Input): the gate's two halves as a tick starts, the one helper of the
+    /// tick ([`Engine::tick_dismissing`]) and the query ([`Engine::context_menu_gate`]): the
+    /// command prompt up and the game not finished ([`command_prompt`]), and whether nothing is
+    /// queued for the game but the repeats the prompt takes back (the menu's `quiet`).
+    fn menu_gate(&self) -> (bool, bool) {
+        let prompt = !self.finished && command_prompt(&self.state.borrow());
+        let quiet = self
+            .io
+            .events
+            .borrow()
+            .iter()
+            .all(|e| taken_back(prompt, e));
+        (prompt, quiet)
+    }
+
+    /// Port-only (spec 17 Input and its checks): the gate a tick puts before a right press that
+    /// would open the context menu, for a press after `pending` (the platform's events not yet
+    /// given to a tick): the command prompt up and nothing queued for the game but the repeats it
+    /// takes back ([`Engine::menu_gate`], the tick's), and every event of `pending` inert (a
+    /// button-less move, a release, a repeat the prompt takes back). The menu's own state (open, a
+    /// chosen command waiting) is left out: a query for tests. Stricter than a tick for the events
+    /// the menu takes itself, which the tick leaves out of the gate and this counts as pending:
+    /// the repeats of a key it took to that key's release (a held Escape's after it closed the
+    /// menu, a held Enter's after a choice) and the held moves and release of a press it
+    /// swallowed (the press that opened it, a double click's second press).
+    pub fn context_menu_gate(&self, pending: &[InputEvent]) -> bool {
+        let (prompt, quiet) = self.menu_gate();
+        prompt && quiet && pending.iter().all(|e| crate::ui::popup::inert(prompt, e))
+    }
+
+    /// Port-only (spec 17): the open context menu as drawn (no text), if one is open.
+    pub fn context_menu(&self) -> Option<crate::ui::popup::View> {
+        self.popup.open().map(crate::ui::popup::Open::view)
+    }
+
+    /// The context menu itself (tests).
+    #[cfg(test)]
+    pub(crate) fn popup_mut(&mut self) -> &mut crate::ui::popup::Popup {
+        &mut self.popup
+    }
+
+    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, each given to
+    /// [`Engine::travel_to`] (spec 21) as it was chosen, refused or not.
+    pub fn go_here_asked(&self) -> &crate::ui::popup::Travel {
+        &self.go_here
+    }
+
     /// Port-only (spec 07 HD0): every buffer gets a source plane ([`Io::enable_src_plane`], and
     /// the frame with the pointer sprite, whose pixels are classic). Off unless called; the
     /// frames' colours are the same either way.
     pub fn enable_src_plane(&mut self) {
         self.io.enable_src_plane();
+        self.layer.enable_src();
         self.shown.enable_src();
     }
 
@@ -1410,6 +1687,10 @@ impl Engine {
     pub fn held_press(&self, input: &[InputEvent], held: Option<Key>) -> Option<InputEvent> {
         let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. }) && !taken_back(true, e);
         let held = held.filter(|k| k.is_direction())?;
+        // Spec 17: a key the context menu holds (open, or the key its own) is the menu's.
+        if self.popup.on() && self.popup.holds(held) {
+            return None;
+        }
         let prompt = !self.finished && command_prompt(&self.state.borrow());
         let waiting = input.iter().any(key) || self.io.events.borrow().iter().any(key);
         (prompt && !waiting).then_some(InputEvent::Paced(held))

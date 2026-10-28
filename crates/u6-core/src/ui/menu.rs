@@ -31,6 +31,9 @@ pub const COMBAT: u16 = 0x8a;
 pub const OPEN: u16 = 0xa0;
 pub const READY: u16 = 0xa7;
 pub const UNREADY: u16 = 0xa8;
+/// Port-only (spec 17, unit M3): "Go here", travel to the pressed map cell (unit M4, spec 21). No
+/// code of the game is this high.
+pub const GO_HERE: u16 = 0x100;
 
 /// The row of the command bar's icons (click region 1, (8, 0xb0)..(0xa7, 0xbf)).
 const ICON_Y: i16 = 0xb8;
@@ -95,11 +98,17 @@ pub enum Reason {
     Stays,
     /// The chest is locked.
     Locked,
+    /// Port-only (spec 17, unit M3): no way to the cell (unit M4's reachability, spec 21).
+    Unreachable,
+    /// Port-only (unit M3, spec 21's refusals): combat mode is on.
+    Combat,
+    /// Port-only (unit M3, spec 21's refusals): a hostile is in view.
+    Foe,
 }
 
 impl Reason {
     /// Every reason, for the page's words.
-    pub const ALL: [Reason; 22] = [
+    pub const ALL: [Reason; 25] = [
         Reason::Far,
         Reason::Heavy,
         Reason::Aboard,
@@ -122,6 +131,9 @@ impl Reason {
         Reason::Blocked,
         Reason::Stays,
         Reason::Locked,
+        Reason::Unreachable,
+        Reason::Combat,
+        Reason::Foe,
     ];
 
     /// The code the page words.
@@ -149,6 +161,9 @@ impl Reason {
             Reason::Blocked => "blocked",
             Reason::Stays => "stays",
             Reason::Locked => "locked",
+            Reason::Unreachable => "unreachable",
+            Reason::Combat => "combat",
+            Reason::Foe => "foe",
         }
     }
 }
@@ -203,6 +218,9 @@ pub struct Menu {
     /// The underlined command (A4-0x7b09), shown first.
     pub underlined: Option<u16>,
     pub sections: Vec<Section>,
+    /// Port-only (unit M3): [`GO_HERE`] for the pressed map cell, last; none on a panel and on the
+    /// leader's own cell.
+    pub go_here: Option<Entry>,
 }
 
 impl Menu {
@@ -240,7 +258,34 @@ pub fn query(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
         _ => return None,
     };
     menu.underlined = underlined;
+    menu.go_here = menu
+        .cell
+        .filter(|_| menu.kind == Kind::Map)
+        .and_then(|cell| go_here(s, cell));
     Some(menu)
+}
+
+/// Port-only (unit M3): the "Go here" entry for map cell `cell` (world x, y on the leader's
+/// level): none on the leader's own cell or when spec 21's travel refuses it as `Here`,
+/// `NoLeader` or `NoGame`, else disabled by its other refusals
+/// ([`crate::actors::travel::reachable`], the cell taken `as u16` as `Engine::travel_to` takes
+/// it, masked to the level there; [`super::popup::go_here_reason`]).
+fn go_here(s: &State, cell: (i16, i16)) -> Option<Entry> {
+    let here = s
+        .leader_position()
+        .is_some_and(|p| (p.x as i16, p.y as i16) == cell);
+    if here {
+        return None;
+    }
+    let reason = match crate::actors::travel::reachable(s, (cell.0 as u16, cell.1 as u16)) {
+        None => None,
+        Some(r) => Some(super::popup::go_here_reason(r)?),
+    };
+    Some(Entry {
+        code: GO_HERE,
+        reason,
+        theft: false,
+    })
 }
 
 /// Aboard a vessel (A4-0x7b7a = the party size): Cast, Get, Drop and Move are refused before
@@ -412,6 +457,7 @@ fn map_menu(c: &mut State, io: &Io) -> Option<Menu> {
             cell,
             underlined: None,
             sections: vec![section],
+            go_here: None,
         });
     }
     // Spec 13 Decision 4: a non-Look command takes a map target only in the original's window.
@@ -450,6 +496,7 @@ fn map_menu(c: &mut State, io: &Io) -> Option<Menu> {
         cell,
         underlined: None,
         sections: e.sections(c, sel),
+        go_here: None,
     })
 }
 
@@ -655,6 +702,7 @@ fn panel_menu(c: &mut State, io: &Io) -> Option<Menu> {
         cell: None,
         underlined: None,
         sections: e.sections(c, sel),
+        go_here: None,
     })
 }
 
@@ -812,6 +860,7 @@ mod tests {
             kind: Kind::Map,
             cell: Some((1, 2)),
             underlined: None,
+            go_here: None,
             sections: vec![Section {
                 object: 300,
                 kind: Some((0x80, 0)),

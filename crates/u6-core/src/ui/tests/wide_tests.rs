@@ -1094,6 +1094,7 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
             code,
             ink,
             paper,
+            halftone: false,
         };
         assert_eq!(
             c.glyphs(),
@@ -1185,6 +1186,7 @@ fn the_scroll_names_its_glyphs_and_the_hd_font_lists_its_letters() {
             code,
             ink: fb.palette[usize::from(ink)],
             paper: fb.palette[usize::from(paper)],
+            halftone: false,
         })
         .collect();
     let mut c = Compositor::new();

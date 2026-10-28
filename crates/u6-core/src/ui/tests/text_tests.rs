@@ -267,6 +267,7 @@ fn a_symbol_after_two_letters_over_the_paper_is_listed_third() {
             code: u16::from(code),
             ink: fb.palette[usize::from(INK)],
             paper: fb.palette[usize::from(PAPER)],
+            halftone: false,
         };
         let letters = vec![letter(22, b'a'), letter(23, b'b')];
         let Some(p) = &kept else {

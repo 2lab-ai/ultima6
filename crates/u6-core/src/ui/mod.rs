@@ -86,6 +86,7 @@ pub mod keyread;
 pub mod menu;
 pub mod panels;
 pub mod pointer;
+pub mod popup;
 pub mod print;
 pub mod printf;
 pub mod scrollback;

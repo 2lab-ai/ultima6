@@ -346,6 +346,9 @@ const SYMBOL: u32 = 0x1_0000;
 /// Spec 11 Design 3 (rev 3), [`Game::hd_glyphs`]: the code of a space the player typed is this |
 /// 0x20.
 const TYPED: u32 = 0x2_0000;
+/// Spec 17 Presentation, [`Game::hd_glyphs`]: the code of a cell drawn half-toned (a disabled
+/// entry of the context menu) is this | its code ([`u6_render::hd::HdGlyph::halftone`]).
+const HALFTONE: u32 = 0x4_0000;
 
 /// A listed cell's code as [`Game::hd_glyphs`] gives it, from the compositor's
 /// ([`u6_render::hd::HdGlyph::code`]): a symbol's and a typed space's in their own ranges
@@ -531,9 +534,6 @@ pub struct Game {
     pointer_version: u64,
     /// Voices on ([`Game::set_voices`]): the engine's speech tap keeps what NPCs say.
     voices: bool,
-    /// Spec 17: the context-menu choice whose target press waits for its command to read the
-    /// target ([`Game::command_at`]).
-    run: Option<u6_core::ui::menu::Run>,
     /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
     /// repeats were queued as, so its release takes back those ([`Game::key_up`]); spec 19 O1c:
     /// with its first event's time and whether it walks.
@@ -549,6 +549,15 @@ pub struct Game {
     modifiers: bool,
     /// Spec 18: the remembered sight on ([`Game::set_sight_memory`]).
     sight_memory: bool,
+    /// Spec 17 Presentation: the frame rects the page shows something else over
+    /// ([`Game::set_menu_hidden`]).
+    menu_hidden: Vec<(i32, i32, i32, i32)>,
+    /// Spec 17: the page's presses that reached no frame pixel while events waited for the next
+    /// step ([`Game::dismiss_menu`]), each the index in `pending` it stands before.
+    dismissals: Vec<usize>,
+    /// Spec 17: the page's clock as a whole millisecond once the page gave one
+    /// ([`Game::set_clock`]), the context menu's double-click clock ([`Engine::set_wall_clock`]).
+    wall: Option<u64>,
 }
 
 impl Default for Game {
@@ -591,12 +600,14 @@ impl Game {
             pointer_rgba: Vec::new(),
             pointer_version: 0,
             voices: false,
-            run: None,
             held: Vec::new(),
             last_step: None,
             clock: 0.0,
             modifiers: false,
             sight_memory: false,
+            menu_hidden: Vec::new(),
+            dismissals: Vec::new(),
+            wall: None,
         };
         game.redraw();
         game
@@ -847,25 +858,33 @@ impl Game {
     }
 
     /// True while the command loop waits for a command key with nothing queued (A4-0x7a2c set,
-    /// no key pending): the prompt is up.
+    /// no key pending): the prompt is up. Not the context menu's gate (spec 17 round 4, opus N1:
+    /// kept apart, the page's `data-prompt` and its tests' waits read this): that one is spec 19's
+    /// command prompt ([`u6_core::engine::command_prompt`]: keys taken as commands, no
+    /// cross-hair or panel cursor up), so with the more prompt up or a cursor up this is true
+    /// while [`Game::context_menu`] gives `""` and a right press opens no menu.
     pub fn at_prompt(&self) -> bool {
         self.engine.as_ref().is_some_and(|e| {
             e.state().main.reading == 1 && e.io().pending_events() == 0 && self.pending.is_empty()
         })
     }
 
-    /// Spec 17: the context menu of a right press at frame pixel (x, y): `""` unless the prompt
-    /// is up ([`Game::at_prompt`], pointer moves queued since the last step let through) and the
-    /// pixel is on the map or on an inventory or equipment slot (Wide's included); else JSON
-    /// `{kind: "map"|"panel", cell: [x, y] | null, underlined: code | null, sections: [{object,
-    /// kind: [type, frame] | null, name, entries: [{code, enabled, reason, theft}]}]}`.
-    /// The name is the game's display name (the user's game text, for the page's menu only:
-    /// never logged or kept). Reads the game only ([`u6_core::ui::menu::query`]).
+    /// Spec 17: the context menu a right press at frame pixel (x, y) would open now: `""` unless
+    /// the engine's gate lets a right press after the page's queued events open one
+    /// ([`Engine::context_menu_gate`]: the command prompt up, nothing queued for the game but the
+    /// repeats it takes back, the events queued since the last step inert) and the pixel is on
+    /// the map or on an inventory or equipment slot (Wide's included); else JSON `{kind:
+    /// "map"|"panel", cell: [x, y] | null, underlined: code | null, sections: [{object, kind:
+    /// [type, frame] | null, entries: [{code, enabled, reason, theft}]}], go_here: {code,
+    /// enabled, reason, theft} | null}`: codes only, no names (the engine draws
+    /// the menu itself, `u6_core::ui::popup`). Reads the game only
+    /// ([`u6_core::ui::menu::query`]); the page's tests use it.
     pub fn context_menu(&self, x: i32, y: i32) -> String {
-        if !self.prompt_up() {
-            return String::new();
-        }
-        let Some(e) = &self.engine else {
+        let Some(e) = self
+            .engine
+            .as_ref()
+            .filter(|e| e.context_menu_gate(&self.pending))
+        else {
             return String::new();
         };
         let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
@@ -873,30 +892,118 @@ impl Game {
             .map_or_else(String::new, |m| menu_json(&m))
     }
 
-    /// Spec 17: runs context-menu entry `code` on the target at frame pixel (x, y) as the
-    /// original's mouse does: a left press and release on the command's icon now, and for a
-    /// command that reads a target (0x81..0x88) a left press and release at (x, y) once it reads
-    /// it ([`Game::step`]; dropped if the prompt comes back first). Rest and Combat (0x89, 0x8a)
-    /// are the icon press alone. No underline is written. False (nothing queued) unless the
-    /// prompt is up and `code` is one of those.
-    pub fn command_at(&mut self, code: u16, x: i32, y: i32) -> bool {
-        if !self.prompt_up() || !(0x81..=0x8a).contains(&code) {
-            return false;
+    /// Spec 17 Presentation: the context menu the engine has open and drawn in the frame, `""`
+    /// while none is: JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover, colours: [paper,
+    /// ink, heading], rows: [{kind: "head"|"entry"|"note", code: code | null, enabled, reason:
+    /// code | null, theft, y}]}`, the box with its frame and the text area in frame pixels, the
+    /// highlighted row's index, the colours its text area is drawn in (0xRRGGBB, the game's
+    /// palette now: the page's tests compare pixels with them and report counts), each row's
+    /// top pixel row; codes only ([`u6_core::Engine::context_menu`]).
+    pub fn menu_view(&self) -> String {
+        let Some(e) = self.engine.as_ref() else {
+            return String::new();
+        };
+        let Some(v) = e.context_menu() else {
+            return String::new();
+        };
+        let c = e.state().ui.tables.colours;
+        let palette = &e.screen_frame().palette;
+        let rgb = |i: u8| {
+            let c = palette[usize::from(i)];
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        };
+        view_json(&v, [rgb(c.paper), rgb(c.text), rgb(c.alert)])
+    }
+
+    /// Spec 17 Presentation: the frame rects the page shows something else over (in Wide its
+    /// windows over the map and the map's parts off the canvas; the canvas's parts off the
+    /// viewport and under the page's elements over it), as `rects` x, y, width, height in turn
+    /// (frame pixels; a rect with no area or a trailing part is left out): the engine's context
+    /// menu keeps off them where it can, one opened from then and one open now (laid out again at
+    /// once, [`Engine::set_context_menu_hidden`]). Kept for every game started after
+    /// ([`Game::menu_hidden`]).
+    pub fn set_menu_hidden(&mut self, rects: Vec<i32>) {
+        self.menu_hidden = rects
+            .chunks_exact(4)
+            .filter(|r| r[2] > 0 && r[3] > 0)
+            .map(|r| (r[0], r[1], r[0] + r[2] - 1, r[1] + r[3] - 1))
+            .collect();
+        if let Some(engine) = &mut self.engine {
+            engine.set_context_menu_hidden(self.menu_hidden.clone());
         }
-        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        let Some(e) = &self.engine else {
+    }
+
+    /// Spec 17 Presentation: a press of the page's that reaches no frame pixel (off the canvas,
+    /// in the HD layout's gaps, on the letterbox) closes an open context menu, as a press outside
+    /// it in the frame does, in order with the events queued before it: while some wait for the
+    /// next step it closes the menu there, after them ([`Engine::tick_dismissing`]; a right press
+    /// queued just before opens the menu at that step, which it then closes), and returns false;
+    /// else at once, true when one was open (the frame without it composed). Nothing reaches the
+    /// game.
+    pub fn dismiss_menu(&mut self) -> bool {
+        let Some(engine) = &mut self.engine else {
             return false;
         };
-        let start = u6_core::ui::menu::Run::start(&e.state(), code, (word(x), word(y)));
-        let icon = match start {
-            Some((icon, run)) => {
-                self.run = Some(run);
-                icon
-            }
-            None => u6_core::ui::menu::icon_press(code),
-        };
-        self.pending.extend(icon);
-        true
+        if self.pending.is_empty() {
+            return engine.dismiss_context_menu();
+        }
+        self.dismissals.push(self.pending.len());
+        false
+    }
+
+    /// Spec 17 Presentation: the frame rects the engine keeps its context menu off now
+    /// ([`Engine::context_menu_hidden`], as the page last gave them, [`Game::set_menu_hidden`]),
+    /// x, y, width, height in turn: what reached the engine, for the page's tests (the page's own
+    /// `__u6Layout.hidden` is computed afresh); none without a game.
+    pub fn menu_hidden(&self) -> Vec<i32> {
+        self.engine.as_ref().map_or_else(Vec::new, |e| {
+            e.context_menu_hidden()
+                .iter()
+                .flat_map(|&(x0, y0, x1, y1)| [x0, y0, x1 - x0 + 1, y1 - y0 + 1])
+                .collect()
+        })
+    }
+
+    /// Spec 17: how many times "Go here" asked travel ([`Engine::travel_to`], spec 21), counted
+    /// from the start; 0 before one (counts only: no cell).
+    pub fn go_here_asked(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| e.go_here_asked().asked.len() as u32)
+    }
+
+    /// Spec 17 (round 2): the presses the engine let through to the game (button-down edges of
+    /// the pointer events it queued for it, the context menu's own and those the message history
+    /// takes left out, [`Engine::game_presses`]), counted from the start; 0 before one. With
+    /// [`Game::game_buttons`] the page's tests see a press and its release within one step.
+    pub fn game_presses(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.game_presses() as f64)
+    }
+
+    /// Spec 17 (round 2): the key events (presses, repeats, releases) the engine let through to
+    /// the game, the context menu's own left out, counted from the start; 0 before one.
+    pub fn game_keys(&self) -> f64 {
+        self.engine.as_ref().map_or(0.0, |e| e.game_keys() as f64)
+    }
+
+    /// Spec 17 (round 2): the lines the game's message scroll holds now (a count; a command
+    /// that prints, as Look, adds to it); 0 before a start.
+    pub fn message_lines(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.state().ui.messages.len() as f64)
+    }
+
+    /// The pointer's buttons as the game's input handler has them (bit 0 left, bit 1 right): the
+    /// last pointer event the engine queued for the game ([`u6_core::Io::handler_pointer`]),
+    /// which the context menu's own presses never reach; 0 before a start. The page's tests read
+    /// what the game took with it.
+    pub fn game_buttons(&self) -> u8 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| e.io().handler_pointer().buttons & 3)
     }
 
     /// Port (spec 21): the travel of a right press's "move here": the party walks to map cell
@@ -1003,7 +1110,6 @@ impl Game {
     /// the previous one: the engine's log taken, the sound machine given the game's calls, the
     /// queue emptied. The RGBA frame is left as it was ([`Game::present`]).
     pub fn step(&mut self, ms: u32) {
-        self.step_run();
         let due = self.held_due();
         if let Some(engine) = &mut self.engine {
             // Spec 19 O1c: a held direction key is pressed again at the command prompt, at most
@@ -1014,7 +1120,16 @@ impl Game {
                 self.pending.push(press);
             }
             let takes = engine.prompt_takes();
-            engine.tick(&self.pending, ms);
+            if let Some(wall) = self.wall {
+                engine.set_wall_clock(wall);
+            }
+            // Spec 21 S3: a travel steps as a held arrow does, at most once a `MIN_STEP_MS` on the
+            // page's clock from the press the prompt last took (its own key is one); until the
+            // page gives a clock ([`Game::set_clock`]), at every prompt, as a headless run.
+            let min = f64::from(u6_core::engine::MIN_STEP_MS);
+            let paced = self.wall.is_some();
+            engine.set_travel_due(!paced || self.last_step.is_none_or(|t| self.clock - t >= min));
+            engine.tick_dismissing(&self.pending, &self.dismissals, ms);
             if engine.prompt_takes() != takes {
                 self.last_step = Some(self.clock);
             }
@@ -1025,6 +1140,7 @@ impl Game {
             self.handed = last_buttons(&self.pending).unwrap_or(self.handed);
         }
         self.pending.clear();
+        self.dismissals.clear();
     }
 
     /// Converts the engine's frame into the RGBA frame ([`Game::frame_ptr`]) when it changed
@@ -1106,7 +1222,10 @@ impl Game {
     /// the player typed (a run goes on across it whatever the spaces beside it); [`SYMBOL`] | its
     /// glyph (a code of the game's font), a symbol the game drew over the paper (the key wait's
     /// cursor, the more prompt's mark), its cell the paper in the HD frame and its pixels in
-    /// [`Game::hd_symbol_rows`]. Empty while HD or the HD font is off. The list changes only
+    /// [`Game::hd_symbol_rows`]; spec 17, [`HALFTONE`] | a letter's or a space's code, the cell
+    /// drawn half-toned (a disabled entry of the context menu: the page draws its HD glyph as a
+    /// checker at the HD pixel grid, half its pixels the paper). Empty while HD or the HD font is
+    /// off. The list changes only
     /// with every block of the cells it adds, drops or changes written, so with
     /// [`Game::frame_version`] moved and those cells in the rect of [`Game::hd_take_dirty`].
     pub fn hd_glyphs(&self) -> Vec<u32> {
@@ -1118,7 +1237,7 @@ impl Game {
                 [
                     u32::from(g.x),
                     u32::from(g.y),
-                    listed_code(g.code),
+                    listed_code(g.code) | if g.halftone { HALFTONE } else { 0 },
                     rgb(g.ink),
                     rgb(g.paper),
                 ]
@@ -1166,21 +1285,22 @@ impl Game {
 
     /// The game's pointer, for the page to tell whether it lies under the system's (index.html
     /// hides the system's there): `[x, y, shown, queued, qx, qy]`. (x, y), the frame pixel the
-    /// engine placed its sprite at in the last step: the input handler's pointer
-    /// ([`u6_core::Io::handler_pointer`], the VBlank server's, which no other call moves);
-    /// `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the pointer not hidden:
-    /// 0x1622d6 parks a hidden one below the frame), else 0, in any program and with HD on or
-    /// off. `queued` 1 while a pointer event waits for the next step (the page's
-    /// [`Game::pointer`], a context-menu entry's [`Game::command_at`]), (qx, qy) the last one's
-    /// pixel as queued; else 0, 0, 0. The queue is as of now: a context-menu entry's target
-    /// press joins it only at the step that runs it ([`Game::step`]), after what was queued
-    /// before, so (qx, qy) is where the sprite goes at the next step but for that press, which
-    /// the next read after that step shows. All 0 before a start.
+    /// engine placed its sprite at in the last step or since ([`Engine::pointer_at`]): the
+    /// context menu's while it takes the pointer's events (spec 17: its arrow over the open menu),
+    /// else the input handler's ([`u6_core::Io::handler_pointer`], the VBlank server's, which no
+    /// other call moves); `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the
+    /// pointer not hidden: 0x1622d6 parks a hidden one below the frame), else 0, in any program
+    /// and with HD on or off. `queued` 1 while a pointer event of the page's waits for the next
+    /// step ([`Game::pointer`]), (qx, qy) the last one's pixel as queued; else 0, 0, 0. The queue
+    /// is as of now: the presses of a context-menu entry chosen at the next step are the engine's
+    /// own, given the game at that step after what was queued before, so (qx, qy) is where the
+    /// sprite goes at the next step but for them, which the next read after that step shows. All
+    /// 0 before a start.
     pub fn game_pointer(&self) -> Vec<i32> {
         let Some(e) = &self.engine else {
             return vec![0; 6];
         };
-        let at = e.io().handler_pointer();
+        let at = e.pointer_at();
         let shown = e.sprite().is_some() && e.state().ui.pointer.shown;
         let queued = self.pending.iter().rev().find_map(|ev| match *ev {
             InputEvent::Pointer { x, y, .. } => Some((x, y)),
@@ -1455,6 +1575,8 @@ impl Game {
     pub fn set_clock(&mut self, now: f64) {
         if now.is_finite() {
             self.clock = now;
+            // Spec 17: the context menu's double click is timed on the page's clock too.
+            self.wall = Some(now.max(0.0) as u64);
         }
     }
 
@@ -1483,7 +1605,9 @@ impl Game {
     /// as DOM `buttons`. Ignored before the game starts.
     pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         if self.engine.is_some() {
-            queue_pointer(&mut self.pending, self.handed, x, y, buttons);
+            // A move after a queued dismissal stays after it.
+            let kept = self.dismissals.last().copied().unwrap_or(0);
+            queue_pointer(&mut self.pending, kept, self.handed, x, y, buttons);
         }
     }
 
@@ -1592,6 +1716,18 @@ impl Game {
         self.rgba.clone()
     }
 
+    /// Spec 17 (round 2, tests): the engine's published frame (the screen as the game drew it:
+    /// no context menu, no pointer sprite) as RGBA8, `width * height * 4` bytes, a copy; empty
+    /// before a start. With [`Game::frame_rgba`] a test tells where the game's own screen changed
+    /// from what the menu left behind.
+    pub fn published_rgba(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.engine {
+            e.published_frame().write_rgba(&mut out);
+        }
+        out
+    }
+
     /// Address of the current RGBA8 frame inside wasm memory. Views over it are
     /// invalidated when memory grows; re-create them every frame.
     pub fn frame_ptr(&self) -> *const u8 {
@@ -1604,51 +1740,6 @@ impl Game {
 }
 
 impl Game {
-    /// Spec 17: the engine's queue is empty and the page's holds nothing the game reads as an
-    /// event: the moves of a button-less pointer change nothing it reads, and a key's release is
-    /// applied where the engine queues the input, never one of its events
-    /// ([`InputEvent::Release`]).
-    fn quiet(&self) -> bool {
-        let inert = |ev: &InputEvent| match ev {
-            InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
-            InputEvent::Release(_) => true,
-            _ => false,
-        };
-        self.engine
-            .as_ref()
-            .is_some_and(|e| e.io().pending_events() == 0)
-            && self.pending.iter().all(inert)
-    }
-
-    /// Spec 17: [`Game::at_prompt`] with the moves of a button-less pointer and the key releases
-    /// queued since the last step let through ([`Game::quiet`]): a right press just after either
-    /// still gets its menu.
-    fn prompt_up(&self) -> bool {
-        self.quiet()
-            && self
-                .engine
-                .as_ref()
-                .is_some_and(|e| e.state().main.reading == 1)
-    }
-
-    /// Spec 17: the held target press of [`Game::command_at`] before a tick: queued once its
-    /// command reads the target with the queues quiet ([`Game::quiet`]), dropped once a new
-    /// prompt read came, whatever is queued ([`u6_core::ui::menu::Run::step`]).
-    fn step_run(&mut self) {
-        let (Some(run), Some(e)) = (self.run, &self.engine) else {
-            return;
-        };
-        let step = run.step(&e.state(), self.quiet());
-        match step {
-            u6_core::ui::menu::Step::Hold => {}
-            u6_core::ui::menu::Step::Release(press) => {
-                self.pending.extend(press);
-                self.run = None;
-            }
-            u6_core::ui::menu::Step::Drop => self.run = None,
-        }
-    }
-
     /// [`Game::load_file`] without the JS error type.
     fn collect(&mut self, path: &str, data: Vec<u8>) -> Result<(), String> {
         let total = self.input_bytes.saturating_add(data.len());
@@ -1876,6 +1967,9 @@ impl Game {
     /// converted and, with HD on, composed whole (its versions start again at 0).
     fn put_on_screen(&mut self, mut engine: Engine) {
         engine.set_speech(self.voices);
+        // Spec 17: the page's right press opens the engine's context menu.
+        engine.set_context_menu(true);
+        engine.set_context_menu_hidden(self.menu_hidden.clone());
         engine.io().set_sight_memory(self.sight_memory);
         self.saved_gen = 0;
         self.save_out = Vec::new();
@@ -1884,6 +1978,7 @@ impl Game {
         self.audio = None;
         self.engine = Some(engine);
         self.pending.clear();
+        self.dismissals.clear();
         self.handed = 0;
         self.held.clear();
         self.last_step = None;
@@ -2012,8 +2107,16 @@ fn last_buttons(events: &[InputEvent]) -> Option<u8> {
 /// at once anyway): the event queued last is a pointer event with the new one's buttons, and the
 /// pointer had them before it too (the pointer event queued before it, else `handed`, the last
 /// one the engine was handed). A press or a release is never replaced, so it stays where its own
-/// event put it, and the moves after it follow it.
-fn queue_pointer(pending: &mut Vec<InputEvent>, handed: u8, x: i32, y: i32, buttons: u8) {
+/// event put it, and the moves after it follow it. Spec 17: nor is one of the first `kept` (a
+/// dismissal of the menu stands after them, [`Game::dismiss_menu`]).
+fn queue_pointer(
+    pending: &mut Vec<InputEvent>,
+    kept: usize,
+    handed: u8,
+    x: i32,
+    y: i32,
+    buttons: u8,
+) {
     let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
     let buttons = buttons & 3;
     let ev = InputEvent::Pointer {
@@ -2021,7 +2124,9 @@ fn queue_pointer(pending: &mut Vec<InputEvent>, handed: u8, x: i32, y: i32, butt
         y: word(y),
         buttons,
     };
-    if let Some((InputEvent::Pointer { buttons: last, .. }, before)) = pending.split_last() {
+    if pending.len() > kept
+        && let Some((InputEvent::Pointer { buttons: last, .. }, before)) = pending.split_last()
+    {
         let before = last_buttons(before).unwrap_or(handed);
         if *last == buttons && before == buttons {
             pending.pop();
@@ -2082,26 +2187,69 @@ fn menu_json(m: &u6_core::ui::menu::Menu) -> String {
             .kind
             .map_or_else(|| "null".to_string(), |(t, f)| format!("[{t},{f}]"));
         out.push_str(&format!(
-            "{{\"object\":{},\"kind\":{kind},\"name\":",
+            "{{\"object\":{},\"kind\":{kind},\"entries\":[",
             section.object
         ));
-        json_string(&mut out, &section.name);
-        out.push_str(",\"entries\":[");
         for (j, e) in section.entries.iter().enumerate() {
             if j > 0 {
                 out.push(',');
             }
-            let reason = e
-                .reason
-                .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
-            out.push_str(&format!(
-                "{{\"code\":{},\"enabled\":{},\"reason\":{reason},\"theft\":{}}}",
-                e.code,
-                e.enabled(),
-                e.theft
-            ));
+            out.push_str(&entry_json(e));
         }
         out.push_str("]}");
+    }
+    let go_here = m
+        .go_here
+        .as_ref()
+        .map_or_else(|| "null".to_string(), entry_json);
+    out.push_str(&format!("],\"go_here\":{go_here}}}"));
+    out
+}
+
+/// One entry of [`menu_json`]: `{code, enabled, reason, theft}`.
+fn entry_json(e: &u6_core::ui::menu::Entry) -> String {
+    let reason = e
+        .reason
+        .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
+    format!(
+        "{{\"code\":{},\"enabled\":{},\"reason\":{reason},\"theft\":{}}}",
+        e.code,
+        e.enabled(),
+        e.theft
+    )
+}
+
+/// [`Game::menu_view`]'s JSON for `v`.
+fn view_json(v: &u6_core::ui::popup::View, [paper, ink, head]: [u32; 3]) -> String {
+    use u6_core::ui::popup::RowKind;
+    let wh = |(x0, y0, x1, y1): (i32, i32, i32, i32)| {
+        format!("[{x0},{y0},{},{}]", x1 - x0 + 1, y1 - y0 + 1)
+    };
+    let mut out = format!(
+        "{{\"rect\":{},\"text\":{},\"hover\":{},\"colours\":[{paper},{ink},{head}],\"rows\":[",
+        wh(v.rect),
+        wh(v.text),
+        v.hover
+    );
+    for (i, r) in v.rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let kind = match r.kind {
+            RowKind::Head => "head",
+            RowKind::Entry => "entry",
+            RowKind::Note => "note",
+        };
+        let code = r.code.map_or_else(|| "null".to_string(), |c| c.to_string());
+        let reason = r
+            .reason
+            .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
+        out.push_str(&format!(
+            "{{\"kind\":\"{kind}\",\"code\":{code},\"enabled\":{},\"reason\":{reason},\"theft\":{},\"y\":{}}}",
+            r.enabled(),
+            r.theft,
+            r.y
+        ));
     }
     out.push_str("]}");
     out
@@ -2135,19 +2283,25 @@ mod tests {
     fn pointer_moves_collapse_and_button_changes_queue() {
         let mut q = Vec::new();
         let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
-        queue_pointer(&mut q, 0, 10, 10, 0);
-        queue_pointer(&mut q, 0, 20, 30, 0);
-        queue_pointer(&mut q, 0, 20, 30, 1);
-        queue_pointer(&mut q, 0, 21, 31, 5);
-        queue_pointer(&mut q, 0, 21, 31, 0);
+        queue_pointer(&mut q, 0, 0, 10, 10, 0);
+        queue_pointer(&mut q, 0, 0, 20, 30, 0);
+        queue_pointer(&mut q, 0, 0, 20, 30, 1);
+        queue_pointer(&mut q, 0, 0, 21, 31, 5);
+        queue_pointer(&mut q, 0, 0, 21, 31, 0);
         assert_eq!(q, [p(20, 30, 0), p(20, 30, 1), p(21, 31, 1), p(21, 31, 0)]);
         q.push(InputEvent::Key(Key::Space));
-        queue_pointer(&mut q, 0, 99_999, -99_999, 2);
+        queue_pointer(&mut q, 0, 0, 99_999, -99_999, 2);
         assert_eq!(
             q.last(),
             Some(&p(i16::MAX, i16::MIN, 2)),
             "a key in between keeps both"
         );
+        // A move right after one a dismissal stands after (spec 17: `kept`) is queued after it.
+        let n = q.len();
+        queue_pointer(&mut q, n, 0, 7, 7, 2);
+        assert_eq!(q.len(), n + 1, "kept: not replaced");
+        queue_pointer(&mut q, n, 0, 8, 8, 2);
+        assert_eq!(q[n..], [p(8, 8, 2)], "past it: replaced as before");
         let mut game = Game::new();
         game.pointer(5, 5, 1);
         assert!(game.pending.is_empty(), "no game, nothing queued");
@@ -2162,7 +2316,7 @@ mod tests {
         let queued = |handed: u8, events: &[(i32, i32, u8)]| {
             let mut q = Vec::new();
             for &(x, y, b) in events {
-                queue_pointer(&mut q, handed, x, y, b);
+                queue_pointer(&mut q, 0, handed, x, y, b);
             }
             q
         };
@@ -5156,22 +5310,26 @@ mod tests {
         assert!(game.hd_frame_rgba().chunks(4).all(|p| p == [0, 0, 0, 255]));
     }
 
-    /// Spec 17: before a start there is no context menu and no entry runs (nothing queued).
+    /// Spec 17: before a start there is no context menu, none drawn, and the game holds no button.
     #[test]
-    fn before_a_start_there_is_no_context_menu_and_no_entry_runs() {
+    fn before_a_start_there_is_no_context_menu() {
         let mut game = Game::new();
         let (x, y) = hero_point();
         assert_eq!(game.context_menu(x, y), "");
-        assert!(!game.command_at(0x88, x, y));
-        assert!(game.pending.is_empty() && game.run.is_none());
+        game.pointer(x, y, 2);
+        game.step(20);
+        assert_eq!(game.menu_view(), "");
+        assert_eq!(game.game_buttons(), 0);
+        assert!(game.pending.is_empty());
+        assert!(game.published_rgba().is_empty(), "no published frame");
     }
 
     /// Spec 17: the context menu's JSON: its kind, cell, underlined command and sections, each
-    /// entry's code, whether it can run, its reason's code and the theft mark; the name as a JSON
-    /// string (made-up names here).
+    /// entry's code, whether it can run, its reason's code and the theft mark, and Go here; no
+    /// names (the section's name never appears).
     #[test]
     fn the_context_menus_json() {
-        use u6_core::ui::menu::{Entry, Kind, Menu, Reason, Section};
+        use u6_core::ui::menu::{Entry, GO_HERE, Kind, Menu, Reason, Section};
         let entry = |code, reason, theft| Entry {
             code,
             reason,
@@ -5190,69 +5348,219 @@ mod tests {
                     entry(0x85, None, true),
                 ],
             }],
+            go_here: Some(entry(GO_HERE, Some(Reason::Unreachable), false)),
         };
         assert_eq!(
             menu_json(&map),
-            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"kind":[128,2],"name":"a \"b\"","entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}]}"#
+            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"kind":[128,2],"entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}],"go_here":{"code":256,"enabled":false,"reason":"unreachable","theft":false}}"#
         );
         let panel = Menu {
             kind: Kind::Panel,
             cell: None,
             underlined: None,
             sections: Vec::new(),
+            go_here: None,
         };
         assert_eq!(
             menu_json(&panel),
-            r#"{"kind":"panel","cell":null,"underlined":null,"sections":[]}"#
+            r#"{"kind":"panel","cell":null,"underlined":null,"sections":[],"go_here":null}"#
         );
     }
 
-    /// Spec 17, on the user's zip (skipped when absent; read only): at the prompt a right press
-    /// on the hero (the view's centre cell, [`cell_point`], so in either build's layout) has a
-    /// map menu with Look, also with a pointer move queued since the last step;
-    /// `command_at` Look there queues the icon press and,
-    /// once Look reads its target, the press on the hero (Look then shows the portrait and waits
-    /// for a key: no prompt); with no prompt it refuses. A key gets the prompt back.
+    /// Spec 17 Presentation: the drawn menu's JSON: the box and the text area as x, y, width,
+    /// height, the highlighted row, each row's kind, code, whether it runs, reason, theft mark and
+    /// top pixel row.
     #[test]
-    #[allow(clippy::disallowed_methods)] // tests may read files
-    fn command_at_runs_look_on_the_hero_through_the_target_read() {
-        if !std::path::Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
-            return;
-        }
-        let mut game = Game::new();
-        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
-            .quiet();
-        game.boot(1, true).quiet();
-        let prompt = |game: &mut Game| {
-            for _ in 0..3000 {
-                if game.at_prompt() {
-                    return true;
-                }
-                game.step(20);
-            }
-            false
+    fn the_drawn_menus_json() {
+        use u6_core::ui::menu::Reason;
+        use u6_core::ui::popup::{RowKind, RowView, View};
+        let row = |kind, code, reason, theft, y| RowView {
+            kind,
+            code,
+            reason,
+            theft,
+            y,
         };
-        assert!(prompt(&mut game), "the prompt");
+        let v = View {
+            rect: (35, 51, 100, 84),
+            text: (40, 56, 95, 79),
+            hover: 1,
+            rows: vec![
+                row(RowKind::Head, None, None, false, 56),
+                row(RowKind::Entry, Some(0x85), None, true, 64),
+                row(RowKind::Note, None, None, false, 72),
+            ],
+        };
+        assert_eq!(
+            view_json(&v, [0x10_2030, 0x40_5060, 0xff_0001]),
+            r#"{"rect":[35,51,66,34],"text":[40,56,56,24],"hover":1,"colours":[1056816,4214880,16711681],"rows":[{"kind":"head","code":null,"enabled":false,"reason":null,"theft":false,"y":56},{"kind":"entry","code":133,"enabled":true,"reason":null,"theft":true,"y":64},{"kind":"note","code":null,"enabled":false,"reason":null,"theft":false,"y":72}]}"#
+        );
+        let off = View {
+            rows: vec![row(
+                RowKind::Entry,
+                Some(0x88),
+                Some(Reason::Far),
+                false,
+                64,
+            )],
+            ..v
+        };
+        assert!(view_json(&off, [0; 3]).contains(r#""enabled":false,"reason":"far""#));
+    }
+
+    /// Presses the pointer's `buttons` at (x, y) and lets them go, a step after each.
+    fn click(game: &mut Game, (x, y): (i32, i32), buttons: u8) {
+        game.pointer(x, y, buttons);
+        game.step(20);
+        game.pointer(x, y, 0);
+        game.step(20);
+    }
+
+    /// The engine's open context menu, if one is drawn.
+    fn drawn(game: &Game) -> Option<u6_core::ui::popup::View> {
+        game.engine.as_ref()?.context_menu()
+    }
+
+    /// The frame pixel of row `i`'s label (the text area's second column, the row's middle).
+    fn row_point(v: &u6_core::ui::popup::View, i: usize) -> (i32, i32) {
+        (v.text.0 + 12, v.rows[i].y + 4)
+    }
+
+    /// The row of the drawn menu `v` with entry `code`.
+    fn row_of(v: &u6_core::ui::popup::View, code: u16) -> Option<usize> {
+        v.rows.iter().position(|r| r.code == Some(code))
+    }
+
+    /// Spec 17 Acceptance 8, on the user's zip (skipped when absent): at the prompt a right press
+    /// on the hero ([`hero_point`], the view's centre cell, either build's layout) opens the menu
+    /// in the frame: its box's pixels differ from the published frame's, every pixel outside it is
+    /// the published frame's; the game took no button, also with the right button held and
+    /// moved over the map; Look is offered and a left press on it runs it through its target read
+    /// (Look then shows the portrait and waits for a key: no prompt), the menu closed. A key
+    /// gets the prompt back.
+    #[test]
+    fn a_right_press_opens_the_drawn_menu_and_look_runs_through_the_target_read() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
         let (hx, hy) = hero_point();
-        let menu = game.context_menu(hx, hy);
-        assert!(
-            menu.starts_with(r#"{"kind":"map""#) && menu.contains(r#""code":132,"enabled":true"#)
+        let at = game.leader_position();
+        let presses = game.game_presses();
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        let v = drawn(&game).expect("the menu open");
+        let still = |game: &Game, what: &str| {
+            assert_eq!(game.game_buttons(), 0, "{what}: the game holds no button");
+            assert_eq!(
+                game.game_presses(),
+                presses,
+                "{what}: no press reached the game"
+            );
+            assert_eq!(game.leader_position(), at, "{what}: no walk");
+        };
+        still(&game, "the opening step");
+        // Held and moved over the map, the page pacing its steps as it does with a button held
+        // (Game::pace reads it held, spec 06): each step the game holds no button, no walk.
+        for (x, y) in [(hx + 20, hy), (hx + 20, hy + 20), (hx - 30, hy)] {
+            game.pointer(x, y, 2);
+            assert!(game.pointer_held(), "the page's button held");
+            let k = game.pace(40.0).max(1);
+            for _ in 0..k {
+                game.step(20);
+                still(&game, "a held move");
+            }
+            game.ran(k);
+            // K3 merge note 7: the page's game pointer is the menu's while it takes the pointer.
+            let gp = game.game_pointer();
+            assert_eq!(
+                (gp[0], gp[1], gp[2], gp[3]),
+                (x, y, 1, 0),
+                "game_pointer: the menu's, drawn, nothing queued"
+            );
+        }
+        game.pointer(hx - 30, hy, 0);
+        game.step(20);
+        still(&game, "the release");
+        assert_eq!(
+            game.game_buttons(),
+            0,
+            "the held right button gave the game nothing"
         );
-        let (mx, my) = cell_point(HALF_W as i32 + 2, HALF_H as i32 + 2);
-        game.pointer(mx, my, 0);
-        let after_a_move = game.context_menu(hx, hy);
-        assert!(after_a_move == menu, "a pointer move queued: the same menu");
-        assert!(game.command_at(0x84, hx, hy));
         assert!(
-            !game.command_at(0x84, hx, hy),
-            "no prompt with the icon queued"
+            game.at_prompt() && drawn(&game).is_some(),
+            "open, the prompt up"
         );
-        let mut read = false;
+        {
+            let e = game.engine.as_ref().quiet();
+            let (screen, published) = (e.screen_frame(), e.published_frame());
+            let (x0, y0, x1, y1) = v.rect;
+            let (mut inside, mut differ, mut outside) = (0, 0, 0);
+            for y in 0..u6_render::HEIGHT {
+                for x in 0..u6_render::WIDTH {
+                    let (a, b) = (screen.get(x, y), published.get(x, y));
+                    let (xi, yi) = (x as i32, y as i32);
+                    if (x0..=x1).contains(&xi) && (y0..=y1).contains(&yi) {
+                        inside += 1;
+                        differ += usize::from(a != b);
+                    } else {
+                        outside += usize::from(a != b);
+                    }
+                }
+            }
+            println!("box pixels {inside}, differing {differ}; outside differing {outside}");
+            assert!(differ * 2 > inside, "the menu drawn in its box");
+            assert_eq!(outside, 0, "the frame outside the box as published");
+        }
+        game.present();
+        let mut want = Vec::new();
+        game.engine
+            .as_ref()
+            .quiet()
+            .published_frame()
+            .write_rgba(&mut want);
+        assert_eq!(
+            game.published_rgba(),
+            want,
+            "Game::published_rgba: the published frame"
+        );
+        // The menu in the frame only (round 2b, opus NIT 5): the frame differs from the published
+        // one in most of the menu's box, and outside it only under the pointer's sprite.
+        {
+            let (frame, published) = (game.frame_rgba(), game.published_rgba());
+            let sprite = game.engine.as_ref().quiet().sprite().cloned();
+            let under_sprite = |x: i32, y: i32| {
+                sprite.as_ref().is_some_and(|sp| {
+                    let (sx, sy) = (i32::from(sp.x), i32::from(sp.y));
+                    (sx..sx + 16).contains(&x) && (sy..sy + sp.rows.len() as i32).contains(&y)
+                })
+            };
+            let (x0, y0, x1, y1) = v.rect;
+            let (mut boxed, mut differ, mut outside) = (0, 0, 0);
+            for y in 0..u6_render::HEIGHT as i32 {
+                for x in 0..u6_render::WIDTH as i32 {
+                    let i = (y as usize * u6_render::WIDTH + x as usize) * 4;
+                    let d = frame[i..i + 3] != published[i..i + 3];
+                    if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                        boxed += 1;
+                        differ += usize::from(d);
+                    } else if !under_sprite(x, y) {
+                        outside += usize::from(d);
+                    }
+                }
+            }
+            println!(
+                "RGBA frame: {differ} of {boxed} box pixels differ; outside, off the sprite, {outside}"
+            );
+            assert!(differ * 2 > boxed, "the menu in the RGBA frame's box");
+            assert_eq!(outside, 0, "outside the box only the sprite differs");
+        }
+        let look = row_of(&v, 0x84).expect("Look offered");
+        assert!(v.rows[look].enabled(), "Look can run");
+        click(&mut game, row_point(&v, look), 1);
+        assert!(drawn(&game).is_none(), "chosen: closed");
         for _ in 0..200 {
             game.step(20);
-            if game.run.is_none() {
-                read = !game.at_prompt();
+            if !game.at_prompt() {
                 break;
             }
         }
@@ -5260,11 +5568,223 @@ mod tests {
             game.step(20);
         }
         assert!(
-            read && !game.at_prompt(),
+            !game.at_prompt(),
             "Look read its target and waits on the portrait"
         );
+        {
+            let e = game.engine.as_ref().quiet();
+            let input = &e.state().ui.input;
+            assert!(
+                !e.context_menu_waits(),
+                "the target press went in: no run held"
+            );
+            assert_eq!(e.io().pending_events(), 0, "and the game took it: consumed");
+            assert!(input.in_wait, "the portrait's key wait");
+        }
         game.key_down("Space", " ", false, 0.0);
-        assert!(prompt(&mut game), "the prompt again");
+        assert!(steps_to_prompt(&mut game), "the prompt again");
+    }
+
+    /// Spec 17 Acceptance 6, on the user's zip: Escape and a left press outside the box close the
+    /// menu; neither the game's key nor its button sees them, no line is printed and the hero
+    /// stays (no turn passed). The press outside is the menu's to its release.
+    #[test]
+    fn escape_and_a_press_outside_close_the_menu_and_give_the_game_nothing() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        let at = game.leader_position();
+        let lines = |g: &Game| g.engine.as_ref().quiet().state().ui.messages.len();
+        let before = lines(&game);
+        click(&mut game, (hx, hy), 2);
+        assert!(drawn(&game).is_some(), "open");
+        assert!(game.key_down("Escape", "Escape", false, 0.0));
+        game.step(20);
+        assert!(game.key_repeat("Escape", "Escape", false, 0.0));
+        game.step(20);
+        assert!(game.key_up("Escape"));
+        for _ in 0..30 {
+            game.step(20);
+        }
+        assert!(drawn(&game).is_none(), "Escape closed it");
+        assert!(game.at_prompt(), "the prompt still up");
+        click(&mut game, (hx, hy), 2);
+        let v = drawn(&game).expect("open again");
+        let (sx0, sy0, ..) = u6_core::geom::SHOWN;
+        let out = (i32::from(sx0) + 2, i32::from(sy0) + 2);
+        assert!(
+            !(v.rect.0..=v.rect.2).contains(&out.0) || !(v.rect.1..=v.rect.3).contains(&out.1),
+            "the press point outside the box"
+        );
+        game.pointer(out.0, out.1, 1);
+        game.step(20);
+        assert_eq!(game.game_buttons(), 0, "the press outside: not the game's");
+        game.pointer(out.0, out.1, 0);
+        for _ in 0..30 {
+            game.step(20);
+        }
+        assert!(drawn(&game).is_none(), "closed");
+        assert_eq!(lines(&game), before, "no line printed");
+        assert_eq!(game.leader_position(), at, "the hero where he was");
+        assert!(game.at_prompt(), "the prompt up");
+    }
+
+    /// One display frame of the page's loop at its clock `t` (wall ms) after `dt`: the clock
+    /// given, then the steps the pace gives (at most 40: Max's budget here), as `app.js` `frame`
+    /// runs them.
+    fn page_frame(game: &mut Game, t: f64, dt: f64) {
+        game.set_clock(t);
+        let k = game.pace(dt).min(40);
+        for _ in 0..k {
+            game.step(step_ms());
+        }
+        game.ran(k);
+    }
+
+    /// [`page_frame`]s 16 wall ms apart from `t` on until the page's queued events all reached
+    /// the game: a frame with a press held runs at 1× (the pacer's rule), so the first after a
+    /// press may run no step.
+    fn settle(game: &mut Game, t: &mut f64) {
+        for _ in 0..20 {
+            *t += 16.0;
+            page_frame(game, *t, 16.0);
+            if game.pending.is_empty() {
+                return;
+            }
+        }
+        panic!("the queued events given within 20 frames");
+    }
+
+    /// Spec 17 Presentation, Input (round 2b, opus MUST 1), on the user's zip: at 8× and at Max
+    /// a double click on Go here, its second press stepped about 200 page (wall) ms after the
+    /// choosing one, is the menu's: no press reaches the game though the engine's clock ran on
+    /// for far more than the 500 ms window meanwhile; Go here asked once. About 600 page ms
+    /// after it, the press is the game's. Past the castle's fight ([`castle_game`], the menu on
+    /// as the page puts it on): since round 4 Go here is the real travel's, refused while the
+    /// fight is on; the cell is the first two cells from the hero whose Go here can run.
+    #[test]
+    fn a_double_click_at_speed_is_timed_on_the_pages_clock() {
+        for speed in [8.0, 0.0] {
+            for (gap, menus) in [(200.0, true), (600.0, false)] {
+                let Some(mut game) = castle_game() else {
+                    return;
+                };
+                game.engine.as_mut().quiet().set_context_menu(true);
+                game.set_speed(speed);
+                let ms = |g: &Game| g.engine.as_ref().quiet().io().now_ms();
+                let (hx, hy) = hero_point();
+                let at = [(32, 0), (-32, 0), (0, 32), (0, -32), (32, 32), (-32, -32)]
+                    .into_iter()
+                    .map(|(dx, dy)| (hx + dx, hy + dy))
+                    .find(|&(x, y)| {
+                        let e = game.engine.as_ref().quiet();
+                        u6_core::ui::menu::query(&e.state(), e.io(), x as i16, y as i16)
+                            .and_then(|m| m.go_here)
+                            .is_some_and(|g| g.enabled())
+                    })
+                    .expect("a cell two from the hero whose Go here can run");
+                let mut t = 1_000.0;
+                page_frame(&mut game, t, 16.0);
+                game.pointer(at.0, at.1, 2);
+                settle(&mut game, &mut t);
+                game.pointer(at.0, at.1, 0);
+                settle(&mut game, &mut t);
+                let v = drawn(&game).expect("the menu open");
+                let go = row_of(&v, u6_core::ui::menu::GO_HERE).expect("Go here");
+                assert!(v.rows[go].enabled(), "Go here can run");
+                let (gx, gy) = row_point(&v, go);
+                game.pointer(gx, gy, 1);
+                settle(&mut game, &mut t);
+                let (t0, e0) = (t, ms(&game));
+                assert!(drawn(&game).is_none(), "chosen: closed");
+                assert_eq!(game.go_here_asked(), 1, "Go here asked");
+                game.pointer(gx, gy, 0);
+                settle(&mut game, &mut t);
+                while t + 16.0 < t0 + gap {
+                    t += 16.0;
+                    page_frame(&mut game, t, 16.0);
+                }
+                let presses = game.game_presses();
+                game.pointer(gx, gy, 1);
+                settle(&mut game, &mut t);
+                let (wall, ran) = (t - t0, ms(&game) - e0);
+                println!(
+                    "speed {speed}: the second press {wall} page ms on, the engine's clock {ran} ms"
+                );
+                assert!(
+                    (gap..gap + 64.0).contains(&wall),
+                    "precondition: the gap as meant"
+                );
+                assert!(ran > 500, "the engine's clock past the window");
+                assert_eq!(
+                    game.game_presses() - presses,
+                    f64::from(u8::from(!menus)),
+                    "speed {speed}, {wall} page ms: the second press the menu's: {menus}"
+                );
+                game.pointer(gx, gy, 0);
+                settle(&mut game, &mut t);
+                assert_eq!(game.go_here_asked(), 1, "chosen once");
+            }
+        }
+    }
+
+    /// Spec 17 Presentation (round 2b, gpt e MUST), on the user's zip: a right press on the
+    /// canvas and then a press off it (`Game::dismiss_menu`), both before one step: the
+    /// dismissal waits its turn behind the press, so the step opens the menu and closes it,
+    /// and it ends closed; nothing reaches the game. With nothing queued the dismissal acts at
+    /// once.
+    #[test]
+    fn a_press_off_the_canvas_after_a_queued_right_press_leaves_the_menu_closed() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        let presses = game.game_presses();
+        game.pointer(hx, hy, 2);
+        assert!(!game.dismiss_menu(), "queued behind the right press");
+        game.pointer(hx + 3, hy, 2);
+        game.step(20);
+        assert!(drawn(&game).is_none(), "the menu ends closed");
+        assert_eq!(game.game_presses(), presses, "nothing reached the game");
+        game.pointer(hx + 3, hy, 0);
+        game.step(20);
+        assert!(
+            drawn(&game).is_none() && game.at_prompt(),
+            "closed, the prompt up"
+        );
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        game.pointer(hx, hy, 0);
+        game.step(20);
+        assert!(drawn(&game).is_some(), "opened by a right press alone");
+        assert!(game.dismiss_menu(), "nothing queued: closed at once");
+        assert!(drawn(&game).is_none(), "closed");
+        assert_eq!(game.game_presses(), presses, "nothing reached the game");
+    }
+
+    /// Spec 17 Presentation (round 2b, gpt f SHOULD; round 3, gpt c SHOULD): `menu_hidden` reads
+    /// the rects the engine holds, not the page's copy: none without a game; the rects given
+    /// before a game starts reach its engine when it goes on screen, and those given while it
+    /// runs at once; rects with no area are left out.
+    #[test]
+    fn menu_hidden_reads_back_the_rects_the_engine_holds() {
+        let mut game = Game::new();
+        game.set_menu_hidden(vec![10, 20, 30, 40, 5, 5, 0, 9, 1, 2, 3]);
+        assert!(game.menu_hidden().is_empty(), "no game: none held");
+        game.put_on_screen(synthetic_engine());
+        assert_eq!(
+            game.engine.as_ref().quiet().context_menu_hidden(),
+            [(10, 20, 39, 59)],
+            "given before the game: its engine holds the rect with area"
+        );
+        assert_eq!(game.menu_hidden(), [10, 20, 30, 40], "read from the engine");
+        game.set_menu_hidden(vec![0, 0, 8, 8]);
+        assert_eq!(
+            game.menu_hidden(),
+            [0, 0, 8, 8],
+            "given while it runs: the engine holds it at once"
+        );
     }
 
     /// Spec 21: `travel_to` starts the engine's travel exactly when
@@ -5366,13 +5886,73 @@ mod tests {
         );
     }
 
+    /// Spec 21 S3 (K2 r6 opus SHOULD 1, the merge round): at Max, where the page runs up to 40
+    /// steps a frame on one clock, a travel past the castle's fight steps at most once a
+    /// `MIN_STEP_MS` of the page's clock, as a held arrow does: the page clock at each step the
+    /// prompt took is at least 150 ms after the one before, and the travel still arrives.
+    #[test]
+    fn at_max_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock() {
+        use u6_core::actors::travel::{End, reachable};
+        let Some(mut game) = castle_game() else {
+            return;
+        };
+        game.set_speed(0.0);
+        let p = game.leader_position();
+        let to = [(3i16, 0i16), (-3, 0), (0, 3), (0, -3), (2, 2), (-2, -2)]
+            .into_iter()
+            .map(|(dx, dy)| (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy)))
+            .find(|&c| reachable(&game.engine.as_ref().quiet().state(), c).is_none())
+            .quiet();
+        assert!(game.travel_to(to.0, to.1), "a reachable cell starts");
+        let (mut t, mut at, mut steps) = (10_000.0, Vec::new(), 0u32);
+        for _ in 0..2000 {
+            if !game.travel_active() {
+                break;
+            }
+            t += 16.0;
+            game.set_clock(t);
+            let k = game.pace(16.0).min(40);
+            for _ in 0..k {
+                let takes = game.prompt_takes();
+                game.step(step_ms());
+                steps += 1;
+                if game.prompt_takes() != takes {
+                    at.push(t);
+                }
+            }
+            game.ran(k);
+        }
+        let gaps: Vec<f64> = at.windows(2).map(|w| w[1] - w[0]).collect();
+        let least = gaps.iter().copied().fold(f64::INFINITY, f64::min);
+        println!(
+            "speed 0: {} travel steps over {steps} engine steps, the least gap {least} page ms",
+            at.len()
+        );
+        assert_eq!(
+            game.engine.as_ref().quiet().travel_end(),
+            Some(End::Arrived),
+            "the travel arrived"
+        );
+        assert!(at.len() >= 3, "three or more steps: {}", at.len());
+        assert!(
+            gaps.iter()
+                .all(|&g| g >= f64::from(u6_core::engine::MIN_STEP_MS)),
+            "each step 150 page ms or more after the one before: {gaps:?}"
+        );
+    }
+
     /// The castle start of spec 19's held-key tests in a `Game` (as `u6-core`'s travel receipt):
     /// `game` at once with seed 0 round the shared state, the actors in the assault worktype 8
     /// passed over (status bit 0x10), the fight broken off with `b`, at the prompt. Skipped when
-    /// the user's zip is absent.
+    /// the user's zip is absent, unless `U6_REQUIRE_ARCHIVE=1`, which fails the test instead.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn castle_game() -> Option<Game> {
         if !std::path::Path::new(ZIP).exists() {
+            assert_ne!(
+                std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+                Ok("1"),
+                "U6_REQUIRE_ARCHIVE=1 and {ZIP} is missing"
+            );
             eprintln!("skipped: {ZIP} not present");
             return None;
         }
@@ -5408,10 +5988,17 @@ mod tests {
         Some(game)
     }
 
-    /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
+    /// The user's zip booted `game` first, stepped to its prompt; none (the test skips, saying
+    /// so) without it, unless `U6_REQUIRE_ARCHIVE=1` (the release receipt), which fails the test
+    /// instead.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn at_the_prompt() -> Option<Game> {
         if !std::path::Path::new(ZIP).exists() {
+            assert_ne!(
+                std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+                Ok("1"),
+                "U6_REQUIRE_ARCHIVE=1 and {ZIP} is missing"
+            );
             eprintln!("skipped: {ZIP} not present");
             return None;
         }
@@ -5423,7 +6010,9 @@ mod tests {
         Some(game)
     }
 
-    /// Steps `game` (20 ms each, at most 3000) until the prompt is up; false if it never is.
+    /// Steps `game` (20 ms each, at most 3000) until the prompt is up; false if it never is. The
+    /// prompt is [`Game::at_prompt`]'s (A4-0x7a2c, nothing queued), not the context menu's gate,
+    /// which also needs keys taken as commands and no cursor up ([`Engine::context_menu_gate`]).
     fn steps_to_prompt(game: &mut Game) -> bool {
         steps_to_prompt_within(game, 3000)
     }
@@ -5561,21 +6150,18 @@ mod tests {
         assert!(held >= 1, "a slot holds something");
     }
 
-    /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip, through `Game::command_at` and
-    /// `Game::step`: the leader starts without a readied spellbook, so the menu shows Cast disabled
-    /// as book; forced anyway on a cell two to five steps off that shows it ([`cell_point`],
-    /// either build's layout), Cast runs its own refusal before any target
-    /// read (its line printed, the prompt back), the held press is dropped, and the leader has not
-    /// moved.
+    /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip: the leader starts without a
+    /// readied spellbook, so on a cell two to five steps off that shows it ([`cell_point`],
+    /// either build's layout) the drawn menu has Cast disabled as book; a left press on it, its
+    /// letter and Enter with it highlighted run nothing (the menu stays open, no button and no
+    /// line reach the game, the leader stays); Escape closes it. (The run of a Cast forced through
+    /// the engine anyway, its target press dropped: u6-core's `objects/commands/real_data.rs`,
+    /// `cast_without_a_book_is_disabled_and_forced_its_target_press_is_dropped`.)
     #[test]
-    fn cast_forced_without_a_book_refuses_and_drops_its_target_press() {
+    fn a_disabled_entry_runs_nothing() {
         let Some(mut game) = at_the_prompt() else {
             return;
         };
-        // Cast is offered on a cell with an object (a bare tile gives Look alone), so the cell is
-        // the first one whose menu shows Cast disabled as book two to five steps from the hero
-        // (inside the original's targeting box in both builds), two east first: what shows Cast
-        // two east differs between the builds.
         const BOOK: &str = r#""code":130,"enabled":false,"reason":"book""#;
         let near = (-5..=5i32).flat_map(|r| (-5..=5i32).map(move |c| (c, r)));
         let (dx, dy) = std::iter::once((2, 0))
@@ -5587,34 +6173,132 @@ mod tests {
             .expect("a cell two to five steps off whose menu shows Cast disabled as book once");
         let (x, y) = cell_point(HALF_W as i32 + dx, HALF_H as i32 + dy);
         let at = game.leader_position();
-        let lines = game.engine.as_ref().quiet().state().ui.messages.len();
-        assert!(game.command_at(0x82, x, y));
-        let mut released = 0;
-        for _ in 0..600 {
-            let before = game.pending.len();
-            game.step(20);
-            released += usize::from(game.pending.len() > before);
-            if game.run.is_none() && game.at_prompt() {
+        let lines = |g: &Game| g.engine.as_ref().quiet().state().ui.messages.len();
+        let before = lines(&game);
+        click(&mut game, (x, y), 2);
+        let v = drawn(&game).expect("open");
+        let cast = row_of(&v, 0x82).expect("Cast shown");
+        assert!(!v.rows[cast].enabled(), "disabled");
+        click(&mut game, row_point(&v, cast), 1);
+        assert!(drawn(&game).is_some(), "a press on it: still open");
+        assert!(game.key_down("KeyC", "c", false, 0.0));
+        game.step(20);
+        game.key_up("KeyC");
+        game.step(20);
+        assert!(drawn(&game).is_some(), "its letter: still open");
+        for _ in 0..v.rows.len() {
+            if drawn(&game).is_none_or(|v| v.hover == cast) {
                 break;
             }
+            assert!(game.key_down("ArrowDown", "ArrowDown", false, 0.0));
+            game.step(20);
+            game.key_up("ArrowDown");
+            game.step(20);
         }
-        let printed = game.engine.as_ref().quiet().state().ui.messages.len() - lines;
-        println!(
-            "the cell {dx}, {dy} from the hero; presses released: {released}, lines: {printed}"
+        assert_eq!(
+            drawn(&game).map(|v| v.hover),
+            Some(cast),
+            "Cast highlighted"
         );
+        assert!(game.key_down("Enter", "Enter", false, 0.0));
+        game.step(20);
+        game.key_up("Enter");
+        game.step(20);
+        assert!(drawn(&game).is_some(), "Enter on it: still open");
+        assert_eq!(game.game_buttons(), 0, "no button reached the game");
+        assert!(game.key_down("Escape", "Escape", false, 0.0));
+        game.step(20);
+        game.key_up("Escape");
+        for _ in 0..30 {
+            game.step(20);
+        }
+        println!("the cell {dx}, {dy} from the hero");
         assert!(
-            game.run.is_none() && game.at_prompt(),
-            "the prompt is back, the run over"
+            drawn(&game).is_none() && game.at_prompt(),
+            "closed, the prompt up"
         );
-        assert_eq!(released, 0, "the target press never went in");
-        assert!(printed > 0, "Cast printed its refusal");
+        assert_eq!(lines(&game), before, "no line printed");
         assert_eq!(game.leader_position(), at, "the leader did not move");
     }
 
+    /// Spec 17 (round 2, gpt f2 SHOULD 1), on the user's zip: a game replaced while its menu is
+    /// open (a restart: a new engine on screen) leaves no menu and no press of the old one: the
+    /// held right button's release reaches the new game as a move, which holds no button, and a
+    /// right press at its prompt opens its own menu.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_game_replaced_while_its_menu_is_open_keeps_nothing_of_it() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        assert!(drawn(&game).is_some(), "open");
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        assert_eq!(game.menu_view(), "", "the new game: no menu");
+        game.pointer(hx, hy, 0);
+        game.step(20);
+        assert_eq!(game.game_buttons(), 0, "the old press's release: no button");
+        assert!(steps_to_prompt(&mut game), "the new game's prompt");
+        click(&mut game, (hx, hy), 2);
+        assert!(drawn(&game).is_some(), "its own menu");
+    }
+
+    /// Spec 17 Presentation in the platform: a cell drawn half-toned (a disabled entry of the
+    /// context menu) is listed as [`HALFTONE`] | its code; one drawn in full as its code.
+    #[test]
+    fn the_hd_glyphs_flag_a_half_toned_cell() {
+        let mut game = Game::new();
+        let engine = Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_, io| async move {
+                use u6_core::ui::text::{self, TextWindow};
+                let font = u6_formats::font::BitFont {
+                    glyphs: (0..=255u8).map(|c| [c; 8]).collect(),
+                };
+                let w = TextWindow::new(0, 0, 39, 24, 3, 4, 0);
+                io.draw(|fb| {
+                    for (i, c) in fb.palette.iter_mut().enumerate() {
+                        let v = i as u8;
+                        *c = u6_core::Rgb::new(v.wrapping_mul(40), 255 - v, v.wrapping_mul(7));
+                    }
+                    for y in 0..u6_render::HEIGHT {
+                        for x in 0..u6_render::WIDTH {
+                            fb.set(x, y, 4);
+                        }
+                    }
+                    text::draw_char(fb, Some(&font), None, &w, 0x41, 2, 2);
+                    text::draw_halftone(fb, (Some(&font), None), &w, 0x55, (3, 2));
+                });
+                io.present();
+                loop {
+                    io.vblank().await;
+                }
+            },
+        );
+        let mut engine = engine;
+        engine.enable_src_plane();
+        game.put_on_screen(engine);
+        game.step(20);
+        game.present();
+        game.set_hd(true, 2);
+        game.set_hd_font(true);
+        let codes: Vec<u32> = game.hd_glyphs().chunks(5).map(|g| g[2]).collect();
+        assert_eq!(
+            codes,
+            [0x41, HALFTONE | 0x55],
+            "the letter, the half-toned letter"
+        );
+    }
+
     /// Spec 17 round 2, item 0: a key let go just before a right press on the hero ([`hero_point`])
-    /// (its release queued, as `key_up` queues it) does not hide the menu, and the entry chosen
-    /// then runs: the release is applied where the engine queues the input and is never one of
-    /// its events.
+    /// (its release queued, as `key_up` queues it, in the same step) does not keep the menu shut,
+    /// and the entry chosen then runs: the release is applied where the engine queues the input
+    /// and is never one of its events. Look is chosen by its letter.
     #[test]
     fn a_key_let_go_just_before_a_right_press_keeps_the_menu_and_its_run() {
         let Some(mut game) = at_the_prompt() else {
@@ -5624,20 +6308,24 @@ mod tests {
         game.step(20);
         assert!(steps_to_prompt(&mut game), "the prompt after the key");
         let (hx, hy) = hero_point();
-        let menu = game.context_menu(hx, hy);
-        assert!(!menu.is_empty(), "a menu on the hero");
         assert!(game.key_up("KeyX"), "the key was held");
-        let with_release = game.context_menu(hx, hy);
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        game.pointer(hx, hy, 0);
+        game.step(20);
         assert!(
-            with_release == menu,
-            "the same menu with the release queued"
+            drawn(&game).is_some(),
+            "the menu with the release queued before the press"
         );
-        assert!(game.command_at(0x84, hx, hy), "the entry runs");
+        assert!(game.key_down("KeyL", "l", false, 0.0), "Look's letter");
+        game.step(20);
+        game.key_up("KeyL");
+        assert!(drawn(&game).is_none(), "chosen: closed");
         let mut read = 0;
         for _ in 0..200 {
             game.step(20);
-            if game.run.is_none() {
-                read = u32::from(!game.at_prompt());
+            if !game.at_prompt() {
+                read = 1;
                 break;
             }
         }

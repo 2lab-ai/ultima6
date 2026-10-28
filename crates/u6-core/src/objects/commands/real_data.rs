@@ -2050,19 +2050,19 @@ fn at_prompt(e: &Engine, queued: &[InputEvent]) -> bool {
     e.state().main.reading == 1 && e.io().pending_events() == 0 && queued.is_empty()
 }
 
-/// `u6-web`'s quiet queue for a run: nothing in the engine's, and in the page's only moves of a
-/// button-less pointer and key releases.
+/// The quiet the engine's context menu steps a run with (`ui::popup::Popup::input_with`): nothing
+/// queued for the game (the engine's own test lets the repeats the command prompt takes back
+/// through; none is queued here), and every event of the tick's input inert
+/// ([`crate::ui::popup::inert`]: a button-less move, a release, a repeat the prompt takes back).
 fn quiet(e: &Engine, queued: &[InputEvent]) -> bool {
-    let inert = |ev: &InputEvent| match ev {
-        InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
-        InputEvent::Release(_) => true,
-        _ => false,
-    };
-    e.io().pending_events() == 0 && queued.iter().all(inert)
+    let prompt = crate::engine::command_prompt(&e.state());
+    e.io().pending_events() == 0 && queued.iter().all(|ev| crate::ui::popup::inert(prompt, ev))
 }
 
-/// One page step of `u6-web`'s `Game::step` with `run` held: the run's step before the tick,
-/// then the tick (16 ms) with `queued`. True when the target press went in at this step.
+/// One step as the engine's context menu runs a chosen entry with `run` held
+/// (`ui::popup::Popup::input_with`): the run's step before the tick, its target press after the
+/// tick's events, then the tick (16 ms) with `queued`. True when the target press went in at this
+/// step.
 fn page_step(e: &mut Engine, queued: &mut Vec<InputEvent>, run: &mut Option<Run>) -> bool {
     let mut released = false;
     if let Some(r) = *run {
@@ -2081,10 +2081,11 @@ fn page_step(e: &mut Engine, queued: &mut Vec<InputEvent>, run: &mut Option<Run>
     released
 }
 
-/// Runs entry `code` on the target at `at` as `Game::command_at` and `Game::step` do, until the
-/// prompt is up again with no run left (at most 3000 steps); a later prompt of the command (a
-/// direction, the next weapon's target) is answered with Escape. True when the target press
-/// went in.
+/// Runs entry `code` on the target at `at` as the engine's context menu runs a chosen entry
+/// (spec 17 Running a choice, `ui::popup`: the icon's press, then the target press once the game
+/// reads it), until the prompt is up again with no run left (at most 3000 steps); a later prompt
+/// of the command (a direction, the next weapon's target) is answered with Escape. True when the
+/// target press went in.
 fn choose(e: &mut Engine, code: u16, at: (i16, i16)) -> bool {
     choose_then(e, code, at, &[])
 }
@@ -2124,7 +2125,7 @@ fn choose_then(e: &mut Engine, code: u16, at: (i16, i16), then: &[&[InputEvent]]
 
 /// The nearest closed steel door (0x12c, frames 4..7: closed, neither locked 8..11 nor magically
 /// locked 12..) with a tile beside it to stand on.
-fn closed_door(s: &State) -> (Slot, (u16, u16)) {
+pub(crate) fn closed_door(s: &State) -> (Slot, (u16, u16)) {
     nearest(s, 0x12c, |s, o| s.objects.tf(o) >> 10 & 0xc == 4)
         .into_iter()
         .find_map(|o| Some((o, beside(s, o)?)))
