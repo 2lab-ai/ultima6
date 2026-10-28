@@ -177,8 +177,8 @@ pub struct Io {
     preview: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
     /// Port-only (spec 20 Design 4): [`Io::warm_early_picture`] answered.
     warmed: Cell<bool>,
-    /// Port-only (spec 20): [`Io::break_motion`] ran and no publication with a scene went out
-    /// since.
+    /// Port-only (spec 20): [`Io::break_motion`] ran and the engine queued no publication with a
+    /// scene since (an early picture is one, [`Published::preview`]).
     motion_break: Cell<bool>,
 }
 
@@ -480,11 +480,11 @@ impl Io {
     /// Port-only (spec 20): the game shown is another (load state 0x105350,
     /// [`crate::saveload::restore::load_state`], whose forgotten remembered sight the scenes kept
     /// so far name; a new process taking over, [`crate::main_loop::take_over`]): the shots kept
-    /// are dropped, and until a publication with a scene goes out ([`Engine::take_motion`]) every
-    /// scene kept snaps, the early picture's included, and an unchanged picture is published
-    /// again: no slide crosses it.
+    /// are dropped, and until the engine queues a publication with a scene ([`Engine::tick`]; an
+    /// early picture is one) every scene kept snaps, the early picture's included, and an
+    /// unchanged picture is published again: no slide crosses it.
     pub(crate) fn break_motion(&self) {
-        self.motion_break.set(true);
+        self.set_motion_break(true);
         self.shots.borrow_mut().clear();
         self.last_shot.borrow_mut().take();
         self.preview.borrow_mut().take();
@@ -493,6 +493,14 @@ impl Io {
     /// Port-only (spec 20): whether an [`Io::break_motion`] is pending.
     pub(crate) fn motion_break(&self) -> bool {
         self.motion_break.get()
+    }
+
+    /// Port-only (spec 20): the one write of the break: set by [`Io::break_motion`], ended by the
+    /// engine when it queues a publication with a scene ([`Engine::tick`]). A queued early picture
+    /// that snaps ends it too: a platform's presenter starts again from it even where it shows no
+    /// slides (u6-render `Presenter::preview`).
+    fn set_motion_break(&self, on: bool) {
+        self.motion_break.set(on);
     }
 
     /// Port-only (spec 20 Design 4): true the first time it is asked: the first framed render
@@ -759,10 +767,14 @@ const TEXT_RING: usize = KEY_RING;
 
 /// Port-only (spec 20): the framed renders an [`Io`] keeps at most until a publication shows one
 /// of them: more than a fight's turn records before its playback shows them.
-const SHOTS: usize = 64;
+pub(crate) const SHOTS: usize = 64;
 
-/// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most.
-const PUBLISHED: usize = 256;
+/// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most, the oldest
+/// dropped past it. A tick queues at most two (its early picture and its own), and a page takes
+/// them at each present, after at most [`crate::pacer::MAX_STEPS`] ticks: none it would take is
+/// dropped, a snapping one that ends an [`Io::break_motion`] included.
+pub(crate) const PUBLISHED: usize = 256;
+const _: () = assert!(2 * crate::pacer::MAX_STEPS as usize <= PUBLISHED);
 
 /// Port-only (spec 20): a publication whose shown map changed ([`Engine::take_motion`]).
 #[derive(Clone, Debug)]
@@ -772,8 +784,10 @@ pub struct Published {
     /// The framed render whose picture it shows; `None` for a foreign picture (a missile, a
     /// flash, a quake, a frame a fight plays back of no render kept, the map overview).
     pub shot: Option<Rc<crate::gfx::motion::Shot>>,
-    /// Spec 20 Design 4: no publication but the early picture of the leader's step
-    /// ([`crate::gfx::motion::preview`]): its scene, ahead of the engine's own picture.
+    /// Spec 20 Design 4: not a picture the engine published but the early picture of the
+    /// leader's step ([`crate::gfx::motion::preview`]): its scene, ahead of the engine's own
+    /// picture. It is a publication with a scene all the same: queued, it ends an
+    /// [`Io::break_motion`].
     pub preview: bool,
 }
 
@@ -951,7 +965,7 @@ impl Engine {
                 shot: Some(shot),
                 preview: true,
             });
-            self.io.motion_break.set(false);
+            self.io.set_motion_break(false);
         }
         let version = self.io.front_version.get();
         let presented = version != self.published_front;
@@ -1028,7 +1042,7 @@ impl Engine {
         self.motion_map = Some(hash);
         let shot = self.io.take_shot(hash);
         if shot.is_some() {
-            self.io.motion_break.set(false);
+            self.io.set_motion_break(false);
         }
         self.motion.push(Published {
             time_ms: self.io.now_ms(),
@@ -1711,8 +1725,6 @@ mod tests {
         // Input after the end is still only queued.
         assert_eq!(e.io().pending_events(), 1);
     }
-    /// A game that draws pixel `n` of the shown map's first row in colour 1 and presents, once a
-    /// tick, `n` counting up: every publication changes the shown map.
     /// A game that paints a new pixel of the shown map in each of its first `paints` frames, then
     /// presents the same picture every frame.
     fn painting_game(paints: usize) -> Engine {
@@ -1728,6 +1740,122 @@ mod tests {
                 io.vblank().await;
             }
         })
+    }
+
+    /// A game whose every frame does as `mode` says: 0 presents the same picture, 1 paints a new
+    /// pixel of the shown map, presents and keeps a scene of its own for it (as a framed render
+    /// does, [`crate::gfx::motion::keep_scene`]), 2 paints a new pixel and presents with no scene
+    /// kept (a foreign picture).
+    fn scene_game(mode: Rc<Cell<u8>>) -> Engine {
+        engine_with(move |_state, io| async move {
+            let (x0, y0, _, _) = crate::geom::SHOWN;
+            let mut n = 0;
+            loop {
+                let m = mode.get();
+                if m != 0 {
+                    io.draw(|fb| {
+                        fb.set(
+                            usize::from(x0) + n % 64,
+                            usize::from(y0),
+                            1 + (n / 64) as u8,
+                        )
+                    });
+                    n += 1;
+                }
+                io.present();
+                if m == 1 {
+                    let scene = u6_render::motion::Scene {
+                        leader: None,
+                        centre: (0, 0, 0),
+                        origin: (0, 0),
+                        cols: 0,
+                        rows: 0,
+                        corner: (0, 0),
+                        cells: Vec::new(),
+                        placed: Vec::new(),
+                        snap: false,
+                    };
+                    crate::gfx::motion::keep_scene(&io, scene);
+                }
+                io.vblank().await;
+            }
+        })
+    }
+
+    /// [`scene_game`] with smooth motion on, a scene published and taken, then an unchanged
+    /// frame (nothing published), then a load's break ([`Io::break_motion`]); and its mode.
+    fn broken_scene_game() -> (Engine, Rc<Cell<u8>>) {
+        let mode = Rc::new(Cell::new(1u8));
+        let mut e = scene_game(Rc::clone(&mode));
+        e.set_motion(true);
+        e.tick(&[], 20);
+        let first = e.take_motion();
+        assert!(
+            first.len() == 1 && first[0].shot.is_some(),
+            "a scene published"
+        );
+        mode.set(0);
+        e.tick(&[], 20);
+        assert!(e.take_motion().is_empty(), "unchanged: nothing");
+        e.io().break_motion();
+        (e, mode)
+    }
+
+    /// Spec 20: while a load's break is pending an unchanged picture is published again (foreign:
+    /// the scenes kept were dropped), so the first scene after the load is not missed.
+    #[test]
+    fn with_the_break_pending_an_unchanged_picture_is_published() {
+        let (mut e, _mode) = broken_scene_game();
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert_eq!(p.len(), 1, "an unchanged picture published");
+        assert!(
+            p[0].shot.is_none(),
+            "foreign: no scene kept since the break"
+        );
+    }
+
+    /// Spec 20: a publication without a scene leaves the break pending (only a scene handed over
+    /// ends it), and the next unchanged picture is published again.
+    #[test]
+    fn a_publication_without_a_scene_leaves_the_break_pending() {
+        let (mut e, mode) = broken_scene_game();
+        mode.set(2);
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert!(
+            p.len() == 1 && p[0].shot.is_none(),
+            "a foreign picture published"
+        );
+        assert!(e.io().motion_break(), "the break still pending");
+        mode.set(0);
+        e.tick(&[], 20);
+        assert_eq!(
+            e.take_motion().len(),
+            1,
+            "so an unchanged picture is published again"
+        );
+    }
+
+    /// Spec 20: the first scene published after the break snaps and ends it; an unchanged picture
+    /// after it is not published.
+    #[test]
+    fn a_published_scene_snaps_and_ends_the_break() {
+        let (mut e, mode) = broken_scene_game();
+        mode.set(1);
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert!(
+            p.len() == 1 && p[0].shot.as_ref().is_some_and(|s| s.scene.snap),
+            "the scene published, snapping"
+        );
+        assert!(!e.io().motion_break(), "the break ended");
+        mode.set(0);
+        e.tick(&[], 20);
+        assert!(
+            e.take_motion().is_empty(),
+            "then an unchanged picture: nothing"
+        );
     }
 
     /// Spec 20: the switch off drops what the engine held for the platform: the publications

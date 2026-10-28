@@ -149,12 +149,34 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
        it is, still shows in grey; the turn's picture then shows them black.
      - No slide crosses a load (load state 0x105350) or a new process taking over: the remembered sight's copies
        are forgotten there, which the scenes kept before name, and the game shown is another. The engine drops its
-       kept scenes, and until a publication with a scene goes out every scene it keeps snaps, the early picture's
-       included, and an unchanged picture is published again (`Io::break_motion`). The page makes the next layers
-       whole after a scene that snaps.
+       kept scenes, and until it queues a publication with a scene every scene it keeps snaps, the early picture's
+       included, and an unchanged picture is published again (`Io::break_motion`). An early picture is such a
+       publication: the presenter starts again from one that snaps whether or not it shows slides
+       (`Presenter::preview`). The page makes the next layers whole after a scene that snaps.
    - **Page:** `draw()` also runs while a slide is active. The wasm exports the presentation clock.
 6. **Switch.** Smooth motion on by default in the page, off in the engine and the web harness by default (as spec 18's
    switch). Off is today's picture exactly.
+7. **Bounds.** What motion keeps and what bounds it. Spec 18's memory bounds count the remembered sight only, not
+   these. Sizes are this build's layouts on the native build, from capacities, as `SightMemory::heap_bytes` counts.
+   - The engine keeps at most `SHOTS` = 64 framed renders until a publication shows one (`engine.rs:770`), with the
+     one kept last and the early picture made in the poll. It queues at most `PUBLISHED` = 256 publications for the
+     platform and drops the oldest past it (`engine.rs:776`, `:1053`); the page takes them all at each present.
+   - None the page would take is dropped, so a snapping one that ends a load's break is never lost before the page
+     sees it. A tick queues at most two (its early picture, `engine.rs:963`, and its own, `:1047`). The page runs at
+     most `MAX_STEPS` = 64 ticks a display frame (`pacer.rs:96-112`, `site/app.js:3082`) and presents after any
+     frame that ran one (`site/app.js:3091-3092`). Each present takes the queue whole (`u6-web lib.rs:993`, `:1903`,
+     `:2213`). 2 × 64 ≤ 256 is asserted at compile time beside `PUBLISHED` (`engine.rs:777`).
+   - The presenter keeps `HISTORY` = 3 scenes (`u6-render motion.rs:57`); an early picture it holds, for at most
+     `PREVIEW_MS`, is one of them.
+   - A shot holds at most 12 264 bytes in Original and 69 864 in Wide (`Shot::heap_bytes`; the start fight, the
+     town's walk, and the walk with the cells round the party remembered: `the_heap_bytes_of_a_shot`, 2026-10-28).
+     At most 325 are held at once: 3.99 MB in Original, 22.7 MB in Wide. With the page's presents (at most 128
+     queued) it is 197: 2.42 MB and 13.8 MB.
+   - The slide's layers at the page's largest scale, HD 4×, the most over four steps east
+     (`the_slide_layer_buffers_at_hd_4x`, 2026-10-28): in Original 1.05 MB of layers (colour indices, sources and
+     drawn marks, in the wasm), 4.77 MB of composed words and changes (in the wasm) and 4.78 MB of the page's
+     canvases, 10.6 MB in all; in Wide 6.00, 27.4 and 27.4 MB, 60.9 MB in all. The words and canvases take 4 · s²
+     bytes a layer pixel at scale s, so at 2× a quarter of these.
 
 ## Receipts
 

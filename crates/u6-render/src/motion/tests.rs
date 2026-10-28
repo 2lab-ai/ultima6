@@ -1168,8 +1168,9 @@ fn a_fractional_restart_in_every_direction_paints_the_cells_it_sweeps_as_compose
 
 /// Spec 20 Design 3 and 5: over sequences of the leader's publications (a chain of restarts, a
 /// reverse, a far jump, and 300 of every kind at pseudo-random times), the camera is never drawn
-/// farther than [`SNAP_PX`] from rest, at each publication's own time and every 5 ms between, which the static layer's margin covers (u6-core
-/// `slide_layers` asserts the bound against the shown map's inset).
+/// farther than [`SNAP_PX`] from rest, at each publication's own time and every 5 ms between,
+/// which the static layer's margin covers (u6-core `slide_layers` asserts the bound against the
+/// shown map's inset).
 #[test]
 fn the_camera_stays_within_its_reach_over_any_sequence_of_publications() {
     let at = |x: i32, y: i32| scene((x, y), 0, &[(LEADER, (x, y), 0x180)]);
@@ -1240,4 +1241,29 @@ fn the_camera_stays_within_its_reach_over_any_sequence_of_publications() {
         steps.push((t, (x, y)));
     }
     assert!(run(&steps) <= bound, "300 publications: within the bound");
+}
+
+/// Spec 20 (no slide crosses a load): an early picture that snaps (the first scene after a load)
+/// restarts the presenter even where slides are not shown (Max, or too few display frames), as a
+/// publication that snaps does: the engine counts it handed over (its break ends there), so a
+/// later scene one cell from the scene before it does not slide from that scene, which is gone.
+#[test]
+fn an_early_picture_that_snaps_restarts_the_presenter_where_slides_are_not_shown() {
+    let a = scene((100, 100), 0, &[(LEADER, (100, 100), 0x180)]);
+    let mut b = scene((101, 100), 0, &[(LEADER, (101, 100), 0x180)]);
+    b.snap = true;
+    let c = scene((101, 100), 0, &[(LEADER, (101, 100), 0x180)]);
+    let mut p = Presenter::new();
+    p.publish(Rc::new(a.clone()), 0.0, true);
+    p.preview(Rc::new(b), 100.0, false);
+    p.publish(Rc::new(c), 200.0, true);
+    assert!(
+        p.view(200.0)
+            .is_none_or(|v| v.camera == (0, 0) && v.movers.is_empty()),
+        "no slide from the scene before the early picture"
+    );
+    assert!(
+        p.history().iter().all(|h| **h != a),
+        "the scene before it is gone"
+    );
 }

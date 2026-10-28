@@ -1901,8 +1901,9 @@ impl Game {
         let engine = self.engine.as_mut()?;
         let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
         let view = self.motion.take(engine, self.pacer.pace_rate(), t);
-        // After a scene that snaps (a load: the remembered sight's copies forgotten, their
-        // sources named again by others) no change is made against layers made before it.
+        // After a scene that snaps no change is made against layers made before it: after a load
+        // the remembered sight's copies are forgotten and their sources named again by others. A
+        // dissolve's or an XOR plot's snap drops them too, so the next layers come whole.
         if std::mem::take(&mut self.motion.snapped) {
             self.layers.held = None;
             self.layers.pending = None;
@@ -2153,8 +2154,10 @@ struct Motion<T> {
     /// What it drew ([`Drawn`]).
     shown: Option<Drawn<T>>,
     frame: Framebuffer,
-    /// A scene that snaps was published since [`Game::slide_view`] last looked (a load, a
-    /// dissolve): the slide's layers the page holds are of scenes before it.
+    /// A scene that snaps was published since [`Game::slide_view`] last looked: the slide's
+    /// layers the page holds are of scenes before it, and are dropped as the base of the next
+    /// changes, whatever made it snap (a load, and a dissolve or an XOR plot too: their next
+    /// layers come whole).
     snapped: bool,
 }
 
@@ -6342,6 +6345,86 @@ mod tests {
              {pack_words} words of the HD frame's map, the first take after it whole); {covered} \
              frames with the map covered",
             page.whole, page.changes, page.misses, checked[0], checked[1]
+        );
+    }
+
+    /// Spec 20 Bounds, on the user's zip, in this build's layout: the bytes of the slide's layers
+    /// at the page's largest scale (HD 4×), the most over the frames drawn on four steps east: the wasm
+    /// side's layers (colour indices, sources and drawn marks; each layer the slide and the kept
+    /// ones share once) and their composed words and changes, and the page's canvases ([`Page`]).
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn the_slide_layer_buffers_at_hd_4x() {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return;
+        }
+        let data = std::fs::read(ZIP).quiet();
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", data).quiet();
+        game.set_motion(true);
+        game.set_hd(true, 4);
+        game.boot(3, true).quiet();
+        assert_eq!(game.hd_scale(), 4, "the largest scale");
+        let mut page = Page::new();
+        let dt = 1000.0 / 60.0;
+        let (mut keys, mut frames) = (0, 0);
+        let (mut pixels, mut words, mut canvases) = (0usize, 0usize, 0usize);
+        let bytes = |l: &u6_render::motion::LayerPixels| {
+            l.pixels.capacity()
+                + l.src.capacity() * std::mem::size_of::<u6_render::Src>()
+                + l.drawn.capacity() * std::mem::size_of::<bool>()
+        };
+        for i in 0..30_000 {
+            if keys < 4 && game.at_prompt() && i > 3000 {
+                game.key_down("ArrowRight", "ArrowRight", false);
+                keys += 1;
+            } else if keys == 4 && game.at_prompt() && !game.sliding() {
+                break;
+            }
+            let k = game.pace(dt);
+            for _ in 0..k {
+                game.step(pacer::STEP_MS);
+            }
+            game.ran(k);
+            if k == 0 && !game.sliding() {
+                continue;
+            }
+            game.present();
+            if !page.take(&mut game) {
+                continue;
+            }
+            frames += 1;
+            let l = &game.layers;
+            let mut held: Vec<&Rc<u6_render::motion::LayerPixels>> = Vec::new();
+            for part in l.slide.iter().flat_map(|s| &s.parts) {
+                held.push(&part.pixels);
+            }
+            for kept in [&l.held, &l.pending].into_iter().flatten() {
+                held.extend([&kept.statics, &kept.frame]);
+            }
+            let mut once: Vec<&Rc<u6_render::motion::LayerPixels>> = Vec::new();
+            for p in held {
+                if !once.iter().any(|o| Rc::ptr_eq(o, p)) {
+                    once.push(p);
+                }
+            }
+            pixels = pixels.max(once.iter().map(|p| bytes(p)).sum());
+            let composed = (l.images.iter()).map(|im| {
+                let patch = im.patch.as_ref().map_or(0, |p| {
+                    (p.rects.iter()).map(|r| r.1.capacity()).sum::<usize>()
+                });
+                4 * (im.rgba.capacity() + patch)
+            });
+            words = words.max(composed.sum());
+            let held = page.held.as_ref();
+            canvases = canvases.max(held.map_or(0, |h| h.2.iter().map(|c| 4 * c.2.len()).sum()));
+        }
+        assert!(keys == 4 && frames > 0, "slides drawn on the steps");
+        println!(
+            "the slide's layers at HD 4x, the most over {frames} frames drawn: {pixels} bytes of layers, \
+             {words} of composed words and changes, {canvases} of the page's canvases; {} in all",
+            pixels + words + canvases
         );
     }
 

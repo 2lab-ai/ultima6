@@ -72,6 +72,24 @@ impl Shot {
         }
     }
 
+    /// The bytes the shot holds on the heap in its `Rc`, from its buffers' capacities in this
+    /// build's layouts, as [`super::cache::SightMemory`] counts its own (the cost receipts): the
+    /// `Rc`'s box (the shot and its two counts), the scene's cells and their nodes, its placed
+    /// objects, and per view cell the remembered layers. Not the allocator's own overhead.
+    #[cfg(test)]
+    pub(super) fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let nodes: usize = (self.scene.cells.iter()).map(|c| c.nodes.capacity()).sum();
+        let layers: usize = (self.memory.iter()).map(|m| m.layers.capacity()).sum();
+        size_of::<Shot>()
+            + 2 * size_of::<usize>()
+            + self.scene.cells.capacity() * size_of::<u6_render::motion::Cell>()
+            + nodes * size_of::<u6_render::motion::Node>()
+            + self.scene.placed.capacity() * size_of::<u6_render::motion::Placed>()
+            + self.memory.capacity() * size_of::<SightShown>()
+            + layers * size_of::<super::cache::Layer>()
+    }
+
     /// A shot of an empty scene whose shown map hashes to `hash` (tests).
     #[cfg(test)]
     pub(crate) fn for_test(hash: u64) -> Rc<Shot> {
@@ -162,16 +180,18 @@ pub(super) fn record(
 
 /// Port-only (a platform's synthetic scenes, tests): keeps `scene` as the shot of the render just
 /// presented, as [`record`] keeps a framed render's (its picture the shown map of the back buffer
-/// now), with no remembered sight, cursor or clock; nothing with the switch off. The engine then
-/// hands it over with the publication of that picture ([`crate::Engine::take_motion`]).
+/// now), with no remembered sight, cursor or clock, snapping while a load's break is pending
+/// ([`Io::break_motion`]) as there; nothing with the switch off. The engine then hands it over
+/// with the publication of that picture ([`crate::Engine::take_motion`]).
 pub fn keep_scene(io: &Io, scene: Scene) {
     if !io.motion() {
         return;
     }
     let hash = io.draw(|fb| shown_hash(fb));
+    let snap = scene.snap | io.motion_break();
     io.keep_shot(Rc::new(Shot {
         hash,
-        ..Shot::of_scene(scene)
+        ..Shot::of_scene(Scene { snap, ..scene })
     }));
 }
 

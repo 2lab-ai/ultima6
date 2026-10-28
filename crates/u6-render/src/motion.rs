@@ -54,7 +54,7 @@ pub const MIN_FRAMES: f64 = 2.0;
 /// `follows`) and a restart at most this far (its `far` check), else it snaps.
 pub const SNAP_PX: f64 = 1.5 * CELL as f64;
 /// Scenes kept for the cells a slide shows and the newest scene lacks (the strip leaving the view).
-const HISTORY: usize = 3;
+pub const HISTORY: usize = 3;
 /// How long a preview ([`Presenter::preview`]) is held, on the presentation clock, when no
 /// picture of the engine's follows it: past a step's 540–860 ms to its picture.
 pub const PREVIEW_MS: f64 = 2000.0;
@@ -303,11 +303,16 @@ impl<T: AsRef<Scene>> Presenter<T> {
 
     /// A scene the engine built ahead of its picture (the early picture of the leader's step):
     /// slid to as [`Presenter::publish`] does, then held at rest until the engine publishes a
-    /// picture, at most [`PREVIEW_MS`].
+    /// picture, at most [`PREVIEW_MS`]. Where slides are not shown it is left out, unless it snaps
+    /// ([`Scene::snap`]: the first scene after a load): then the presenter starts again from it,
+    /// as from a publication that snaps. The engine counts a scene that snaps handed over once it
+    /// queued it (u6-core `Io::break_motion` ends there), so no scene before it may stay here.
     pub fn preview(&mut self, shot: Rc<T>, time: f64, slides: bool) {
         if slides {
             self.publish(shot, time, true);
             self.held = Some(time + PREVIEW_MS);
+        } else if (*shot).as_ref().snap {
+            self.restart(shot);
         }
     }
 
