@@ -1331,8 +1331,12 @@ fn what_follows_an_injecting_release_waits_for_the_next_reader() {
             usize::from(click_after),
             "{label}: the f9 read's next pass took one"
         );
-        idle(&mut e, 3);
-        assert_eq!(e.io().pending_events(), 0, "{label}: the f9 read took them");
+        idle(&mut e, 1);
+        assert_eq!(
+            e.io().pending_events(),
+            0,
+            "{label}: the pass after it took the other"
+        );
         let injected = talk::INJECTED.with(|k| k.borrow().clone());
         assert_eq!(
             injected,
@@ -1357,9 +1361,11 @@ fn what_follows_an_injecting_release_waits_for_the_next_reader() {
 /// Spec 22 Contract 5 "Timing" (gpt SHOULD 1): when the next reader is another f7 read (`job`'s
 /// answer jumps back to the player's words), that read takes what was queued after the injecting
 /// release as its own pointer events, hit-tested in its first pass: a click on the keyword the
-/// answer showed, queued in the frame of the click on Job, types that keyword there. Taken by
-/// the first read instead (before the answer showed it), or left queued behind nothing, it types
-/// nothing and the second read waits.
+/// answer showed, queued in the frame of the click on Job, types that keyword there, and the
+/// conversation ends in that frame (a read takes one pass a frame once it waits, as the f9 case
+/// shows, so the second read's first pass took it). Taken by the first read instead, hit-tested
+/// there before the answer showed the keyword or taken there with no hit test, it types nothing
+/// and the second read waits.
 #[test]
 fn a_click_after_an_injecting_release_is_the_next_f7_reads_own() {
     let mut body = b"\xf7\xefjob\xf6Work @cat.\xb0".to_vec();
@@ -1390,11 +1396,21 @@ fn a_click_after_an_injecting_release_is_the_next_f7_reads_own() {
         ],
         16,
     );
+    // In that frame (opus N1, gpt NIT): its first pass took the click, its Enter ended it.
+    assert!(
+        e.finished() && e.state().converse.input == b"cat",
+        "the second read's first pass typed the keyword, in the click's frame"
+    );
     finish(&mut e);
     assert_eq!(
         e.state().converse.input,
         b"cat",
         "the second read typed the keyword"
+    );
+    assert_eq!(
+        e.io().pending_events(),
+        0,
+        "nothing left queued: the click's keys taken once (opus N2)"
     );
     assert!(screen(&e.state()).ends_with("Purr."), "its answer");
     let injected = talk::INJECTED.with(|k| k.borrow().clone());

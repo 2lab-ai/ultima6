@@ -108,13 +108,11 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
      release puts its keys in front of the queue and ends the pass. The events queued after it wait behind those keys
      for the next reader, which takes them as its own pointer events once the keys are taken (their Enter ends this
      read) and does with them what such events do there: a string read (f9) takes them one change of the buttons a
-     pass and types nothing for them (tested); a next f7 read starts with `talk::begin` and then hit-tests them in its
-     first pass (`ui/keyread.rs` `edit_line`, read from the code), and a click there on a keyword the answer showed
-     types it (tested).
-     Elsewhere the original's event wait takes one a pass. So presses
-     and releases queued together, on targets or off them, are taken before the wait's next frame up to a click's
-     release, and a press and its release queued together alone type the word in that pass and leave no pointer event
-     behind it.
+     pass and types nothing for them; a next f7 read starts with `talk::begin` and then hit-tests them in its first
+     pass (`ui/keyread.rs` `edit_line`): a click there on a keyword the answer showed types it in the frame the read
+     began (both tested). Elsewhere the original's event wait takes one a pass. So presses and releases queued
+     together, on targets or off them, are taken before the wait's next frame up to a click's release, and a press and
+     its release queued together alone type the word in that pass and leave no pointer event behind it.
    - Positions: each event is hit-tested where its own event put the pointer, a press or a release included: a move
      after a release (the pointer leaving the target in the click's frame) does not move the release off the target,
      and a move back over it after a cancelled press's release does not move that release onto it. The page's queue
@@ -241,11 +239,13 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   wait behind its keys, are taken by the f9 read that follows (the hover in its first pass, the press and the release
   in its next two, one a pass) and type nothing there (the hover half cannot tell which read took the hover; the
   click half shows the f7 read took none of it). Round 5: a click queued after the click on Job, on the keyword
-  `job`'s answer shows, is taken by the next f7 read the answer jumps back to and types that keyword there. Web (`crates/u6-web/src/lib.rs`): a run of moves
-  collapses and a press or a release stays where its event put it (release then hover, press then held moves, a
-  release of a press the engine has), also through `Game::step`'s hand-over; a press the old engine took keeps no two
-  moves apart after a relaunch (`put_on_screen` resets `Game::handed`: tested, not left as an optimisation);
-  `Game::talk_target` codes the read's hot and pressed targets.
+  `job`'s answer shows, is taken by the next f7 read the answer jumps back to and types that keyword there; round 6:
+  in the click's frame (the second read's first pass, a read taking one pass a frame once it waits), leaving nothing
+  queued. Web (`crates/u6-web/src/lib.rs`): a run of moves collapses and a press or a release stays where its event
+  put it (release then hover, press then held moves, a release of a press the engine has), also through
+  `Game::step`'s hand-over; a press the old engine took keeps no two moves apart after a relaunch (`put_on_screen`
+  resets `Game::handed`: tested, not left as an optimisation); `Game::talk_target` codes the read's hot and pressed
+  targets.
 - Real data (`ui/tests/pointer_real.rs`, the user's zip; counts and equality only; it prints `ran` or `skipped`): Talk
   to member 1 by the pointer, press Name, type a letter and press Job (the press takes the letter back with the keymap's
   Backspace), press a keyword of the answers; the same run with the pointer moved to the same places and the keys typed
@@ -260,8 +260,8 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   pointer back over Name in the cancel's frame, is released off every target, types nothing, the words are still
   read and the input line is the line before the touch (after the game took the press: Name pressed in the read,
   `Game::talk_target`, before the cancel is sent); Wide, a window dragged by its title strip during the read and
-  cancelled queues its release at the rest pixel, keeps its place at once, and the next move reaches the game at its
-  own pixel; a
+  cancelled queues one pointer event (`Game::keys_pending`), the last queued at the rest pixel (`Game::game_pointer`;
+  its buttons are not read back), keeps its place at once, and the next move reaches the game at its own pixel; a
   press on it in the canvas sends no key and ends the conversation with the same message-window pixels as typing
   `name` + Enter, every cell but the prompt's turning cursor (the one cell that changes from frame to frame there,
   found in each run, the same in both), Original and Wide (frames with `U6_FRAMES_DIR`).
