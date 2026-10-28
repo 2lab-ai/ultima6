@@ -1895,11 +1895,19 @@ impl Game {
     }
 
     /// Spec 20: hands the presenter the engine's publications since the last present; the slides
-    /// as drawn at the presentation clock while one runs.
+    /// as drawn at the presentation clock while one runs. A scene that snaps drops the layers the
+    /// page holds as the base of the next changes: the next layers come whole.
     fn slide_view(&mut self) -> Option<View> {
         let engine = self.engine.as_mut()?;
         let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
-        self.motion.take(engine, self.pacer.pace_rate(), t)
+        let view = self.motion.take(engine, self.pacer.pace_rate(), t);
+        // After a scene that snaps (a load: the remembered sight's copies forgotten, their
+        // sources named again by others) no change is made against layers made before it.
+        if std::mem::take(&mut self.motion.snapped) {
+            self.layers.held = None;
+            self.layers.pending = None;
+        }
+        view
     }
 
     /// Spec 20, HD off: with a slide (`view`), puts the published frame with the map as the
@@ -2145,6 +2153,9 @@ struct Motion<T> {
     /// What it drew ([`Drawn`]).
     shown: Option<Drawn<T>>,
     frame: Framebuffer,
+    /// A scene that snaps was published since [`Game::slide_view`] last looked (a load, a
+    /// dissolve): the slide's layers the page holds are of scenes before it.
+    snapped: bool,
 }
 
 impl<T: AsRef<Scene>> Motion<T> {
@@ -2156,6 +2167,7 @@ impl<T: AsRef<Scene>> Motion<T> {
             drawn: false,
             shown: None,
             frame: Framebuffer::new(),
+            snapped: false,
         }
     }
 
@@ -2179,6 +2191,7 @@ impl<T: AsRef<Scene>> Motion<T> {
     ) -> Option<View> {
         let slides = slides_shown(rate, self.interval);
         for (shot, time, preview) in publications {
+            self.snapped |= shot.as_ref().is_some_and(|s| (**s).as_ref().snap);
             match shot {
                 Some(shot) if preview => self.presenter.preview(shot, time, slides),
                 Some(shot) => self.presenter.publish(shot, time, slides),
@@ -5720,7 +5733,8 @@ mod tests {
     /// The engine of the page's tests: records 1..=3 of other pixels each, opaque, a palette of
     /// distinct colours presented once; then at each `w` the walk's next scene ([`walk_scene`]
     /// 1, 2, …) presented as a framed render keeps its scene (a pixel of the shown map set for
-    /// it, so its picture is its own; [`u6_core::gfx::motion::keep_scene`]), and at each `p` the
+    /// it, so its picture is its own; [`u6_core::gfx::motion::keep_scene`]), at each `s` the same
+    /// with a scene that snaps (as a load's first picture), and at each `p` the
     /// palette's colours changed and presented (the shown map's colour indices as they were).
     fn walk_engine() -> Engine {
         let mut state = u6_core::State::empty();
@@ -5745,11 +5759,15 @@ mod tests {
             loop {
                 while io.key_ready() {
                     match io.next_key().await {
-                        Key::Char('w') => {
+                        Key::Char(c @ ('w' | 's')) => {
                             n += 1;
                             io.draw(|fb| fb.set(usize::from(x0) + n as usize, usize::from(y0), 7));
                             io.present();
-                            u6_core::gfx::motion::keep_scene(&io, walk_scene(n));
+                            let scene = Scene {
+                                snap: c == 's',
+                                ..walk_scene(n)
+                            };
+                            u6_core::gfx::motion::keep_scene(&io, scene);
                         }
                         Key::Char('p') => {
                             k += 0x55;
@@ -6071,6 +6089,29 @@ mod tests {
         );
         assert!(before.is_some(), "pack: set");
         assert_eq!((page.whole, page.misses), (2, 0), "pack: whole again");
+        // A scene that snaps (as a load's first picture) after scene 2's slide: the next layers
+        // come whole (safeguard: a scene that snaps drops the layers the page holds as the base
+        // of changes, whose sources a load names again).
+        let (mut game, mut page) = (walk_game(), Page::new());
+        let mut at_snap = None;
+        run_walk(
+            &mut game,
+            &mut page,
+            4,
+            &mut |n, f, g: &mut Game, p: &mut Page| {
+                if (n, f) == (2, 12) {
+                    at_snap = Some(p.whole);
+                    g.key_down("KeyS", "s", false);
+                }
+            },
+            "snap",
+        );
+        assert_eq!(at_snap, Some(1), "snap: whole once before it");
+        assert_eq!(
+            (page.whole, page.misses),
+            (2, 0),
+            "snap: whole again after it"
+        );
         // HD off and on again at the same scale half way through scene 2: the page keeps its
         // canvases, the layers come whole (made under the new HD view version) and equal to those
         // made fresh, the versions moved.

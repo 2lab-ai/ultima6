@@ -138,12 +138,20 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      it (the static layer), as the window render drew it then: its base word (black for a remembered cell), then the
      remembered layers in grey, each pixel only where the fade keeps it (`keeps`, as `draw_remembered`). So a slide's
      end is the engine's picture for faded cells too (the receipt ages remembered cells 0 to 4 game days).
+     - A fade step (a remembered cell a game day older, or forgotten from day 5) is an in-place change: the scene of
+       the render that shows it has the same places, so the slides run on. Classic shows it at the next present (each
+       frame is drawn from the newest scene); HD at the slide's end (the layers stay those of their generation, and
+       the page then shows the engine's HD frame).
      - The early picture's grey cells are read from the live remembered sight, unchanged, round the copy's view and
        at its time (`SightMemory::shown_in`): the copy's cache holds none, and the cells in sight are drawn live,
-       so what that render would remember changes nothing it shows.
-     - No slide crosses a load (load state 0x105350): the remembered sight's copies are forgotten there, which the
-       scenes kept before name, so the engine drops its kept scenes and the next framed render's scene snaps
-       (`Io::break_motion`).
+       so what that render would remember changes nothing it shows. One case differs: where the store is at its
+       cap, the turn's render may forget the oldest remembered cells, which the early picture, reading the store as
+       it is, still shows in grey; the turn's picture then shows them black.
+     - No slide crosses a load (load state 0x105350) or a new process taking over: the remembered sight's copies
+       are forgotten there, which the scenes kept before name, and the game shown is another. The engine drops its
+       kept scenes, and until a publication with a scene goes out every scene it keeps snaps, the early picture's
+       included, and an unchanged picture is published again (`Io::break_motion`). The page makes the next layers
+       whole after a scene that snaps.
    - **Page:** `draw()` also runs while a slide is active. The wasm exports the presentation clock.
 6. **Switch.** Smooth motion on by default in the page, off in the engine and the web harness by default (as spec 18's
    switch). Off is today's picture exactly.

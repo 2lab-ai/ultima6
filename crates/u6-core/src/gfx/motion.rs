@@ -22,15 +22,15 @@
 
 use std::rc::Rc;
 
-use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, Span, TILE_H, TILE_W, TileKind};
+use u6_formats::gfx::{ANIM_FRAMES, ANIM_PLANE, Span, TILE_W, TileKind};
 use u6_render::motion::{
     Cell, Draw, LayerPixels, Layers, Node, Op, Part, Placed, Presenter, Rank, SNAP_PX, Scene, View,
 };
-use u6_render::{FLAG_MEMORY, FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, GREY, Kind, Src};
+use u6_render::{FLAG_OUTLINE, FLAG_OVERLAY, Framebuffer, Kind, Src};
 
 use super::GfxState;
 use super::blit::outline_colour;
-use super::cache::{Layer, Shown as Remembered, keeps};
+use super::cache::Shown as SightShown;
 use super::view::{CLOCK_TYPE, border_tiles, clock_points};
 use crate::engine::Io;
 use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
@@ -46,7 +46,7 @@ pub struct Shot {
     pub scene: Scene,
     /// Per view cell, what the remembered sight draws in grey over its base, with its fade (spec
     /// 18: no layers where it draws none); empty with the remembered sight off.
-    memory: Vec<Remembered>,
+    pub(super) memory: Vec<SightShown>,
     /// The target cursor (tile, x, y) the render drew over the cells.
     cursor: Option<(u16, u16, u16)>,
     /// The clock's tile (its object gets hands).
@@ -125,14 +125,14 @@ pub(crate) fn shown_hash(fb: &Framebuffer) -> u64 {
 
 /// Keeps the shot of the framed render just presented, with its remembered layers, cursor and
 /// clock tile (what 0x102c90 took before it drew); `snap` when it was presented dissolving or drew
-/// XOR plots (the sparkle) its scene does not hold, or is the first after a load
-/// ([`Io::break_motion`]). A render of the window cache that drew no box
+/// XOR plots (the sparkle) its scene does not hold, or a load is not yet followed by a published
+/// scene ([`Io::break_motion`]). A render of the window cache that drew no box
 /// (`same`: every box's draws those of the last render) keeps the last shot again. Nothing with the
 /// switch off.
 pub(super) fn record(
     state: &State,
     io: &Io,
-    memory: Vec<Remembered>,
+    memory: Vec<SightShown>,
     (cursor, clock): (Option<(u16, u16, u16)>, Option<u16>),
     snap: bool,
     same: bool,
@@ -143,7 +143,7 @@ pub(super) fn record(
     if io.warm_early_picture() {
         drop(std::hint::black_box(state.clone()));
     }
-    let snap = snap | io.take_motion_break();
+    let snap = snap | io.motion_break();
     let hash = io.draw(|fb| shown_hash(fb));
     if let Some(last) = io.last_shot().filter(|l| same && l.hash == hash && !snap) {
         io.keep_shot(last);
@@ -180,7 +180,8 @@ pub fn keep_scene(io: &Io, scene: Scene) {
 /// 0x10e81e: an RNG draw it makes stays on the copy) and the remembered sight read as a framed
 /// render of the copy would draw it ([`super::cache::SightMemory::shown_in`] of the state's
 /// memory, unchanged: the cells in sight are drawn live, so what this render would remember
-/// changes nothing it shows); its shot kept for the engine to hand over ([`Io::keep_preview`]). The
+/// changes nothing it shows); its shot kept for the engine to hand over ([`Io::keep_preview`]),
+/// snapping while a load is not yet followed by a published scene ([`Io::break_motion`]). The
 /// copy is dropped; nothing with the switch off, nor in combat mode, where a fight's frames (a
 /// missile's flight, a flash) can show the party where it was before the turn's picture does.
 pub(crate) fn preview(state: &State, io: &Io) {
@@ -199,7 +200,7 @@ pub(crate) fn preview(state: &State, io: &Io) {
     };
     let clock = copy.tables.basetile.base.get(CLOCK_TYPE).copied();
     let shot = Shot {
-        scene: scene_of(&copy, false),
+        scene: scene_of(&copy, io.motion_break()),
         memory,
         cursor: None,
         clock,
@@ -317,10 +318,21 @@ impl Clip {
 
 /// What the draws at any pixel write into: the shown map of a frame ([`Shown`]), or a layer of a
 /// slide ([`LayerPixels`]).
-trait Canvas {
+pub(super) trait Canvas {
     /// Writes pixel (x, y), in frame pixels, as `f` of what it holds, naming `src`, where the
     /// canvas holds it.
     fn put(&mut self, at: (i32, i32), src: Src, f: impl FnOnce(u8) -> u8);
+}
+
+/// A whole frame (the window render's back buffer).
+impl Canvas for Framebuffer {
+    fn put(&mut self, (x, y): (i32, i32), src: Src, f: impl FnOnce(u8) -> u8) {
+        if let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y))
+            && let Some(p) = self.get(x, y)
+        {
+            self.set_src(x, y, f(p), src);
+        }
+    }
 }
 
 /// A frame drawn inside its shown map only.
@@ -407,43 +419,6 @@ fn blit_at(gfx: &GfxState, fb: &mut impl Canvas, word: u16, (x, y): (i32, i32), 
     }
 }
 
-/// The window render's grey draw of a remembered layer `fade` whole days old (spec 18,
-/// `blit_memory`) at any pixel: the pixels the fade keeps ([`keeps`]).
-fn memory_at(gfx: &GfxState, fb: &mut impl Canvas, layer: Layer, (x, y): (i32, i32), fade: u8) {
-    let r = usize::from(layer.record);
-    let (Some((pixels, transparent, id, ver)), Some(overlay)) =
-        (layer.image(gfx), gfx.overlays.get(r))
-    else {
-        return;
-    };
-    let src = |c: usize, row: usize, flags: u8| tile_src(id, ver, (c, row), flags | FLAG_MEMORY);
-    let pixels = pixels.iter().zip(transparent).take(TILE_W * TILE_H);
-    for (i, (&p, &clear)) in pixels.enumerate() {
-        let (row, c) = (i / TILE_W, i % TILE_W);
-        if !clear && keeps(fade, c, row) {
-            put(fb, (x + c as i32, y + row as i32), src(c, row, 0), |_| {
-                p | GREY
-            });
-        }
-    }
-    if layer.masktype & 4 != 0
-        && let Some(ov) = overlay
-    {
-        let rows = &ov.frames[usize::from(layer.frame) % ANIM_FRAMES];
-        for (k, bits) in rows.iter().enumerate() {
-            let row = usize::from(ov.first_row) + k;
-            if row >= TILE_H {
-                break;
-            }
-            let drawn = |&c: &usize| bits & (0x8000 >> c) != 0 && keeps(fade, c, row);
-            for c in (0..TILE_W).filter(drawn) {
-                let at = (x + c as i32, y + row as i32);
-                put(fb, at, src(c, row, FLAG_OVERLAY), |p| p | 1 << ANIM_PLANE);
-            }
-        }
-    }
-}
-
 /// The clock hands (0x102bf2, [`clock_points`]) of a clock tile at any pixel, in the clock's
 /// colour (a plot sets the pixel; a colour past 15 plots nothing). The game's plot colour is not
 /// touched.
@@ -499,7 +474,7 @@ fn draw_ops(state: &State, presenter: &Presenter<Shot>, ops: &[Op], fb: &mut imp
                 blit_at(gfx, fb, shot.scene.cells[cell].base, at, frame);
                 if let Some(m) = shot.memory.get(cell) {
                     for &layer in &m.layers {
-                        memory_at(gfx, fb, layer, at, m.fade);
+                        super::view::blit_memory(gfx, fb, layer, at, m.fade);
                     }
                 }
             }

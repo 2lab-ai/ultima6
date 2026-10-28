@@ -628,8 +628,8 @@ fn remembered(fb: &Framebuffer, x: usize, y: usize) -> bool {
 /// then the steps again). At the end of every slide
 /// the map drawn again over a poisoned map is the engine's picture in colour and source, classic
 /// and HD, the faded cells included; and each early picture (out of combat) drawn at its start
-/// shows every cell remembered in the engine's picture then, and out of sight in the early
-/// picture too, as that picture shows it.
+/// shows every cell out of sight in it and in the engine's picture then as that picture shows it,
+/// pixel for pixel (its black pixels and the dither's holes included), colour and source.
 #[test]
 fn remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them() {
     let Some(files) = files() else { return };
@@ -659,22 +659,29 @@ fn remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them() {
                     let mut fb = poisoned(e);
                     paint(&e.state(), &p, &start, &mut fb);
                     let n = &shot.scene;
+                    // The engine's scene shown now (the picture before the step).
+                    let before = p.history().get(1).map(|h| &h.scene);
+                    let unseen_in = |s: &u6_render::motion::Scene, (rx, ry): (i32, i32)| {
+                        let cell = (
+                            s.origin.0 + (rx - s.corner.0).div_euclid(16),
+                            s.origin.1 + (ry - s.corner.1).div_euclid(16),
+                        );
+                        s.index(cell).is_some_and(|i| {
+                            let base = s.cells[i].base;
+                            base == crate::map::view::NOT_VISIBLE || base == crate::map::view::DARK
+                        })
+                    };
                     let (mut compared, mut differ) = (0, 0);
                     let (x0, y0, x1, y1) = SHOWN;
                     for y in usize::from(y0)..=usize::from(y1) {
                         for x in usize::from(x0)..=usize::from(x1) {
-                            // The early picture's cell drawn at (x, y) at its start.
-                            let (rx, ry) = (x as i32 + start.camera.0, y as i32 + start.camera.1);
-                            let cell = (
-                                n.origin.0 + (rx - n.corner.0).div_euclid(16),
-                                n.origin.1 + (ry - n.corner.1).div_euclid(16),
-                            );
-                            let unseen = n.index(cell).is_some_and(|i| {
-                                let base = n.cells[i].base;
-                                base == crate::map::view::NOT_VISIBLE
-                                    || base == crate::map::view::DARK
-                            });
-                            if remembered(&want, x, y) && unseen {
+                            // A cell out of sight in the early picture (drawn at (x, y) at its
+                            // start) and in the engine's picture: every pixel of it, its black ones
+                            // and the dither's holes included, colour and source.
+                            let start_at = (x as i32 + start.camera.0, y as i32 + start.camera.1);
+                            let rest = (x as i32, y as i32);
+                            if unseen_in(n, start_at) && before.is_some_and(|b| unseen_in(b, rest))
+                            {
                                 compared += 1;
                                 let same = fb.get(x, y) == want.get(x, y)
                                     && fb.src_at(x, y) == want.src_at(x, y);
@@ -729,7 +736,7 @@ fn remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them() {
         );
         println!(
             "{days} days: {} slide ends equal to the engine's picture, {} remembered pixels in \
-             them; {} early pictures, {} remembered pixels each as the engine's picture",
+             them; {} early pictures, {} pixels of cells out of sight each as the engine's picture",
             seen[0], seen[1], seen[2], seen[3]
         );
         for (t, s) in totals.iter_mut().zip(seen) {
@@ -739,60 +746,429 @@ fn remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them() {
     println!("in all: {totals:?}");
 }
 
-/// Spec 20 (load state 0x105350, spec 18's forget): no slide crosses a load. The party steps a cell
-/// in the start fight, then the game is restored (the boot's save: the party back a cell away,
-/// the remembered sight forgotten), then a turn passes: its picture's scene snaps, so a presenter
-/// fed every publication shows no slide into it (the scenes before the load name copies of the
-/// forgotten store and another game).
+/// Whether a slide runs at `t` (a camera or a mover off its place; a preview held at rest runs
+/// none).
+fn slides_at(p: &Presenter<Shot>, t: f64) -> bool {
+    p.view(t)
+        .is_some_and(|v| v.camera != (0, 0) || !v.movers.is_empty())
+}
+
+/// The town's setup of [`play`]: the actors in the assault worktype passed over (status bit
+/// 0x10).
+fn pass_assault(s: &mut State) {
+    for a in 0..0x100 {
+        if s.actors.worktype[a] == 8 {
+            s.actors.attrs.status[a] |= 0x10;
+        }
+    }
+}
+
+/// Spec 20 (load state 0x105350, spec 18's forget): no slide crosses a load. In the town, out of
+/// combat: the party steps a cell, the game is restored (the boot's save: the party back a cell
+/// away, the remembered sight forgotten; combat broken off again in the state), then the first
+/// input is a step across the first one's way. The first publication after the load (the step's
+/// early picture) snaps, every scene after it slides only from scenes after the load, and none
+/// of them names a copy of the forgotten store.
 #[test]
 fn no_slide_crosses_a_load() {
     let Some(files) = files() else { return };
     let (mut e, state) = boot(&files, 0, true);
     let mut p: Presenter<Shot> = Presenter::new();
-    // The first scene published since it was emptied, and whether a slide ran into it.
-    let last: RefCell<Option<(Rc<Shot>, bool)>> = RefCell::new(None);
+    // The scenes published since it was emptied: whether early, snapped, and slid into.
+    let seen: RefCell<Vec<(bool, bool, bool)>> = RefCell::new(Vec::new());
     let mut feed = |e: &mut Engine| {
         for publ in e.take_motion() {
             let time = publ.time_ms as f64;
-            match publ.shot {
-                Some(shot) if publ.preview => p.preview(shot, time, true),
-                Some(shot) => {
-                    p.publish(Rc::clone(&shot), time, true);
-                    let mut first = last.borrow_mut();
-                    if first.is_none() {
-                        *first = Some((shot, p.view(time).is_some()));
-                    }
-                }
-                None => p.foreign(),
+            let Some(shot) = publ.shot else {
+                p.foreign();
+                continue;
+            };
+            let snap = shot.scene.snap;
+            if publ.preview {
+                p.preview(shot, time, true);
+            } else {
+                p.publish(shot, time, true);
             }
+            seen.borrow_mut()
+                .push((publ.preview, snap, slides_at(&p, time)));
         }
     };
     turn(&mut e, &[], &mut feed);
-    last.borrow_mut().take();
+    pass_assault(&mut state.borrow_mut());
+    turn(&mut e, &[InputEvent::Key(Key::Char('b'))], &mut feed);
     let at = |s: &RefCell<State>| (s.borrow().map.centre.x, s.borrow().map.centre.y);
     let start = at(&state);
+    let mut way = None;
     for k in [Key::Right, Key::Left, Key::Up, Key::Down] {
+        seen.borrow_mut().clear();
         turn(&mut e, &[InputEvent::Key(k)], &mut feed);
         if at(&state) != start {
+            way = Some(k);
             break;
         }
     }
-    let stepped = at(&state);
-    assert!(stepped != start, "a step walked");
+    let way = way.quiet();
     assert!(
-        last.borrow().as_ref().is_some_and(|f| f.1),
-        "the step's picture slid (the presenter slides here)"
+        seen.borrow().iter().any(|&(early, _, slid)| early && slid),
+        "the step's early picture slid (the presenter slides here)"
     );
     crate::saveload::restore(&mut state.borrow_mut(), e.io()).quiet();
+    {
+        // As the town's setup, combat broken off in the state (0x121d78): no input before the step.
+        let mut s = state.borrow_mut();
+        pass_assault(&mut s);
+        if s.actors.combat_mode() {
+            crate::combat::mode::break_off(&mut s);
+        }
+    }
     assert_eq!(
         at(&state),
         start,
         "the restore put the party back a cell away"
     );
-    last.borrow_mut().take();
-    turn(&mut e, &[InputEvent::Key(Key::Space)], &mut feed);
-    let (shot, slides) = last.borrow_mut().take().quiet();
-    assert!(shot.scene.snap, "the first picture after the load snaps");
-    assert!(!slides, "no slide into it");
-    println!("a step, a load a cell back, a turn: its picture snapped, no slide");
+    assert!(!state.borrow().actors.combat_mode(), "out of combat");
+    seen.borrow_mut().clear();
+    let across = match way {
+        Key::Right | Key::Left => [Key::Up, Key::Down],
+        _ => [Key::Right, Key::Left],
+    };
+    let mut walked = false;
+    for k in across {
+        let before = at(&state);
+        turn(&mut e, &[InputEvent::Key(k)], &mut feed);
+        if at(&state) != before {
+            walked = true;
+            break;
+        }
+    }
+    assert!(walked, "a step across the first one's way walked");
+    let seen = seen.borrow();
+    let first = *seen.first().quiet();
+    assert!(
+        first.0,
+        "the first publication after the load is the step's early picture"
+    );
+    assert!(first.1 && !first.2, "it snaps, no slide into it: {first:?}");
+    // The store's copies after the load: every scene the presenter holds names only those.
+    let copies = state.borrow().gfx.cache.memory.copies();
+    for shot in p.history() {
+        for m in &shot.memory {
+            for l in &m.layers {
+                assert!(l.frozen.is_none_or(|slot| usize::from(slot) < copies));
+            }
+        }
+    }
+    println!(
+        "a step, a load a cell back, a step across as the first input: {} publications after the \
+         load, the first (the early picture) snapped, no slide into it",
+        seen.len()
+    );
+}
+
+/// Remembers every cell within 12 of the leader's on its level as last seen at `seen` (game
+/// minutes, [`super::cache::minutes`]), its look the leader's cell's ground.
+fn remember_round_at(state: &mut State, seen: u64) {
+    let c = state.map.centre;
+    let i = crate::geom::HALF_H * crate::geom::VIEW_W + crate::geom::HALF_W;
+    let t = usize::from(state.objects.draw.base[i] & 0x7ff);
+    let gfx = &mut state.gfx;
+    let layer = super::cache::Layer {
+        record: gfx.record_of[t],
+        masktype: gfx.masktype[t],
+        frame: 0,
+        frozen: None,
+    };
+    for dy in -12i32..=12 {
+        for dx in -12i32..=12 {
+            let (x, y) = ((i32::from(c.x) + dx) as u16, (i32::from(c.y) + dy) as u16);
+            gfx.cache.memory.remember((c.z, x, y), vec![layer], seen);
+        }
+    }
+}
+
+/// The pixels of `drawn` (a frame `s` device pixels a frame pixel) on the remembered cells of
+/// `scene` (out of sight in it) drawn at `camera`, against `want`, the frame of the render of
+/// `scene` at rest: each such pixel shows the one of its cell at rest, `camera` pixels on. Only
+/// pixels inside the shown map at rest and on the screen, and no frame pixel `skip` names
+/// (what is drawn over the map there: the movers, the cursor and the border). Returns (compared,
+/// differing).
+fn remembered_against(
+    drawn: &[u32],
+    want: &[u32],
+    s: usize,
+    scene: &u6_render::motion::Scene,
+    camera: (i32, i32),
+    skip: &dyn Fn(i32, i32) -> bool,
+) -> (usize, usize) {
+    let (x0, y0, x1, y1) = SHOWN;
+    let shown = |x: i32, y: i32| {
+        (i32::from(x0)..=i32::from(x1)).contains(&x) && (i32::from(y0)..=i32::from(y1)).contains(&y)
+    };
+    let w = u6_render::WIDTH * s;
+    let (mut compared, mut differ) = (0, 0);
+    for (i, cell) in scene.cells.iter().enumerate() {
+        let unseen =
+            cell.base == crate::map::view::NOT_VISIBLE || cell.base == crate::map::view::DARK;
+        let at = (
+            scene.corner.0 + 16 * (i % scene.cols) as i32,
+            scene.corner.1 + 16 * (i / scene.cols) as i32,
+        );
+        let screen = (at.0 - camera.0, at.1 - camera.1);
+        if !unseen {
+            continue;
+        }
+        for y in 0..16 * s {
+            for x in 0..16 * s {
+                let (fx, fy) = (screen.0 + (x / s) as i32, screen.1 + (y / s) as i32);
+                let rest = (at.0 + (x / s) as i32, at.1 + (y / s) as i32);
+                if !shown(fx, fy) || !shown(rest.0, rest.1) || skip(fx, fy) || skip(rest.0, rest.1)
+                {
+                    continue;
+                }
+                let index =
+                    |(px, py): (i32, i32)| (py as usize * s + y % s) * w + px as usize * s + x % s;
+                compared += 1;
+                differ += usize::from(drawn[index((fx, fy))] != want[index(rest)]);
+            }
+        }
+    }
+    (compared, differ)
+}
+
+/// The calendar `minutes` game minutes on (the original's 60 minutes, 24 hours, 28 days, 12
+/// months).
+fn later(cal: &mut crate::actors::Calendar, minutes: u64) {
+    for _ in 0..minutes {
+        cal.minute += 1;
+        if cal.minute < 60 {
+            continue;
+        }
+        cal.minute = 0;
+        cal.hour += 1;
+        if cal.hour < 24 {
+            continue;
+        }
+        cal.hour = 0;
+        cal.day += 1;
+        if cal.day <= 28 {
+            continue;
+        }
+        cal.day = 1;
+        cal.month += 1;
+        if cal.month > 12 {
+            cal.month = 1;
+            cal.year += 1;
+        }
+    }
+}
+
+/// An engine picture: its shot, its classic pixels and its HD words at 2×.
+type Picture = (Rc<Shot>, Vec<u32>, Vec<u32>);
+
+/// The pictures `e` publishes with a scene from now on (`each`'s calls), drained: each with
+/// [`Picture`]'s frames as published.
+fn pictures(e: &mut Engine, hd: &mut HdView, out: &mut Vec<Picture>) {
+    for publ in e.take_motion() {
+        if let Some(shot) = publ.shot.filter(|_| !publ.preview) {
+            hd.present(Some(e), &Framebuffer::new());
+            let classic = e
+                .published_frame()
+                .pixels()
+                .iter()
+                .map(|&c| u32::from(c))
+                .collect();
+            out.push((shot, classic, hd.rgba().to_vec()));
+        }
+    }
+}
+
+/// Spec 18 and 20, on the user's zip: a fade step during a slide. In the town the remembered
+/// cells round the party are seen d whole game days ago (d from 0 to 4: day 4 to 5 is the step to
+/// black); the party steps along the town's walk until a step's picture (B) has cells out of
+/// sight in the shown map (faded d); the calendar moved on to d + 1 days since the sight,
+/// the prompt's refresh draws the cells faded d + 1, the same places (picture B'). A presenter
+/// slides from the picture before the step into B, and B' comes half way. At the slide's start,
+/// its middle (B' just in) and near its end, the remembered cells drawn are the engine's own
+/// pictures shifted by the camera: classic, of the newest scene (B, then B': an in-place change
+/// shows at the next present); HD, of B, the scene its layers were made from (the change shows at
+/// the slide's end, when the page shows the engine's HD frame again).
+#[test]
+fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
+    let Some(files) = files() else { return };
+    let s = 2;
+    let mut totals = [0usize; 4];
+    for days in 0..=4u64 {
+        let mut hd = HdView::new();
+        hd.set(true, Scale::X2);
+        let mut game = boot(&files, 0, true);
+        let mut pics = Vec::new();
+        play(&mut game, true, |e| pictures(e, &mut hd, &mut pics));
+        let a = Rc::clone(&pics.last().quiet().0);
+        let now = super::cache::minutes(&game.1.borrow().actors.calendar);
+        let seen = now - days * 1440;
+        remember_round_at(&mut game.1.borrow_mut(), seen);
+        let (mut e, state) = game;
+        let centre = |s: &RefCell<State>| (s.borrow().map.centre.x, s.borrow().map.centre.y);
+        // A step of the town's walk whose picture has cells out of sight whole in the shown map.
+        let (mut b, mut a) = (None, a);
+        for k in STEPS {
+            let from = centre(&state);
+            let mut stepped = Vec::new();
+            turn(&mut e, &[InputEvent::Key(k)], &mut |e| {
+                pictures(e, &mut hd, &mut stepped)
+            });
+            let Some(last) = stepped.pop() else { continue };
+            let (cells, _) =
+                remembered_against(&last.1, &last.1, 1, &last.0.scene, (16, 16), &|_, _| false);
+            if centre(&state) != from && cells > 0 {
+                b = Some(last);
+                break;
+            }
+            a = Rc::clone(&last.0);
+        }
+        let b = b.quiet();
+        // On to the fade step (d + 1 whole days since the sight; the steps took less than a day):
+        // the prompt's refresh draws the faded cells again, in place.
+        let at_b = super::cache::minutes(&state.borrow().actors.calendar);
+        assert!(
+            at_b < seen + (days + 1) * 1440,
+            "{days} days: B before the fade step"
+        );
+        later(
+            &mut state.borrow_mut().actors.calendar,
+            seen + (days + 1) * 1440 - at_b,
+        );
+        let mut again = Vec::new();
+        for _ in 0..200 {
+            e.tick(&[], STEP_MS);
+            pictures(&mut e, &mut hd, &mut again);
+            if !again.is_empty() {
+                break;
+            }
+        }
+        let b2 = again.into_iter().next().quiet();
+        assert!(
+            b2.0.scene.placed == b.0.scene.placed && b2.0.scene.centre == b.0.scene.centre,
+            "{days} days: the same places"
+        );
+        assert!(
+            b2.1 != b.1,
+            "{days} days: the fade step changed the picture"
+        );
+        // The slide into B, B' half way.
+        let mut p: Presenter<Shot> = Presenter::new();
+        p.publish(Rc::clone(&a), 0.0, true);
+        let t0 = 1000.0;
+        p.publish(Rc::clone(&b.0), t0, true);
+        assert!(slides_at(&p, t0), "{days} days: the step slides");
+        let g = p.generation();
+        let slide = slide_layers(&e.state(), &p).quiet();
+        let words: Vec<Vec<u32>> = (slide.parts.iter())
+            .map(|part| {
+                let mut w = Vec::new();
+                hd.compose_layer(&e, &part.pixels, &mut w);
+                w
+            })
+            .collect();
+        let mut bad = Vec::new();
+        for (k, dt) in [0.0, 90.0, 180.0, 270.0, 350.0].into_iter().enumerate() {
+            let t = t0 + dt;
+            if dt == 180.0 {
+                p.publish(Rc::clone(&b2.0), t, true);
+                assert_eq!(p.generation(), g, "{days} days: in place, the layers kept");
+            }
+            let view = p.view(t).filter(|_| slides_at(&p, t)).quiet();
+            let newest = if dt < 180.0 { &b } else { &b2 };
+            // The movers and the words over them, where drawn now (not the remembered cells').
+            let layers = p.layers();
+            let movers: Vec<(i32, i32)> = (layers.placed(&view).into_iter())
+                .flat_map(|(part, (dx, dy))| {
+                    let ops = match part {
+                        u6_render::motion::Part::Static => &[][..],
+                        u6_render::motion::Part::Mover(i) => &layers.movers[i].ops[..],
+                        u6_render::motion::Part::Over(i) => &layers.movers[i].over[..],
+                    };
+                    ops.iter().map(move |o| (o.x + dx, o.y + dy))
+                })
+                .collect();
+            // And the cursor and the border, over the map where the frame layer draws.
+            let frame = (slide.parts.iter())
+                .find(|l| l.role == super::motion::Role::Frame)
+                .map(|l| Rc::clone(&l.pixels));
+            let skip = |x: i32, y: i32| {
+                let mover = |&(mx, my): &(i32, i32)| {
+                    (mx..mx + 16).contains(&x) && (my..my + 16).contains(&y)
+                };
+                movers.iter().any(mover)
+                    || (frame.as_ref()).is_some_and(|f| f.index((x, y)).is_some_and(|i| f.drawn[i]))
+            };
+            // Classic: drawn from the newest scene.
+            let mut fb = poisoned(&e);
+            paint(&e.state(), &p, &view, &mut fb);
+            let drawn: Vec<u32> = fb.pixels().iter().map(|&c| u32::from(c)).collect();
+            let (n, d) =
+                remembered_against(&drawn, &newest.1, 1, &newest.0.scene, view.camera, &skip);
+            totals[0] += n;
+            if n == 0 || d > 0 {
+                bad.push(("classic", k, n, d));
+            }
+            // HD: the layers made from B, over its HD frame.
+            let ow = u6_render::WIDTH * s;
+            let mut out = b.2.clone();
+            for (i, x, y) in slide_placements(&slide, &view) {
+                let (px, w) = (&slide.parts[i].pixels, &words[i]);
+                let lw = px.width * s;
+                for (j, &word) in w.iter().enumerate() {
+                    let (dx, dy) = (
+                        x * s as i32 + (j % lw) as i32,
+                        y * s as i32 + (j / lw) as i32,
+                    );
+                    if word >> 24 != 0
+                        && dx >= 0
+                        && dy >= 0
+                        && in_shown(dx as usize / s, dy as usize / s)
+                    {
+                        out[dy as usize * ow + dx as usize] = word;
+                    }
+                }
+            }
+            let (n, d) = remembered_against(&out, &b.2, s, &b.0.scene, view.camera, &skip);
+            totals[1] += n;
+            if n == 0 || d > 0 {
+                bad.push(("HD", k, n, d));
+            }
+        }
+        // The end: no slide, the page shows the engine's frame (B').
+        assert!(!p.active(t0 + SLIDE_MS), "{days} days: the slide over");
+        let (x0, y0, x1, y1) = SHOWN;
+        let grey = |f: &[u32]| {
+            (usize::from(y0)..=usize::from(y1))
+                .flat_map(|y| (usize::from(x0)..=usize::from(x1)).map(move |x| (x, y)))
+                .filter(|&(x, y)| f[y * u6_render::WIDTH + x] >= u32::from(u6_render::GREY))
+                .count()
+        };
+        assert!(
+            grey(&b2.1) < grey(&b.1),
+            "{days} days: the fade step took grey pixels away ({} then {})",
+            grey(&b.1),
+            grey(&b2.1)
+        );
+        assert!(
+            bad.is_empty(),
+            "{days} days: (renderer, sample, remembered pixels compared, differing): {bad:?}"
+        );
+        totals[2] += grey(&b.1);
+        totals[3] += grey(&b2.1);
+        println!(
+            "{days} to {} days: grey pixels of the shown map {} then {}",
+            days + 1,
+            grey(&b.1),
+            grey(&b2.1)
+        );
+    }
+    println!(
+        "a fade step during a slide, 0 to 4 days: {} classic and {} HD remembered pixels drawn as \
+         the engine's pictures at the slide's start, middle and near its end",
+        totals[0], totals[1]
+    );
 }

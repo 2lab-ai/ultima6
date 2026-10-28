@@ -177,7 +177,8 @@ pub struct Io {
     preview: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
     /// Port-only (spec 20 Design 4): [`Io::warm_early_picture`] answered.
     warmed: Cell<bool>,
-    /// Port-only (spec 20): [`Io::break_motion`] since the last framed render kept its scene.
+    /// Port-only (spec 20): [`Io::break_motion`] ran and no publication with a scene went out
+    /// since.
     motion_break: Cell<bool>,
 }
 
@@ -476,10 +477,12 @@ impl Io {
         }
     }
 
-    /// Port-only (spec 20): the remembered sight's copies were forgotten (load state 0x105350,
-    /// [`crate::saveload::restore::load_state`]), which the scenes kept so far name, and the game
-    /// shown is another: the shots kept are dropped, and the next framed render's scene snaps (no
-    /// slide across the load: [`Io::take_motion_break`]).
+    /// Port-only (spec 20): the game shown is another (load state 0x105350,
+    /// [`crate::saveload::restore::load_state`], whose forgotten remembered sight the scenes kept
+    /// so far name; a new process taking over, [`crate::main_loop::take_over`]): the shots kept
+    /// are dropped, and until a publication with a scene goes out ([`Engine::take_motion`]) every
+    /// scene kept snaps, the early picture's included, and an unchanged picture is published
+    /// again: no slide crosses it.
     pub(crate) fn break_motion(&self) {
         self.motion_break.set(true);
         self.shots.borrow_mut().clear();
@@ -487,9 +490,9 @@ impl Io {
         self.preview.borrow_mut().take();
     }
 
-    /// Port-only (spec 20): whether [`Io::break_motion`] ran since the last call.
-    pub(crate) fn take_motion_break(&self) -> bool {
-        self.motion_break.replace(false)
+    /// Port-only (spec 20): whether an [`Io::break_motion`] is pending.
+    pub(crate) fn motion_break(&self) -> bool {
+        self.motion_break.get()
     }
 
     /// Port-only (spec 20 Design 4): true the first time it is asked: the first framed render
@@ -948,6 +951,7 @@ impl Engine {
                 shot: Some(shot),
                 preview: true,
             });
+            self.io.motion_break.set(false);
         }
         let version = self.io.front_version.get();
         let presented = version != self.published_front;
@@ -1013,17 +1017,22 @@ impl Engine {
         }
     }
 
-    /// Port-only (spec 20): the publication just made, when its shown map changed: with the shot
-    /// whose picture it is ([`Io::take_shot`]), or foreign.
+    /// Port-only (spec 20): the publication just made, when its shown map changed (or after an
+    /// [`Io::break_motion`] until a scene went out): with the shot whose picture it is
+    /// ([`Io::take_shot`]), or foreign.
     fn match_motion(&mut self) {
         let hash = crate::gfx::motion::shown_hash(&self.io.published.borrow());
-        if self.motion_map == Some(hash) {
+        if self.motion_map == Some(hash) && !self.io.motion_break() {
             return;
         }
         self.motion_map = Some(hash);
+        let shot = self.io.take_shot(hash);
+        if shot.is_some() {
+            self.io.motion_break.set(false);
+        }
         self.motion.push(Published {
             time_ms: self.io.now_ms(),
-            shot: self.io.take_shot(hash),
+            shot,
             preview: false,
         });
         if self.motion.len() > PUBLISHED {

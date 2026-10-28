@@ -1168,7 +1168,7 @@ fn a_fractional_restart_in_every_direction_paints_the_cells_it_sweeps_as_compose
 
 /// Spec 20 Design 3 and 5: over sequences of the leader's publications (a chain of restarts, a
 /// reverse, a far jump, and 300 of every kind at pseudo-random times), the camera is never drawn
-/// farther than [`SNAP_PX`] from rest, which the static layer's margin covers (u6-core
+/// farther than [`SNAP_PX`] from rest, at each publication's own time and every 5 ms between, which the static layer's margin covers (u6-core
 /// `slide_layers` asserts the bound against the shown map's inset).
 #[test]
 fn the_camera_stays_within_its_reach_over_any_sequence_of_publications() {
@@ -1186,6 +1186,8 @@ fn the_camera_stays_within_its_reach_over_any_sequence_of_publications() {
             while k < steps.len() && steps[k].0 <= t {
                 let (x, y) = steps[k].1;
                 p.publish(Rc::new(at(x, y)), steps[k].0, true);
+                // Right after the publication, at its own time, as well as between them.
+                most = most.max(reach(&p, steps[k].0));
                 k += 1;
             }
             most = most.max(reach(&p, t));

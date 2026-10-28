@@ -103,15 +103,22 @@ fn load_palette(state: &State, fb: &mut Framebuffer, memory: bool) {
 /// colour bit 3 into the pixels under it that the fade keeps (rows within the cell). A pixel the
 /// fade does not keep is not written. The sources are the blitter's (0x153008, [`blit_back`])
 /// with [`FLAG_MEMORY`]. Every write stays in the cell's box; a map cell is never in the UI's
-/// columns in Wide, so no write is dropped there.
-fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16, u16), fade: u8) {
+/// columns in Wide, so no write is dropped there. The one draw of a remembered layer: the window
+/// render's into the back buffer, and (spec 20) a slide's at any pixel of its canvas
+/// ([`motion::Canvas`]).
+pub(super) fn blit_memory(
+    gfx: &GfxState,
+    fb: &mut impl motion::Canvas,
+    layer: Layer,
+    (x, y): (i32, i32),
+    fade: u8,
+) {
     let r = usize::from(layer.record);
     let (Some((pixels, transparent, id, ver)), Some(overlay)) =
         (layer.image(gfx), gfx.overlays.get(r))
     else {
         return;
     };
-    let (x, y) = (usize::from(x), usize::from(y));
     let src = |c: usize, row: usize, flags: u8| Src {
         ver,
         id,
@@ -120,11 +127,12 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16,
         kind: Kind::Tile,
         flags: flags | FLAG_MEMORY,
     };
+    let at = |c: usize, row: usize| (x + c as i32, y + row as i32);
     let pixels = pixels.iter().zip(transparent).take(TILE_W * TILE_H);
     for (i, (&p, &clear)) in pixels.enumerate() {
         let (row, c) = (i / TILE_W, i % TILE_W);
         if !clear && keeps(fade, c, row) {
-            fb.set_src(x + c, y + row, p | GREY, src(c, row, 0));
+            fb.put(at(c, row), src(c, row, 0), |_| p | GREY);
         }
     }
     if layer.masktype & 4 != 0
@@ -138,13 +146,9 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16,
             }
             let drawn = |&c: &usize| bits & (0x8000 >> c) != 0 && keeps(fade, c, row);
             for c in (0..TILE_W).filter(drawn) {
-                let p = fb.get(x + c, y + row).unwrap_or(0);
-                fb.set_src(
-                    x + c,
-                    y + row,
-                    p | 1 << ANIM_PLANE,
-                    src(c, row, FLAG_OVERLAY),
-                );
+                fb.put(at(c, row), src(c, row, FLAG_OVERLAY), |p| {
+                    p | 1 << ANIM_PLANE
+                });
             }
         }
     }
@@ -163,7 +167,7 @@ fn draw_remembered(
     let (fade, layers) = shown;
     blit_back(gfx, fb, tile, at.0, at.1);
     for &layer in layers {
-        blit_memory(gfx, fb, layer, at, fade);
+        blit_memory(gfx, fb, layer, (i32::from(at.0), i32::from(at.1)), fade);
     }
 }
 
