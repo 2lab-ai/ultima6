@@ -485,6 +485,9 @@ pub struct Game {
     zip: Option<(zipscan::Sliced, usize)>,
     engine: Option<Engine>,
     pending: Vec<InputEvent>,
+    /// The buttons of the last pointer event [`Game::step`] handed to the engine (0 before
+    /// one): the pointer state before the first one queued now ([`queue_pointer`]).
+    handed: u8,
     blank: Framebuffer,
     rgba: Vec<u8>,
     /// The engine frame `rgba` holds ([`Engine::frame_version`]); `None` while it holds the
@@ -564,6 +567,7 @@ impl Game {
             zip: None,
             engine: None,
             pending: Vec::new(),
+            handed: 0,
             blank: Framebuffer::new(),
             rgba: Vec::new(),
             rgba_holds: None,
@@ -895,6 +899,22 @@ impl Game {
         true
     }
 
+    /// Port (spec 21): the travel of a right press's "move here": the party walks to map cell
+    /// (x, y) on its level, one step a command prompt entered as its direction key, from the next
+    /// [`Game::step`] on ([`u6_core::engine::Engine::travel_to`]). Any key or a button press after
+    /// it stops the walk. False (nothing started) before a start or when the cell is refused
+    /// ([`u6_core::actors::travel::reachable`]).
+    pub fn travel_to(&mut self, x: u16, y: u16) -> bool {
+        self.engine
+            .as_mut()
+            .is_some_and(|e| e.travel_to((x, y)).is_ok())
+    }
+
+    /// Port (spec 21): a travel walks ([`Game::travel_to`]).
+    pub fn travel_active(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| e.travel_active())
+    }
+
     /// The leader's map position (x, y, z), or empty before a start.
     pub fn leader_position(&self) -> Vec<u16> {
         self.engine.as_ref().map_or_else(Vec::new, |e| {
@@ -1002,6 +1022,7 @@ impl Game {
             if let Some(driver) = &mut self.audio {
                 driver.sync(&engine.state().sound, engine.io().files());
             }
+            self.handed = last_buttons(&self.pending).unwrap_or(self.handed);
         }
         self.pending.clear();
     }
@@ -1462,8 +1483,39 @@ impl Game {
     /// as DOM `buttons`. Ignored before the game starts.
     pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         if self.engine.is_some() {
-            queue_pointer(&mut self.pending, x, y, buttons);
+            queue_pointer(&mut self.pending, self.handed, x, y, buttons);
         }
+    }
+
+    /// Spec 22 Contract 8: whether the game reads the player's words by click now (a
+    /// conversation's read after "you say", op f7, from its start to its end; buttons drawn or
+    /// not). The page releases a cancelled press off every target then. False before a start.
+    pub fn reading_by_click(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.state().ui.talk.reading)
+    }
+
+    /// Spec 22 Contract 6, for the page's tests: [hot, pressed] of the read by click, the
+    /// target drawn inverse and the one the left button went down on, as the engine holds them
+    /// after its last step: each -1 for none, `i` for the button `i` (0 Job, 1 Name), 0x10000 +
+    /// row × 0x100 + col for the keyword whose first part starts at message-window cell (row,
+    /// col). [-1, -1] before a start and outside a read.
+    pub fn talk_target(&self) -> Vec<i32> {
+        let code = |t: Option<u6_core::ui::talk::Target>| match t {
+            None => -1,
+            Some(u6_core::ui::talk::Target::Button(i)) => i as i32,
+            Some(u6_core::ui::talk::Target::Key { row, col }) => {
+                0x10000 + i32::from(row) * 0x100 + i32::from(col)
+            }
+        };
+        self.engine.as_ref().map_or_else(
+            || vec![-1, -1],
+            |e| {
+                let talk = &e.state().ui.talk;
+                vec![code(talk.hot), code(talk.pressed)]
+            },
+        )
     }
 
     /// Voices on or off (spec 09 Design 1): while on, the engine's speech tap keeps what NPCs
@@ -1784,15 +1836,7 @@ impl Game {
     /// since the previous step (newer than the engine's), else the engine's handler pointer
     /// ([`u6_core::Io::handler_pointer`]). False before a start.
     fn pointer_held(&self) -> bool {
-        let queued = self.pending.iter().rev().find_map(|e| match *e {
-            InputEvent::Pointer { buttons, .. } => Some(buttons),
-            InputEvent::Key(_)
-            | InputEvent::Repeat(_)
-            | InputEvent::Paced(_)
-            | InputEvent::Release(_)
-            | InputEvent::Text(_) => None,
-        });
-        let buttons = queued.or_else(|| {
+        let buttons = last_buttons(&self.pending).or_else(|| {
             self.engine
                 .as_ref()
                 .map(|e| e.io().handler_pointer().buttons)
@@ -1813,6 +1857,7 @@ impl Game {
         self.audio = None;
         self.engine = Some(engine);
         self.pending.clear();
+        self.handed = 0;
         self.held.clear();
         self.last_step = None;
         self.redraw();
@@ -1923,19 +1968,37 @@ fn pointer_pixels(e: &Engine) -> ([u32; 4], Vec<u8>) {
     (rect, rgba)
 }
 
-/// Queues a pointer event; a move right after one with the same buttons replaces it (the game
-/// samples the pointer once per frame and takes a run of moves at once anyway).
-fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
+/// The buttons of the last pointer event of `events`.
+fn last_buttons(events: &[InputEvent]) -> Option<u8> {
+    events.iter().rev().find_map(|e| match *e {
+        InputEvent::Pointer { buttons, .. } => Some(buttons),
+        InputEvent::Key(_)
+        | InputEvent::Repeat(_)
+        | InputEvent::Paced(_)
+        | InputEvent::Release(_)
+        | InputEvent::Text(_) => None,
+    })
+}
+
+/// Queues a pointer event. Spec 22 Contract 5: a move replaces the move queued last when both
+/// keep the same buttons (the game samples the pointer once per frame and takes a run of moves
+/// at once anyway): the event queued last is a pointer event with the new one's buttons, and the
+/// pointer had them before it too (the pointer event queued before it, else `handed`, the last
+/// one the engine was handed). A press or a release is never replaced, so it stays where its own
+/// event put it, and the moves after it follow it.
+fn queue_pointer(pending: &mut Vec<InputEvent>, handed: u8, x: i32, y: i32, buttons: u8) {
     let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let buttons = buttons & 3;
     let ev = InputEvent::Pointer {
         x: word(x),
         y: word(y),
-        buttons: buttons & 3,
+        buttons,
     };
-    let same =
-        |e: &InputEvent| matches!(*e, InputEvent::Pointer { buttons: b, .. } if b == buttons & 3);
-    if pending.last().is_some_and(same) {
-        pending.pop();
+    if let Some((InputEvent::Pointer { buttons: last, .. }, before)) = pending.split_last() {
+        let before = last_buttons(before).unwrap_or(handed);
+        if *last == buttons && before == buttons {
+            pending.pop();
+        }
     }
     pending.push(ev);
 }
@@ -2037,18 +2100,22 @@ mod tests {
     use u6_core::geom::{HALF_H, HALF_W};
     use u6_testkit::{Quiet, assert_same};
 
+    /// Spec 22 Contract 5: a run of moves keeping the buttons collapses to its last; a press or
+    /// a release is never replaced, so the move after it, the held move after a press included,
+    /// is queued behind it (until round 3 of spec 22 the press moved with that held move to
+    /// (21, 31), and a release to the hover after it).
     #[test]
     fn pointer_moves_collapse_and_button_changes_queue() {
         let mut q = Vec::new();
         let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
-        queue_pointer(&mut q, 10, 10, 0);
-        queue_pointer(&mut q, 20, 30, 0);
-        queue_pointer(&mut q, 20, 30, 1);
-        queue_pointer(&mut q, 21, 31, 5);
-        queue_pointer(&mut q, 21, 31, 0);
-        assert_eq!(q, [p(20, 30, 0), p(21, 31, 1), p(21, 31, 0)]);
+        queue_pointer(&mut q, 0, 10, 10, 0);
+        queue_pointer(&mut q, 0, 20, 30, 0);
+        queue_pointer(&mut q, 0, 20, 30, 1);
+        queue_pointer(&mut q, 0, 21, 31, 5);
+        queue_pointer(&mut q, 0, 21, 31, 0);
+        assert_eq!(q, [p(20, 30, 0), p(20, 30, 1), p(21, 31, 1), p(21, 31, 0)]);
         q.push(InputEvent::Key(Key::Space));
-        queue_pointer(&mut q, 99_999, -99_999, 2);
+        queue_pointer(&mut q, 0, 99_999, -99_999, 2);
         assert_eq!(
             q.last(),
             Some(&p(i16::MAX, i16::MIN, 2)),
@@ -2057,6 +2124,120 @@ mod tests {
         let mut game = Game::new();
         game.pointer(5, 5, 1);
         assert!(game.pending.is_empty(), "no game, nothing queued");
+    }
+
+    /// Spec 22 Contract 5 (gpt c-2): a release and the hover after it in one frame (a click
+    /// whose release would otherwise be taken where the hover went), a press and the held move
+    /// after it, and a run of moves after either.
+    #[test]
+    fn a_press_or_release_stays_where_its_event_put_it() {
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        let queued = |handed: u8, events: &[(i32, i32, u8)]| {
+            let mut q = Vec::new();
+            for &(x, y, b) in events {
+                queue_pointer(&mut q, handed, x, y, b);
+            }
+            q
+        };
+        assert_eq!(
+            queued(0, &[(40, 50, 1), (40, 50, 0), (60, 70, 0), (61, 71, 0)]),
+            [p(40, 50, 1), p(40, 50, 0), p(61, 71, 0)],
+            "release then hover: the release kept, the hover's moves one"
+        );
+        assert_eq!(
+            queued(0, &[(40, 50, 1), (45, 55, 1), (46, 56, 1)]),
+            [p(40, 50, 1), p(46, 56, 1)],
+            "press then held moves: the press kept, the held moves one"
+        );
+        assert_eq!(
+            queued(0, &[(1, 1, 0), (2, 2, 0), (3, 3, 0)]),
+            [p(3, 3, 0)],
+            "a run of moves collapses"
+        );
+        assert_eq!(
+            queued(1, &[(1, 1, 1), (2, 2, 1)]),
+            [p(2, 2, 1)],
+            "held moves after a press the engine has collapse"
+        );
+        assert_eq!(
+            queued(1, &[(-1, -1, 0), (40, 50, 0)]),
+            [p(-1, -1, 0), p(40, 50, 0)],
+            "a release of a press the engine has: kept before the hover"
+        );
+    }
+
+    /// Spec 22 Contract 8: the press handed to the engine at one step, its release (the page's
+    /// cancelled press, at (-1, -1)) and a hover over the press's place queued before the next:
+    /// both reach the engine, the release where it was queued.
+    #[test]
+    fn a_release_after_a_handed_press_is_not_moved_by_the_hover_after_it() {
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_, io| async move {
+                io.sleep(u32::MAX).await;
+            },
+        ));
+        game.pointer(40, 50, 1);
+        game.step(16);
+        game.pointer(-1, -1, 0);
+        game.pointer(40, 50, 0);
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        assert_eq!(game.pending, [p(-1, -1, 0), p(40, 50, 0)]);
+        game.step(16);
+        game.pointer(41, 51, 0);
+        game.pointer(42, 52, 0);
+        assert_eq!(game.pending, [p(42, 52, 0)], "moves after it collapse");
+    }
+
+    /// Spec 22 Contract 7: a relaunch starts the page's stream again (`put_on_screen`: no button
+    /// handed to the new engine): a press the old engine took keeps no two moves apart after it.
+    #[test]
+    fn a_press_handed_before_a_relaunch_keeps_no_moves_apart_after_it() {
+        let idle = || {
+            Engine::with_game(
+                u6_core::State::empty(),
+                Files::default(),
+                |_, io| async move {
+                    io.sleep(u32::MAX).await;
+                },
+            )
+        };
+        let mut game = Game::new();
+        game.put_on_screen(idle());
+        game.pointer(40, 50, 1);
+        game.step(16);
+        assert_eq!(game.handed, 1, "the old engine took the press");
+        game.put_on_screen(idle());
+        game.pointer(1, 1, 0);
+        game.pointer(2, 2, 0);
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        assert_eq!(game.pending, [p(2, 2, 0)], "the moves collapse");
+    }
+
+    /// Spec 22 Contract 6: `talk_target` codes the read's hot and pressed targets for the page.
+    #[test]
+    fn talk_target_codes_the_hot_and_pressed_targets() {
+        use u6_core::ui::talk::{TalkClicks, Target};
+        let mut game = Game::new();
+        assert_eq!(game.talk_target(), [-1, -1], "before a start");
+        let with = |talk: TalkClicks| {
+            let mut s = u6_core::State::empty();
+            s.ui.talk = talk;
+            Some(Engine::with_game(s, Files::default(), |_, io| async move {
+                io.sleep(u32::MAX).await;
+            }))
+        };
+        game.engine = with(TalkClicks {
+            reading: true,
+            buttons: Vec::new(),
+            hot: Some(Target::Button(1)),
+            pressed: Some(Target::Key { row: 2, col: 3 }),
+        });
+        assert_eq!(game.talk_target(), [1, 0x10203]);
+        game.engine = with(TalkClicks::default());
+        assert_eq!(game.talk_target(), [-1, -1], "outside a read");
     }
 
     #[test]
@@ -4991,6 +5172,147 @@ mod tests {
         );
         game.key_down("Space", " ", false, 0.0);
         assert!(prompt(&mut game), "the prompt again");
+    }
+
+    /// Spec 21: `travel_to` starts the engine's travel exactly when
+    /// [`u6_core::actors::travel::reachable`] lets it, and nothing before a start. On the user's
+    /// zip (skipped when absent) at the first prompt, the 49 cells round the leader (the castle's
+    /// fight is on there, so the refusals are what it shows; the walk itself is
+    /// `u6-core`'s real-data receipt, `actors/travel_tests.rs`).
+    #[test]
+    fn travel_to_starts_exactly_what_reachable_allows() {
+        let mut none = Game::new();
+        assert!(!none.travel_to(1, 1) && !none.travel_active(), "no game");
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let p = game.leader_position();
+        let (mut why, mut any) = (std::collections::BTreeMap::new(), false);
+        for dy in -3i16..=3 {
+            for dx in -3i16..=3 {
+                let c = (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy));
+                let reason = {
+                    let e = game.engine.as_ref().quiet();
+                    u6_core::actors::travel::reachable(&e.state(), c)
+                };
+                let started = game.travel_to(c.0, c.1);
+                assert_eq!(started, reason.is_none(), "{dx} {dy}");
+                any |= started;
+                assert_eq!(
+                    game.travel_active(),
+                    any,
+                    "a refusal leaves the travel as it was"
+                );
+                *why.entry(reason.map_or("started", |r| r.code()))
+                    .or_insert(0) += 1;
+            }
+        }
+        eprintln!("travel_to over 49 cells: {why:?}");
+    }
+
+    /// Spec 21 round 2 (review gpt-b MUST 1): past the fight, broken off as spec 21's receipt
+    /// does it ([`castle_game`]), a reachable cell starts a travel; a refused request then (the
+    /// leader's own cell) leaves that travel walking to its target, which it reaches. A held
+    /// key's repeat queued the way the page queues it (into `pending`, before the step) ends a
+    /// second travel in that step.
+    #[test]
+    fn travel_to_starts_a_reachable_cell_and_a_refusal_leaves_it_walking() {
+        use u6_core::actors::travel::{End, reachable};
+        let Some(mut game) = castle_game() else {
+            return;
+        };
+        let p = game.leader_position();
+        let to = [(2i16, 0i16), (-2, 0), (0, 2), (0, -2)]
+            .into_iter()
+            .map(|(dx, dy)| (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy)))
+            .find(|&c| reachable(&game.engine.as_ref().quiet().state(), c).is_none())
+            .quiet();
+        assert!(game.travel_to(to.0, to.1), "a reachable cell starts");
+        assert!(game.travel_active());
+        assert!(
+            !game.travel_to(p[0], p[1]),
+            "the leader's own cell is refused"
+        );
+        assert!(
+            game.travel_active(),
+            "the refusal leaves the travel walking"
+        );
+        let target = game
+            .engine
+            .as_ref()
+            .quiet()
+            .travel_progress()
+            .quiet()
+            .target();
+        assert_eq!(target, to, "to its own target");
+        for _ in 0..3000 {
+            if !game.travel_active() {
+                break;
+            }
+            game.step(20);
+        }
+        assert_eq!(
+            game.engine.as_ref().quiet().travel_end(),
+            Some(End::Arrived)
+        );
+        let at = game.leader_position();
+        assert_eq!((at[0], at[1]), to, "on the target");
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        assert!(game.travel_to(p[0], p[1]), "back");
+        game.step(20);
+        assert!(game.travel_active(), "walking back");
+        game.pending.push(InputEvent::Repeat(Key::Left));
+        game.step(20);
+        assert_eq!(
+            game.engine.as_ref().quiet().travel_end(),
+            Some(End::Input),
+            "a queued repeat ends it"
+        );
+        eprintln!(
+            "travel_to past the fight: started, kept through a refusal, arrived; a repeat stopped the next"
+        );
+    }
+
+    /// The castle start of spec 19's held-key tests in a `Game` (as `u6-core`'s travel receipt):
+    /// `game` at once with seed 0 round the shared state, the actors in the assault worktype 8
+    /// passed over (status bit 0x10), the fight broken off with `b`, at the prompt. Skipped when
+    /// the user's zip is absent.
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn castle_game() -> Option<Game> {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return None;
+        }
+        let r = intake(vec![InputFile {
+            name: "ultima-vi.zip".into(),
+            data: std::fs::read(ZIP).quiet(),
+        }]);
+        let files = Files::new(r.files);
+        let mut state = u6_core::State::new_game(&files).quiet();
+        state.rng.seed(0);
+        let keep = Rc::new(std::cell::RefCell::new(None));
+        let k = Rc::clone(&keep);
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(state, files, move |st, io| {
+            *k.borrow_mut() = Some(Rc::clone(&st));
+            u6_core::main_loop::game_first(st, io)
+        }));
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        let st = keep.borrow_mut().take().quiet();
+        {
+            let mut s = st.borrow_mut();
+            for a in 0..0x100 {
+                if s.actors.worktype[a] == 8 {
+                    s.actors.attrs.status[a] |= 0x10;
+                }
+            }
+        }
+        game.pending.push(InputEvent::Key(Key::Char('b')));
+        for _ in 0..25 {
+            game.step(20);
+        }
+        assert!(steps_to_prompt(&mut game), "the prompt past the fight");
+        Some(game)
     }
 
     /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).

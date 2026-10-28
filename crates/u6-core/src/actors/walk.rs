@@ -216,19 +216,30 @@ pub fn random_offset(rng: &mut Rng) -> i16 {
 /// impassable.
 pub fn spend_tile_cost(s: &mut State, actor: u16) {
     let p = s.objects.location[usize::from(actor)];
+    let cost = tile_cost(s, p.x, p.y, u16::from(p.z));
+    spend_mp(s, actor, cost);
+}
+
+/// 0x11ef84's cost of (x, y, z) before [`spend_mp`]: 5, plus the cost nibble of the map tile and
+/// of every object tile there that is not impassable. Port: also spec 21's travel search's cost
+/// of a step that leaves the cell.
+pub(crate) fn tile_cost(s: &State, x: u16, y: u16, z: u16) -> i16 {
     let mut cost: i16 = 5;
-    let t = u16::from(seams::tile_at(s, p.x, p.y, u16::from(p.z)));
-    let f = flags1(s, t);
+    let f = flags1(s, u16::from(seams::tile_at(s, x, y, z)));
     if f & 0x02 == 0 {
         cost += i16::from(f >> 4);
     }
-    for Found { id, .. } in seams::objects_at(s, p.x, p.y, u16::from(p.z)) {
-        let f = flags1(s, word_tile(s, seams::obj_word(s, id)));
-        if f & 0x02 == 0 {
-            cost += i16::from(f >> 4);
-        }
+    for Found { id, .. } in seams::objects_at(s, x, y, z) {
+        cost += object_cost(s, seams::obj_word(s, id));
     }
-    spend_mp(s, actor, cost);
+    cost
+}
+
+/// What one object of type/frame `word` adds to 0x11ef84's cost of its cell: the cost nibble of
+/// its tile, unless the tile is impassable.
+pub(crate) fn object_cost(s: &State, word: u16) -> i16 {
+    let f = flags1(s, word_tile(s, word));
+    if f & 0x02 == 0 { i16::from(f >> 4) } else { 0 }
 }
 
 /// Original: 0x11b92a (actors: is the actor outside the map-window cache)

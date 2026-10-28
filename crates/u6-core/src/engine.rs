@@ -42,6 +42,15 @@ pub enum Key {
     Escape,
     Space,
     Backspace,
+    /// Port (spec 21): the four diagonal steps, north-east, south-east, south-west, north-west:
+    /// the PC keypad's PgUp, PgDn, End and Home, whose game codes the command loop walks with
+    /// (0x106c6c) and which the Amiga's raw-key table gives for no key
+    /// ([`crate::ui::input::key_code`] gives their codes past it). Only the travel to a pressed
+    /// cell presses them ([`crate::actors::travel`]); no platform maps a key to them.
+    UpRight,
+    DownRight,
+    DownLeft,
+    UpLeft,
     /// A printable character as typed (letters keep their case).
     Char(char),
 }
@@ -451,6 +460,24 @@ impl Io {
         self.pointer.get()
     }
 
+    /// Port-only (spec 22 Contract 5): whether the next queued event is a pointer event.
+    pub(crate) fn pointer_ready(&self) -> bool {
+        matches!(
+            self.events.borrow().front(),
+            Some(InputEvent::Pointer { .. })
+        )
+    }
+
+    /// Port-only (spec 22 Contract 5): queues `events` ahead of everything queued, in their
+    /// order, so the next reader takes them first: a click on a conversation button or keyword
+    /// types its word as these keys, which the line editor then takes as typed ones.
+    pub(crate) fn push_front(&self, events: &[InputEvent]) {
+        let mut queue = self.events.borrow_mut();
+        for &e in events.iter().rev() {
+            queue.push_front(e);
+        }
+    }
+
     /// Resolves once the tick clock reaches now + `ms` (deadline fixed at the call).
     pub fn sleep(&self, ms: u32) -> Sleep<'_> {
         Sleep {
@@ -777,6 +804,17 @@ pub struct Engine {
     task: Task,
     finished: bool,
     ticks: u64,
+    /// Port (spec 21): the party's travel to a pressed cell, while it walks
+    /// ([`crate::actors::travel`]); engine state, never saved.
+    travel: Option<crate::actors::travel::Travel>,
+    /// Port (spec 21): why the last travel ended.
+    travel_end: Option<crate::actors::travel::End>,
+    /// Port (spec 21): the key the travel pressed last while it still waits in the queue (the
+    /// game reads it at its next prompt); any other waiting key is not the travel's.
+    travel_own: Option<InputEvent>,
+    /// Port (spec 21): the keys the travel pressed, with the tick (from 1) each went in at.
+    #[cfg(test)]
+    travel_log: Vec<(u64, Key)>,
     /// The screen's version ([`Io::present`]) the published frame was synced from last.
     published_front: u64,
     /// Bumped each time the published frame is synced again from the screen: its colours and
@@ -856,6 +894,11 @@ impl Engine {
             task,
             finished: false,
             ticks: 0,
+            travel: None,
+            travel_end: None,
+            travel_own: None,
+            #[cfg(test)]
+            travel_log: Vec::new(),
             published_front: 0,
             published_version: 0,
             shown: Framebuffer::new(),
@@ -878,7 +921,18 @@ impl Engine {
     /// buffer if the game presented, then the vertical-blank work of the display (the pointer
     /// sprite, at the handler's position, over the published frame,
     /// [`crate::ui::pointer::vblank`]).
+    ///
+    /// Port (spec 21): first the travel's step, a direction key it adds to `input` at the command
+    /// prompt ([`Engine::travel_press`]).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
+        let with_step;
+        let input = match self.travel_press(input) {
+            Some(step) => {
+                with_step = [input, &[step]].concat();
+                &with_step[..]
+            }
+            None => input,
+        };
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -999,6 +1053,86 @@ impl Engine {
                 self.src_shows += 1;
             }
         }
+    }
+
+    /// Port (spec 21): starts the party's travel to map cell `target` on its level (masked to the
+    /// level's coordinates): one step a command prompt, entered as its direction key, until it
+    /// arrives or stops ([`crate::actors::travel::End`]). A travel under way is replaced; a key it
+    /// pressed that still waits is not the new travel's own (a key queued before it started).
+    /// Refused with the reason [`crate::actors::travel::reachable`] gives, nothing changed then.
+    pub fn travel_to(&mut self, target: (u16, u16)) -> Result<(), crate::actors::travel::Reason> {
+        let travel = crate::actors::travel::Travel::start(&self.state.borrow(), target)?;
+        self.travel = Some(travel);
+        self.travel_end = None;
+        self.travel_own = None;
+        Ok(())
+    }
+
+    /// Port (spec 21): a travel walks.
+    pub fn travel_active(&self) -> bool {
+        self.travel.is_some()
+    }
+
+    /// Port (spec 21): why the last travel ended (`None` while one walks or before any).
+    pub fn travel_end(&self) -> Option<crate::actors::travel::End> {
+        self.travel_end
+    }
+
+    /// Port (spec 21): the travel under way, if any (its target and receipts).
+    pub fn travel_progress(&self) -> Option<&crate::actors::travel::Travel> {
+        self.travel.as_ref()
+    }
+
+    /// Port (spec 21): the travel's press for this tick, before `input` is queued: the next step's
+    /// key at the command prompt with no key waiting ([`crate::actors::travel::Travel::next`]);
+    /// none otherwise, and the travel ends at a stop.
+    fn travel_press(&mut self, input: &[InputEvent]) -> Option<InputEvent> {
+        use crate::actors::travel::{End, Next, Polled};
+        let (waiting, own) = {
+            let events = self.io.events.borrow();
+            let own = self.travel_own.filter(|&k| events.iter().any(|&e| e == k));
+            let keys = events
+                .iter()
+                .filter(|e| !matches!(e, InputEvent::Pointer { .. }))
+                .count();
+            (keys, own.is_some())
+        };
+        if !own {
+            // Read by the game: no longer the travel's.
+            self.travel_own = None;
+        }
+        let travel = self.travel.as_mut()?;
+        let next = if self.finished {
+            Next::Stop(End::Gone)
+        } else {
+            let polled = Polled {
+                input,
+                buttons: self.io.handler_pointer().buttons,
+                queued: waiting > 0,
+                foreign: waiting > usize::from(own),
+            };
+            travel.next(&self.state.borrow(), &polled)
+        };
+        match next {
+            Next::Hold => None,
+            Next::Press(k) => {
+                #[cfg(test)]
+                self.travel_log.push((self.ticks + 1, k));
+                self.travel_own = Some(InputEvent::Key(k));
+                Some(InputEvent::Key(k))
+            }
+            Next::Stop(end) => {
+                self.travel = None;
+                self.travel_end = Some(end);
+                None
+            }
+        }
+    }
+
+    /// Port (spec 21): the keys the travel pressed so far, with the tick (from 1) of each.
+    #[cfg(test)]
+    pub(crate) fn travel_log(&self) -> &[(u64, Key)] {
+        &self.travel_log
     }
 
     /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at

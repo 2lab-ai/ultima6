@@ -197,9 +197,23 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
     let w = *ui.text.win();
     let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
     io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
+    forget(ui, col, row);
     ui.text.drawn = true;
     ui.text.win_mut().fg = saved;
     key
+}
+
+/// Port (spec 22 Contract 4): screen cell (`col`, `row`) of the message window was drawn over:
+/// the keyword it held is forgotten.
+fn forget(ui: &mut super::UiState, col: u16, row: u16) {
+    if ui.text.current == super::WindowId::Messages {
+        let w = *ui.text.win();
+        let (c, r) = (
+            col.saturating_sub(u16::from(w.x)),
+            row.saturating_sub(u16::from(w.y)),
+        );
+        ui.text.keys.forget(r as u8, c as u8);
+    }
 }
 
 /// Original: 0x105d78 (ui: echo a typed character at the cursor of the line editor: backspace (8)
@@ -241,8 +255,10 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
         }
         let w = *win;
         io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
+        forget(ui, col, row);
     } else {
         io.draw(|fb| text::draw_typed(fb, (font, hangul), &w, c, (col, row)));
+        forget(ui, col, row);
         let win = ui.text.win_mut();
         win.col = win.col.wrapping_add(1);
         if win.col >= win.width {
@@ -251,6 +267,9 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
                 win.row += 1;
             } else if win.flags & text::SCROLL != 0 {
                 ui.text.drawn = true;
+                if ui.text.current == super::WindowId::Messages {
+                    super::talk::scroll(ui);
+                }
                 let w = *ui.text.win();
                 io.draw(|fb| text::scroll_window(fb, &w, ui.paper.as_ref()));
             }
@@ -267,7 +286,7 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
 /// any other is dropped where it is met, as if it had not come ([`poll`]). The player's words
 /// in a conversation take Hangul too ([`read_words`]).
 pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u8>) {
-    edit_line(state, io, max, false).await
+    edit_line(state, io, max, false, false).await
 }
 
 /// Port-only (spec 08 Design 4, slice K5a): [`read_line`] for what the player says in a
@@ -278,7 +297,14 @@ pub async fn read_line(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u
 /// takes the whole syllable back. Without a pack it is [`read_line`].
 pub async fn read_words(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u8>) {
     let hangul = state.borrow().locale.pack.is_some();
-    edit_line(state, io, max, hangul).await
+    edit_line(state, io, max, hangul, false).await
+}
+
+/// Port-only (spec 22): [`read_words`] for what the player says after "you say" (op `f7`), with
+/// the conversation's buttons and keywords to press ([`super::talk`]).
+pub async fn read_said(state: &RefCell<State>, io: &Io, max: i16) -> (i16, Vec<u8>) {
+    let hangul = state.borrow().locale.pack.is_some();
+    edit_line(state, io, max, hangul, true).await
 }
 
 /// Whether `c` is a Hangul syllable (U+AC00..=U+D7A3), the one kind of text beyond ASCII the
@@ -292,14 +318,23 @@ fn cells(line: &[u8]) -> usize {
     line.iter().filter(|&&b| b & 0xc0 != 0x80).count()
 }
 
-/// [`read_line`] (`hangul`: [`read_words`] with a pack).
-async fn edit_line(state: &RefCell<State>, io: &Io, max: i16, hangul: bool) -> (i16, Vec<u8>) {
+/// [`read_line`] (`hangul`: [`read_words`] with a pack; `talk`: [`read_said`]).
+async fn edit_line(
+    state: &RefCell<State>,
+    io: &Io,
+    max: i16,
+    hangul: bool,
+    talk: bool,
+) -> (i16, Vec<u8>) {
     {
         let mut s = state.borrow_mut();
         s.ui.input.line_input = true;
         s.ui.input.upcase = false;
     }
     put_raw(state, io, -1).await;
+    if talk {
+        super::talk::begin(&mut state.borrow_mut(), io);
+    }
     let mut line: Vec<u8> = Vec::new();
     let mut n: i16 = 0;
     state.borrow_mut().ui.input.drain = false;
@@ -307,14 +342,23 @@ async fn edit_line(state: &RefCell<State>, io: &Io, max: i16, hangul: bool) -> (
         let text = if hangul { Text::Hangul } else { Text::Ascii };
         let typed = loop {
             // Port: nothing here reads the pointer; its queued events are applied (as the
-            // handler would) so the keys behind them arrive.
-            io.take_pointer();
+            // handler would) so the keys behind them arrive. Port (spec 22): but the buttons and
+            // keywords of `talk`.
+            if talk {
+                let typed = cells(&line[..n as usize]);
+                super::talk::pointer(&mut state.borrow_mut(), io, typed);
+            } else {
+                io.take_pointer();
+            }
             let typed = idle_wait(state, io, text).await;
             if typed != Polled::None {
                 break typed;
             }
         };
         let mut s = state.borrow_mut();
+        if talk {
+            super::talk::cool(&mut s, io);
+        }
         let k = match typed {
             Polled::Code(k) => k,
             Polled::Text(c) => {
@@ -369,6 +413,9 @@ async fn edit_line(state: &RefCell<State>, io: &Io, max: i16, hangul: bool) -> (
         }
     }
     let mut s = state.borrow_mut();
+    if talk {
+        super::talk::end(&mut s, io);
+    }
     let ui = &mut s.ui;
     ui.input.drain = true;
     ui.text.more_rows = i16::from(ui.text.win().height);

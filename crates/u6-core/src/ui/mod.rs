@@ -90,6 +90,7 @@ pub mod print;
 pub mod printf;
 pub mod seams;
 pub mod tables;
+pub mod talk;
 pub mod target;
 #[cfg(test)]
 mod tests;
@@ -137,6 +138,9 @@ pub struct UiState {
     pub input: InputState,
     pub panel: PanelState,
     pub pointer: pointer::PointerState,
+    /// Port-only (spec 22): the conversation's buttons and the target drawn inverse, while it
+    /// reads the player's words.
+    pub talk: talk::TalkClicks,
 }
 
 impl UiState {
@@ -172,6 +176,7 @@ impl UiState {
             input: InputState::from_tables(&tables),
             panel: PanelState::from_tables(&tables),
             pointer: pointer::PointerState::default(),
+            talk: talk::TalkClicks::default(),
             tables,
         }
     }

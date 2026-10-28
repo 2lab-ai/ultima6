@@ -12629,6 +12629,243 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
 }, { needs: h.haveHfes });
 
+// Spec 22 (conversation by click): koFixture's archive with the player's words after the
+// greeting (`f7`), a keyword block `name` whose answer ends the conversation, and a line for no
+// match. All of it the test's own.
+const CLICK_ANSWER = '"Named, and so answered."';
+const CLICK_NOPE = '"No such thing."';
+async function clickTalkFixture() {
+  const { latin1 } = await import('../i18n/translate.mjs');
+  const script = [0xff, 0x02, ...latin1('Zed'), 0xf1, ...latin1(KO_LOOK), 0xf2, ...latin1(KO_GREET), 0xf7, 0xef, ...latin1('name'), 0xf6, ...latin1(CLICK_ANSWER), 0xb6, 0xee, ...latin1(CLICK_NOPE), 0xb6];
+  const items = 0x63;
+  const table = [];
+  const body = [];
+  for (let i = 0; i < items; i += 1) {
+    const at = i === 0 ? 0 : items * 4 + body.length;
+    if (i > 0) body.push(0, 0, 0, 0, ...script);
+    table.push(at & 255, (at >> 8) & 255, (at >> 16) & 255, 0);
+  }
+  return [...table, ...body];
+}
+
+// The Name button's middle (spec 22 Contract 2: Job then Name, each its word between blank cells,
+// centred on the Status window's last row, cols 0x16..0x26, row 12, one cell between them).
+const NAME_BUTTON = [33 * 8 + 4, 12 * 8 + 4];
+
+for (const layout of ['original', 'wide']) {
+  test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a touch on Name the browser cancels, before or after the game took its press, and with the pointer back over Name in the same frame, is released off every target and types nothing (the input line as before it), while at the prompt a cancelled touch is released where it was; in the Wide layout a window dragged by its title strip during the read and cancelled keeps its place and the next move reaches the game at its own pixel; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels (the prompt's cursor cell aside), and no key was sent for the press`, async (env) => {
+    const { page } = layout === 'wide' ? await h.openWide(env) : await h.openPage(env);
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await h.waitPrompt(page);
+    // Pointer events dispatched on the canvas in one evaluation (one frame: no step between
+    // them), `kinds` each [type, pointerType, buttons] at client point `xy`; after each, what the
+    // game holds of them: its queued events (Game.keys_pending), where the last queued pointer
+    // event puts the pointer (Game.game_pointer: queued, x, y) and whether it reads words by
+    // click (Game.reading_by_click). Pointer id 1, the mouse's, so the canvas's capture of it
+    // succeeds and the listener goes on to queue the press.
+    const dispatch = (xy, kinds) => page.evaluate(([x, y, list]) => {
+      const c = document.getElementById('screen');
+      const g = globalThis.__shownGame;
+      return list.map(([kind, pointerType, buttons]) => {
+        c.dispatchEvent(new PointerEvent(kind, { pointerType, pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+        const p = g.game_pointer();
+        return { pending: g.keys_pending(), queued: p[3], at: [p[4], p[5]], reading: g.reading_by_click() };
+      });
+    }, [...xy, kinds]);
+    const pending = () => page.evaluate(() => globalThis.__shownGame.keys_pending());
+    // At the prompt (no conversation): a touch on the message window that the browser cancels
+    // is released where it was, as before spec 22.
+    const outside = [0x16 * 8 + 36, 0x0e * 8 + 20];
+    const before = await pending();
+    const [down, cancel] = await dispatch(await h.screenPoint(page, ...outside), [['pointerdown', 'touch', 1], ['pointercancel', 'touch', 0]]);
+    assert.deepEqual([down.reading, down.pending, down.queued, down.at], [false, before + 1, 1, outside], 'the press queued where the touch was');
+    assert.deepEqual([cancel.pending, cancel.at], [before + 2, outside], 'outside the read the cancel is a release at the touch point');
+    await h.waitFrames(page, 4);
+    await h.waitPrompt(page);
+    assert.equal(await h.replaceKept(page, 'converse.a', await clickTalkFixture()), 1, 'one archive replaced');
+    // Pixels of the game's frame (the 320 x 200 UI at its top left in both builds), as a list:
+    // compared, never printed.
+    const region = (x0, y0, x1, y1) => page.evaluate(([a, b, c, d]) => {
+      const g = globalThis.__shownGame;
+      const w = g.width();
+      const rgba = g.frame_rgba();
+      const out = [];
+      for (let y = b; y < d; y += 1) for (let x = a; x < c; x += 1) out.push(rgba.slice((y * w + x) * 4, (y * w + x) * 4 + 3).join(','));
+      return out;
+    }, [x0, y0, x1, y1]);
+    // The message window's 17 x 10 cells (cols 0x16..=0x26, rows 0x0e..=0x17), each its pixels.
+    const windowCells = async () => {
+      const px = await region(0x16 * 8, 0x0e * 8, 0x27 * 8, 0x18 * 8);
+      const cells = [];
+      for (let r = 0; r < 10; r += 1) {
+        for (let c = 0; c < 17; c += 1) {
+          const cell = [];
+          for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) cell.push(px[(r * 8 + y) * 17 * 8 + c * 8 + x]);
+          cells.push(cell.join(';'));
+        }
+      }
+      return cells;
+    };
+    // At the prompt: the window's cells, the prompt's turning cursor masked (the one cell that
+    // changes from frame to frame; sampled until it has).
+    const messages = async () => {
+      const first = await windowCells();
+      let changed = [];
+      for (let i = 0; i < 20 && changed.length === 0; i += 1) {
+        await h.waitFrames(page, 1);
+        const now = await windowCells();
+        changed = now.flatMap((c, j) => (c === first[j] ? [] : [j]));
+      }
+      assert.equal(changed.length, 1, 'at the prompt one cell turns: its cursor');
+      const cells = await windowCells();
+      cells[changed[0]] = 'cursor';
+      return { cursor: changed[0], cells: cells.join('|') };
+    };
+    // Talk to member 2 up to the player's words, the pointer at rest over the Name button.
+    const talkTo2 = async () => {
+      await page.reload();
+      await h.waitSettled(page);
+      await h.waitPrompt(page);
+      await page.focus('#screen');
+      await page.keyboard.press('t');
+      await h.waitTaken(page);
+      await page.keyboard.press('2');
+      await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+      await h.waitFrames(page, 2);
+      const cells = await region(30 * 8, 12 * 8, 36 * 8, 13 * 8);
+      await page.mouse.move(...(await h.screenPoint(page, ...NAME_BUTTON)));
+      await h.waitTaken(page);
+      await h.waitFrames(page, 2);
+      return cells;
+    };
+    const cells = await talkTo2();
+    assert.ok(new Set(cells).size >= 2, 'the Name button drawn in the frame (its cells of two colours, the pointer elsewhere)');
+    await keepFrame(page.locator('#screen'), `talk-click-${layout}-hover.png`);
+    // A touch pressed on Name that the browser cancels (a scroll or a zoom taking it): released
+    // off every target (frame pixel (-1, -1)), it types nothing and the read goes on, whether
+    // the game took the press before the cancel or not, and with the pointer moved back over Name
+    // in the cancel's frame. Each time the input line (the message window's cells) is the line
+    // before the touch.
+    const touchAt = await h.screenPoint(page, ...NAME_BUTTON);
+    // The pointer at rest on the portrait (no target, its sprite clear of the message window and
+    // the buttons' row) whenever the input line is sampled, so the sprite is no part of it.
+    const rest = async () => {
+      await page.mouse.move(...(await h.screenPoint(page, 23 * 8 + 4, 3 * 8 + 4)));
+      await h.waitTaken(page);
+      await h.waitFrames(page, 2);
+    };
+    await rest();
+    const base = await messages();
+    const unchanged = async (label) => {
+      for (let i = 0; i < 40; i += 1) {
+        await h.waitFrames(page, 1);
+        assert.equal(await page.evaluate(() => globalThis.__owned), 7, `${label}: the words are still read`);
+      }
+      await rest();
+      assert.deepEqual(await messages(), base, `${label}: the input line as before the touch`);
+    };
+    // The read's targets as the engine holds them (Game.talk_target: [hot, pressed], 1 the Name
+    // button): the press taken is Name pressed in the read, not only the page's queue drained.
+    const target = () => page.evaluate(() => Array.from(globalThis.__shownGame.talk_target()));
+    const taken = async (label) => {
+      for (let i = 0; i < 40 && (await target())[1] !== 1; i += 1) await h.waitFrames(page, 1);
+      assert.deepEqual([(await target())[1], await pending()], [1, 0], `${label}: the game took the press (Name pressed in the read)`);
+    };
+    const queuedOn = (r, n, label) => assert.deepEqual([r.reading, r.pending, r.queued, r.at], [true, n, 1, NAME_BUTTON], `${label}: the press queued on Name`);
+    const off = (r, n, label) => assert.deepEqual([r.pending, r.at], [n, [-1, -1]], `${label}: the release queued off every target`);
+    const over = (r, n, label) => assert.deepEqual([r.pending, r.at], [n, NAME_BUTTON], `${label}: the pointer back over Name, queued after the release`);
+    {
+      const label = 'cancelled before the game took the press';
+      const n = await pending();
+      const [d, c] = await dispatch(touchAt, [['pointerdown', 'touch', 1], ['pointercancel', 'touch', 0]]);
+      queuedOn(d, n + 1, label);
+      off(c, n + 2, label);
+      await unchanged(label);
+    }
+    {
+      const label = 'cancelled after the game took the press';
+      const n = await pending();
+      const [d] = await dispatch(touchAt, [['pointerdown', 'touch', 1]]);
+      queuedOn(d, n + 1, label);
+      await taken(label);
+      const [c] = await dispatch(touchAt, [['pointercancel', 'touch', 0]]);
+      off(c, 1, label);
+      await unchanged(label);
+    }
+    {
+      const label = 'cancelled, the pointer back over Name in its frame';
+      const n = await pending();
+      const [d, c, m] = await dispatch(touchAt, [['pointerdown', 'touch', 1], ['pointercancel', 'touch', 0], ['pointermove', 'mouse', 0]]);
+      queuedOn(d, n + 1, label);
+      off(c, n + 2, label);
+      over(m, n + 3, label);
+      await unchanged(label);
+    }
+    {
+      const label = 'cancelled after the game took the press, the pointer back over Name in its frame';
+      const n = await pending();
+      const [d] = await dispatch(touchAt, [['pointerdown', 'touch', 1]]);
+      queuedOn(d, n + 1, label);
+      await taken(label);
+      const [c, m] = await dispatch(touchAt, [['pointercancel', 'touch', 0], ['pointermove', 'mouse', 0]]);
+      off(c, 1, label);
+      over(m, 2, label);
+      await unchanged(label);
+    }
+    await page.mouse.move(...(await h.screenPoint(page, ...NAME_BUTTON)));
+    await h.waitTaken(page);
+    await page.evaluate(() => { globalThis.__sent.length = 0; });
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+    await h.waitPrompt(page);
+    assert.deepEqual(await page.evaluate(() => globalThis.__sent.length), 0, 'no key sent for the press');
+    const pressed = await messages();
+    await talkTo2();
+    if (layout === 'wide') {
+      // Wide, the windows view: a touch on the date line's title strip during the read drags that
+      // window and the browser cancels it. The drag ends as any release does (dragWindow): its
+      // place kept at once and no drag left over, so the next move reaches the game at its own
+      // pixel (over Name), not at the rest pixel the drag sent.
+      const date = (await wideShown(page)).windows.find((w) => w.name === 'date');
+      const strip = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5, date.bar[1] + date.bar[3] / 2 + 0.5);
+      const to = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5 - 200, date.bar[1] + date.bar[3] / 2 + 0.5 + 100);
+      const over = await h.screenPoint(page, ...NAME_BUTTON);
+      const drag = await page.evaluate(([[sx, sy], [tx, ty], [ox, oy]]) => {
+        const c = document.getElementById('screen');
+        const g = globalThis.__shownGame;
+        const send = (kind, pointerType, buttons, x, y) => c.dispatchEvent(new PointerEvent(kind, { pointerType, pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+        const reading = g.reading_by_click();
+        send('pointerdown', 'touch', 1, sx, sy);
+        send('pointermove', 'touch', 1, tx, ty);
+        send('pointercancel', 'touch', 0, tx, ty);
+        const kept = JSON.parse(localStorage.getItem('u6.layout.windows'))?.date ?? null;
+        const shown = globalThis.__u6Layout.windows.find((w) => w.name === 'date').outer.slice(0, 2);
+        send('pointermove', 'mouse', 0, ox, oy);
+        const p = g.game_pointer();
+        return { reading, kept, shown, queued: p[3], at: [p[4], p[5]] };
+      }, [strip, to, over]);
+      assert.equal(drag.reading, true, 'the drag during the read');
+      assert.deepEqual(drag.shown, [date.outer[0] - 200, date.outer[1] + 100], 'the date line dragged');
+      assert.deepEqual(drag.kept, drag.shown, 'the cancelled drag kept its place (u6.layout.windows)');
+      assert.deepEqual([drag.queued, drag.at], [1, NAME_BUTTON], 'the next move queued at its own pixel, not the rest pixel');
+      await page.mouse.move(...over);
+      await h.waitTaken(page);
+      console.log('  receipt: wide: a window drag cancelled during the read kept its place: pass');
+    }
+    await page.keyboard.type('name');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+    await h.waitPrompt(page);
+    const typed = await messages();
+    assert.equal(pressed.cursor, typed.cursor, 'the prompt\'s cursor in the same cell');
+    assert.ok(pressed.cells === typed.cells, 'the press answered as typing name and Enter: the same message window');
+    console.log(`  receipt: ${layout}: Name pressed in the canvas answered as typed: pass`);
+  }, { needs: h.haveHfes });
+}
+
 // The system's pointer over the game screen: the game draws its own (the engine's sprite over
 // the frame; with HD on the page draws it over the HD frame, spec 11 Design 7), so while a game
 // runs the stylesheet hides the system's over the canvas where the engine's sprite is under the

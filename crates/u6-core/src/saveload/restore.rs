@@ -146,6 +146,7 @@ pub fn restore(s: &mut State, io: &Io) -> Result<(), LoadError> {
     }
     crate::actors::clock::tick(s, 0);
     s.actors.work.prompt = 1;
+    s.saveload.restores = s.saveload.restores.wrapping_add(1);
     Ok(())
 }
 
