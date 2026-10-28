@@ -1091,11 +1091,12 @@ fn a_release_is_taken_where_its_own_event_put_the_pointer() {
         16,
     );
     idle(&mut e, 8);
-    e.tick(&typed("cat\n"), 16);
+    // A draft of its own (gpt b NIT): only what the player types now is the input.
+    e.tick(&typed("dog\n"), 16);
     finish(&mut e);
     assert_eq!(
         e.state().converse.input,
-        b"cat",
+        b"dog",
         "the line held nothing before"
     );
     println!("each pointer event hit-tested where it is: pass");
@@ -1104,17 +1105,18 @@ fn a_release_is_taken_where_its_own_event_put_the_pointer() {
 /// Spec 22 Contract 6 (opus S2): a wrapped keyword hovered by its first part when the line
 /// editor's entry put scrolls that part off the top leaves no cell inverse once the pointer is
 /// off it, and the read's end draws nothing inverse: the frame of the same read never hovered.
+/// The control (gpt b-2): with a last row the put leaves in place, the same hover takes.
 #[test]
 fn a_keyword_whose_hovered_first_part_scrolled_off_leaves_no_cell_inverse() {
     let (mut s, f) = talk_state(BODY, None);
     s.ui.text.set_wide(true);
-    // Four cells wide: `abc` and its rest `d`, rows of filler, and a full last row, so the read
-    // starts with a put that scrolls `abc` off.
+    // Four cells wide: `abc` and its rest `d`, rows of filler, and a last row: full, so the read
+    // starts with a put that scrolls `abc` off; one cell short, so nothing scrolls.
     s.ui.text.windows[WindowId::Messages.index()].width = 4;
-    let run = |over: Option<(i16, i16)>| {
-        let mut e = Engine::with_game(s.clone(), f.clone(), |st, io| async move {
-            let text = b"@{abc d}\n1\n2\n3\n4\n5\n6\n7\nwxyz";
-            crate::ui::printf::printf(&st, &io, text, &[]).await;
+    let run = |last: &'static [u8], over: Option<(i16, i16)>| {
+        let mut e = Engine::with_game(s.clone(), f.clone(), move |st, io| async move {
+            let text = [b"@{abc d}\n1\n2\n3\n4\n5\n6\n7\n" as &[u8], last].concat();
+            crate::ui::printf::printf(&st, &io, &text, &[]).await;
             crate::ui::keyread::read_said(&st, &io, 20).await;
         });
         let (x, y) = over.unwrap_or((4, 4));
@@ -1122,7 +1124,30 @@ fn a_keyword_whose_hovered_first_part_scrolled_off_leaves_no_cell_inverse() {
         idle(&mut e, 2);
         e
     };
-    let mut plain = run(None);
+    // The control: the pointer over `abc`'s third cell with nothing scrolled is the hover, `abc`
+    // the target and both its parts inverse (the leftmost pixel of each cell the alert colour).
+    let w = *s.ui.text.window(WindowId::Messages);
+    let control = run(b"wxy", Some(message_pixel(&s, 2, 0)));
+    assert_eq!(
+        control.state().ui.talk.hot,
+        Some(Target::Key { row: 0, col: 0 }),
+        "the control: the hover took `abc`"
+    );
+    let alert = s.ui.tables.colours.alert;
+    for (col, row, n) in [(0u8, 0u8, 3u8), (0, 1, 1)] {
+        for i in 0..n {
+            let (x, y) = (
+                usize::from(w.x + col + i) * CELL,
+                usize::from(w.y + row) * CELL,
+            );
+            assert_eq!(
+                control.frame().get(x, y),
+                Some(alert),
+                "the control: inverse at row {row}, cell {i}"
+            );
+        }
+    }
+    let mut plain = run(b"wxyz", None);
     let spans = plain.state().ui.text.keys.spans.clone();
     assert_eq!(
         spans
@@ -1133,7 +1158,7 @@ fn a_keyword_whose_hovered_first_part_scrolled_off_leaves_no_cell_inverse() {
         "its first part scrolled off, its rest on the top row"
     );
     // The pointer over `abc`'s third cell (row 0 before the scroll; nothing there after it).
-    let mut hovered = run(Some(message_pixel(&plain.state(), 2, 0)));
+    let mut hovered = run(b"wxyz", Some(message_pixel(&plain.state(), 2, 0)));
     assert!(
         hovered.state().ui.talk.hot.is_none(),
         "off every target after the scroll"
@@ -1211,4 +1236,103 @@ fn a_press_the_scroll_moves_types_on_its_release_where_the_keyword_went() {
     assert_eq!(e.state().converse.input, b"cat");
     assert!(screen(&e.state()).ends_with("Purr."), "its answer");
     println!("a press moved by the scroll types on its release there: pass");
+}
+
+/// Spec 22 Contract 4 (opus NIT 1): a braced keyword whose inner space is the cell that overflows
+/// the row breaks with its rest empty; the newline after it ends that empty row, which spends the
+/// wrap: a keyword at a later row's start is a word of its own.
+#[test]
+fn a_wrap_whose_rest_row_draws_nothing_is_spent() {
+    let (mut s, _) = talk_state(BODY, None);
+    s.ui.text.set_wide(true);
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        let text = b"Xxxxxxxxxxxxx @{big }\n@dog\n";
+        crate::ui::printf::printf(&st, &io, text, &[]).await;
+    });
+    finish(&mut e);
+    let st = e.state();
+    let keys = &st.ui.text.keys;
+    let laid: Vec<(u8, u8, Vec<u8>, bool)> = keys
+        .spans
+        .iter()
+        .map(|k| (k.row, k.col, k.word(), k.joined.is_some()))
+        .collect();
+    assert_eq!(
+        laid,
+        [
+            (0, 14, b"big".to_vec(), false),
+            (2, 0, b"dog".to_vec(), false)
+        ],
+        "`big` ending its row, `dog` at a row's start, no rest"
+    );
+    assert_eq!(
+        (keys.word(0, 14), keys.word(2, 0)),
+        (b"big".to_vec(), b"dog".to_vec())
+    );
+    println!("a wrap whose rest row draws nothing is spent: pass");
+}
+
+/// Spec 22 Contract 5 "Timing" (opus NIT 2, gpt a-1): a click's release ends the read's pass;
+/// the pointer events queued after it wait behind the keys it injected for the next reader (here
+/// the string read, f9, of `job`'s answer), which takes them as its own pointer events: a hover
+/// there and a click where the Name button was in the f7 read type nothing.
+#[test]
+fn what_follows_an_injecting_release_waits_for_the_next_reader() {
+    let body: &[u8] = b"\xf7\xefjob\xf6Work.\xf9\x05\xb3$5\xb6\xeeNo.\xb6";
+    let (s, f) = talk_state(body, None);
+    for click_after in [false, true] {
+        let label = if click_after {
+            "a click after"
+        } else {
+            "a hover after"
+        };
+        let mut e = waiting(s.clone(), f.clone());
+        let (job, name) = (button_pixel(&e, 0), button_pixel(&e, 1));
+        e.tick(&[at(job.0, job.1, 0)], 16);
+        let mut events = vec![
+            at(job.0, job.1, POINTER_LEFT),
+            at(job.0, job.1, 0),
+            at(name.0, name.1, 0),
+        ];
+        if click_after {
+            events.extend([at(name.0, name.1, POINTER_LEFT), at(name.0, name.1, 0)]);
+        }
+        talk::INJECTED.with(|k| k.borrow_mut().clear());
+        e.tick(&events, 16);
+        // In that tick the editor took the keys, `job` answered and the f9 read began, then took
+        // the hover in its first pass; a press and release after it wait for its next passes.
+        {
+            let st = e.state();
+            assert!(
+                !st.ui.talk.reading && st.ui.input.line_input && screen(&st).contains("Work."),
+                "{label}: `job` answered, the f9 read waits"
+            );
+        }
+        let p = e.io().pointer();
+        assert_eq!(
+            (p.x, p.y, p.buttons, e.io().pending_events()),
+            (name.0, name.1, 0, if click_after { 2 } else { 0 }),
+            "{label}: the hover taken by the f9 read, what follows it still queued"
+        );
+        idle(&mut e, 4);
+        assert_eq!(e.io().pending_events(), 0, "{label}: the f9 read took them");
+        let injected = talk::INJECTED.with(|k| k.borrow().clone());
+        assert_eq!(
+            injected,
+            typed("job\n"),
+            "{label}: only the click on Job typed"
+        );
+        e.tick(&typed("abc\n"), 16);
+        finish(&mut e);
+        assert_eq!(
+            e.state().converse.input,
+            b"abc",
+            "{label}: f9 took what was typed, alone"
+        );
+        assert!(
+            screen(&e.state()).ends_with("abc"),
+            "{label}: and printed it"
+        );
+    }
+    println!("what follows an injecting release waits for the next reader: pass");
 }

@@ -12542,7 +12542,7 @@ async function clickTalkFixture() {
 const NAME_BUTTON = [33 * 8 + 4, 12 * 8 + 4];
 
 for (const layout of ['original', 'wide']) {
-  test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a touch on Name the browser cancels, before or after the game took its press, and with the pointer back over Name in the same frame, is released off every target and types nothing (the input line as before it), while at the prompt a cancelled touch is released where it was; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels (the prompt's cursor cell aside), and no key was sent for the press`, async (env) => {
+  test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a touch on Name the browser cancels, before or after the game took its press, and with the pointer back over Name in the same frame, is released off every target and types nothing (the input line as before it), while at the prompt a cancelled touch is released where it was; in the Wide layout a window dragged by its title strip during the read and cancelled keeps its place and the next move reaches the game at its own pixel; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels (the prompt's cursor cell aside), and no key was sent for the press`, async (env) => {
     const { page } = layout === 'wide' ? await h.openWide(env) : await h.openPage(env);
     await h.load(page, env);
     await page.setInputFiles('#picker', h.HFES);
@@ -12655,9 +12655,12 @@ for (const layout of ['original', 'wide']) {
       await rest();
       assert.deepEqual(await messages(), base, `${label}: the input line as before the touch`);
     };
+    // The read's targets as the engine holds them (Game.talk_target: [hot, pressed], 1 the Name
+    // button): the press taken is Name pressed in the read, not only the page's queue drained.
+    const target = () => page.evaluate(() => Array.from(globalThis.__shownGame.talk_target()));
     const taken = async (label) => {
-      for (let i = 0; i < 40 && await pending() !== 0; i += 1) await h.waitFrames(page, 1);
-      assert.equal(await pending(), 0, `${label}: the game took the press`);
+      for (let i = 0; i < 40 && (await target())[1] !== 1; i += 1) await h.waitFrames(page, 1);
+      assert.deepEqual([(await target())[1], await pending()], [1, 0], `${label}: the game took the press (Name pressed in the read)`);
     };
     const queuedOn = (r, n, label) => assert.deepEqual([r.reading, r.pending, r.queued, r.at], [true, n, 1, NAME_BUTTON], `${label}: the press queued on Name`);
     const off = (r, n, label) => assert.deepEqual([r.pending, r.at], [n, [-1, -1]], `${label}: the release queued off every target`);
@@ -12710,6 +12713,37 @@ for (const layout of ['original', 'wide']) {
     assert.deepEqual(await page.evaluate(() => globalThis.__sent.length), 0, 'no key sent for the press');
     const pressed = await messages();
     await talkTo2();
+    if (layout === 'wide') {
+      // Wide, the windows view: a touch on the date line's title strip during the read drags that
+      // window and the browser cancels it. The drag ends as any release does (dragWindow): its
+      // place kept at once and no drag left over, so the next move reaches the game at its own
+      // pixel (over Name), not at the rest pixel the drag sent.
+      const date = (await wideShown(page)).windows.find((w) => w.name === 'date');
+      const strip = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5, date.bar[1] + date.bar[3] / 2 + 0.5);
+      const to = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5 - 200, date.bar[1] + date.bar[3] / 2 + 0.5 + 100);
+      const over = await h.screenPoint(page, ...NAME_BUTTON);
+      const drag = await page.evaluate(([[sx, sy], [tx, ty], [ox, oy]]) => {
+        const c = document.getElementById('screen');
+        const g = globalThis.__shownGame;
+        const send = (kind, pointerType, buttons, x, y) => c.dispatchEvent(new PointerEvent(kind, { pointerType, pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+        const reading = g.reading_by_click();
+        send('pointerdown', 'touch', 1, sx, sy);
+        send('pointermove', 'touch', 1, tx, ty);
+        send('pointercancel', 'touch', 0, tx, ty);
+        const kept = JSON.parse(localStorage.getItem('u6.layout.windows'))?.date ?? null;
+        const shown = globalThis.__u6Layout.windows.find((w) => w.name === 'date').outer.slice(0, 2);
+        send('pointermove', 'mouse', 0, ox, oy);
+        const p = g.game_pointer();
+        return { reading, kept, shown, queued: p[3], at: [p[4], p[5]] };
+      }, [strip, to, over]);
+      assert.equal(drag.reading, true, 'the drag during the read');
+      assert.deepEqual(drag.shown, [date.outer[0] - 200, date.outer[1] + 100], 'the date line dragged');
+      assert.deepEqual(drag.kept, drag.shown, 'the cancelled drag kept its place (u6.layout.windows)');
+      assert.deepEqual([drag.queued, drag.at], [1, NAME_BUTTON], 'the next move queued at its own pixel, not the rest pixel');
+      await page.mouse.move(...over);
+      await h.waitTaken(page);
+      console.log('  receipt: wide: a window drag cancelled during the read kept its place: pass');
+    }
     await page.keyboard.type('name');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });

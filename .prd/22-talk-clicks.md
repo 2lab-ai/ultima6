@@ -84,8 +84,9 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
    there, or the next cell; inside `@{…}` a space is in the alert colour, after an `@` keyword it is not), the span
    holding that last cell is marked continued (`KeySpans::wrapped`, no other span of the row), and the span the next row
    starts with at column 0 is that keyword's rest (the first cell drawn there takes the wrap, a blank aside, so a more
-   prompt's blank row between keeps it; a wrap the next drawn row does not take is spent with it,
-   `KeySpans::row_drawn`). The link is explicit: a rest follows only the continued span of its row above, a continued
+   prompt's blank row between keeps it; a wrap the next drawn row does not take is spent with it, and so is one whose
+   rest row ends with nothing drawn, as when the dropped space was all the keyword had left (`ui/print.rs`
+   `end_line`, `KeySpans::row_drawn`). The link is explicit: a rest follows only the continued span of its row above, a continued
    span is followed only by the rest at column 0 of its row below (a keyword broken twice has three parts), so a
    keyword before or after them on their rows stays its own; a part drawn over takes its link with it, leaving the other
    part a keyword of its own. The word is the parts' cells with the dropped cells between. A
@@ -102,11 +103,16 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
    they did (nothing); so does a press the browser cancels, which the page sends as a release at frame pixel (-1, -1),
    which the engine's pointer clamps to the frame's corner (0, 0) (`engine.rs` `Pointer::apply`), off every target
    (Contract 8).
-   - Timing: in the f7 read every pointer event at the front of the queue is taken in the same pass of the editor's
-     wait, one event a take (`Io::take_pointer_upto(1)`), the hover drawn after each; elsewhere the original's event
-     wait takes one a pass. So presses and releases queued together, on targets or off them, are all taken before the
-     wait's next frame, and a press and its release queued together type the word in that pass and leave no pointer
-     event behind it.
+   - Timing: in the f7 read the pointer events at the front of the queue are taken in the same pass of the editor's
+     wait, one event a take (`Io::take_pointer_upto(1)`), the hover drawn after each, up to a click's release: that
+     release puts its keys in front of the queue and ends the pass. The events queued after it wait behind those keys
+     for the next reader, which takes them as its own pointer events once the keys are taken (their Enter ends this
+     read) and does with them what such events do there: a string read (f9) takes them and types nothing for them
+     (tested); read from the code, not tested, a next f7 read starts with `talk::begin` and then hit-tests them in its
+     first pass (`ui/keyread.rs` `edit_line`). Elsewhere the original's event wait takes one a pass. So presses
+     and releases queued together, on targets or off them, are taken before the wait's next frame up to a click's
+     release, and a press and its release queued together alone type the word in that pass and leave no pointer event
+     behind it.
    - Positions: each event is hit-tested where its own event put the pointer, a press or a release included: a move
      after a release (the pointer leaving the target in the click's frame) does not move the release off the target,
      and a move back over it after a cancelled press's release does not move that release onto it. The page's queue
@@ -136,12 +142,24 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
    `talk::end`, buttons drawn or not), is released at frame pixel (-1, -1) at once, the frame's corner once the engine
    clamps it, off every target; no release goes at the touch point first. At every other time it is released where
    it was cancelled, as before spec 22 (`sendPointer` with no button), so the map, the slots and a Wide strip drag see
-   what they saw. The page calls `showGamePointer()` after either. Chosen over `touch-action: none` on the canvas:
+   what they saw. A Wide window drag (`dragged`: a press on a title strip in the windows view, spec 13 Design 5) is no
+   such press: its press went at the rest pixel, off every target, and its cancel ends the drag through
+   `sendPointer` → `dragWindow` as its release does, the places kept (`keepWindows`) and the release at the rest
+   pixel, where the press went; the next move then reaches the game where it is. The page calls `showGamePointer()`
+   after the release at (-1, -1); `sendPointer` calls it itself. Chosen over `touch-action: none` on the canvas:
    that would change the page for every touch user (no scroll or zoom started on the canvas) and still leave the
-   cancels the browser makes for other reasons. The one race left: the page asks at the cancel, the engine takes the
-   release later; events queued before it that end the read in between (Enter typed in the same frame) leave the
-   release at (0, 0) to whatever reads the pointer next. A release with nothing pressed at that place is what the
-   game sees for a release off the canvas's top left in the Original layout.
+   cancels the browser makes for other reasons. Two races are left, both of a cancel the page sees at one time and the
+   engine takes at another:
+   - The read ends first: the page asks at the cancel, the engine takes the release later; events queued before it
+     that end the read in between (Enter typed in the same frame) leave the release at (0, 0) to whatever reads the
+     pointer next. A release with nothing pressed at that place is what the game sees for a release off the canvas's
+     top left in the Original layout.
+   - The read begins later (the mirror): a press and its cancel both queued while the conversation yields before the
+     read begins (the frame a refresh presents, `converse/seams.rs:340` `refresh_view`, or every `YIELD_EVERY` steps,
+     `converse/run.rs:218` `checkpoint`) find `reading_by_click` false, so the release goes at the touch point. The
+     read's first pass then takes the press and that release where the touch was: a target there (a keyword still
+     shown, or a button the read's start drew there) types. A touch cancelled at the moment the read begins is the
+     only case; the page cannot know the read is about to begin.
 
 ## Trace: a click on Name (the same for Job and a keyword)
 
@@ -211,9 +229,16 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   it; with a draft typed, a cancelled press, a right click and a keyword that types nothing leave it, and Enter alone
   submits it; a press the scroll moves types on its release where the keyword went; the ASCII and Hangul draft is
   checked before the clicks (two cells echoed; submitted as it is) and a click puts exactly one Backspace per cell
-  in front of the queue (`talk::INJECTED`, a test hook). Web (`crates/u6-web/src/lib.rs`): a run of moves collapses
-  and a press or a release stays where its event put it (release then hover, press then held moves, a release of a
-  press the engine has), also through `Game::step`'s hand-over.
+  in front of the queue (`talk::INJECTED`, a test hook). Engine, round 4: a braced keyword whose inner space
+  overflows its row, then a newline, then a keyword at a later row's start are two words (the empty rest row spends
+  the wrap); the hover-scroll case has its control (the same hover with nothing scrolled takes `abc`, both parts
+  inverse); the cancelled press's case types a draft of its own; a hover, and a click where Name was, queued after a
+  click on Job wait behind its keys, are taken by the f9 read that follows (the hover in its first pass, the press and
+  release in its next passes, one a pass) and type nothing there. Web (`crates/u6-web/src/lib.rs`): a run of moves
+  collapses and a press or a release stays where its event put it (release then hover, press then held moves, a
+  release of a press the engine has), also through `Game::step`'s hand-over; a press the old engine took keeps no two
+  moves apart after a relaunch (`put_on_screen` resets `Game::handed`: tested, not left as an optimisation);
+  `Game::talk_target` codes the read's hot and pressed targets.
 - Real data (`ui/tests/pointer_real.rs`, the user's zip; counts and equality only; it prints `ran` or `skipped`): Talk
   to member 1 by the pointer, press Name, type a letter and press Job (the press takes the letter back with the keymap's
   Backspace), press a keyword of the answers; the same run with the pointer moved to the same places and the keys typed
@@ -226,7 +251,9 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   pressed on it that the browser cancels, the press queued on Name each time (the page's queue read through
   `Game::keys_pending` and `Game::game_pointer`), cancelled before and after the game took the press, and with the
   pointer back over Name in the cancel's frame, is released off every target, types nothing, the words are still
-  read and the input line is the line before the touch; a
+  read and the input line is the line before the touch (after the game took the press: Name pressed in the read,
+  `Game::talk_target`, before the cancel is sent); Wide, a window dragged by its title strip during the read and
+  cancelled keeps its place at once and the next move reaches the game at its own pixel; a
   press on it in the canvas sends no key and ends the conversation with the same message-window pixels as typing
   `name` + Enter, every cell but the prompt's turning cursor (the one cell that changes from frame to frame there,
   found in each run, the same in both), Original and Wide (frames with `U6_FRAMES_DIR`).
@@ -237,7 +264,7 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
 `crates/u6-core/src/ui/talk.rs` (new), `ui/mod.rs`, `ui/textstate.rs`, `ui/print.rs`, `ui/keyread.rs`, `engine.rs`
 (`Io::push_front`), `converse/seams.rs`, `converse/start.rs`, `converse/mod.rs`, `converse/tests_talk.rs` (new),
 `ui/tests/pointer_real.rs`, `crates/u6-web/src/lib.rs` (`queue_pointer`, `Game::handed`,
-`Game::reading_by_click`), `site/app.js` (`pointercancel`),
+`Game::reading_by_click`, `Game::talk_target`), `site/app.js` (`pointercancel`),
 `tools/web/test-web.mjs`, this file. (`re/notes/port-map.md` regenerates unchanged: every
 new function is port-only.)
 

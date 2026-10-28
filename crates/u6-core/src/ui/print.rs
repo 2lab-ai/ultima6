@@ -244,10 +244,11 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
     t.win_mut().fg = text_ink;
     if start < end {
         t.win_mut().col = end as u8;
-        if t.current == WindowId::Messages {
-            // Port (spec 22 Contract 4): the row's first cell has taken the wrap or not.
-            t.keys.row_drawn();
-        }
+    }
+    if t.current == WindowId::Messages && (start < end || c >= 0) {
+        // Port (spec 22 Contract 4): the row's first cell has taken the wrap or not, or the row
+        // ends with none drawn (a wrap's empty rest): the wrap is spent.
+        t.keys.row_drawn();
     }
     if wrapped {
         // Port (spec 22 Contract 4): a keyword the wrap breaks (its last cell drawn and what

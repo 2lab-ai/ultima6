@@ -1480,6 +1480,28 @@ impl Game {
             .is_some_and(|e| e.state().ui.talk.reading)
     }
 
+    /// Spec 22 Contract 6, for the page's tests: [hot, pressed] of the read by click, the
+    /// target drawn inverse and the one the left button went down on, as the engine holds them
+    /// after its last step: each -1 for none, `i` for the button `i` (0 Job, 1 Name), 0x10000 +
+    /// row × 0x100 + col for the keyword whose first part starts at message-window cell (row,
+    /// col). [-1, -1] before a start and outside a read.
+    pub fn talk_target(&self) -> Vec<i32> {
+        let code = |t: Option<u6_core::ui::talk::Target>| match t {
+            None => -1,
+            Some(u6_core::ui::talk::Target::Button(i)) => i as i32,
+            Some(u6_core::ui::talk::Target::Key { row, col }) => {
+                0x10000 + i32::from(row) * 0x100 + i32::from(col)
+            }
+        };
+        self.engine.as_ref().map_or_else(
+            || vec![-1, -1],
+            |e| {
+                let talk = &e.state().ui.talk;
+                vec![code(talk.hot), code(talk.pressed)]
+            },
+        )
+    }
+
     /// Voices on or off (spec 09 Design 1): while on, the engine's speech tap keeps what NPCs
     /// say for [`Game::take_speech`]; off (the default), it keeps nothing. Applies to the game
     /// running and to every game started after.
@@ -2151,6 +2173,55 @@ mod tests {
         game.pointer(41, 51, 0);
         game.pointer(42, 52, 0);
         assert_eq!(game.pending, [p(42, 52, 0)], "moves after it collapse");
+    }
+
+    /// Spec 22 Contract 7: a relaunch starts the page's stream again (`put_on_screen`: no button
+    /// handed to the new engine): a press the old engine took keeps no two moves apart after it.
+    #[test]
+    fn a_press_handed_before_a_relaunch_keeps_no_moves_apart_after_it() {
+        let idle = || {
+            Engine::with_game(
+                u6_core::State::empty(),
+                Files::default(),
+                |_, io| async move {
+                    io.sleep(u32::MAX).await;
+                },
+            )
+        };
+        let mut game = Game::new();
+        game.put_on_screen(idle());
+        game.pointer(40, 50, 1);
+        game.step(16);
+        assert_eq!(game.handed, 1, "the old engine took the press");
+        game.put_on_screen(idle());
+        game.pointer(1, 1, 0);
+        game.pointer(2, 2, 0);
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        assert_eq!(game.pending, [p(2, 2, 0)], "the moves collapse");
+    }
+
+    /// Spec 22 Contract 6: `talk_target` codes the read's hot and pressed targets for the page.
+    #[test]
+    fn talk_target_codes_the_hot_and_pressed_targets() {
+        use u6_core::ui::talk::{TalkClicks, Target};
+        let mut game = Game::new();
+        assert_eq!(game.talk_target(), [-1, -1], "before a start");
+        let with = |talk: TalkClicks| {
+            let mut s = u6_core::State::empty();
+            s.ui.talk = talk;
+            Some(Engine::with_game(s, Files::default(), |_, io| async move {
+                io.sleep(u32::MAX).await;
+            }))
+        };
+        game.engine = with(TalkClicks {
+            reading: true,
+            buttons: Vec::new(),
+            hot: Some(Target::Button(1)),
+            pressed: Some(Target::Key { row: 2, col: 3 }),
+        });
+        assert_eq!(game.talk_target(), [1, 0x10203]);
+        game.engine = with(TalkClicks::default());
+        assert_eq!(game.talk_target(), [-1, -1], "outside a read");
     }
 
     #[test]
