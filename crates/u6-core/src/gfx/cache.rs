@@ -1473,17 +1473,18 @@ mod sight_tests {
     /// owner's land holds.
     const STACKED_LAND: usize = 100;
 
-    /// One cell in this many, about 1.43 %: at most 3 275 stacks before a cap (3 268 in Wide),
-    /// under the 3 326 the 16 MiB ceiling holds with [`MAX_COPIES`] copies once the stacks'
-    /// table has stepped to 8 192 buckets (spec 18, Bounds); 1 648 bytes under it (1 872 in
-    /// Wide), as the test prints.
+    /// One cell in this many, about 1.43 %: 3 275 stacks at the run's high-water (3 268 in Wide),
+    /// under the 3 326 [computed] the 16 MiB ceiling holds with [`MAX_COPIES`] copies once the
+    /// stacks' table has stepped to 8 192 buckets (spec 18, Bounds); 1 648 bytes under it (1 872
+    /// in Wide), as the test prints. The 3 326 is exact for the test's state, the latest index
+    /// and the scratch empty; in play they add 0.1 to 0.9 KB, about 3 300 stacks [computed].
     const STACKED_MOST: usize = 70;
 
     /// What [`the_bounds_hold_the_heap_under_16_mib`] measures with one cell in `every` stacked:
     /// the most cells held at any time, the cell table's buckets, the highest heap retained over
-    /// the run (after each render's puts, before its cap: the most cells and stacks) and the
-    /// stacks then.
-    fn bound_with_stacks(every: usize) -> (usize, usize, usize, usize) {
+    /// the run (after each render's puts, before its cap: the most cells and stacks), the stacks
+    /// at that sample, and the stacks' table's buckets at the end.
+    fn bound_with_stacks(every: usize) -> (usize, usize, usize, usize, usize) {
         let l = |record| Layer {
             record,
             masktype: 0,
@@ -1521,7 +1522,7 @@ mod sight_tests {
             m.copies(),
             (16usize << 20) as i64 - high as i64
         );
-        (most, m.cell_buckets(), high, stacks)
+        (most, m.cell_buckets(), high, stacks, stack_buckets)
     }
 
     /// Spec 18's bounds as retained heap bytes ([`SightMemory::heap_bytes`], this build's
@@ -1532,24 +1533,45 @@ mod sight_tests {
     /// [`STACKED_MOST`]. The highest heap retained over the run, taken after each render's puts
     /// and before its cap, stays under 16 MiB, spec 18's ceiling; the cells are at most
     /// [`MAX_CELLS`] at any time (taken after each put) and the table at most 2^19 buckets (21
-    /// bytes each). A change of either bound, of a cell's size or of the stacks has to move it.
+    /// bytes each). At one in [`STACKED_MOST`] the stacks' table is at 8 192 buckets, and the
+    /// ceiling's stack count [computed] from the high-water sample (its bytes but 32 a stack,
+    /// then 32 bytes a stack up to 16 MiB) is 3 326: the boundary spec 18 states, for the
+    /// test's state. A change of either bound, of a cell's size or of the stacks has to move it.
     /// The peak of the table's growth is the integration test `sight_memory_peak`'s.
     #[test]
     fn the_bounds_hold_the_heap_under_16_mib() {
         for every in [STACKED_LAND, STACKED_MOST] {
-            let (most, buckets, high, stacks) = bound_with_stacks(every);
+            let (most, buckets, high, stacks, stack_buckets) = bound_with_stacks(every);
             assert!(high < 16 << 20, "one in {every} stacked: under 16 MiB");
             assert!(stacks <= 3326, "the stacks the ceiling holds");
             assert!(most <= MAX_CELLS, "at most MAX_CELLS cells at any time");
             assert!(buckets <= 1 << 19, "at most 2^19 buckets");
+            if every == STACKED_MOST {
+                assert_eq!(
+                    stack_buckets, 8192,
+                    "the stacks' table stepped to 8 192 buckets"
+                );
+                let fixed = high - 32 * stacks;
+                let most_stacks = ((16 << 20) - 1 - fixed) / 32;
+                assert_eq!(
+                    most_stacks, 3326,
+                    "the ceiling's stack count, for this state"
+                );
+            }
         }
     }
 
-    /// Spec 18 (the review's churn): renders of a view's worth of new cells each, each followed
-    /// by [`SightMemory::cap`], until the cells' table has grown to 2^19 buckets (its capacity
-    /// past 2^18's 229 376), its deleted entries have taken some of its room (its capacity under
-    /// 2^19's 458 752) and hashbrown has rehashed it in place (its capacity back at 458 752, no
-    /// allocation). The table never passes 2^19 buckets on the way. Prints the cells put.
+    /// Spec 18 (the review's churn; capacity-recovery coverage): renders of a view's worth of new
+    /// cells each, each followed by [`SightMemory::cap`], until the cells' table has grown to
+    /// 2^19 buckets (its capacity past 2^18's 229 376), its deleted entries have taken some of its
+    /// room (its capacity under 2^19's 458 752) and its capacity is back at 458 752 with a rise of
+    /// more than [`BOXES`] since the sample before. Between two samples the render's [`BOXES`]
+    /// inserts can take back at most that many deleted entries, so the larger rise needs a
+    /// rehash; that it is in place, allocating nothing, rests on hashbrown's rule cited at
+    /// [`MAX_CELLS`] (the test sees the capacity, not allocations). The table never passes 2^19
+    /// buckets on the way. Prints the cells put and the rise: about 1.76 million cells in
+    /// Original on this aarch64 machine, whose control groups are 8 bytes (NEON, as on wasm32;
+    /// SSE2's are 16, so the count differs there).
     #[test]
     fn the_cells_table_rehashes_in_place_at_2_19_buckets() {
         let l = Layer {
@@ -1560,7 +1582,7 @@ mod sight_tests {
         };
         let full = (1 << 19) / 8 * 7;
         let mut m = SightMemory::default();
-        let (mut put, mut minute, mut phase) = (0usize, 0, 0);
+        let (mut put, mut minute, mut phase, mut prev, mut rise) = (0usize, 0, 0, 0, 0);
         while phase < 3 && put < 32 * MAX_CELLS {
             minute += 1;
             for _ in 0..BOXES {
@@ -1577,13 +1599,17 @@ mod sight_tests {
             phase = match phase {
                 0 if c > MAX_CELLS => 1,
                 1 if c < full => 2,
-                2 if c == full => 3,
+                2 if c == full && c - prev > BOXES => {
+                    rise = c - prev;
+                    3
+                }
                 p => p,
             };
+            prev = c;
             m.cap();
         }
-        println!("{put} cells put to the first in-place rehash at 2^19 buckets");
-        assert_eq!(phase, 3, "grown, deleted entries taken, rehashed in place");
+        println!("{put} cells put to the first rehash at 2^19 buckets, the capacity up {rise}");
+        assert_eq!(phase, 3, "grown, deleted entries taken, rehashed");
     }
 
     /// The fade's days: whole days of 1440 minutes, none from [`FORGET_DAYS`]; the pattern keeps
