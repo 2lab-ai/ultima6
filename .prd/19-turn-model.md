@@ -6,7 +6,7 @@ tags: [ultima6, timing, turns, input, research]
 
 # 19 — The turn model
 
-Status: planned (2026-10-27; research done, O1 building in round 2 as unit K1, O2 with spec 20). Item 4 of `objects-menu-fog-motion/ssot.md`; the owner's words there: the turn handling feels like a very old game. Round 1 unit T1 drafted it at main `587d973` (the round's common file names `cca7e3e`; the tree read is `587d973`). Related: spec 06 (the fixed tick and the paces timed from the original), spec 20 (smooth motion, unit W1).
+Status: in progress (2026-10-28; research done; O1b shipped with unit K1 in deploy 26, O1c with unit K2 in deploy 33, main d059d8e; O2 with spec 20). Item 4 of `objects-menu-fog-motion/ssot.md`; the owner's words there: the turn handling feels like a very old game. Round 1 unit T1 drafted it at main `587d973` (the round's common file names `cca7e3e`; the tree read is `587d973`). Related: spec 06 (the fixed tick and the paces timed from the original), spec 20 (smooth motion, unit W1).
 
 Evidence labels used below: **measured** = printed by the T1 probe (`~/Games/ultima6/work/dispatch/r1027-t1/probe/src/main.rs`, outputs `probe-castle.txt`, `probe-fight.txt`, `probe-held.txt`, `probe-visible.txt`, `probe-busy.txt` beside it; game-first boot, 20 ms engine steps, the method of `combat/pace_real.rs:121-196`; it prints engine ms, PAL frames and counts only; built with `CARGO_TARGET_DIR=~/Games/ultima6/work/target-r1027-t1 CARGO_BUILD_JOBS=4 scripts/cargo.sh build --offline` in `probe/`, run as `t1-probe castle pass`, `fight`, `held tap`, `visible`, `busy`); **cited** = a number another spec or note measured; **read** = a `file:line` or an original address; `[추정]` = inference.
 
