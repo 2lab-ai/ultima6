@@ -6,8 +6,10 @@ tags: [ultima6, render, hd, timing]
 
 # 20 — Smooth motion
 
-Status: planned (2026-10-27). Item 5 of `objects-menu-fog-motion/ssot.md`. Research and measurements: round 1 unit W1,
-`~/Games/ultima6/work/dispatch/r1027-w1/motion.md` (runner and raw outputs in `runner/` beside it), and spec 19 (T1).
+Status: implemented, not merged (2026-10-29: unit W2, branch `feat/smooth-motion`, round 10 on 369f00a, which has
+integ/r1027 9e8f133 merged in). Item 5 of `objects-menu-fog-motion/ssot.md`. Research and measurements: round 1 unit
+W1, `~/Games/ultima6/work/dispatch/r1027-w1/motion.md` (runner and raw outputs in `runner/` beside it), and spec 19
+(T1).
 Presentation only: the engine keeps its cells, its RNG order and the original's timing (spec 06).
 
 ## Measured facts (main 587d973)
@@ -40,20 +42,52 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      step, near Ultima VII's medium walk of 400 ms per 16 px cell. Modern tile games use 100–270 ms but block input
      during the slide; this port must not block. Sources: W1 §2–§3.
    - A held walk (spec 19 O1c) steps every max(turn / speed, `MIN_STEP_MS` = 150) wall ms, and every paced step
-     slides (`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`; in the page, test-web's "a held
-     walk in the page"). The slide keeps its 360 engine ms, so the picture moves on part of each step. Measured in
-     the castle, the down arrow held 6 s, the frames drawing a slide over the frames to the next step (median, and
-     range) (2026-10-28):
+     slides: on some frame of each step the camera is drawn between the step's two cells, moved its way since the
+     frame before (`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`; in the page, test-web's
+     "a held walk in the page": the static layer drawn onto the screen off rest, moved against the step). A step
+     that snaps and is held at rest fails both (`SNAP_PX` set under a cell). The slide keeps its 360 engine ms, so
+     the picture moves on part of each step. Measured in the castle fixture (the assault's actors passed over), the
+     down arrow held 6 s on 60 Hz frames: per step, the frames that drew the slide off rest (moving: the camera or
+     a mover off its place) and those that drew the presenter's picture at rest (held: the early picture until the
+     turn's) over the frames to the next step, median and range; the other frames show the engine's frame
+     (2026-10-29):
 
-     | speed | a step every | Original | Wide |
-     |---|---|---|---|
-     | 1× | 746–757 wall ms | 61 % (60–84 %) | 74 % (60–76 %) |
-     | 4× | 185–189 wall ms | 78 % (54–80 %) | 70 % (62–80 %) |
-     | 8× | 156 wall ms | 44 % (30–44 %) | 44 % (30–44 %) |
+     | speed | a step every (mean, Original / Wide) | Original moving | Original held | Wide moving | Wide held |
+     |---|---|---|---|---|---|
+     | 1× | 746 / 757 wall ms | 41 % (40–57) | 20 % (19–28) | 50 % (40–51) | 24 % (19–24) |
+     | 4× | 185 / 189 wall ms | 50 % (38–60) | 23 % (15–30) | 50 % (38–55) | 23 % (15–30) |
+     | 8× | 156 / 156 wall ms | 22 % (20–22) | 22 % (10–22) | 22 % (20–22) | 22 % (10–22) |
 
-     Kept at 360 ms for the owner to accept. A slide stretched to the held walk's cadence would leave the picture
-     behind the engine's after the last step: a slide's end would no longer be the engine's picture within 360 ms
-     of its publication.
+     (Round 9's 61–78 % counted the held frames as moving.)
+   - **Decision (W2's): D stays 360 ms of the presentation clock.** The constraints that fix it:
+     - The floor: outside a fight a world turn's pictures come no sooner than `AFTER_TURN_MS` = 427 ms apart
+       (Measured facts). A 360 ms slide ends before the next turn's picture, so each turn's moves are seen whole.
+     - The next step is unknown when the slide starts. A held step's cadence is max(turn / speed, 150) wall ms, and
+       the turn's length is known only when its prompt comes back, after its slide was published with its length.
+     - A slide longer than the cadence lags. Each new step restarts it from where it is drawn, farther behind the
+       leader each time, until the restart is more than `SNAP_PX` (1.5 cells) off and snaps (`far` in
+       `Presenter::publish`): the jump smooth motion exists to remove. 360 ms is under the cadence at every speed a
+       slide is shown at (at 8×, 45 wall ms against 150).
+     A held walk that moves without a stop between its steps is unit W3's (`objects-menu-fog-motion/loop.md`, row
+     W3); spec 19 O1c's "Measured live" is the same 1× symptom seen from the held key.
+   - **The held walk on the real clock (round 10).** In the start room out of the start fight (HD on, 1×, the page's
+     fixed seed), the virtual display's receipt above walks a paced step in 206 and 207 frames: 3433 and 3450 ms
+     (the paced steps followed by another). On the browser's own clock in the same room, K2's instrument
+     (`watchWalk`, `walkReceipt`) with each step's time, the ms the pace dropped and combat mode (test-web's "the
+     held walk on the real clock", 2026-10-29, the down arrow held with no browser repeat, two runs: alone, and in
+     the whole suite):
+     - motion on: paced steps of 4450, 5967 and 3650 wall ms, then 4517, 6033 and 4533 (the engine ms within a
+       frame of each), 0 ms dropped, out of combat at every step, no late step, each paced press taken 17–33 ms
+       (one or two frames) after the prompt came back;
+     - motion off: 4517, 5583 and 4533 wall ms, then 4517, 7283 and 3733 (the engine ms within a frame of each),
+       0 ms dropped, out of combat, no late step, taken 17–33 ms after the prompt.
+
+     So the prompt takes the held key at once (no K2 defect), and the steps take as long with the switch off while
+     the page drops nothing (no W2 defect). The slow held walk at 1× is the turn's own length: the start room's
+     world turns between two prompts, 3.4–7.3 s here, as long on the virtual display as on the real clock. It
+     belongs to the turn's pace (spec 19 O2, and W3 for the held walk's continuity). The runs walked different
+     steps (the virtual display's down arrow 2 cells, the real clock's 4, and a turn's length varies with what the
+     room's actors do), so their ranges compare, not their steps one by one.
 2. **The scene.** At each framed map present the engine records a port-only `MapScene` (`Scene` in u6-render's
    `motion` module; u6-core's `Shot` (`gfx/motion.rs`) holds it with what the render drew in place of a base):
    - the publication's engine time, the leader's cell and z, the view origin and size;
@@ -197,18 +231,20 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      remembered layers holds more. Estimated from them, at most 325 shots held at once take about 3.99 MB in
      Original and 22.7 MB in Wide; with the page's presents (at most 128 queued), 197 shots take about 2.42 MB and
      13.8 MB.
-   - A run with motion on (`the_shots_motion_holds_at_its_peak`, 2026-10-28: the start fight, and the town's walk
-     with the cells round the party remembered, a presenter fed as a page at 8× feeds it): the shots the engine and
-     the presenter hold, each once, take at most 73 584 bytes in 6 shots in Original and 468 440 bytes in 7 shots in
-     Wide.
+   - A run with motion on (`the_shots_motion_holds_at_its_peak`, 2026-10-29: the start fight, and the town's walk
+     with the cells round the party remembered, a presenter fed as a page at 8× feeds it, every 8 ticks; sampled
+     after each tick and, on a tick that feeds it, before the feed too): the shots the engine and the presenter hold,
+     each once, take at most 85 848 bytes in 7 shots in Original (the start fight, before a feed: the presenter's
+     scenes beside the queued ones it has not taken) and 468 440 bytes in 7 shots in Wide. At Max a page presents
+     after up to 64 ticks, so Max is bounded by the 197-shot estimate above, not by this run.
    - The slide's layers at the page's largest scale, HD 4×, over four taps east, the most over the frames from the
      first tap on that drew a move's slide while it ran, every move having some (`the_slide_layer_buffers_at_hd_4x`,
-     2026-10-28). In Original: 1.05 MB of layers (colour indices, sources and drawn marks, in the wasm), 4.77 MB of
-     composed words and changes (in the wasm), and 4.78 MB of canvases in the test's stand-in for the page (`Page`:
-     the layers' canvases only; the page's screen canvas and Wide's compositing canvas are not counted). The sum of
-     these peaks is 10.6 MB, and the most on one frame 10.58 MB. In Wide: 6.00, 27.4 and 27.4 MB; 60.9 MB both
-     summed and on one frame. The words and canvases
-     take 4 · s² bytes a layer pixel at scale s, so at 2× a quarter of these.
+     2026-10-28; measured again with this window 2026-10-29, the same figures). In Original: 1.05 MB of layers
+     (colour indices, sources and drawn marks, in the wasm), 4.77 MB of composed words and changes (in the wasm),
+     and 4.78 MB of canvases in the test's stand-in for the page (`Page`: the layers' canvases only; the page's
+     screen canvas and Wide's compositing canvas are not counted). The sum of these peaks is 10.6 MB, and the most
+     on one frame 10.58 MB. In Wide: 6.00, 27.4 and 27.4 MB; 60.9 MB both summed and on one frame. The words and
+     canvases take 4 · s² bytes a layer pixel at scale s, so at 2× a quarter of these.
 
 ## Receipts
 
@@ -236,4 +272,5 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
 | Animation during a slide | The HD layers are made again only when what slides changes: a camera slide starts or restarts, a mover joins, restarts or leaves, the presenter starts again (a foreign picture, a snap, the switch). A publication that only lets the slides run on keeps them, so an animated tile or the clock keeps its frame for at most one slide; the slide's end shows the engine's frame. |
 | Actor entering or leaving sight | It is in one scene only, so it pops (spec 18's memory never holds actors). |
 | A click during a slide | Mapped through the published cell grid. The held walk is relative to the centred leader, so it is unaffected. |
+| The message history scrolled back (spec 23) | A slide keeps the history over the message window. Classic draws the slide into a copy of the engine's shown frame (the published frame, the history over it, the pointer sprite), HD over the HD frame composed with the history (`Engine::with_view_frame`); the slide's layers are clipped to the shown map (`a_slide_keeps_the_message_history_the_player_scrolled_back_to`; in the page, test-web's "while the history is scrolled back"). |
 | Key type-ahead | Fixed by spec 19 O1 (unit K1), which lands before this. Otherwise one hold queues up to 49 slides. |

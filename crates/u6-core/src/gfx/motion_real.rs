@@ -1220,7 +1220,7 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
                         &remembered_pixels(1, scene, view.camera, &mover),
                         (&b.1, &b2.1),
                     );
-                    unsampled = Some((at_rest, at_rest - on, free));
+                    unsampled = Some((k, at_rest, at_rest - on, free));
                     if !(at_rest > on && on == free && free > 0) {
                         bad.push(("why B against B' is 0", k, at_rest - on, free));
                     }
@@ -1293,7 +1293,15 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
         totals[2] += grey(&b.1);
         totals[3] += grey(&b2.1);
         totals[6] += held_at_end;
-        if let Some((at_rest, off, under)) = unsampled {
+        // The case the midpoint's sample is left for is this run's: Original at 4 days, at the
+        // midpoint (sample 2), and nowhere else (a zero elsewhere is a failure above).
+        let midpoint_unsampled = days == 4 && !cfg!(feature = "wide");
+        assert_eq!(
+            unsampled.map(|u| u.0),
+            midpoint_unsampled.then_some(2),
+            "{days} days: the sample at the midpoint holds none only at 4 days in Original"
+        );
+        if let Some((_, at_rest, off, under)) = unsampled {
             println!(
                 "{days} days: none of the {at_rest} pixels B' changes sampled at the midpoint: \
                  {off} off the shown map at the camera, {under} under the frame layer"
@@ -1386,8 +1394,10 @@ fn the_heap_bytes_of_a_shot() {
 /// with motion off), on the user's zip, in this build's layout: the most heap bytes of the shots
 /// motion holds at once over a run with it on. The runs: the start fight, and the town's walk
 /// with every cell within 12 of the party remembered a day ago; a presenter fed as a page at 8×
-/// feeds it (the publications taken every 8 ticks). After each tick: the shots the engine holds
-/// ([`Engine::motion_shots`]) and those the presenter holds, each once ([`Shot::heap_bytes`]).
+/// feeds it (the publications taken every 8 ticks). After each tick, and on a tick that feeds it
+/// also before the feed (the presenter's shots beside the queued ones it has not taken yet): the
+/// shots the engine holds ([`Engine::motion_shots`]) and those the presenter holds, each once
+/// ([`Shot::heap_bytes`]).
 #[test]
 fn the_shots_motion_holds_at_its_peak() {
     let Some(files) = files() else { return };
@@ -1403,18 +1413,9 @@ fn the_shots_motion_holds_at_its_peak() {
         }
         let mut p: Presenter<Shot> = Presenter::new();
         let (mut ticks, mut most) = (0usize, (0usize, 0usize, 0usize));
-        play(&mut game, town, |e| {
-            ticks += 1;
-            if ticks % 8 == 0 {
-                for publ in e.take_motion() {
-                    let time = publ.time_ms as f64;
-                    match publ.shot {
-                        None => p.foreign(),
-                        Some(shot) if publ.preview => p.preview(shot, time, true),
-                        Some(shot) => p.publish(shot, time, true),
-                    }
-                }
-            }
+        // Samples taken before a feed, and those of them that were the most so far.
+        let (mut before, mut peaks_before) = (0usize, 0usize);
+        let mut sample = |e: &Engine, p: &Presenter<Shot>, fed: bool| {
             let mut held = e.motion_shots();
             held.extend(p.history().iter().cloned());
             let mut once: Vec<Rc<Shot>> = Vec::new();
@@ -1426,12 +1427,33 @@ fn the_shots_motion_holds_at_its_peak() {
             let bytes = once.iter().map(|s| s.heap_bytes()).sum::<usize>();
             if bytes > most.0 {
                 most = (bytes, once.len(), most.2);
+                peaks_before += usize::from(fed);
             }
             most.2 = most.2.max(once.len());
+        };
+        play(&mut game, town, |e| {
+            ticks += 1;
+            if ticks % 8 == 0 {
+                sample(e, &p, true);
+                before += 1;
+                for publ in e.take_motion() {
+                    let time = publ.time_ms as f64;
+                    match publ.shot {
+                        None => p.foreign(),
+                        Some(shot) if publ.preview => p.preview(shot, time, true),
+                        Some(shot) => p.publish(shot, time, true),
+                    }
+                }
+            }
+            sample(e, &p, false);
         });
-        assert!(most.0 > 0, "{case}: shots held");
+        assert!(
+            most.0 > 0 && before > 0,
+            "{case}: shots held, sampled before a feed"
+        );
         println!(
-            "{case}: {ticks} ticks; the most held at once {} bytes in {} shots; the most shots {}",
+            "{case}: {ticks} ticks, {before} sampled before a feed too; the most held at once {} \
+             bytes in {} shots; the most shots {}; {peaks_before} new peaks before a feed",
             most.0, most.1, most.2
         );
         if most.0 > peak.0 {

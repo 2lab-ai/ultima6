@@ -662,8 +662,11 @@ mod tests {
     use u6_render::motion::{Cell, Node, Placed, Rank};
 
     /// Spec 20 Design 4 (C2's merge note 3): a copy of the state holds no remembered sight
-    /// (`RenderCache::clone`), so the early picture, made on a copy, reads the live state's
-    /// ([`preview`], `SightMemory::shown_in`) and its render on the copy remembers nothing.
+    /// (`RenderCache::clone`). This checks the copy only; that the early picture, made on such a
+    /// copy, shows the live state's remembered cells as the engine's picture does
+    /// ([`preview`], `SightMemory::shown_in`) is the real-data receipt
+    /// `remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them` (its
+    /// `early_bad`, `gfx/motion_real.rs`).
     #[test]
     fn a_copy_of_the_state_holds_no_remembered_sight() {
         let mut state = State::empty();

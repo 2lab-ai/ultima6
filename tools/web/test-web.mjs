@@ -13145,13 +13145,46 @@ for (const mode of ['hd', 'layout', 'wide']) {
   }, { needs: h.haveHfes });
 }
 
+// Whether the static layer of `placed` (Game.slide's (layer, x, y) triples: the static layer
+// first, the frame layer last, drawn at rest) lies off its rest place, a cell up and left of the
+// frame layer's; and how far (Chebyshev, frame pixels).
+const staticOff = (placed) => {
+  const n = placed.length;
+  if (n < 6) return 0;
+  return Math.max(Math.abs(placed[1] - (placed[n - 2] - 16)), Math.abs(placed[2] - (placed[n - 1] - 16)));
+};
+
+// One display frame of the virtual display in the page (`motionRing` installed): the leader, the
+// slide placed (Game.slide), and whether the frame drew the static layer onto the screen.
+const runSlideFrame = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  globalThis.__slideDraws = [];
+  window.__display.run();
+  const draws = globalThis.__slideDraws;
+  globalThis.__slideDraws = null;
+  const onScreen = (d, k) => d.target === c || draws.some((e, j) => j > k && e.source === d.target && e.target === c);
+  return [c.dataset.leader, globalThis.__shownGame.slide(), draws.some((d, k) => d.isStatic && onScreen(d, k))];
+});
+
+// The median and the range of `values` (shares), as percents.
+const sharesLine = (values) => {
+  const v = [...values].sort((a, b) => a - b);
+  const pc = (x) => Math.round(100 * x);
+  return v.length === 0 ? '-' : `median ${pc(v[v.length >> 1])}% (${pc(v[0])}% to ${pc(v.at(-1))}%)`;
+};
+
 // Spec 20 against spec 19 O1c, in the page (HD on, 1×, the virtual 60 Hz display, whose clock
 // the key events' timeStamp follow; a fixed seed; out of the start fight): each way held in turn
 // (no repeat: the page's held walk adds the paced presses, which reach paced_player_step) until
-// the party stops for 5 s; every step of the leader draws the slide's static layer onto the
-// screen on some of its frames, the paced ones (each hold's after its first, the press's own)
-// counted. One frame in the middle
-// of a step's slide is written for the dispatcher to read (U6_FRAMES_DIR, as keepFrame has it);
+// the party stops for 5 s. Per frame, what the screen shows of the map: the slide's static layer
+// drawn off its rest place (moving), drawn at rest (held: an early picture until the turn's), or
+// the HD frame. Every step of the leader slides: on some frame of it the static layer is drawn
+// onto the screen off rest and moved the step's way back since the frame before (the camera
+// coming after the step, the map moving against it); a step that snaps, its picture held at rest,
+// has none. The paced ones (each hold's after its first, the press's own) are counted, and per
+// step the moving and held shares and the frames × 16.7 ms (the step's time on this display)
+// printed. One frame in the middle of a step's slide (the static layer half a cell off rest, a
+// hold's second step) is written for the dispatcher to read (U6_FRAMES_DIR, as keepFrame has it);
 // nothing of it is printed.
 test('smooth motion (spec 20), a held walk in the page: every paced step slides', async (env) => {
   const { context, page } = await motionPage(env, 'hd', true, 1_700_000_000_000);
@@ -13163,28 +13196,26 @@ test('smooth motion (spec 20), a held walk in the page: every paced step slides'
   for (const dir of MOTION_DIRS) {
     await page.keyboard.down(dir.key);
     const steps = [];
-    let [leader, still] = [await motionLeader(page), 0];
+    let [leader, still, last] = [await motionLeader(page), 0, null];
     for (let i = 0; i < 3600 && still < 300; i += 1) {
-      const [now, drawn] = await page.evaluate(() => {
-        const c = document.getElementById('screen');
-        globalThis.__slideDraws = [];
-        window.__display.run();
-        const draws = globalThis.__slideDraws;
-        globalThis.__slideDraws = null;
-        const onScreen = (d, k) => d.target === c || draws.some((e, j) => j > k && e.source === d.target && e.target === c);
-        return [c.dataset.leader, draws.some((d, k) => d.isStatic && onScreen(d, k))];
-      });
+      const [now, placed, drawn] = await runSlideFrame(page);
       if (now !== leader) {
-        [leader, still] = [now, 0];
-        steps.push({ frames: 0, drawn: 0 });
+        const [a, b] = [leader, now].map((l) => l.split(',').map(Number));
+        steps.push({ frames: 0, drawn: 0, moving: 0, held: 0, along: 0, dir: [b[0] - a[0], b[1] - a[1]] });
+        [leader, still, last] = [now, 0, null];
       } else still += 1;
       const step = steps.at(-1);
       if (!step) continue;
       step.frames += 1;
+      const off = drawn ? staticOff(placed) : 0;
       step.drawn += drawn ? 1 : 0;
-      // A frame in the middle of a step's slide (its third drawn frame, a hold's second step),
-      // once.
-      if (!kept && steps.length === 2 && drawn && step.drawn === 3) {
+      step.moving += drawn && off > 0 ? 1 : 0;
+      step.held += drawn && off === 0 ? 1 : 0;
+      // The static layer moved against the step since the frame before.
+      if (drawn && off > 0 && last && (placed[1] - last[0]) * step.dir[0] + (placed[2] - last[1]) * step.dir[1] < 0) step.along += 1;
+      last = drawn && off > 0 ? [placed[1], placed[2]] : null;
+      // The middle of a step's slide (half a cell off rest), a hold's second step, once.
+      if (!kept && steps.length === 2 && drawn && off === 8) {
         await keepFrame(page.locator('#screen'), 'held-walk-mid-slide-hd.png');
         kept = true;
       }
@@ -13196,10 +13227,168 @@ test('smooth motion (spec 20), a held walk in the page: every paced step slides'
   const paced = holds.flatMap((hold) => hold.steps.slice(1));
   const all = holds.flatMap((hold) => hold.steps);
   const walked = holds.map((hold) => `${hold.key} ${hold.steps.length}`).join(', ');
+  const row = (st) => [st.frames, st.drawn, st.moving, st.along];
   assert.ok(paced.length >= 4, `paced steps held: ${walked}`);
-  assert.ok(all.every((st) => st.drawn > 0), `a slide drawn on every step: ${JSON.stringify(all.map((st) => [st.frames, st.drawn]))}`);
-  console.log(`  receipt: a held walk at 1x in the page, steps per way held: ${walked}; ${paced.length} paced steps, per step (the frames to the next or to the stop, those that drew the static layer onto the screen) ${JSON.stringify(paced.map((st) => [st.frames, st.drawn]))}; every step slid; a mid-slide frame ${kept && process.env.U6_FRAMES_DIR ? 'written' : 'not written'}`);
+  assert.ok(all.every((st) => st.along > 0), `a slide drawn moving on every step (frames, drawn, off rest, moved against the step): ${JSON.stringify(all.map(row))}`);
+  // A step's time on this display: its frames to the next step of the same hold (a hold's last
+  // runs to the stop instead).
+  const ms = holds.flatMap((hold) => hold.steps.slice(1, -1)).map((st) => Math.round((st.frames * 1000) / 60));
+  console.log(`  receipt: a held walk at 1x in the page, steps per way held: ${walked}; ${paced.length} paced steps, per step (the frames to the next or to the stop, those that drew the static layer onto the screen, those off rest, those moved against the step) ${JSON.stringify(paced.map(row))}; the frames x 16.7 ms of each paced step followed by another ${ms.join(', ') || '-'} ms; moving share ${sharesLine(paced.map((st) => st.moving / st.frames))}, held share ${sharesLine(paced.map((st) => st.held / st.frames))}; every step slid; a mid-slide frame ${kept && process.env.U6_FRAMES_DIR ? 'written' : 'not written'}`);
   await context.close();
+}, { needs: h.haveHfes });
+
+// Spec 20 Design 1 (round 10, review gpt b): the held walk on the browser's own clock (no virtual
+// display) in the start room of the receipt above (HD on, 1×, the same fixed seed, out of the
+// start fight by B), with smooth motion on and then off: each way held in turn with no browser
+// repeat (as `heldNoRepeat`) until the leader stepped four times, or 30 s of the game's clock, or
+// 2 s with no step, then let up. K2's instrument (`watchWalk`, `walkReceipt`: the late steps, the
+// paced takes and their waits from the prompt coming back) plus, per step of the leader, its
+// time on the page's clock and the engine's, the ms the pace dropped meanwhile
+// (Game.dropped_ms) and whether the party was in combat mode then (Game.combat_mode). A receipt:
+// it asserts only that each run walked; the verdict is spec 20 Design 1's.
+async function realClockHold(page, key) {
+  await h.waitPrompt(page);
+  await watchWalk(page);
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const watched = g.step;
+    // One row per row of the log so far (the frames between the two hooks' installs too).
+    const extra = window.__k2.steps.map(() => [g.dropped_ms(), g.combat_mode()]);
+    window.__k2.extra = extra;
+    g.step = function (ms) {
+      watched.call(this, ms);
+      extra.push([this.dropped_ms(), this.combat_mode()]);
+    };
+  });
+  await page.keyboard.down(key);
+  const t0 = await page.evaluate(() => globalThis.__clock);
+  try {
+    await page.waitForFunction((from) => {
+      const s = window.__k2.steps;
+      let n = 0;
+      for (let i = 1; i < s.length; i += 1) if (s[i][1] !== s[i - 1][1]) n += 1;
+      const ran = globalThis.__clock - from;
+      return n >= 4 || ran >= 30_000 || (n === 0 && ran >= 2_000);
+    }, t0, { timeout: 180_000, polling: 'raf' });
+  } finally {
+    await page.keyboard.up(key);
+  }
+  await coolDown(page, COOLDOWN_MS);
+  await h.waitPrompt(page);
+  const extra = await page.evaluate(() => window.__k2.extra);
+  const log = await unwatchWalk(page);
+  const released = log.releaseIndex ?? log.steps.length;
+  const steps = [];
+  let from = 0;
+  for (let i = 1; i < released; i += 1) {
+    if (log.steps[i][1] === log.steps[i - 1][1]) continue;
+    const [a, b] = [log.steps[from], log.steps[i]];
+    steps.push({ wall: b[3] - (a[3] ?? b[3]), engine: b[0] - a[0], dropped: extra[i][0] - extra[from][0], combat: extra[i][1] });
+    from = i;
+  }
+  return { key, steps, w: walkReceipt(log) };
+}
+
+test('smooth motion (spec 20 Design 1), the held walk on the real clock in the start room, motion on and off: per step its time, the ms dropped and combat mode (receipt)', async (env) => {
+  const lines = [];
+  const runs = {};
+  for (const motion of [true, false]) {
+    const { context, page } = await motionOpen(env, 'hd', { motion: motion ? 'on' : 'off', font: 'pixel' });
+    await context.addInitScript((t) => { Date.now = () => t; }, 1_700_000_000_000);
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await page.focus('#screen');
+    await h.waitPrompt(page);
+    await h.press(page, 'b', 20);
+    const shown = await page.evaluate(() => [globalThis.__shownGame.hd_on(), globalThis.__shownGame.motion()]);
+    assert.deepEqual(shown, [true, motion], `motion ${motion}: HD on, motion as set`);
+    const holds = [];
+    for (const dir of MOTION_DIRS) {
+      const hold = await realClockHold(page, dir.key);
+      holds.push(hold);
+      if (hold.steps.length >= 3) break;
+    }
+    await context.close();
+    runs[motion] = holds;
+    for (const { key, steps, w } of holds) {
+      const paced = steps.slice(1);
+      const mean = (k) => (paced.length === 0 ? '-' : Math.round(paced.reduce((a, s) => a + s[k], 0) / paced.length));
+      lines.push(`motion ${motion ? 'on' : 'off'}, ${key} held: ${steps.length} steps; per step (wall ms, engine ms, ms dropped, combat) ${JSON.stringify(steps.map((s) => [Math.round(s.wall), s.engine, Math.round(s.dropped), s.combat ? 1 : 0]))}; the paced steps' mean ${mean('wall')} wall ms, ${mean('engine')} engine ms; late ${w.late}; paced takes ${w.paced.length}, waits from the prompt back ${w.paced.map((p) => Math.round(p.wait)).join(', ') || '-'} ms; the longest frame ${Math.round(w.longestFrame)} ms`);
+    }
+  }
+  for (const line of lines) console.log(`  receipt: ${line}`);
+  for (const motion of [true, false]) assert.ok(runs[motion].some((hold) => hold.steps.length >= 2), `motion ${motion}: a hold walked`);
+}, { needs: h.haveHfes });
+
+// Spec 20 with spec 23 (round 10), in the page ('original': HD off; 'hd': HD on, the Original
+// layout; the virtual 60 Hz display, 1×, a fixed seed, out of the start fight, after six passes):
+// a step taken, and once its slide runs the message history wheeled three lines back through the
+// game's API (a key is the player's input and returns the view to the live bottom). Every frame
+// of the slide from then on shows over the message window what the first frame after the slide
+// shows (the history, still three lines back), not the live window the slide's first frame
+// showed. The frame in the middle of the slide is written for the dispatcher to read
+// (U6_FRAMES_DIR, as keepFrame has it): with HD the static layer half a cell off rest, without it
+// the slide's 11th frame of about 22.
+test('smooth motion (spec 20) with the message history (spec 23): a step\'s slide while the history is scrolled back shows the history over the message window, Original and HD (frames kept)', async (env) => {
+  const lines = [];
+  for (const mode of ['original', 'hd']) {
+    const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+    await motionKey(page, 'b');
+    for (let i = 0; i < 6; i += 1) await motionKey(page, 'Space');
+    // The message window's pixels on the canvas (frame rect 176, 112, 136 x 80 at the canvas's
+    // scale), as one hash; whether a slide runs; with HD how far the static layer is off rest.
+    const look = async () => {
+      const seen = await page.evaluate(() => {
+        const g = globalThis.__shownGame;
+        const c = document.getElementById('screen');
+        const s = c.width / g.width();
+        const d = c.getContext('2d').getImageData(176 * s, 112 * s, 136 * s, 80 * s).data;
+        let hash = 2166136261;
+        for (let i = 0; i < d.length; i += 1) if (i % 4 !== 3) hash = Math.imul(hash ^ d[i], 16777619) >>> 0;
+        return { hash, sliding: g.sliding(), placed: g.slide(), offset: g.history_offset(), leader: c.dataset.leader };
+      });
+      return { ...seen, off: staticOff(seen.placed) };
+    };
+    let stepped = false;
+    for (const dir of MOTION_DIRS) {
+      const from = await motionLeader(page);
+      await page.keyboard.press(dir.key);
+      for (let f = 0; f < 600 && !stepped; f += 1) {
+        await page.evaluate(() => window.__display.run());
+        const now = await look();
+        stepped = now.leader !== from && now.sliding;
+      }
+      if (stepped) break;
+      await h.runFramesToPrompt(page, 60_000);
+    }
+    assert.ok(stepped, `${mode}: a step slid`);
+    const live = await look();
+    assert.ok(await page.evaluate(() => globalThis.__shownGame.wheel(200, 150, -3)), `${mode}: the wheel over the message window`);
+    const during = [];
+    let [settled, kept] = [null, false];
+    // The slide, then the picture held at rest until the turn's picture or PREVIEW_MS (2 s): the
+    // first frame with neither is the engine's frame with the history over it.
+    for (let f = 0; f < 600 && settled === null; f += 1) {
+      await page.evaluate(() => window.__display.run());
+      const now = await look();
+      if (!now.sliding) {
+        settled = now;
+        break;
+      }
+      during.push(now);
+      const middle = mode === 'hd' ? now.off === 8 : during.length === 11;
+      if (!kept && middle) kept = await keepFrame(page.locator('#screen'), `slide-history-back-${mode}.png`);
+    }
+    await context.close();
+    assert.ok(settled !== null && during.length >= 3, `${mode}: frames of the slide after the wheel, then the slide over`);
+    assert.ok([...during, settled].every((x) => x.offset === 3), `${mode}: the history three lines back throughout`);
+    assert.notEqual(settled.hash, live.hash, `${mode}: the history's window is not the live one`);
+    const same = during.filter((x) => x.hash === settled.hash).length;
+    assert.equal(same, during.length, `${mode}: every frame of the slide shows the history over the message window`);
+    lines.push(`${mode}: ${during.length} frames of the slide after the wheel, each with the history over the message window; a mid-slide frame ${kept ? 'written' : 'not written'}`);
+  }
+  for (const line of lines) console.log(`  receipt: ${line}`);
 }, { needs: h.haveHfes });
 
 // Page init script: per display frame of the page's loop (`frame`) while `__slideTimes` is an

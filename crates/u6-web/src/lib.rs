@@ -946,6 +946,14 @@ impl Game {
         })
     }
 
+    /// Whether the party is in combat mode (the combat byte, A4-0x7b0c) as of the last step; false
+    /// before a start. Read by the tests' receipts of a step's time (spec 20 Design 1).
+    pub fn combat_mode(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.state().actors.combat_mode())
+    }
+
     /// Starts the audio machine for the running game at the page's `sample_rate`; false before
     /// a start (the page calls it again for each new game).
     pub fn audio_start(&mut self, sample_rate: u32) -> Result<bool, JsError> {
@@ -2119,10 +2127,12 @@ impl Game {
         view
     }
 
-    /// Spec 20, HD off: with a slide (`view`), puts the published frame with the map as the
-    /// slides have it ([`u6_core::gfx::motion::paint`]) and the pointer sprite over it into the
-    /// RGBA frame (nothing when it holds that picture already: a preview held at rest). Returns
-    /// whether it did; the first present after the last slide converts the engine's frame again.
+    /// Spec 20, HD off: with a slide (`view`), puts the engine's shown frame ([`Engine::frame`]:
+    /// the published frame, the message history the player scrolled back to over it, spec 23,
+    /// and the pointer sprite) with the map as the slides have it
+    /// ([`u6_core::gfx::motion::paint`]) and the pointer sprite over it again into the RGBA frame
+    /// (nothing when it holds that picture already: a preview held at rest). Returns whether it
+    /// did; the first present after the last slide converts the engine's frame again.
     fn present_slide(&mut self, view: Option<&View>) -> bool {
         let Some(engine) = &self.engine else {
             return false;
@@ -2141,7 +2151,7 @@ impl Game {
         }
         self.motion.shown = Some(shown);
         let fb = &mut self.motion.frame;
-        fb.clone_from(&engine.published_frame());
+        fb.clone_from(engine.frame());
         u6_core::gfx::motion::paint(&engine.state(), &self.motion.presenter, view, fb);
         if let Some(sprite) = engine.sprite() {
             sprite.draw(fb);
@@ -7806,12 +7816,39 @@ mod tests {
         }
     }
 
-    /// Spec 20 (S4) against spec 19 O1c's held walk, on the user's zip: in the castle with
-    /// smooth motion on, the down arrow held 6 wall s at 1×, 4× and 8× on 60 Hz frames, each
-    /// presented as the page does (after a frame that stepped or while sliding). Every paced
-    /// step of the leader slides: from it to the next step some frames draw the slide. Per step
-    /// (the first and the last left out) the moving share is the frames that drew the slide over
-    /// the frames to the next step; printed per speed with the steps' gaps.
+    /// Whether a slide's view draws anything off rest: the camera or a mover off its place.
+    fn off_rest(view: &View) -> bool {
+        view.camera != (0, 0) || view.movers.iter().any(|m| m.offset != (0, 0))
+    }
+
+    /// What the RGBA frame showed over one step of a held walk
+    /// ([`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`]).
+    #[derive(Debug, Default)]
+    struct WalkStep {
+        /// The leader's move, cells (x, y).
+        dir: (i32, i32),
+        /// The display frames from the step to the next.
+        frames: usize,
+        /// Those that drew the slide off rest ([`off_rest`]).
+        moving: usize,
+        /// Those that drew the presenter's picture at rest (an early picture held).
+        held: usize,
+        /// Those whose camera lay between the step's two cells, moved along the step since the
+        /// frame before when that one drew it too.
+        along: usize,
+    }
+
+    /// Spec 20 (S4, round 10) against spec 19 O1c's held walk, on the user's zip: in the castle
+    /// with smooth motion on, the down arrow held 6 wall s at 1×, 4× and 8× on 60 Hz frames, each
+    /// presented as the page does (after a frame that stepped or while sliding). Per frame, what
+    /// the RGBA frame shows ([`Game::present_slide`]'s view): the slide drawn off rest (moving:
+    /// the camera or a mover off its place), the presenter's picture at rest (held: an early
+    /// picture until the turn's), or the engine's frame. Every paced step of the leader slides:
+    /// from it to the next some frame draws the camera between the step's two cells, moved along
+    /// the step since the frame before when that one drew it too (a step that snaps, its picture
+    /// held at rest, has none). Per step (the first and the last left out) the moving and the
+    /// held shares are those frames over the frames to the next step; printed per speed with the
+    /// mean wall ms between steps.
     #[test]
     fn a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed() {
         for speed in [1.0, 4.0, 8.0] {
@@ -7823,18 +7860,25 @@ mod tests {
             let t0 = game.clock;
             assert!(down(&mut game, "ArrowDown"));
             let mut at = game.leader_position();
-            // Per step: the frames to the next one, and those that drew the slide.
-            let mut steps: Vec<(usize, usize)> = Vec::new();
+            let mut steps: Vec<WalkStep> = Vec::new();
             let mut gaps = Vec::new();
             let mut last = None;
+            // The camera the frame before drew, in this step.
+            let mut camera = None;
             while game.clock - t0 < 6000.0 {
                 game.set_clock(game.clock + FRAME);
                 let k = game.pace(FRAME);
                 for _ in 0..k {
                     game.step(20);
-                    if game.leader_position() != at {
-                        at = game.leader_position();
-                        steps.push((0, 0));
+                    let now = game.leader_position();
+                    if now != at {
+                        let d = |i: usize| i32::from(now[i]) - i32::from(at[i]);
+                        steps.push(WalkStep {
+                            dir: (d(0), d(1)),
+                            ..WalkStep::default()
+                        });
+                        at = now;
+                        camera = None;
                         if let Some(t) = last.replace(game.clock) {
                             gaps.push(game.clock - t);
                         }
@@ -7844,37 +7888,209 @@ mod tests {
                 if k > 0 || game.sliding() {
                     game.present();
                 }
-                if let Some(step) = steps.last_mut() {
-                    step.0 += 1;
-                    step.1 += usize::from(game.motion.drawn);
+                let Some(step) = steps.last_mut() else {
+                    continue;
+                };
+                step.frames += 1;
+                let shown = (game.motion.shown.as_ref()).filter(|_| game.motion.drawn);
+                match shown.map(|s| &s.0) {
+                    Some(v) if off_rest(v) => {
+                        step.moving += 1;
+                        // The camera between the step's two cells (off rest against the step, on
+                        // its line), and moved its way since the frame before if that drew it.
+                        let (dx, dy) = step.dir;
+                        let (cx, cy) = v.camera;
+                        let between = cx * dx + cy * dy < 0 && cx * dy - cy * dx == 0;
+                        let moved = camera
+                            .is_none_or(|(x, y): (i32, i32)| (cx - x) * dx + (cy - y) * dy > 0);
+                        step.along += usize::from(between && moved);
+                        camera = Some(v.camera);
+                    }
+                    Some(_) => {
+                        step.held += 1;
+                        camera = None;
+                    }
+                    None => camera = None,
                 }
             }
             assert!(game.key_up("ArrowDown"));
-            let inner = &steps[1..steps.len().saturating_sub(1).max(1)];
+            let inner = steps.get(1..steps.len().saturating_sub(1)).unwrap_or(&[]);
             assert!(
                 inner.len() >= 3,
                 "steps while held at {speed}x: {}",
                 steps.len()
             );
+            let snapped: Vec<_> = inner.iter().filter(|s| s.along == 0).collect();
             assert!(
-                inner.iter().all(|&(_, drawn)| drawn > 0),
-                "a slide drawn on every paced step at {speed}x: {inner:?}"
+                snapped.is_empty(),
+                "a slide drawn moving along every paced step at {speed}x: {snapped:?}"
             );
-            let mut shares: Vec<f64> = (inner.iter())
-                .map(|&(frames, drawn)| drawn as f64 / frames as f64)
-                .collect();
-            shares.sort_by(f64::total_cmp);
+            let share = |n: fn(&WalkStep) -> usize| {
+                let mut v: Vec<f64> = (inner.iter())
+                    .map(|s| n(s) as f64 / s.frames as f64)
+                    .collect();
+                v.sort_by(f64::total_cmp);
+                let pc = |x: f64| (100.0 * x).round();
+                format!(
+                    "median {:.0}% ({:.0}% to {:.0}%)",
+                    pc(v[v.len() / 2]),
+                    pc(v[0]),
+                    pc(v[v.len() - 1])
+                )
+            };
             let gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
             println!(
-                "held 6 s at {speed}x: {} steps, a step every {gap:.0} wall ms on average; moving \
-                 share per step {:.0}% to {:.0}%, median {:.0}% (frames drawing the slide over the \
-                 frames to the next step)",
+                "held 6 s at {speed}x: {} steps, a step every {gap:.0} wall ms on average; per \
+                 step over the frames to the next: moving (the slide drawn off rest) {}, held \
+                 (the picture at rest) {}",
                 steps.len(),
-                100.0 * shares[0],
-                100.0 * shares[shares.len() - 1],
-                100.0 * shares[shares.len() / 2]
+                share(|s| s.moving),
+                share(|s| s.held)
             );
         }
+    }
+
+    /// Spec 20 with spec 23 (round 10): while the message history is scrolled back, a slide shows
+    /// the history over the message window, not the live window. In the castle with smooth motion
+    /// on at 1×, after a few passes: the down arrow tapped and, once the leader stepped (a key is
+    /// the player's input and returns the view to the live bottom), the history wheeled three
+    /// lines back through the engine's API while the step's slide runs. On every frame that draws
+    /// the slide off rest the page's frame off the shown map is the viewed one: with HD off the
+    /// RGBA frame there is the engine's shown frame's (the published frame, the view, the
+    /// sprite); with HD on the frame the page draws ([`Page`]) is the HD frame of the published
+    /// frame with the view over it ([`Engine::with_view_frame`], composed here apart from the
+    /// game's). The viewed frame differs there from the published one: the history is shown.
+    #[test]
+    fn a_slide_keeps_the_message_history_the_player_scrolled_back_to() {
+        use u6_core::geom::SHOWN;
+        let off_map = |x: usize, y: usize| {
+            let (x0, y0, x1, y1) = SHOWN;
+            let (x, y) = (x as u16, y as u16);
+            !((x0..=x1).contains(&x) && (y0..=y1).contains(&y))
+        };
+        for hd in [false, true] {
+            let label = if hd { "HD" } else { "classic" };
+            let Some(mut game) = in_the_castle() else {
+                return;
+            };
+            game.set_motion(true);
+            if hd {
+                game.set_hd(true, 2);
+            }
+            // The passes publish the scenes the step slides from.
+            for _ in 0..6 {
+                assert!(down(&mut game, "Space"));
+                assert!(game.key_up("Space"));
+                game.step(20);
+                assert!(
+                    steps_to_prompt(&mut game),
+                    "{label}: the prompt after a pass"
+                );
+                game.present();
+            }
+            let mut page = Page::new();
+            let at = game.leader_position();
+            assert!(down(&mut game, "ArrowDown"));
+            assert!(game.key_up("ArrowDown"));
+            let (mut wheeled, mut checked, mut viewed) = (false, 0, 0);
+            for _ in 0..120 {
+                game.set_clock(game.clock + FRAME);
+                let k = game.pace(FRAME);
+                for _ in 0..k {
+                    game.step(20);
+                }
+                game.ran(k);
+                if !wheeled && game.leader_position() != at {
+                    assert!(game.wheel(200, 150, -3), "{label}: over the message window");
+                    wheeled = true;
+                }
+                if k > 0 || game.sliding() {
+                    game.present();
+                }
+                if !wheeled {
+                    continue;
+                }
+                assert_eq!(
+                    game.history_offset(),
+                    3,
+                    "{label}: the history scrolled back"
+                );
+                let e = game.engine.as_ref().quiet();
+                let w = u6_render::WIDTH;
+                // The viewed frame against the published one off the shown map.
+                viewed += e.with_view_frame(|v| {
+                    let live = e.published_frame();
+                    (0..v.pixels().len())
+                        .filter(|&i| off_map(i % w, i / w) && v.pixels()[i] != live.pixels()[i])
+                        .count()
+                });
+                if !hd {
+                    let shown = (game.motion.shown.as_ref()).filter(|_| game.motion.drawn);
+                    if !shown.is_some_and(|s| off_rest(&s.0)) {
+                        continue;
+                    }
+                    let mut want = Vec::new();
+                    e.frame().write_rgba(&mut want);
+                    let got = game.frame_rgba();
+                    let differ = (0..want.len() / 4)
+                        .filter(|&i| {
+                            off_map(i % w, i / w) && got[4 * i..4 * i + 4] != want[4 * i..4 * i + 4]
+                        })
+                        .count();
+                    assert_eq!(
+                        differ, 0,
+                        "{label}: off the shown map, the engine's shown frame"
+                    );
+                    checked += 1;
+                    continue;
+                }
+                let placed = game.slide();
+                if !page.take(&mut game) || !static_off_rest(&placed) {
+                    continue;
+                }
+                let e = game.engine.as_ref().quiet();
+                let mut compositor = u6_render::hd::Compositor::new();
+                let mut cache = u6_core::hd::ImageCache::new();
+                e.with_view_frame(|fb| {
+                    let state = e.state();
+                    let mut images = cache.images(&state, e.io());
+                    compositor.compose(fb, &mut images, Scale::X2)
+                });
+                let drawn = page.draw(&game, &placed);
+                let ow = w * 2;
+                let differ = (drawn.iter().zip(compositor.rgba()).enumerate())
+                    .filter(|&(i, (a, b))| off_map(i % ow / 2, i / ow / 2) && a != b)
+                    .count();
+                assert_eq!(
+                    differ, 0,
+                    "{label}: off the shown map, the HD frame of the viewed frame"
+                );
+                checked += 1;
+            }
+            assert!(wheeled, "{label}: the step taken");
+            assert!(checked > 0, "{label}: frames of the slide checked");
+            assert!(
+                viewed > 0,
+                "{label}: the history shown, not the live window"
+            );
+            assert_eq!(
+                game.history_offset(),
+                3,
+                "{label}: still scrolled back after the turn"
+            );
+            println!(
+                "{label}: {checked} frames drawing the slide off rest with the history scrolled \
+                 back, each the viewed frame off the shown map"
+            );
+        }
+    }
+
+    /// Whether the static layer of a slide's placements ([`Game::slide`]: (layer, x, y) triples,
+    /// the static layer first and the frame layer, drawn at rest, last) is drawn off its rest
+    /// place: a cell up and left of the frame layer's.
+    fn static_off_rest(placed: &[i32]) -> bool {
+        let n = placed.len();
+        n >= 6 && (placed[1], placed[2]) != (placed[n - 2] - 16, placed[n - 1] - 16)
     }
 
     /// Spec 19 O1c (round 4 item 1), the owner's symptom on a real keyboard above 4×: the down
