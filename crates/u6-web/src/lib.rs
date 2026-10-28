@@ -1487,6 +1487,27 @@ impl Game {
         }
     }
 
+    /// Spec 23: the wheel at frame pixel (x, y) (as [`Game::pointer`] maps it), `dy` lines (< 0
+    /// older, > 0 newer): over the message window while `game` runs it scrolls the message
+    /// history the frame shows, at once ([`Game::present`] shows it), and returns true (the caller
+    /// should then `preventDefault`); elsewhere, or before a start, false and nothing changes.
+    /// `dy` 0 moves nothing: whether the wheel is taken there (the page asks before it adds a
+    /// pixel delta to its carry). Never the game's input.
+    pub fn wheel(&mut self, x: i32, y: i32, dy: i32) -> bool {
+        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.engine
+            .as_mut()
+            .is_some_and(|e| e.wheel(word(x), word(y), dy))
+    }
+
+    /// Spec 23: lines the message history is scrolled back from the live bottom (0: live, and
+    /// before a start).
+    pub fn history_offset(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| u32::try_from(e.history_offset()).unwrap_or(u32::MAX))
+    }
+
     /// Spec 22 Contract 8: whether the game reads the player's words by click now (a
     /// conversation's read after "you say", op f7, from its start to its end; buttons drawn or
     /// not). The page releases a cancelled press off every target then. False before a start.
@@ -1834,14 +1855,20 @@ impl Game {
 
     /// A pointer button is down as the input handler has it: the last pointer event queued
     /// since the previous step (newer than the engine's), else the engine's handler pointer
-    /// ([`u6_core::Io::handler_pointer`]). False before a start.
+    /// ([`u6_core::Io::handler_pointer`]), or a press the message history holds (spec 23: the
+    /// handler sees no button then, [`u6_core::Engine::history_holding`]) unless the last pointer
+    /// event queued has every button up (the step that takes it ends the press: paced as
+    /// released, as a game press is). False before a start.
     fn pointer_held(&self) -> bool {
-        let buttons = last_buttons(&self.pending).or_else(|| {
+        let queued = last_buttons(&self.pending);
+        let buttons = queued.or_else(|| {
             self.engine
                 .as_ref()
                 .map(|e| e.io().handler_pointer().buttons)
         });
-        buttons.is_some_and(|b| b & 3 != 0)
+        let holding = queued.is_none_or(|b| b & 3 != 0)
+            && self.engine.as_ref().is_some_and(Engine::history_holding);
+        buttons.is_some_and(|b| b & 3 != 0) || holding
     }
 
     /// `engine`, just started, becomes the game on screen: no Save of it taken yet, no sound
@@ -3069,6 +3096,71 @@ mod tests {
             "a start runs the launcher: `u` first"
         );
         assert!(!game.finished());
+    }
+
+    /// Spec 23 on the user's zip (read only; prints whether it ran, skips when the zip is absent
+    /// and fails then with `U6_REQUIRE_ARCHIVE=1`): passes at the prompt fill the message window
+    /// past its rows; scrolled back, a press on its bar is the history's until the release: the
+    /// game's handler sees no button, the pace runs at 1× as with one held, and the speed again
+    /// from the step that takes the release (queued, not yet stepped) on.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
+    fn a_press_the_message_history_holds_paces_at_1x() {
+        if !std::path::Path::new(ZIP).exists() {
+            let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+            assert!(!required, "U6_REQUIRE_ARCHIVE=1: {ZIP} is required");
+            println!("history pace: skipped ({ZIP} not present)");
+            return;
+        }
+        println!("history pace: ran");
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        let prompt = |game: &mut Game| {
+            for _ in 0..2000 {
+                if game.at_prompt() {
+                    return;
+                }
+                game.step(20);
+            }
+            panic!("the prompt");
+        };
+        prompt(&mut game);
+        for _ in 0..14 {
+            game.key_down("Space", " ", false, 0.0);
+            game.key_up("Space");
+            game.step(20);
+            prompt(&mut game);
+        }
+        assert!(game.wheel(200, 150, -3), "over the message window");
+        assert_eq!(game.history_offset(), 3);
+        game.set_speed(8.0);
+        let fast = game.pace(100.0);
+        game.ran(fast);
+        assert!(fast >= 40, "{fast} steps free");
+        // On the bar's track, above the thumb (a page older): the press the history's.
+        game.pointer(310, 113, 1);
+        game.step(20);
+        let engine = game.engine.as_ref().unwrap();
+        assert!(engine.history_holding(), "the history's press");
+        assert_eq!(
+            engine.io().handler_pointer().buttons,
+            0,
+            "no button for the game"
+        );
+        assert!(game.pending.is_empty());
+        assert_eq!(game.pace(100.0), 5, "held: 1×");
+        game.ran(5);
+        game.pointer(310, 113, 0);
+        // The release queued, the press still the history's: the step that takes it is paced as
+        // released.
+        assert!(game.engine.as_ref().unwrap().history_holding());
+        assert_eq!(game.pace(100.0), fast, "the release queued: the speed");
+        game.ran(fast);
+        game.step(20);
+        assert!(!game.engine.as_ref().unwrap().history_holding());
+        assert_eq!(game.pace(100.0), fast, "released: the speed");
     }
 
     /// On the user's zip (skipped when absent; read only): a start gives every buffer the source

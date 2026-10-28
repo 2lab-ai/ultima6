@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 
+use super::scrollback::{self, CellKind};
 use super::text::{self, CENTRE, PAGED, RUNIC, SCROLL, WRAP, WindowId};
 use super::textstate::TRANSCRIPT;
 use super::wide;
@@ -28,7 +29,7 @@ fn is_lower(c: i32) -> bool {
 /// Draws `c` at window-relative cell (`col`, `row`) of the current window, in its colours.
 /// Port (spec 22 Contract 4): in the message window the cell goes to its keyword record
 /// ([`super::talk::KeySpans::draw`]: the keyword under it forgotten, a cell in the alert colour
-/// recorded).
+/// recorded). Port (spec 23): a cell of the message window is noted for its history.
 fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
     let ui = &s.ui;
     let w = *ui.text.win();
@@ -41,6 +42,7 @@ fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
         let r = row.saturating_sub(u16::from(w.y)) as u8;
         keys.draw(r, col, c, w.fg, w.fg == alert);
     }
+    scrollback::note(&mut s.ui, &w, c, (x, row), CellKind::Char);
 }
 
 /// The code a line cell holds for `c` (codes past `u16` are blank cells; none is put).
@@ -301,9 +303,14 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
         } else if w.flags & SCROLL != 0 {
             let w = *w;
             t.drawn = true;
-            if t.current == WindowId::Messages {
-                super::talk::scroll(&mut s.ui);
-            }
+            // Port (spec 22, 23): the keywords move up a row, those of the top row leave with it
+            // and are kept with it.
+            let spans = if t.current == WindowId::Messages {
+                super::talk::scroll(&mut s.ui)
+            } else {
+                Vec::new()
+            };
+            io.draw(|fb| scrollback::scrolled(&mut s.ui, fb, &w, spans));
             let paper = s.ui.paper.as_ref();
             io.draw(|fb| text::scroll_window(fb, &w, paper));
         }

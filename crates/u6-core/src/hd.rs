@@ -51,9 +51,10 @@ pub struct HdView {
     version: u64,
     compositor: Compositor,
     images: ImageCache,
-    /// What the frame holds: the published frame's version (`None` for the black frame before a
-    /// start) and `version`; `None` before the first composition and after a start.
-    holds: Option<(Option<u64>, u64)>,
+    /// What the frame holds: the published frame's version and the message history's view stamp
+    /// ([`Engine::view_version`]; `None` for the black frame before a start) and `version`; `None`
+    /// before the first composition and after a start.
+    holds: Option<(Option<(u64, u64)>, u64)>,
 }
 
 impl Default for HdView {
@@ -147,20 +148,26 @@ impl HdView {
     /// With HD on: composes the published frame of `engine` ([`Engine::published_frame`], without
     /// the pointer sprite; `blank` before a start) when the HD frame does not hold it at the
     /// setting now. Returns whether a block of the HD frame changed.
+    ///
+    /// Port (spec 23): while the player scrolls the message history back, the published frame
+    /// with the history over it ([`Engine::with_view_frame`]).
     pub fn present(&mut self, engine: Option<&Engine>, blank: &Framebuffer) -> bool {
         if !self.on {
             return false;
         }
-        let key = (engine.map(Engine::published_version), self.version);
+        let key = (engine.map(Engine::view_version), self.version);
         if self.holds == Some(key) {
             return false;
         }
         let wrote = match engine {
             Some(e) => {
-                let state = e.state();
-                let mut images = self.images.images(&state, e.io());
-                self.compositor
-                    .compose(&e.published_frame(), &mut images, self.scale)
+                let (compositor, cache, scale) =
+                    (&mut self.compositor, &mut self.images, self.scale);
+                e.with_view_frame(|fb| {
+                    let state = e.state();
+                    let mut images = cache.images(&state, e.io());
+                    compositor.compose(fb, &mut images, scale)
+                })
             }
             None => self.compositor.compose(blank, &mut NoImages, self.scale),
         };

@@ -12667,6 +12667,387 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
 }, { needs: h.haveHfes });
 
+// --- the message history (spec 23) --------------------------------------------------------------
+// The message window keeps the lines it scrolled off; the wheel over it shows them, with the
+// engine's scrollbar in its last cell column. Passes at the prompt fill the window past its rows.
+// The checks read the engine's RGBA frame (the window's rect, frame pixels 176..311 x 112..191 in
+// every build), with HD on the HD frame's rows over it, and the offset; never the text. The game
+// runs on between reads: its prompt's cursor in the window's last row may blink, so a check that
+// the window stayed the same reads the rows above it (the first 72 pixel rows). The checks of
+// what the window shows leave out its last cell column (x 128..135 of the rect), where the
+// scrollbar is drawn (read apart, `barPixels`).
+const ABOVE_CURSOR = 72 * 136;
+const TEXT_COLUMNS = 128;
+const inText = (i) => i % 136 < TEXT_COLUMNS;
+
+/// The message window's rect of the RGBA frame (a colour string per pixel), with HD on a digest of
+/// the HD frame's pixels over its rows above the last and its first 16 cell columns (the bar's
+/// column aside) and, with the HD font on (the text the page's, drawn from the list, spec 11),
+/// of the cells the HD frame lists there, and the history offset.
+async function historyShown(page) {
+  return page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const [x0, y0, w, rows] = [176, 112, 136, 80];
+    const fw = g.width();
+    const d = g.frame_rgba();
+    const px = [];
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const i = ((y0 + y) * fw + x0 + x) * 4;
+        px.push(`${d[i]},${d[i + 1]},${d[i + 2]}`);
+      }
+    }
+    let hd = null;
+    if (g.hd_on()) {
+      const s = g.hd_scale();
+      const f = g.hd_frame_rgba();
+      hd = 2166136261;
+      for (let y = y0 * s; y < (y0 + rows - 8) * s; y += 1) {
+        for (let x = x0 * s; x < (x0 + 128) * s; x += 1) {
+          for (let k = 0; k < 3; k += 1) hd = Math.imul(hd ^ f[(y * fw * s + x) * 4 + k], 16777619) >>> 0;
+        }
+      }
+      if (g.hd_font()) {
+        const gl = g.hd_glyphs();
+        for (let k = 0; k + 4 < gl.length; k += 5) {
+          if (gl[k] >= x0 && gl[k] < x0 + 128 && gl[k + 1] >= y0 && gl[k + 1] < y0 + rows - 8) {
+            for (let j = 0; j < 5; j += 1) hd = Math.imul(hd ^ gl[k + j], 16777619) >>> 0;
+          }
+        }
+      }
+    }
+    return { offset: g.history_offset(), px, hd };
+  });
+}
+
+const sameAbove = (a, b) => a.px.every((c, i) => i >= ABOVE_CURSOR || !inText(i) || c === b.px[i]);
+
+/// The scrollbar's pixels in a rect read by `historyShown`: in each cell of the last column whose
+/// first five columns show one colour, the last three columns' pixels of another colour (spec 23
+/// Design 7: the bar yields to a letter, over a cell of one colour it is the ink); their count and
+/// their colours.
+function barPixels(px) {
+  const w = 136;
+  const colours = new Set();
+  let n = 0;
+  for (let r = 0; r < 10; r += 1) {
+    const at = (x, y) => px[(r * 8 + y) * w + x];
+    const paper = at(128, 0);
+    let plain = true;
+    for (let y = 0; y < 8; y += 1) for (let x = 128; x < 133; x += 1) plain &&= at(x, y) === paper;
+    if (!plain) continue;
+    for (let y = 0; y < 8; y += 1) {
+      for (let x = 133; x < 136; x += 1) {
+        if (at(x, y) !== paper) {
+          n += 1;
+          colours.add(at(x, y));
+        }
+      }
+    }
+  }
+  return { n, colours: colours.size };
+}
+
+/// Spec 23 in one layout: the passes, the wheel over the map (nothing), over the message window
+/// (back a line a notch, the scrollbar drawn), a key (back to the live bottom).
+async function messageScrollback(page, env, label) {
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const live = await historyShown(page);
+  assert.equal(live.offset, 0, `${label}: the live bottom`);
+  if (label === 'HD') assert.ok(live.hd !== null, 'HD: the HD frame on');
+  assert.equal(barPixels(live.px).n, 0, `${label}: no scrollbar at the live bottom`);
+  await keepFrame(page.locator('#screen'), `scrollback-${label.toLowerCase()}-live.png`);
+  // Over the map (Wide: its map window, spec 14): the engine takes nothing, the frame stays.
+  const map = label === 'Wide' ? [600, 150] : [40, 40];
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await page.mouse.wheel(0, -100);
+  await h.waitFrames(page, 2);
+  const away = await historyShown(page);
+  assert.equal(away.offset, 0, `${label}: the wheel over the map scrolls nothing`);
+  assert.ok(sameAbove(away, live) && away.hd === live.hd, `${label}: the window as it was`);
+  // Over the message window: one line a notch, up to four.
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  for (let k = 1; k <= 4; k += 1) {
+    await page.mouse.wheel(0, -100);
+    await h.waitFrames(page, 2);
+    assert.equal((await historyShown(page)).offset, k, `${label}: ${k} lines back after ${k} notches`);
+  }
+  // Read with the pointer back over the map: its sprite (in the RGBA frame, not the HD one) out of
+  // the window, as at the live read.
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await h.waitFrames(page, 2);
+  const back = await historyShown(page);
+  assert.equal(back.offset, 4, `${label}: a move leaves the view as it is`);
+  const changed = back.px.filter((c, i) => i < ABOVE_CURSOR && inText(i) && c !== live.px[i]).length;
+  assert.ok(changed > 0, `${label}: the window shows older lines`);
+  const bar = barPixels(back.px);
+  assert.ok(bar.n > 0 && bar.colours === 1, `${label}: the scrollbar drawn, in one ink`);
+  if (live.hd !== null) assert.ok(back.hd !== live.hd, `${label}: the HD frame shows them`);
+  await keepFrame(page.locator('#screen'), `scrollback-${label.toLowerCase()}-back.png`);
+  // A notch down: a line newer.
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  await page.mouse.wheel(0, 100);
+  await h.waitFrames(page, 2);
+  assert.equal((await historyShown(page)).offset, 3, `${label}: a notch down, a line newer`);
+  // A key: the live bottom, the key the game's.
+  await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const after = await historyShown(page);
+  assert.equal(after.offset, 0, `${label}: a key returns to the live bottom`);
+  assert.equal(barPixels(after.px).n, 0, `${label}: no scrollbar after it`);
+  console.log(`  receipt: spec 23 ${label}: 4 notches 4 lines back, ${changed} window pixels changed, ${bar.n} scrollbar pixels in one ink; the map's wheel nothing; a key the live bottom: pass`);
+}
+
+test('the message history (spec 23), Original: the wheel over the message window shows the lines it scrolled off a line a notch, with the engine\'s scrollbar in its last column; over the map it does nothing; a key returns to the live bottom', async (env) => {
+  const { page } = await h.openPage(env);
+  await messageScrollback(page, env, 'Original');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23), the HD layout: the same through the HD frame', async (env) => {
+  const { page } = await h.openPage(env, { layout: 'hd' });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await messageScrollback(page, env, 'HD');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23), Wide: the same in the message scroll\'s window', async (env) => {
+  const { page } = await h.openWide(env, { width: 1400, height: 900 });
+  await messageScrollback(page, env, 'Wide');
+}, { needs: h.haveHfes });
+
+/// A wheel event (a `WheelEvent` init: `deltaY`, `deltaMode`, `ctrlKey`) dispatched on the canvas
+/// at game pixel `at`: whether the page cancelled it, and the history offset after it.
+async function wheelAt(page, at, init) {
+  const [cx, cy] = await h.screenPoint(page, ...at);
+  return page.evaluate(([x, y, more]) => {
+    const ev = new WheelEvent('wheel', { clientX: x, clientY: y, bubbles: true, cancelable: true, deltaMode: 0, ...more });
+    const kept = document.getElementById('screen').dispatchEvent(ev);
+    return { prevented: !kept, offset: globalThis.__shownGame.history_offset() };
+  }, [cx, cy, init]);
+}
+
+/// A pointer move with no button dispatched on the canvas at game pixel `at`.
+async function moveAt(page, at) {
+  const [cx, cy] = await h.screenPoint(page, ...at);
+  await page.evaluate(([x, y]) => {
+    document.getElementById('screen').dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y, buttons: 0, bubbles: true }));
+  }, [cx, cy]);
+}
+
+test('the message history (spec 23): the wheel\'s pixel deltas add up only over the message window, at 100 a line, the carry dropped at a turn, when the pointer leaves the window and at a key; Ctrl-wheel and the wheel elsewhere are the browser\'s', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const [inside, map] = [[200, 150], [40, 40]];
+  const step = async (what, at, init, want) => {
+    const got = await wheelAt(page, at, init);
+    assert.deepEqual(got, want, what);
+  };
+  // Outside, then inside: the outside delta is not carried in.
+  await step('over the map: not taken', map, { deltaY: -60 }, { prevented: false, offset: 0 });
+  await step('then inside: no jump', inside, { deltaY: -40 }, { prevented: true, offset: 0 });
+  // Fractional deltas add up: -40 -40 -40 is a line (and -20 carried).
+  await step('-80 so far', inside, { deltaY: -40 }, { prevented: true, offset: 0 });
+  await step('-120: a line', inside, { deltaY: -40 }, { prevented: true, offset: 1 });
+  // A turn drops the carry: +60 is no line; +60 more is.
+  await step('turned: +60', inside, { deltaY: 60 }, { prevented: true, offset: 1 });
+  await step('+120: a line newer', inside, { deltaY: 60 }, { prevented: true, offset: 0 });
+  // Leaving the window drops it.
+  await step('-60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 0 });
+  await moveAt(page, map);
+  await moveAt(page, inside);
+  await step('left and back: -60 only', inside, { deltaY: -60 }, { prevented: true, offset: 0 });
+  // A key drops it (a key the game is not given: dispatched on the window).
+  await page.evaluate(() => globalThis.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', code: 'ShiftLeft' })));
+  await step('a key: -60 only', inside, { deltaY: -60 }, { prevented: true, offset: 0 });
+  await step('-120: a line', inside, { deltaY: -60 }, { prevented: true, offset: 1 });
+  // Ctrl: the browser's zoom, not taken; a line-mode notch is one line.
+  await step('Ctrl', inside, { deltaY: -300, ctrlKey: true }, { prevented: false, offset: 1 });
+  await step('a line-mode notch', inside, { deltaY: -3, deltaMode: 1 }, { prevented: true, offset: 2 });
+  // The page's own scroll: a page taller than the window scrolls under the wheel outside the
+  // message window and stays put over it.
+  await page.evaluate(() => {
+    const tall = document.createElement('div');
+    tall.id = 'tall-for-test';
+    tall.style.height = '3000px';
+    document.body.append(tall);
+    document.documentElement.style.overflowY = 'auto';
+    globalThis.scrollTo(0, 0);
+  });
+  const scrollTop = () => page.evaluate(() => document.scrollingElement.scrollTop);
+  await page.mouse.move(...(await h.screenPoint(page, ...inside)));
+  await page.mouse.wheel(0, 300);
+  await h.waitFrames(page, 2);
+  assert.equal(await scrollTop(), 0, 'over the message window the page does not scroll');
+  assert.equal(await page.evaluate(() => globalThis.__shownGame.history_offset()), 0, 'the wheel scrolled the history instead');
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await page.mouse.wheel(0, 300);
+  await page.waitForFunction(() => document.scrollingElement.scrollTop > 0, null, { timeout: 5000 });
+  assert.ok((await scrollTop()) > 0, 'over the map the page scrolls');
+  console.log('  receipt: spec 23 wheel carry: outside then inside no jump; -40x3 a line; a turn, a leave and a key drop it; Ctrl and line mode; the page scrolls outside only: pass');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23): a wheel with no vertical delta (a horizontal swipe) over the message window is the browser\'s, not cancelled, the carry kept; a wheel the engine does not take drops the carry', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const [inside, map] = [[200, 150], [40, 40]];
+  // Each Game.wheel call the page makes, counted (the page's game is the one shown).
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const wheel = g.wheel;
+    g.__asked = 0;
+    g.wheel = (...args) => {
+      g.__asked += 1;
+      return wheel.apply(g, args);
+    };
+  });
+  const asked = () => page.evaluate(() => globalThis.__shownGame.__asked);
+  const step = async (what, at, init, want) => {
+    const before = await asked();
+    const got = await wheelAt(page, at, init);
+    assert.deepEqual({ ...got, asked: (await asked()) - before }, want, what);
+  };
+  // deltaY 0: the engine not asked, the event not cancelled, the carry untouched, in pixel or
+  // line mode. Asked: once whether it takes the wheel there, once more for a line.
+  await step('-60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 0, asked: 1 });
+  await step('a horizontal wheel: the browser\'s', inside, { deltaX: 30, deltaY: 0 }, { prevented: false, offset: 0, asked: 0 });
+  await step('-120 with the carry kept: a line', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 2 });
+  await step('a horizontal line-mode notch: the browser\'s', inside, { deltaX: 3, deltaY: 0, deltaMode: 1 }, { prevented: false, offset: 1, asked: 0 });
+  // A wheel the engine does not take (over the map), with no pointer move between: the carry
+  // dropped, so -60 inside, one over the map and -60 inside again move no line (-20 was left
+  // from the -120, so -80 before the map).
+  await step('-60 carried again', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 1 });
+  await step('over the map: not taken', map, { deltaY: -60 }, { prevented: false, offset: 1, asked: 1 });
+  await step('then -60 inside: no line', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 1 });
+  await step('-120 since the map: a line', inside, { deltaY: -60 }, { prevented: true, offset: 2, asked: 2 });
+  // Line mode alone (gpt c, round 3): the carry dropped first (a move over the map: not the
+  // engine's), then -60, a line-mode wheel with no vertical delta, -60: one line, the middle one
+  // neither asked nor cancelled, so only a carry it kept makes the line.
+  await moveAt(page, map);
+  await moveAt(page, inside);
+  await step('isolated: -60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 2, asked: 1 });
+  await step('isolated: a horizontal line-mode notch', inside, { deltaX: 3, deltaY: 0, deltaMode: 1 }, { prevented: false, offset: 2, asked: 0 });
+  await step('isolated: -120 with the carry kept: one line', inside, { deltaY: -60 }, { prevented: true, offset: 3, asked: 2 });
+  console.log('  receipt: spec 23 wheel deltaY 0: not cancelled, the carry kept (pixel and line mode, alone too); a rejected wheel drops the carry: pass');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23): a press on the scrollbar whose pointer capture is lost without a release gives the game every button up, as a cancel does', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  assert.equal((await wheelAt(page, [200, 150], { deltaY: -300 })).offset, 3, 'three lines back');
+  // The mouse's press on the bar's track (the history's), its pointer id kept, and a move on the
+  // track with the button held (a capture takes effect at the pointer's next event).
+  await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    globalThis.__capture = [];
+    c.addEventListener('pointerdown', (e) => { globalThis.__pressId = e.pointerId; }, { once: true });
+    for (const kind of ['gotpointercapture', 'lostpointercapture']) c.addEventListener(kind, () => globalThis.__capture.push(kind));
+  });
+  await page.mouse.move(...(await h.screenPoint(page, 310, 113)));
+  await page.mouse.down();
+  await page.mouse.move(...(await h.screenPoint(page, 310, 114)));
+  await h.waitFrames(page, 2);
+  const last = () => page.evaluate(() => globalThis.__buttons.at(-1)?.[0]);
+  const capture = () => page.evaluate(() => globalThis.__capture.join(' '));
+  assert.equal(await last(), 1, 'the press queued');
+  assert.equal(await capture(), 'gotpointercapture', 'the canvas has the capture');
+  // The capture taken away with the button still down, then the mouse off the canvas: the
+  // browser fires lostpointercapture before that move (which the canvas no longer gets), and no
+  // pointerup reaches the canvas.
+  await page.evaluate(() => document.getElementById('screen').releasePointerCapture(globalThis.__pressId));
+  const off = await page.evaluate(() => {
+    const r = document.getElementById('screen').getBoundingClientRect();
+    return r.bottom + 20 < innerHeight ? [r.left + 10, r.bottom + 10] : [r.right + 10, r.top + 10];
+  });
+  await page.mouse.move(...off);
+  await h.waitFrames(page, 2);
+  assert.equal(await capture(), 'gotpointercapture lostpointercapture', 'the capture lost');
+  assert.equal(await last(), 0, 'every button up for the game');
+  // Back over the canvas with the button still held (no capture: the canvas gets the moves): the
+  // game's buttons stay up until every button is up; then a new press is the game's.
+  const moves = await page.evaluate(() => globalThis.__buttons.length);
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  await page.mouse.move(...(await h.screenPoint(page, 40, 40)));
+  await h.waitFrames(page, 2);
+  assert.equal(await page.evaluate((n) => globalThis.__buttons.slice(n).some(([b]) => b !== 0), moves), false, 'the held button never reached the game again');
+  assert.equal(await page.evaluate(() => globalThis.__pointerAt.join(',')), '40,40', 'the moves reached it');
+  await page.mouse.up();
+  await page.mouse.down();
+  await h.waitFrames(page, 2);
+  assert.equal(await last(), 1, 'a new press is the game\'s');
+  await page.mouse.up();
+  await h.waitFrames(page, 2);
+  assert.equal(await last(), 0);
+  console.log('  receipt: spec 23 lost pointer capture: the press released for the game, the held button kept up: pass');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23): after a press whose pointer capture is lost, a second button pressed with the first still held is the game\'s, and the first stays up for it until it is up', async (env) => {
+  // opus N2 (round 4): the page keeps up for the game the buttons it released (`releasedHeld`, a
+  // mask), not every button held after: a chorded press arrives as a move, never a pointerdown.
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  const at = await h.screenPoint(page, 40, 40);
+  // A: the left press on the map, its capture lost (the event as the browser fires it, pointer id
+  // 1), the right button down with the left held, the left up, the left down again, both up.
+  // B: the left press, its capture lost, the right down with the left held, then a cancel with
+  // both held (the second release keeps the first's button up too), the right up, the left up, a
+  // new press and its release. One evaluation, the buttons of each Game.pointer call recorded.
+  const calls = await page.evaluate(([x, y]) => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const pointer = g.pointer;
+    const seen = [];
+    g.pointer = (...args) => {
+      seen.push(args[2]);
+      return pointer.apply(g, args);
+    };
+    const send = (kind, buttons) => c.dispatchEvent(new PointerEvent(kind, { pointerType: 'mouse', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+    const reading = g.reading_by_click();
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 3);
+    send('pointermove', 2);
+    send('pointermove', 3);
+    send('pointerup', 0);
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 3);
+    send('pointercancel', 3);
+    send('pointermove', 3);
+    send('pointermove', 1);
+    send('pointermove', 0);
+    send('pointerdown', 1);
+    send('pointerup', 0);
+    g.pointer = pointer;
+    return { reading, seen };
+  }, at);
+  assert.equal(calls.reading, false, 'not a read by click');
+  assert.deepEqual(calls.seen.slice(0, 6), [1, 0, 2, 2, 3, 0], 'A: the press, its release, the right press alone, the left up, a new left press, every button up');
+  assert.deepEqual(calls.seen.slice(6), [1, 0, 2, 0, 0, 0, 0, 1, 0], 'B: the press, its release, the right alone, the cancel, both held, the right up, the left up: none, a new press');
+  console.log('  receipt: spec 23 lost pointer capture: a button pressed after is the game\'s, the released one kept up while held: pass');
+}, { needs: h.haveHfes });
+
 // Spec 22 (conversation by click): koFixture's archive with the player's words after the
 // greeting (`f7`), a keyword block `name` whose answer ends the conversation, and a line for no
 // match. All of it the test's own.
@@ -12911,6 +13292,61 @@ for (const layout of ['original', 'wide']) {
     console.log(`  receipt: ${layout}: Name pressed in the canvas answered as typed: pass`);
   }, { needs: h.haveHfes });
 }
+
+test('Conversation by click (spec 22) and the message history (spec 23): a press on Name whose pointer capture is lost during the read is released off every target, as a cancel is, and the button still held moved over Name stays up for the game until every button is up; the read goes on, and a new press answers', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(await h.replaceKept(page, 'converse.a', await clickTalkFixture()), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await page.focus('#screen');
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+  await h.waitFrames(page, 2);
+  const at = await h.screenPoint(page, ...NAME_BUTTON);
+  // The mouse's press on Name, its capture lost (the event as the browser fires it, pointer id 1),
+  // a move on Name with the button still held, the release on Name: one evaluation (one frame),
+  // each Game.pointer call the page made recorded.
+  const calls = await page.evaluate(([x, y]) => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const pointer = g.pointer;
+    const seen = [];
+    g.pointer = (...args) => {
+      seen.push(args);
+      return pointer.apply(g, args);
+    };
+    const send = (kind, buttons) => c.dispatchEvent(new PointerEvent(kind, { pointerType: 'mouse', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+    const reading = g.reading_by_click();
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 1);
+    send('pointerup', 0);
+    g.pointer = pointer;
+    return { reading, seen };
+  }, at);
+  assert.equal(calls.reading, true, 'during the read');
+  assert.deepEqual(calls.seen, [[...NAME_BUTTON, 1], [-1, -1, 0], [...NAME_BUTTON, 0], [...NAME_BUTTON, 0]], 'the press, its release off every target, the move held and the release with every button up for the game');
+  const target = () => page.evaluate(() => Array.from(globalThis.__shownGame.talk_target()));
+  for (let i = 0; i < 40; i += 1) {
+    await h.waitFrames(page, 1);
+    assert.equal(await page.evaluate(() => globalThis.__owned), 7, 'the words are still read');
+  }
+  assert.equal((await target())[1], -1, 'nothing pressed in the read');
+  // A new press on Name is the game's: it answers.
+  await page.mouse.move(...at);
+  await h.waitTaken(page);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+  console.log('  receipt: spec 22 + 23 capture lost during the read: released off every target, the held button kept up, a new press answers: pass');
+}, { needs: h.haveHfes });
 
 // The system's pointer over the game screen: the game draws its own (the engine's sprite over
 // the frame; with HD on the page draws it over the HD frame, spec 11 Design 7), so while a game

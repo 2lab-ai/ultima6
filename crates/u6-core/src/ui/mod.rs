@@ -88,6 +88,7 @@ pub mod panels;
 pub mod pointer;
 pub mod print;
 pub mod printf;
+pub mod scrollback;
 pub mod seams;
 pub mod tables;
 pub mod talk;
@@ -138,6 +139,9 @@ pub struct UiState {
     pub input: InputState,
     pub panel: PanelState,
     pub pointer: pointer::PointerState,
+    /// Port-only (spec 23): what the game drew in the message window and the lines that scrolled
+    /// off it, for the history the engine shows while the player scrolls back. Never saved.
+    pub scrollback: scrollback::Scrollback,
     /// Port-only (spec 22): the conversation's buttons and the target drawn inverse, while it
     /// reads the player's words.
     pub talk: talk::TalkClicks,
@@ -176,6 +180,7 @@ impl UiState {
             input: InputState::from_tables(&tables),
             panel: PanelState::from_tables(&tables),
             pointer: pointer::PointerState::default(),
+            scrollback: scrollback::Scrollback::default(),
             talk: talk::TalkClicks::default(),
             tables,
         }
