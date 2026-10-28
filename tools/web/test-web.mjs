@@ -1930,12 +1930,13 @@ const MIN_STEP_MS = 150;
 // page's clock (the frame's time, the timeline of the press's `timeStamp`), the presses the command
 // prompt has taken (`prompt_takes`: the instrumentation that says which step took the press) and
 // the keys pending. The keydown records the press's `timeStamp` and the index of the first step
-// after it (`pressIndex`: every step from it on is after the press, whatever the clocks say).
+// after it (`pressIndex`: every step from it on is after the press, whatever the clocks say); the
+// window's first keyup after it, the index of the first step after the release (`releaseIndex`).
 function watchWalk(page) {
   return page.evaluate(() => {
     const g = globalThis.__shownGame;
     const c = document.getElementById('screen');
-    const log = { steps: [], repeats: 0, pressedAt: null, pressIndex: null, now: null, stop: new AbortController() };
+    const log = { steps: [], repeats: 0, pressedAt: null, pressIndex: null, releaseIndex: null, now: null, stop: new AbortController() };
     window.__k2 = log;
     c.addEventListener('keydown', (e) => {
       if (e.repeat) log.repeats += 1;
@@ -1944,6 +1945,9 @@ function watchWalk(page) {
         log.pressIndex = log.steps.length;
       }
     }, { signal: log.stop.signal });
+    window.addEventListener('keyup', () => {
+      if (log.pressIndex !== null && log.releaseIndex === null) log.releaseIndex = log.steps.length;
+    }, { signal: log.stop.signal, capture: true });
     g.set_clock = function (now) {
       log.now = now;
       Object.getPrototypeOf(this).set_clock.call(this, now);
@@ -1965,22 +1969,58 @@ function unwatchWalk(page) {
     k2.stop.abort();
     delete globalThis.__shownGame.step;
     delete globalThis.__shownGame.set_clock;
-    return { steps: k2.steps, repeats: k2.repeats, pressedAt: k2.pressedAt, pressIndex: k2.pressIndex };
+    return { steps: k2.steps, repeats: k2.repeats, pressedAt: k2.pressedAt, pressIndex: k2.pressIndex, releaseIndex: k2.releaseIndex };
   });
 }
 
-// What a watched hold did (`released`: the steps logged when the key went up). The steps of the
-// leader while held (each with the step() calls from the prompt coming back to it and the engine
-// ms since the step before) and after (the cells they ended on); the repeats the canvas saw; and,
-// from the press on (D1', spec 19 O1c), by the instrumentation: the step that took the press
-// itself (the first prompt take from `pressIndex` on), then each paced press taken (the page's
-// clock, its gap from the take before, and the wait from the prompt coming back), the longest
-// frame interval of the hold, and the late steps: one that ran with the prompt up and a paced
-// press due (the minimum interval past the press and past the last take) and took nothing,
-// with what the step saw (for a failure: the press's time, the frame's, the last take's, the
-// prompt before and the keys pending).
-function walkReceipt(log, released) {
+// Whether the hold `watchWalk` logs has cooled down (`span` ms of the page's clock): past the
+// release, and past the first step after it at a ready command prompt (the prompt up, nothing
+// waiting; round 6, review gpt b: a release inside a turn longer than the cooldown must still
+// reach a prompt where a key wrongly left held would be taken), or a take after the release
+// (the hold already failed). Runs in the page.
+function cooledDown(span) {
+  const log = window.__k2;
+  const steps = log.steps;
+  const from = log.releaseIndex;
+  if (from === null || steps[from] === undefined) return false;
+  for (let i = from; i < steps.length; i += 1) if (steps[i][4] !== steps[i - 1][4]) return true;
+  const ready = steps.findIndex((row, i) => i >= from && row[2]);
+  return ready >= 0 && log.now - steps[from][3] >= span && log.now - steps[ready][3] >= span;
+}
+
+// On the browser's own clock: frames until the hold has cooled down (`cooledDown`).
+async function coolDown(page, ms) {
+  await page.waitForFunction(cooledDown, ms, { timeout: 120_000, polling: 'raf' });
+}
+
+// On the virtual display: frames, five at a time, until the hold has cooled down
+// (`cooledDown`), at most `max`.
+async function coolDownFrames(page, ms, max = 5000) {
+  let frames = 0;
+  while (!(await page.evaluate(cooledDown, ms))) {
+    assert.ok(frames < max, `cooled down within ${max} frames`);
+    await h.runFrames(page, 5);
+    frames += 5;
+  }
+}
+
+// What a watched hold did (the release: the first step after the window's keyup, `releaseIndex`).
+// The steps of the leader while held (each with the step() calls from the prompt coming back to it
+// and the engine ms since the step before) and after (the cells they ended on); the repeats the
+// canvas saw; and, from the press on (D1', spec 19 O1c), by the instrumentation: the step that
+// took the press itself (the first prompt take from `pressIndex` on: its step index, its frame's
+// time, and its delay from the press's time), then each paced press taken (the page's clock, its
+// gap from the take before, and the wait from the prompt coming back), the longest frame interval
+// of the hold, and the late steps: one that ran with the prompt up and a paced press due (the
+// minimum interval past the press and past the last take) and took nothing, with what the step
+// saw (for a failure: the press's time, the frame's, the last take's, the prompt before and the
+// keys pending); after the release, the takes (none expected), the span of the page's clock the
+// log covers (the cooldown) and the first step at a ready command prompt with the span after it.
+function walkReceipt(log) {
   const { steps, pressedAt, pressIndex } = log;
+  const released = log.releaseIndex ?? steps.length;
+  let first = null;
+  let afterTakes = 0;
   const held = [];
   const after = [];
   let prompt = 0;
@@ -2001,11 +2041,13 @@ function walkReceipt(log, released) {
       last = clock;
     }
     if (atPrompt) prompt = i;
+    if (i >= released && takes !== before[4]) afterTakes += 1;
     if (pressIndex === null || i < pressIndex || i >= released) continue;
     if (before[3] !== null && now !== before[3]) longestFrame = Math.max(longestFrame, now - before[3]);
     if (takes !== before[4]) {
       // The prompt took a press: the key's own first, then each a paced one.
       if (pressTaken) paced.push({ at: now, gap: now - lastTake, wait: promptBack === null ? 0 : now - promptBack });
+      else first = { step: i, at: now, delay: now - pressedAt };
       pressTaken = true;
       lastTake = now;
       promptBack = null;
@@ -2021,14 +2063,20 @@ function walkReceipt(log, released) {
       }
     }
   }
-  return { held, after, repeats: log.repeats, pressTaken, paced, late, lateAt, longestFrame };
+  const releasedAt = steps[released]?.[3] ?? null;
+  const end = steps.at(-1)?.[3] ?? releasedAt;
+  const cooldown = releasedAt === null ? 0 : end - releasedAt;
+  const ready = steps.findIndex((row, i) => i >= released && row[2]);
+  const afterReady = ready < 0 ? 0 : end - steps[ready][3];
+  return { held, after, repeats: log.repeats, pressIndex, pressTaken, first, paced, late, lateAt, longestFrame, afterTakes, cooldown, ready: ready < 0 ? null : ready - released, afterReady };
 }
 
 // One line for a receipt of `walkReceipt`.
 function walkLine(key, w) {
   const walked = w.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL);
   const gaps = w.paced.map((p) => Math.round(p.gap)).join(', ') || '-';
-  return `${key} held, ${w.repeats} browser repeats; ${w.held.length} steps while held, engine ms between them ${walked.map((s) => s.ms).join(', ') || '-'}, step() calls from the prompt to each ${walked.map((s) => s.fromPrompt).join(', ') || '-'}; the press taken: ${w.pressTaken ? 'yes' : 'no'}; ${w.paced.length} paced presses taken, wall ms from the take before ${gaps}; the longest frame ${Math.round(w.longestFrame)} ms; ${w.late} steps left the prompt up with a press due${w.late > 0 ? ` (${JSON.stringify(w.lateAt)})` : ''}; ${w.after.length} position changes after the keyup`;
+  const first = w.first === null ? 'not taken' : `taken in step ${w.first.step - w.pressIndex + 1} after the keydown, ${w.first.delay.toFixed(1)} ms from its time`;
+  return `${key} held, ${w.repeats} browser repeats; ${w.held.length} steps while held, engine ms between them ${walked.map((s) => s.ms).join(', ') || '-'}, step() calls from the prompt to each ${walked.map((s) => s.fromPrompt).join(', ') || '-'}; the press ${first}; ${w.paced.length} paced presses taken, wall ms from the take before ${gaps}; the longest frame ${Math.round(w.longestFrame)} ms; ${w.late} steps left the prompt up with a press due${w.late > 0 ? ` (${JSON.stringify(w.lateAt)})` : ''}; after the keyup ${w.afterTakes} takes over a ${Math.round(w.cooldown)} ms cooldown (a ready prompt ${w.ready === null ? 'never' : `in step ${w.ready + 1} after it, ${Math.round(w.afterReady)} ms watched from there`}), ${w.after.length} position changes`;
 }
 
 // Spec 19 O1c at the page, on the browser's own clock (no virtual display): `key` pressed once on
@@ -2040,7 +2088,6 @@ async function heldNoRepeat(page, key) {
   await watchWalk(page);
   await page.keyboard.down(key);
   const t0 = await page.evaluate(() => globalThis.__clock);
-  let released = 0;
   try {
     await page.waitForFunction((from) => {
       const s = window.__k2.steps;
@@ -2050,50 +2097,70 @@ async function heldNoRepeat(page, key) {
       return n >= 3 || ran >= 30_000 || (n === 0 && ran >= 2_000);
     }, t0, { timeout: 120_000, polling: 'raf' });
   } finally {
-    released = await page.evaluate(() => window.__k2.steps.length);
     await page.keyboard.up(key);
   }
+  await coolDown(page, COOLDOWN_MS);
+  const failed = await page.evaluate(() => {
+    const s = window.__k2.steps;
+    for (let i = window.__k2.releaseIndex; i < s.length; i += 1) if (s[i][4] !== s[i - 1][4]) return true;
+    return false;
+  });
+  // A take after the keyup: the key was left held; the receipt says so at once (no wait for a
+  // prompt such a walk never leaves up).
+  if (failed) return walkReceipt(await unwatchWalk(page));
   await h.waitTaken(page);
   await h.waitPrompt(page);
-  return walkReceipt(await unwatchWalk(page), released);
+  return walkReceipt(await unwatchWalk(page));
 }
 
+// The page's clock a hold is watched past its release: twice the minimum interval, so a paced
+// press still due would be taken in it.
+const COOLDOWN_MS = 2 * MIN_STEP_MS;
+
 // The start fight as booted, on the browser's own clock, arrows (left first) held with no browser
-// repeat until one walks twice: at every command prompt the held arrow is pressed again as soon
-// as the minimum interval allows (no step runs with the prompt up and a paced press due and leaves
-// it up, whether its steps walk or the fight blocks them: D1', the prompt up at most one step in
-// a row once due), the press itself is taken on every hold, at least one command prompt over all
-// the holds is taken by a paced press (the opportunity: the key down past the interval), the
-// paced presses at least the interval apart from the take before, and nothing after the keyup.
-// The fight's geometry decides whether any way is open twice (a hero killed wakes on
-// `h.WAKE_CELL`, between the same foes, and may be blocked every way, `h.stepOnce`'s note). A
-// position change after a keyup is allowed only onto the wake cell.
+// repeat until one walks two cells or more with two paced takes or more: on every hold the press
+// itself is taken by the first step after its keydown (the first-step deadline, round 5 d-1), at
+// every command prompt the held arrow is pressed again as soon as the minimum interval allows (no
+// step runs with the prompt up and a paced press due and leaves it up, whether its steps walk or
+// the fight blocks them: D1', the prompt up at most one step in a row once due), the paced
+// presses at least the interval apart from the take before, and after the keyup nothing is taken
+// over a full cooldown (twice the interval of the page's clock, d-2), reaching a ready command
+// prompt and a full cooldown from there (round 6: a release inside a long turn too), and nothing
+// walks. The
+// fight's geometry decides whether any way is open twice (a hero killed wakes on `h.WAKE_CELL`,
+// between the same foes, and may be blocked every way, `h.stepOnce`'s note), so the holds go on
+// over the directions and rounds until one walks so. A position change after a keyup is allowed
+// only onto the wake cell.
 test('a held arrow with no browser repeat walks on at every command prompt once the minimum interval allows, and stops at its keyup (spec 19 O1c)', async (env) => {
   const { page } = await h.openPage(env); // gated: the glue keeps the engine clock and its ticks
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   const keys = ['ArrowLeft', ...h.STEPS.map((s) => s.key).filter((k) => k !== 'ArrowLeft')];
+  // Two cells or more walked (a wake onto the wake cell is no cell walked, as `walkLine` counts).
+  const walks = (w) => w.held.length >= 1 && 1 + w.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL).length >= 2 && w.paced.length >= 2;
   const holds = [];
-  for (let round = 0; round < h.STEP_ROUNDS && !holds.some((w) => w.held.length >= 2); round += 1) {
+  for (let round = 0; round < h.STEP_ROUNDS && !holds.some(walks); round += 1) {
     if (round > 0) await h.passTurn(page);
     for (const key of keys) {
       const w = await heldNoRepeat(page, key);
       holds.push({ ...w, key });
-      if (w.held.length >= 2) break;
+      assert.equal(w.afterTakes, 0, `${key}: nothing taken after the keyup (${walkLine(key, w)})`);
+      if (walks(w)) break;
     }
   }
   for (const w of holds) console.log(`  receipt: ${walkLine(w.key, w)}`);
-  const taken = holds.reduce((n, w) => n + w.paced.length, 0);
-  assert.ok(taken >= 1, `a command prompt taken by a paced press over the holds (${taken})`);
+  assert.ok(holds.some(walks), 'a hold walked two cells or more with two paced takes or more');
   for (const w of holds) {
     assert.equal(w.repeats, 0, `${w.key}: no browser repeat was sent`);
-    assert.ok(w.pressTaken, `${w.key}: the press itself taken`);
+    assert.ok(w.first !== null && w.first.step === w.pressIndex, `${w.key}: the press taken by the first step after its keydown`);
     assert.equal(w.late, 0, `${w.key}: pressed again at every prompt once due`);
     assert.ok(w.paced.every((p) => p.gap >= MIN_STEP_MS), `${w.key}: the paced presses the interval after the take before`);
+    assert.ok(w.cooldown >= COOLDOWN_MS, `${w.key}: watched a full cooldown after the keyup (${Math.round(w.cooldown)} ms)`);
+    assert.ok(w.ready !== null && w.afterReady >= COOLDOWN_MS, `${w.key}: a ready command prompt after the keyup, watched a full cooldown from it`);
+    assert.equal(w.afterTakes, 0, `${w.key}: nothing taken after the keyup`);
     assert.ok(w.after.every((cell) => cell === h.WAKE_CELL), `${w.key}: no step after the keyup (a change only onto the wake cell)`);
   }
-  assert.ok(holds.some((w) => w.held.length >= 1), 'a held arrow walked');
 }, { needs: h.haveHfes });
 
 // Spec 19 O1c (round 4 items 6 and 11) at Max on the virtual display (64 steps a frame, a step
@@ -2118,10 +2185,9 @@ test('at Max a held arrow walks one step per minimum interval, no sooner and no 
     await watchWalk(page);
     await page.keyboard.down(key);
     await h.runFrames(page, 90);
-    const released = await page.evaluate(() => window.__k2.steps.length);
     await page.keyboard.up(key);
-    await h.runFramesToPrompt(page, 5000);
-    const w = walkReceipt(await unwatchWalk(page), released);
+    await coolDownFrames(page, COOLDOWN_MS);
+    const w = walkReceipt(await unwatchWalk(page));
     holds.push({ ...w, key });
     console.log(`  receipt (Max): ${walkLine(key, w)}`);
     if (w.paced.length >= 2) break;
@@ -2130,7 +2196,90 @@ test('at Max a held arrow walks one step per minimum interval, no sooner and no 
   assert.ok(w.paced.length >= 2, `two paced presses or more in one hold (${w.paced.length})`);
   assert.equal(w.late, 0, 'none late');
   assert.ok(w.paced.every((p) => p.gap >= MIN_STEP_MS - 0.01 && p.gap <= MIN_STEP_MS + frame + 0.01), `every paced press 150 ms after the take before, within a frame: ${w.paced.map((p) => Math.round(p.gap)).join(', ')}`);
-  for (const x of holds) assert.ok(x.after.every((cell) => cell === h.WAKE_CELL), `${x.key}: no step after the keyup`);
+  for (const x of holds) {
+    assert.ok(x.first !== null && x.first.step === x.pressIndex, `${x.key}: the press taken by the first step after its keydown`);
+    assert.ok(x.cooldown >= COOLDOWN_MS && x.afterTakes === 0, `${x.key}: nothing taken over the cooldown after the keyup`);
+    assert.ok(x.ready !== null && x.afterReady >= COOLDOWN_MS, `${x.key}: a ready command prompt after the keyup, watched a full cooldown from it`);
+    assert.ok(x.after.every((cell) => cell === h.WAKE_CELL), `${x.key}: no step after the keyup`);
+  }
+}, { needs: h.haveHfes });
+
+// Spec 19 O1c (round 5, review d-3), the receipt's attribution on a deterministic fixture: at Max
+// on the virtual display, input stamped 20 ms after the frame last run (`displayInputAt`), past the
+// next frame's time (16.7 ms on), as when a keydown lands after a frame's timestamp but before its
+// callback runs: the press is taken by a frame older than its own stamp. The arrow (left first,
+// else the next whose hold gives a paced take) held 40 frames, then a full cooldown. The receipt
+// gives the press to the first step after the keydown (`pressIndex`, from the instrumentation, not
+// the clocks), counts no step late, and the paced take comes 150 ms within a frame after the
+// press (from its stamp: the interval runs from the later of the press and the step it gave).
+test('the held-walk receipt gives a press taken by a frame older than its stamp to its keydown, with no false lateness (spec 19 O1c)', async (env) => {
+  const { page } = await menuPage(env);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  for (let i = 0; i < 7; i += 1) await page.keyboard.press('Equal');
+  assert.equal((await speedShown(page)).speed, 'max', 'seven presets up: Max');
+  const frame = 1000 / 60;
+  const keys = ['ArrowLeft', ...h.STEPS.map((s) => s.key).filter((k) => k !== 'ArrowLeft')];
+  let w = null;
+  let key = null;
+  for (key of keys) {
+    await h.runFramesToPrompt(page, 5000);
+    await watchWalk(page);
+    await h.displayInputAt(page, 20);
+    await page.keyboard.down(key);
+    await h.displayInputAt(page, 0);
+    await h.runFrames(page, 40);
+    await page.keyboard.up(key);
+    await coolDownFrames(page, COOLDOWN_MS);
+    w = walkReceipt(await unwatchWalk(page));
+    console.log(`  receipt (stamped 20 ms after the frame): ${walkLine(key, w)}`);
+    if (w.paced.length >= 1) break;
+  }
+  assert.ok(w.first !== null && w.first.step === w.pressIndex, `${key}: the press given to the first step after its keydown`);
+  assert.ok(w.first.delay < 0, `${key}: taken by a frame older than its stamp (${w.first.delay.toFixed(1)} ms)`);
+  assert.equal(w.late, 0, `${key}: no step counted late`);
+  assert.ok(w.paced.length >= 1, `${key}: a paced take`);
+  const fromPress = w.paced[0].at - (w.first.at - w.first.delay);
+  assert.ok(fromPress >= MIN_STEP_MS - 0.01 && fromPress <= MIN_STEP_MS + frame + 0.01, `${key}: the paced take ${fromPress.toFixed(1)} ms after the press's stamp`);
+  assert.equal(w.afterTakes, 0, `${key}: nothing taken after the keyup`);
+  assert.ok(w.ready !== null && w.afterReady >= COOLDOWN_MS, `${key}: a ready command prompt after the keyup, watched a full cooldown from it`);
+}, { needs: h.haveHfes });
+
+// Spec 19 O1c (round 5, review b-2), the page's Meta release on the virtual display: the down arrow
+// (else the first whose press the prompt takes) pressed at the prompt and held, Meta down while its
+// turn runs (macOS sends no keyup for a key let go while Cmd is down, so the page lets every held
+// key go) and up again, the arrow still down; then ten repeats of it (Playwright sends a held key's
+// next down as its repeat), three frames apart, and the prompt held 60 frames more. After its press
+// the prompt takes nothing: the arrow was let go at the Meta chord, and its repeats, taken back at
+// the command prompt, enrol it as a key that does not walk (spec 19, N4's kind). Ctrl and Alt
+// pause instead: the test above.
+test('Meta down lets a held arrow go at the page: no walk after it, though the arrow stays down (spec 19 O1c)', async (env) => {
+  const { page } = await menuPage(env);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const takes = () => page.evaluate(() => globalThis.__shownGame.prompt_takes());
+  await h.runFramesToPrompt(page, 5000);
+  const t0 = await takes();
+  await page.keyboard.down('ArrowDown');
+  await h.runFrames(page, 3);
+  const t1 = await takes();
+  await page.keyboard.down('Meta');
+  await h.runFrames(page, 2);
+  await page.keyboard.up('Meta');
+  await h.runFramesToPrompt(page, 5000);
+  const at = await page.evaluate(() => document.getElementById('screen').dataset.leader);
+  for (let i = 0; i < 10; i += 1) {
+    await page.keyboard.down('ArrowDown');
+    await h.runFrames(page, 3);
+  }
+  await h.runFrames(page, 60);
+  const t2 = await takes();
+  const leader = await page.evaluate(() => document.getElementById('screen').dataset.leader);
+  await page.keyboard.up('ArrowDown');
+  console.log(`  receipt: takes at the press ${t1 - t0}; after the Meta chord, over its turn, 10 repeats and 60 frames at the prompt ${t2 - t1}; leader ${leader === at ? 'stayed' : 'moved'}`);
+  assert.equal(t1 - t0, 1, 'the press taken');
+  assert.equal(t2 - t1, 0, 'nothing taken after the Meta chord');
+  assert.equal(leader, at, 'the leader stayed');
 }, { needs: h.haveHfes });
 
 // Spec 19 O1c (round 4 items 2 and 10), the page's modifier chords on the virtual display, at the
@@ -13143,6 +13292,387 @@ test('smooth motion (spec 20 Design 5), the page\'s cost per display frame of a 
   for (const line of lines) console.log(`  receipt: ${line}`);
 }, { needs: h.haveHfes });
 
+// --- the message history (spec 23) --------------------------------------------------------------
+// The message window keeps the lines it scrolled off; the wheel over it shows them, with the
+// engine's scrollbar in its last cell column. Passes at the prompt fill the window past its rows.
+// The checks read the engine's RGBA frame (the window's rect, frame pixels 176..311 x 112..191 in
+// every build), with HD on the HD frame's rows over it, and the offset; never the text. The game
+// runs on between reads: its prompt's cursor in the window's last row may blink, so a check that
+// the window stayed the same reads the rows above it (the first 72 pixel rows). The checks of
+// what the window shows leave out its last cell column (x 128..135 of the rect), where the
+// scrollbar is drawn (read apart, `barPixels`).
+const ABOVE_CURSOR = 72 * 136;
+const TEXT_COLUMNS = 128;
+const inText = (i) => i % 136 < TEXT_COLUMNS;
+
+/// The message window's rect of the RGBA frame (a colour string per pixel), with HD on a digest of
+/// the HD frame's pixels over its rows above the last and its first 16 cell columns (the bar's
+/// column aside) and, with the HD font on (the text the page's, drawn from the list, spec 11),
+/// of the cells the HD frame lists there, and the history offset.
+async function historyShown(page) {
+  return page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const [x0, y0, w, rows] = [176, 112, 136, 80];
+    const fw = g.width();
+    const d = g.frame_rgba();
+    const px = [];
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const i = ((y0 + y) * fw + x0 + x) * 4;
+        px.push(`${d[i]},${d[i + 1]},${d[i + 2]}`);
+      }
+    }
+    let hd = null;
+    if (g.hd_on()) {
+      const s = g.hd_scale();
+      const f = g.hd_frame_rgba();
+      hd = 2166136261;
+      for (let y = y0 * s; y < (y0 + rows - 8) * s; y += 1) {
+        for (let x = x0 * s; x < (x0 + 128) * s; x += 1) {
+          for (let k = 0; k < 3; k += 1) hd = Math.imul(hd ^ f[(y * fw * s + x) * 4 + k], 16777619) >>> 0;
+        }
+      }
+      if (g.hd_font()) {
+        const gl = g.hd_glyphs();
+        for (let k = 0; k + 4 < gl.length; k += 5) {
+          if (gl[k] >= x0 && gl[k] < x0 + 128 && gl[k + 1] >= y0 && gl[k + 1] < y0 + rows - 8) {
+            for (let j = 0; j < 5; j += 1) hd = Math.imul(hd ^ gl[k + j], 16777619) >>> 0;
+          }
+        }
+      }
+    }
+    return { offset: g.history_offset(), px, hd };
+  });
+}
+
+const sameAbove = (a, b) => a.px.every((c, i) => i >= ABOVE_CURSOR || !inText(i) || c === b.px[i]);
+
+/// The scrollbar's pixels in a rect read by `historyShown`: in each cell of the last column whose
+/// first five columns show one colour, the last three columns' pixels of another colour (spec 23
+/// Design 7: the bar yields to a letter, over a cell of one colour it is the ink); their count and
+/// their colours.
+function barPixels(px) {
+  const w = 136;
+  const colours = new Set();
+  let n = 0;
+  for (let r = 0; r < 10; r += 1) {
+    const at = (x, y) => px[(r * 8 + y) * w + x];
+    const paper = at(128, 0);
+    let plain = true;
+    for (let y = 0; y < 8; y += 1) for (let x = 128; x < 133; x += 1) plain &&= at(x, y) === paper;
+    if (!plain) continue;
+    for (let y = 0; y < 8; y += 1) {
+      for (let x = 133; x < 136; x += 1) {
+        if (at(x, y) !== paper) {
+          n += 1;
+          colours.add(at(x, y));
+        }
+      }
+    }
+  }
+  return { n, colours: colours.size };
+}
+
+/// Spec 23 in one layout: the passes, the wheel over the map (nothing), over the message window
+/// (back a line a notch, the scrollbar drawn), a key (back to the live bottom).
+async function messageScrollback(page, env, label) {
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const live = await historyShown(page);
+  assert.equal(live.offset, 0, `${label}: the live bottom`);
+  if (label === 'HD') assert.ok(live.hd !== null, 'HD: the HD frame on');
+  assert.equal(barPixels(live.px).n, 0, `${label}: no scrollbar at the live bottom`);
+  await keepFrame(page.locator('#screen'), `scrollback-${label.toLowerCase()}-live.png`);
+  // Over the map (Wide: its map window, spec 14): the engine takes nothing, the frame stays.
+  const map = label === 'Wide' ? [600, 150] : [40, 40];
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await page.mouse.wheel(0, -100);
+  await h.waitFrames(page, 2);
+  const away = await historyShown(page);
+  assert.equal(away.offset, 0, `${label}: the wheel over the map scrolls nothing`);
+  assert.ok(sameAbove(away, live) && away.hd === live.hd, `${label}: the window as it was`);
+  // Over the message window: one line a notch, up to four.
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  for (let k = 1; k <= 4; k += 1) {
+    await page.mouse.wheel(0, -100);
+    await h.waitFrames(page, 2);
+    assert.equal((await historyShown(page)).offset, k, `${label}: ${k} lines back after ${k} notches`);
+  }
+  // Read with the pointer back over the map: its sprite (in the RGBA frame, not the HD one) out of
+  // the window, as at the live read.
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await h.waitFrames(page, 2);
+  const back = await historyShown(page);
+  assert.equal(back.offset, 4, `${label}: a move leaves the view as it is`);
+  const changed = back.px.filter((c, i) => i < ABOVE_CURSOR && inText(i) && c !== live.px[i]).length;
+  assert.ok(changed > 0, `${label}: the window shows older lines`);
+  const bar = barPixels(back.px);
+  assert.ok(bar.n > 0 && bar.colours === 1, `${label}: the scrollbar drawn, in one ink`);
+  if (live.hd !== null) assert.ok(back.hd !== live.hd, `${label}: the HD frame shows them`);
+  await keepFrame(page.locator('#screen'), `scrollback-${label.toLowerCase()}-back.png`);
+  // A notch down: a line newer.
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  await page.mouse.wheel(0, 100);
+  await h.waitFrames(page, 2);
+  assert.equal((await historyShown(page)).offset, 3, `${label}: a notch down, a line newer`);
+  // A key: the live bottom, the key the game's.
+  await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const after = await historyShown(page);
+  assert.equal(after.offset, 0, `${label}: a key returns to the live bottom`);
+  assert.equal(barPixels(after.px).n, 0, `${label}: no scrollbar after it`);
+  console.log(`  receipt: spec 23 ${label}: 4 notches 4 lines back, ${changed} window pixels changed, ${bar.n} scrollbar pixels in one ink; the map's wheel nothing; a key the live bottom: pass`);
+}
+
+test('the message history (spec 23), Original: the wheel over the message window shows the lines it scrolled off a line a notch, with the engine\'s scrollbar in its last column; over the map it does nothing; a key returns to the live bottom', async (env) => {
+  const { page } = await h.openPage(env);
+  await messageScrollback(page, env, 'Original');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23), the HD layout: the same through the HD frame', async (env) => {
+  const { page } = await h.openPage(env, { layout: 'hd' });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await messageScrollback(page, env, 'HD');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23), Wide: the same in the message scroll\'s window', async (env) => {
+  const { page } = await h.openWide(env, { width: 1400, height: 900 });
+  await messageScrollback(page, env, 'Wide');
+}, { needs: h.haveHfes });
+
+/// A wheel event (a `WheelEvent` init: `deltaY`, `deltaMode`, `ctrlKey`) dispatched on the canvas
+/// at game pixel `at`: whether the page cancelled it, and the history offset after it.
+async function wheelAt(page, at, init) {
+  const [cx, cy] = await h.screenPoint(page, ...at);
+  return page.evaluate(([x, y, more]) => {
+    const ev = new WheelEvent('wheel', { clientX: x, clientY: y, bubbles: true, cancelable: true, deltaMode: 0, ...more });
+    const kept = document.getElementById('screen').dispatchEvent(ev);
+    return { prevented: !kept, offset: globalThis.__shownGame.history_offset() };
+  }, [cx, cy, init]);
+}
+
+/// A pointer move with no button dispatched on the canvas at game pixel `at`.
+async function moveAt(page, at) {
+  const [cx, cy] = await h.screenPoint(page, ...at);
+  await page.evaluate(([x, y]) => {
+    document.getElementById('screen').dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y, buttons: 0, bubbles: true }));
+  }, [cx, cy]);
+}
+
+test('the message history (spec 23): the wheel\'s pixel deltas add up only over the message window, at 100 a line, the carry dropped at a turn, when the pointer leaves the window and at a key; Ctrl-wheel and the wheel elsewhere are the browser\'s', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const [inside, map] = [[200, 150], [40, 40]];
+  const step = async (what, at, init, want) => {
+    const got = await wheelAt(page, at, init);
+    assert.deepEqual(got, want, what);
+  };
+  // Outside, then inside: the outside delta is not carried in.
+  await step('over the map: not taken', map, { deltaY: -60 }, { prevented: false, offset: 0 });
+  await step('then inside: no jump', inside, { deltaY: -40 }, { prevented: true, offset: 0 });
+  // Fractional deltas add up: -40 -40 -40 is a line (and -20 carried).
+  await step('-80 so far', inside, { deltaY: -40 }, { prevented: true, offset: 0 });
+  await step('-120: a line', inside, { deltaY: -40 }, { prevented: true, offset: 1 });
+  // A turn drops the carry: +60 is no line; +60 more is.
+  await step('turned: +60', inside, { deltaY: 60 }, { prevented: true, offset: 1 });
+  await step('+120: a line newer', inside, { deltaY: 60 }, { prevented: true, offset: 0 });
+  // Leaving the window drops it.
+  await step('-60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 0 });
+  await moveAt(page, map);
+  await moveAt(page, inside);
+  await step('left and back: -60 only', inside, { deltaY: -60 }, { prevented: true, offset: 0 });
+  // A key drops it (a key the game is not given: dispatched on the window).
+  await page.evaluate(() => globalThis.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', code: 'ShiftLeft' })));
+  await step('a key: -60 only', inside, { deltaY: -60 }, { prevented: true, offset: 0 });
+  await step('-120: a line', inside, { deltaY: -60 }, { prevented: true, offset: 1 });
+  // Ctrl: the browser's zoom, not taken; a line-mode notch is one line.
+  await step('Ctrl', inside, { deltaY: -300, ctrlKey: true }, { prevented: false, offset: 1 });
+  await step('a line-mode notch', inside, { deltaY: -3, deltaMode: 1 }, { prevented: true, offset: 2 });
+  // The page's own scroll: a page taller than the window scrolls under the wheel outside the
+  // message window and stays put over it.
+  await page.evaluate(() => {
+    const tall = document.createElement('div');
+    tall.id = 'tall-for-test';
+    tall.style.height = '3000px';
+    document.body.append(tall);
+    document.documentElement.style.overflowY = 'auto';
+    globalThis.scrollTo(0, 0);
+  });
+  const scrollTop = () => page.evaluate(() => document.scrollingElement.scrollTop);
+  await page.mouse.move(...(await h.screenPoint(page, ...inside)));
+  await page.mouse.wheel(0, 300);
+  await h.waitFrames(page, 2);
+  assert.equal(await scrollTop(), 0, 'over the message window the page does not scroll');
+  assert.equal(await page.evaluate(() => globalThis.__shownGame.history_offset()), 0, 'the wheel scrolled the history instead');
+  await page.mouse.move(...(await h.screenPoint(page, ...map)));
+  await page.mouse.wheel(0, 300);
+  await page.waitForFunction(() => document.scrollingElement.scrollTop > 0, null, { timeout: 5000 });
+  assert.ok((await scrollTop()) > 0, 'over the map the page scrolls');
+  console.log('  receipt: spec 23 wheel carry: outside then inside no jump; -40x3 a line; a turn, a leave and a key drop it; Ctrl and line mode; the page scrolls outside only: pass');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23): a wheel with no vertical delta (a horizontal swipe) over the message window is the browser\'s, not cancelled, the carry kept; a wheel the engine does not take drops the carry', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  const [inside, map] = [[200, 150], [40, 40]];
+  // Each Game.wheel call the page makes, counted (the page's game is the one shown).
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const wheel = g.wheel;
+    g.__asked = 0;
+    g.wheel = (...args) => {
+      g.__asked += 1;
+      return wheel.apply(g, args);
+    };
+  });
+  const asked = () => page.evaluate(() => globalThis.__shownGame.__asked);
+  const step = async (what, at, init, want) => {
+    const before = await asked();
+    const got = await wheelAt(page, at, init);
+    assert.deepEqual({ ...got, asked: (await asked()) - before }, want, what);
+  };
+  // deltaY 0: the engine not asked, the event not cancelled, the carry untouched, in pixel or
+  // line mode. Asked: once whether it takes the wheel there, once more for a line.
+  await step('-60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 0, asked: 1 });
+  await step('a horizontal wheel: the browser\'s', inside, { deltaX: 30, deltaY: 0 }, { prevented: false, offset: 0, asked: 0 });
+  await step('-120 with the carry kept: a line', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 2 });
+  await step('a horizontal line-mode notch: the browser\'s', inside, { deltaX: 3, deltaY: 0, deltaMode: 1 }, { prevented: false, offset: 1, asked: 0 });
+  // A wheel the engine does not take (over the map), with no pointer move between: the carry
+  // dropped, so -60 inside, one over the map and -60 inside again move no line (-20 was left
+  // from the -120, so -80 before the map).
+  await step('-60 carried again', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 1 });
+  await step('over the map: not taken', map, { deltaY: -60 }, { prevented: false, offset: 1, asked: 1 });
+  await step('then -60 inside: no line', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 1 });
+  await step('-120 since the map: a line', inside, { deltaY: -60 }, { prevented: true, offset: 2, asked: 2 });
+  // Line mode alone (gpt c, round 3): the carry dropped first (a move over the map: not the
+  // engine's), then -60, a line-mode wheel with no vertical delta, -60: one line, the middle one
+  // neither asked nor cancelled, so only a carry it kept makes the line.
+  await moveAt(page, map);
+  await moveAt(page, inside);
+  await step('isolated: -60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 2, asked: 1 });
+  await step('isolated: a horizontal line-mode notch', inside, { deltaX: 3, deltaY: 0, deltaMode: 1 }, { prevented: false, offset: 2, asked: 0 });
+  await step('isolated: -120 with the carry kept: one line', inside, { deltaY: -60 }, { prevented: true, offset: 3, asked: 2 });
+  console.log('  receipt: spec 23 wheel deltaY 0: not cancelled, the carry kept (pixel and line mode, alone too); a rejected wheel drops the carry: pass');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23): a press on the scrollbar whose pointer capture is lost without a release gives the game every button up, as a cancel does', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  for (let i = 0; i < 14; i += 1) await h.passTurn(page);
+  await h.waitFrames(page, 2);
+  assert.equal((await wheelAt(page, [200, 150], { deltaY: -300 })).offset, 3, 'three lines back');
+  // The mouse's press on the bar's track (the history's), its pointer id kept, and a move on the
+  // track with the button held (a capture takes effect at the pointer's next event).
+  await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    globalThis.__capture = [];
+    c.addEventListener('pointerdown', (e) => { globalThis.__pressId = e.pointerId; }, { once: true });
+    for (const kind of ['gotpointercapture', 'lostpointercapture']) c.addEventListener(kind, () => globalThis.__capture.push(kind));
+  });
+  await page.mouse.move(...(await h.screenPoint(page, 310, 113)));
+  await page.mouse.down();
+  await page.mouse.move(...(await h.screenPoint(page, 310, 114)));
+  await h.waitFrames(page, 2);
+  const last = () => page.evaluate(() => globalThis.__buttons.at(-1)?.[0]);
+  const capture = () => page.evaluate(() => globalThis.__capture.join(' '));
+  assert.equal(await last(), 1, 'the press queued');
+  assert.equal(await capture(), 'gotpointercapture', 'the canvas has the capture');
+  // The capture taken away with the button still down, then the mouse off the canvas: the
+  // browser fires lostpointercapture before that move (which the canvas no longer gets), and no
+  // pointerup reaches the canvas.
+  await page.evaluate(() => document.getElementById('screen').releasePointerCapture(globalThis.__pressId));
+  const off = await page.evaluate(() => {
+    const r = document.getElementById('screen').getBoundingClientRect();
+    return r.bottom + 20 < innerHeight ? [r.left + 10, r.bottom + 10] : [r.right + 10, r.top + 10];
+  });
+  await page.mouse.move(...off);
+  await h.waitFrames(page, 2);
+  assert.equal(await capture(), 'gotpointercapture lostpointercapture', 'the capture lost');
+  assert.equal(await last(), 0, 'every button up for the game');
+  // Back over the canvas with the button still held (no capture: the canvas gets the moves): the
+  // game's buttons stay up until every button is up; then a new press is the game's.
+  const moves = await page.evaluate(() => globalThis.__buttons.length);
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  await page.mouse.move(...(await h.screenPoint(page, 40, 40)));
+  await h.waitFrames(page, 2);
+  assert.equal(await page.evaluate((n) => globalThis.__buttons.slice(n).some(([b]) => b !== 0), moves), false, 'the held button never reached the game again');
+  assert.equal(await page.evaluate(() => globalThis.__pointerAt.join(',')), '40,40', 'the moves reached it');
+  await page.mouse.up();
+  await page.mouse.down();
+  await h.waitFrames(page, 2);
+  assert.equal(await last(), 1, 'a new press is the game\'s');
+  await page.mouse.up();
+  await h.waitFrames(page, 2);
+  assert.equal(await last(), 0);
+  console.log('  receipt: spec 23 lost pointer capture: the press released for the game, the held button kept up: pass');
+}, { needs: h.haveHfes });
+
+test('the message history (spec 23): after a press whose pointer capture is lost, a second button pressed with the first still held is the game\'s, and the first stays up for it until it is up', async (env) => {
+  // opus N2 (round 4): the page keeps up for the game the buttons it released (`releasedHeld`, a
+  // mask), not every button held after: a chorded press arrives as a move, never a pointerdown.
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  const at = await h.screenPoint(page, 40, 40);
+  // A: the left press on the map, its capture lost (the event as the browser fires it, pointer id
+  // 1), the right button down with the left held, the left up, the left down again, both up.
+  // B: the left press, its capture lost, the right down with the left held, then a cancel with
+  // both held (the second release keeps the first's button up too), the right up, the left up, a
+  // new press and its release. One evaluation, the buttons of each Game.pointer call recorded.
+  const calls = await page.evaluate(([x, y]) => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const pointer = g.pointer;
+    const seen = [];
+    g.pointer = (...args) => {
+      seen.push(args[2]);
+      return pointer.apply(g, args);
+    };
+    const send = (kind, buttons) => c.dispatchEvent(new PointerEvent(kind, { pointerType: 'mouse', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+    const reading = g.reading_by_click();
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 3);
+    send('pointermove', 2);
+    send('pointermove', 3);
+    send('pointerup', 0);
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 3);
+    send('pointercancel', 3);
+    send('pointermove', 3);
+    send('pointermove', 1);
+    send('pointermove', 0);
+    send('pointerdown', 1);
+    send('pointerup', 0);
+    g.pointer = pointer;
+    return { reading, seen };
+  }, at);
+  assert.equal(calls.reading, false, 'not a read by click');
+  assert.deepEqual(calls.seen.slice(0, 6), [1, 0, 2, 2, 3, 0], 'A: the press, its release, the right press alone, the left up, a new left press, every button up');
+  assert.deepEqual(calls.seen.slice(6), [1, 0, 2, 0, 0, 0, 0, 1, 0], 'B: the press, its release, the right alone, the cancel, both held, the right up, the left up: none, a new press');
+  console.log('  receipt: spec 23 lost pointer capture: a button pressed after is the game\'s, the released one kept up while held: pass');
+}, { needs: h.haveHfes });
+
 // Spec 22 (conversation by click): koFixture's archive with the player's words after the
 // greeting (`f7`), a keyword block `name` whose answer ends the conversation, and a line for no
 // match. All of it the test's own.
@@ -13340,10 +13870,12 @@ for (const layout of ['original', 'wide']) {
     await talkTo2();
     if (layout === 'wide') {
       // Wide, the windows view: a touch on the date line's title strip during the read drags that
-      // window and the browser cancels it. The drag ends as any release does (dragWindow): its
-      // place kept at once and no drag left over, so the next move reaches the game at its own
-      // pixel (over Name), not at the rest pixel the drag sent.
-      const date = (await wideShown(page)).windows.find((w) => w.name === 'date');
+      // window and the browser cancels it. The drag ends as any release does (dragWindow): the
+      // cancel queues one pointer event, at the rest pixel, where its press went (the buttons of a
+      // queued event are not read back); its place is kept at once and no drag is left over, so
+      // the next move reaches the game at its own pixel (over Name), not at the rest pixel.
+      const shownLayout = await wideShown(page);
+      const date = shownLayout.windows.find((w) => w.name === 'date');
       const strip = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5, date.bar[1] + date.bar[3] / 2 + 0.5);
       const to = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5 - 200, date.bar[1] + date.bar[3] / 2 + 0.5 + 100);
       const over = await h.screenPoint(page, ...NAME_BUTTON);
@@ -13354,15 +13886,21 @@ for (const layout of ['original', 'wide']) {
         const reading = g.reading_by_click();
         send('pointerdown', 'touch', 1, sx, sy);
         send('pointermove', 'touch', 1, tx, ty);
+        const before = g.keys_pending();
         send('pointercancel', 'touch', 0, tx, ty);
+        const cancelQueued = g.keys_pending() - before;
+        const r = g.game_pointer();
+        const lastQueued = [r[3], r[4], r[5]];
         const kept = JSON.parse(localStorage.getItem('u6.layout.windows'))?.date ?? null;
         const shown = globalThis.__u6Layout.windows.find((w) => w.name === 'date').outer.slice(0, 2);
         send('pointermove', 'mouse', 0, ox, oy);
         const p = g.game_pointer();
-        return { reading, kept, shown, queued: p[3], at: [p[4], p[5]] };
+        return { reading, cancelQueued, lastQueued, kept, shown, queued: p[3], at: [p[4], p[5]] };
       }, [strip, to, over]);
       assert.equal(drag.reading, true, 'the drag during the read');
       assert.deepEqual(drag.shown, [date.outer[0] - 200, date.outer[1] + 100], 'the date line dragged');
+      assert.equal(drag.cancelQueued, 1, 'the cancel queued one pointer event (Game.keys_pending)');
+      assert.deepEqual(drag.lastQueued, [1, ...shownLayout.rest], 'the pointer event queued last at the rest pixel (Game.game_pointer: queued, x, y)');
       assert.deepEqual(drag.kept, drag.shown, 'the cancelled drag kept its place (u6.layout.windows)');
       assert.deepEqual([drag.queued, drag.at], [1, NAME_BUTTON], 'the next move queued at its own pixel, not the rest pixel');
       await page.mouse.move(...over);
@@ -13379,6 +13917,61 @@ for (const layout of ['original', 'wide']) {
     console.log(`  receipt: ${layout}: Name pressed in the canvas answered as typed: pass`);
   }, { needs: h.haveHfes });
 }
+
+test('Conversation by click (spec 22) and the message history (spec 23): a press on Name whose pointer capture is lost during the read is released off every target, as a cancel is, and the button still held moved over Name stays up for the game until every button is up; the read goes on, and a new press answers', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(await h.replaceKept(page, 'converse.a', await clickTalkFixture()), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await page.focus('#screen');
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+  await h.waitFrames(page, 2);
+  const at = await h.screenPoint(page, ...NAME_BUTTON);
+  // The mouse's press on Name, its capture lost (the event as the browser fires it, pointer id 1),
+  // a move on Name with the button still held, the release on Name: one evaluation (one frame),
+  // each Game.pointer call the page made recorded.
+  const calls = await page.evaluate(([x, y]) => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const pointer = g.pointer;
+    const seen = [];
+    g.pointer = (...args) => {
+      seen.push(args);
+      return pointer.apply(g, args);
+    };
+    const send = (kind, buttons) => c.dispatchEvent(new PointerEvent(kind, { pointerType: 'mouse', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+    const reading = g.reading_by_click();
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 1);
+    send('pointerup', 0);
+    g.pointer = pointer;
+    return { reading, seen };
+  }, at);
+  assert.equal(calls.reading, true, 'during the read');
+  assert.deepEqual(calls.seen, [[...NAME_BUTTON, 1], [-1, -1, 0], [...NAME_BUTTON, 0], [...NAME_BUTTON, 0]], 'the press, its release off every target, the move held and the release with every button up for the game');
+  const target = () => page.evaluate(() => Array.from(globalThis.__shownGame.talk_target()));
+  for (let i = 0; i < 40; i += 1) {
+    await h.waitFrames(page, 1);
+    assert.equal(await page.evaluate(() => globalThis.__owned), 7, 'the words are still read');
+  }
+  assert.equal((await target())[1], -1, 'nothing pressed in the read');
+  // A new press on Name is the game's: it answers.
+  await page.mouse.move(...at);
+  await h.waitTaken(page);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+  console.log('  receipt: spec 22 + 23 capture lost during the read: released off every target, the held button kept up, a new press answers: pass');
+}, { needs: h.haveHfes });
 
 // The system's pointer over the game screen: the game draws its own (the engine's sprite over
 // the frame; with HD on the page draws it over the HD frame, spec 11 Design 7), so while a game

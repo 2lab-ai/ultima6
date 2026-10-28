@@ -1186,15 +1186,19 @@ mod tests {
     }
 
     /// A game that stands for the command prompt: it reads one key with A4-0x7a2c and A4-0x7a42
-    /// set ([`u6_core::engine::command_prompt`]), then waits 100 ms (so its prompt is up again
-    /// sooner than the interval), over and over, counting the keys it read in `count`.
+    /// set ([`u6_core::engine::command_prompt`]) as the prompt does, the drained take once a
+    /// frame ([`u6_core::ui::keyread::take_drained`]: minifb's direction repeats taken back, the
+    /// take counted), then waits 100 ms (so its prompt is up again sooner than the interval),
+    /// over and over, counting the keys it read in `count`.
     fn prompt_reader(count: std::rc::Rc<std::cell::Cell<usize>>) -> Engine {
         let mut state = u6_core::State::default();
         state.ui.input.accept = true;
         Engine::with_game(state, Files::default(), move |st, io| async move {
             loop {
                 st.borrow_mut().main.reading = 1;
-                io.next_key().await;
+                while u6_core::ui::keyread::take_drained(&st, &io).is_none() {
+                    io.vblank().await;
+                }
                 st.borrow_mut().main.reading = 0;
                 count.set(count.get() + 1);
                 io.sleep(100).await;
@@ -1345,6 +1349,139 @@ mod tests {
             window_keys(&mut keys, &mut pending, &frame, &mut active);
             assert_eq!(pending, want, "modifier {modifier}");
         }
+    }
+
+    /// Frames of 20 ms from `t0` at the prompt ([`prompt_reader`]), one window step each unless
+    /// `steps` says none: per frame `f`, the presses `press(f)` gives and whether a modifier is
+    /// down (`modifier(f)`); the frames (as wall ms) a key was read in, and the events queued.
+    fn frames(
+        n: u64,
+        press: &dyn Fn(u64) -> Vec<(minifb::Key, Key, bool)>,
+        modifier: &dyn Fn(u64) -> bool,
+        steps: &dyn Fn(u64) -> bool,
+    ) -> (Vec<u64>, Vec<InputEvent>) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let count = Rc::new(Cell::new(0));
+        let mut engine = prompt_reader(Rc::clone(&count));
+        let t0 = Instant::now();
+        let (mut keys, mut pending, mut was) = (HeldKeys::default(), Vec::new(), true);
+        let (mut reads, mut queued) = (Vec::new(), Vec::new());
+        for f in 0..n {
+            let now = t0 + Duration::from_millis(f * 20);
+            let presses = press(f);
+            let frame = WindowFrame {
+                presses: &presses,
+                releases: &[],
+                modifier: modifier(f),
+                active: true,
+                at: now,
+            };
+            let before = pending.len();
+            window_keys(&mut keys, &mut pending, &frame, &mut was);
+            queued.extend_from_slice(&pending[before..]);
+            if !steps(f) {
+                continue;
+            }
+            let mut walk = Walk {
+                keys: &mut keys,
+                now,
+                modifier: modifier(f),
+            };
+            let read = count.get();
+            window_step(&mut engine, &mut pending, &mut walk, None, None).unwrap();
+            if count.get() > read {
+                reads.push(f * 20);
+            }
+        }
+        (reads, queued)
+    }
+
+    /// Spec 19 O1c (round 5, review c-2), the native window's modifier contract against the
+    /// page's: the left arrow held walking at the prompt (frames 0, 8, 16, …, 20 ms each), then
+    /// Ctrl, Alt or the system key (Cmd) down from frame 20 to 40, the arrow still down. For
+    /// each the walk pauses (no read while it is down), nothing is let go (no release queued),
+    /// and the walk goes on once it is up: natively Cmd pauses as Ctrl and Alt do, where the page
+    /// lets every held key go at a Meta chord (spec 19, the native window: minifb hears the
+    /// key-ups Cmd would hide from a page).
+    #[test]
+    fn ctrl_alt_and_the_system_key_each_pause_a_held_walk_and_let_nothing_go() {
+        use minifb::Key as K;
+        for m in [K::LeftCtrl, K::LeftAlt, K::LeftSuper] {
+            let down = |f: u64| (20..40).contains(&f) && modifier_down(|k| k == m);
+            let press = |f: u64| {
+                if f == 0 {
+                    vec![(K::Left, Key::Left, false)]
+                } else {
+                    Vec::new()
+                }
+            };
+            let (reads, queued) = frames(60, &press, &down, &|_| true);
+            assert_eq!(reads, [0, 160, 320, 800, 960, 1120], "{m:?}");
+            assert!(
+                !queued.iter().any(|e| matches!(e, InputEvent::Release(_))),
+                "{m:?}: nothing let go"
+            );
+        }
+    }
+
+    /// Spec 19 O1c (round 5, review c-3): a key that does not walk stays so through later
+    /// frames of minifb's repeats (the first 250 ms after the press, then one every 50 ms, 1.2 s
+    /// in all, no modifier down), at the prompt: the left arrow pressed with Alt down, Alt let
+    /// up at once, reads its press once (natively the press reaches the game, spec 19 N2) and
+    /// never walks; one whose first event is a repeat (pressed before the window had it) reads
+    /// nothing. Each repeat is queued and taken back at the prompt.
+    #[test]
+    fn a_key_first_seen_with_a_modifier_or_by_a_repeat_never_walks() {
+        use minifb::Key as K;
+        let repeat = |f: u64| (f * 20..f * 20 + 20).any(|t| t >= 250 && (t - 250) % 50 == 0);
+        let with_alt = |f: u64| {
+            if f == 0 {
+                vec![(K::Left, Key::Left, false)]
+            } else if repeat(f) {
+                vec![(K::Left, Key::Left, true)]
+            } else {
+                Vec::new()
+            }
+        };
+        let (reads, queued) = frames(60, &with_alt, &|f| f == 0, &|_| true);
+        assert_eq!(reads, [0], "its press, once");
+        let repeats = queued
+            .iter()
+            .filter(|e| **e == InputEvent::Repeat(Key::Left));
+        assert_eq!(repeats.count(), 19, "minifb's repeats queued");
+        let repeats_only = |f: u64| {
+            if f == 0 || repeat(f) {
+                vec![(K::Left, Key::Left, true)]
+            } else {
+                Vec::new()
+            }
+        };
+        let (reads, _) = frames(60, &repeats_only, &|_| false, &|_| true);
+        assert_eq!(reads, [] as [u64; 0], "first seen by a repeat");
+    }
+
+    /// Spec 19 O1c (round 5, review c-4): a press the window takes late keeps the interval from
+    /// the step it gives: the left arrow pressed at 0 and held, no window step until the frame
+    /// at 200 ms (a stall: the frames ran none), where the prompt takes the press; the paced
+    /// press comes 150 ms after that step (rounded up to the 20 ms frame: 360), not at once
+    /// because the press is already older than the interval.
+    #[test]
+    fn a_late_taken_press_keeps_the_interval_after_its_step() {
+        use minifb::Key as K;
+        let press = |f: u64| {
+            if f == 0 {
+                vec![(K::Left, Key::Left, false)]
+            } else {
+                Vec::new()
+            }
+        };
+        let (reads, _) = frames(30, &press, &|_| false, &|f| f >= 10);
+        assert_eq!(
+            &reads[..2],
+            [200, 360],
+            "the press at 200, the paced one 160 ms on"
+        );
     }
 
     /// Spec 19 O1b, O1c (round 4 item 8), the effects of a loss of focus on a held walk at the

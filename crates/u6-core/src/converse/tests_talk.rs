@@ -1240,7 +1240,10 @@ fn a_press_the_scroll_moves_types_on_its_release_where_the_keyword_went() {
 
 /// Spec 22 Contract 4 (opus NIT 1): a braced keyword whose inner space is the cell that overflows
 /// the row breaks with its rest empty; the newline after it ends that empty row, which spends the
-/// wrap: a keyword at a later row's start is a word of its own.
+/// wrap: a keyword at a later row's start carries no rest link (`joined`). Its word is its own
+/// with the link or without it, as a rest follows only the continued span on the row directly
+/// above it (`is_rest`, `is_first`); the `joined` column is the check, the word assert only says
+/// so (opus round-4 NIT 1).
 #[test]
 fn a_wrap_whose_rest_row_draws_nothing_is_spent() {
     let (mut s, _) = talk_state(BODY, None);
@@ -1263,19 +1266,26 @@ fn a_wrap_whose_rest_row_draws_nothing_is_spent() {
             (0, 14, b"big".to_vec(), false),
             (2, 0, b"dog".to_vec(), false)
         ],
-        "`big` ending its row, `dog` at a row's start, no rest"
+        "`big` ending its row, `dog` at a row's start, no rest link"
     );
+    // Two rows apart: no link reaches between them, so this holds with `dog` marked a rest too.
     assert_eq!(
         (keys.word(0, 14), keys.word(2, 0)),
-        (b"big".to_vec(), b"dog".to_vec())
+        (b"big".to_vec(), b"dog".to_vec()),
+        "two words, link or none"
     );
     println!("a wrap whose rest row draws nothing is spent: pass");
 }
 
 /// Spec 22 Contract 5 "Timing" (opus NIT 2, gpt a-1): a click's release ends the read's pass;
 /// the pointer events queued after it wait behind the keys it injected for the next reader (here
-/// the string read, f9, of `job`'s answer), which takes them as its own pointer events: a hover
-/// there and a click where the Name button was in the f7 read type nothing.
+/// the string read, f9, of `job`'s answer), which takes them as its own pointer events, one
+/// change of the buttons a pass: a hover there and a click where the Name button was in the f7
+/// read type nothing. The hover half shows only that: the pointer ends at the hover whichever
+/// read took it (opus NIT 5). The click half shows who took the events: its press and release
+/// are still queued once the f9 read began, and the f9 read's input is only what is typed after
+/// them, so the f7 read clicked no Name with them (keys queued behind the pointer events would
+/// let it).
 #[test]
 fn what_follows_an_injecting_release_waits_for_the_next_reader() {
     let body: &[u8] = b"\xf7\xefjob\xf6Work.\xf9\x05\xb3$5\xb6\xeeNo.\xb6";
@@ -1314,8 +1324,19 @@ fn what_follows_an_injecting_release_waits_for_the_next_reader() {
             (name.0, name.1, 0, if click_after { 2 } else { 0 }),
             "{label}: the hover taken by the f9 read, what follows it still queued"
         );
-        idle(&mut e, 4);
-        assert_eq!(e.io().pending_events(), 0, "{label}: the f9 read took them");
+        // One a pass (opus NIT 2): the press at the next, the release at the one after.
+        idle(&mut e, 1);
+        assert_eq!(
+            e.io().pending_events(),
+            usize::from(click_after),
+            "{label}: the f9 read's next pass took one"
+        );
+        idle(&mut e, 1);
+        assert_eq!(
+            e.io().pending_events(),
+            0,
+            "{label}: the pass after it took the other"
+        );
         let injected = talk::INJECTED.with(|k| k.borrow().clone());
         assert_eq!(
             injected,
@@ -1335,4 +1356,68 @@ fn what_follows_an_injecting_release_waits_for_the_next_reader() {
         );
     }
     println!("what follows an injecting release waits for the next reader: pass");
+}
+
+/// Spec 22 Contract 5 "Timing" (gpt SHOULD 1): when the next reader is another f7 read (`job`'s
+/// answer jumps back to the player's words), that read takes what was queued after the injecting
+/// release as its own pointer events, hit-tested in its first pass: a click on the keyword the
+/// answer showed, queued in the frame of the click on Job, types that keyword there, and the
+/// conversation ends in that frame (a read takes one pass a frame once it waits, as the f9 case
+/// shows, so the second read's first pass took it). Taken by the first read instead, hit-tested
+/// there before the answer showed the keyword or taken there with no hit test, it types nothing
+/// and the second read waits.
+#[test]
+fn a_click_after_an_injecting_release_is_the_next_f7_reads_own() {
+    let mut body = b"\xf7\xefjob\xf6Work @cat.\xb0".to_vec();
+    // The jump's target: the f7 read, the body's first op.
+    body.extend_from_slice(&(super::tests_locale::HEADER.len() as u32).to_le_bytes());
+    body.extend_from_slice(b"\xefcat\xf6Purr.\xb6\xeeNo.\xb6");
+    let (s, f) = talk_state(&body, None);
+    // Where `cat` is once `job` answered: a run that typed it.
+    let mut probe = waiting(s.clone(), f.clone());
+    probe.tick(&typed("job\n"), 16);
+    idle(&mut probe, 4);
+    assert!(probe.state().ui.talk.reading, "a second f7 read");
+    let k = probe.state().ui.text.keys.spans.first().cloned();
+    let k = k.expect("`cat` shown by the answer");
+    assert_eq!(k.word(), b"cat");
+    let cat = message_pixel(&probe.state(), k.col + 1, k.row);
+    let mut e = waiting(s, f);
+    let job = button_pixel(&e, 0);
+    e.tick(&[at(job.0, job.1, 0)], 16);
+    talk::INJECTED.with(|k| k.borrow_mut().clear());
+    e.tick(
+        &[
+            at(job.0, job.1, POINTER_LEFT),
+            at(job.0, job.1, 0),
+            at(cat.0, cat.1, 0),
+            at(cat.0, cat.1, POINTER_LEFT),
+            at(cat.0, cat.1, 0),
+        ],
+        16,
+    );
+    // In that frame (opus N1, gpt NIT): its first pass took the click, its Enter ended it.
+    assert!(
+        e.finished() && e.state().converse.input == b"cat",
+        "the second read's first pass typed the keyword, in the click's frame"
+    );
+    finish(&mut e);
+    assert_eq!(
+        e.state().converse.input,
+        b"cat",
+        "the second read typed the keyword"
+    );
+    assert_eq!(
+        e.io().pending_events(),
+        0,
+        "nothing left queued: the click's keys taken once (opus N2)"
+    );
+    assert!(screen(&e.state()).ends_with("Purr."), "its answer");
+    let injected = talk::INJECTED.with(|k| k.borrow().clone());
+    assert_eq!(
+        injected,
+        typed("cat\n"),
+        "the second read's click typed it, its line empty"
+    );
+    println!("a click after an injecting release is the next f7 read's own: pass");
 }

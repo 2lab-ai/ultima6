@@ -47,6 +47,20 @@ fn settle(e: &mut Engine) {
     panic!("the game reaches the prompt");
 }
 
+/// The user's zip for the castle tests: without it a test is skipped (None) and says so; with
+/// `U6_REQUIRE_ARCHIVE=1` it fails instead (spec 19 round 5, review b-1). Prints whether it ran.
+#[allow(clippy::disallowed_methods)] // tests may read the environment
+fn castle_files() -> Option<Files> {
+    let Some(files) = files() else {
+        let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+        assert!(!required, "U6_REQUIRE_ARCHIVE=1 and the zip not present");
+        eprintln!("castle fixture: skipped");
+        return None;
+    };
+    eprintln!("castle fixture: ran");
+    Some(files)
+}
+
 /// The castle start state (module doc), at the prompt.
 fn castle(files: &Files) -> Engine {
     let mut state = State::new_game(files).quiet();
@@ -171,7 +185,7 @@ fn held_south(files: &Files, ms: u64) -> (Hold, Hold) {
 
 #[test]
 fn a_key_held_1_s_steps_once_a_prompt_and_not_after_its_release() {
-    let Some(files) = files() else { return };
+    let Some(files) = castle_files() else { return };
     let (model, platform) = held_south(&files, 1000);
     assert!(
         platform.held.abs_diff(model.held) <= 1,
@@ -184,7 +198,7 @@ fn a_key_held_1_s_steps_once_a_prompt_and_not_after_its_release() {
 
 #[test]
 fn a_key_held_3_s_does_not_fill_the_ring() {
-    let Some(files) = files() else { return };
+    let Some(files) = castle_files() else { return };
     let (model, platform) = held_south(&files, 3000);
     assert!(
         platform.most_queued < KEY_RING,
@@ -202,7 +216,7 @@ fn a_key_held_3_s_does_not_fill_the_ring() {
 
 #[test]
 fn a_tap_during_a_turn_gives_exactly_one_more_step() {
-    let Some(files) = files() else { return };
+    let Some(files) = castle_files() else { return };
     let mut e = castle(&files);
     // A tap at the prompt (released 60 ms later) and a second one 100 ms into its turn, as the
     // probe's `tap gap 100 ms` row.
@@ -302,6 +316,101 @@ fn a_drained_key_wait_takes_the_newest_press_and_a_release_takes_back_its_repeat
         take(&[rep(a), up(a)]).is_empty(),
         "a repeat released before the poll"
     );
+}
+
+/// Spec 19 O1c (round 5, review S1), zip-free: the command prompt's own read, keyread's idle
+/// poll (`Io::key_ready_at` with the prompt, then the drained take, `keyread::take_drained`), on
+/// the test tables in `game` (the drain flag set, A4-0x7a42 set). A game that waits 100 ms with
+/// A4-0x7a2c clear, then sets it and reads with the idle poll, a frame between two polls (as the
+/// event wait's pointer sample takes one while a mouse walk waits, `ui/target.rs`), over and
+/// over; the right arrow's repeats come every tick throughout, queued during the waits and met
+/// by a prompt that comes up within a tick, and at the prompt; a paced press of it, a press of a
+/// letter and the letter's repeat come once each. Every other prompt (round 6, review opus S1)
+/// waits two frames before its first poll, as the event wait's pointer sample does when the
+/// prompt comes up during a held mouse walk (`ui/target.rs` `pointer_click`), so the repeats
+/// queued during the wait before it survive into the ticks that start at the prompt. Read: those
+/// three, in order, each counted, no direction repeat. After every tick that began at the prompt
+/// the queue holds only the presses not read yet (0 or 1): the tick drops the repeats that came
+/// while the prompt waited, from its input and from the queue (those a late prompt found), the
+/// read those queued before it came up. That check runs on many ticks, counted (review gpt a).
+#[test]
+fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_at_it() {
+    let s = game_state();
+    assert!(
+        s.ui.input.drain && s.ui.input.accept,
+        "the image's words are 1"
+    );
+    let (right, letter) = (Key::Right, Key::Char('s'));
+    let want = [code(&s, right), code(&s, Key::Char('a')), code(&s, letter)];
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let out = Rc::clone(&seen);
+    let late = Rc::new(std::cell::Cell::new(0));
+    let lates = Rc::clone(&late);
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        for cycle in 0.. {
+            io.sleep(100).await;
+            st.borrow_mut().main.reading = 1;
+            if cycle % 2 == 1 {
+                lates.set(lates.get() + 1);
+                io.vblank().await;
+                io.vblank().await;
+            }
+            let code = loop {
+                let k = keyread::idle_poll(&st, &io).await;
+                if k != 0 {
+                    break k;
+                }
+                io.vblank().await;
+            };
+            st.borrow_mut().main.reading = 0;
+            out.borrow_mut().push(code);
+        }
+    });
+    let presses = [
+        (14, InputEvent::Paced(right)),
+        (30, InputEvent::Key(Key::Char('a'))),
+        (47, InputEvent::Repeat(letter)),
+    ];
+    let (mut sent, mut checked) = (0, 0);
+    for t in 0..90 {
+        let mut input = vec![InputEvent::Repeat(right)];
+        if let Some(&(_, p)) = presses.iter().find(|(at, _)| *at == t) {
+            input.push(p);
+            sent += 1;
+        }
+        let at_prompt = e.state().main.reading == 1;
+        e.tick(&input, 16);
+        let read = seen.borrow().len();
+        assert!(
+            read <= sent,
+            "tick {t}: {read} read for {sent} presses: {:?}",
+            seen.borrow()
+        );
+        let unread = sent - read;
+        if at_prompt && e.state().main.reading == 1 {
+            checked += 1;
+            assert_eq!(
+                e.io().pending_events(),
+                unread,
+                "tick {t}: only the presses not read yet wait"
+            );
+        }
+    }
+    println!(
+        "{checked} ticks at the prompt checked, {} prompts polled two frames late",
+        late.get()
+    );
+    assert!(
+        checked >= 20,
+        "the queue checked at the prompt: {checked} ticks"
+    );
+    assert!(late.get() >= 2, "late prompts: {}", late.get());
+    assert_eq!(
+        *seen.borrow(),
+        want,
+        "the paced press, the letter, its repeat"
+    );
+    assert_eq!(e.prompt_takes(), 3, "each counted");
 }
 
 /// The line editor 0x107cba reads with the drain flag clear (0x107cd6 clears it, 0x107d5a sets

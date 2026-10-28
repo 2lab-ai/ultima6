@@ -11,7 +11,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::engine::{InputEvent, Key};
+use crate::engine::{InputEvent, Key, command_prompt};
 use crate::geom::{VIEW_H, VIEW_W, WINDOW};
 use crate::main_loop::Program;
 use crate::map::flags::CELL_VISIBLE;
@@ -443,18 +443,17 @@ pub(crate) fn chebyshev(a: (u16, u16), b: (u16, u16), mask: u16) -> u16 {
     d(a.0, b.0).max(d(a.1, b.1))
 }
 
-/// The command prompt: the command loop reads a command key (A4-0x7a2c set) with keys going
-/// through command processing (A4-0x7a42 set: the more prompt clears it), no line editor
-/// (A4-0x7a57) and no cursor up (A4-0x7a60 = 0: with Tab's cross-hair, 1, or the panel cursor, 2,
-/// a direction key moves the cursor, `ui/target.rs` `tab_key`, `targeting_key` and `step`).
-pub fn command_prompt(s: &State) -> bool {
-    s.main.reading == 1 && s.ui.input.accept && !s.ui.input.line_input && s.ui.input.targeting == 0
-}
-
-/// A key wait other than the command prompt: the event wait 0x106bbc or the line editor while the
-/// command prompt is not up.
+/// A key wait other than the command prompt ([`command_prompt`], spec 19's one definition: the
+/// command loop reads a command key, A4-0x7a2c set, with keys going through command processing,
+/// A4-0x7a42 set, the more prompt clears it, and no cursor up, A4-0x7a60 = 0: with Tab's
+/// cross-hair, 1, or the panel cursor, 2, a direction key moves the cursor, `ui/target.rs`
+/// `tab_key`, `targeting_key` and `step`): the line editor (A4-0x7a57), whatever else is set, or
+/// the event wait 0x106bbc while the command prompt is not up. The line editor's flag is read
+/// here, where it decides the result; the command prompt's definition needs none (the line
+/// editor never runs while A4-0x7a2c is set: it is entered only from a command's handler, after
+/// the command read cleared the flag, `main_loop/commands.rs` `command_loop`).
 fn other_prompt(s: &State) -> bool {
-    !command_prompt(s) && (s.ui.input.in_wait || s.ui.input.line_input)
+    s.ui.input.line_input || (!command_prompt(s) && s.ui.input.in_wait)
 }
 
 /// Why `s` refuses a travel to map cell `target` on the party's level, `None` when it may start:

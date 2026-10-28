@@ -6,8 +6,9 @@ tags: [ultima6, input, pathfinding, ui]
 
 # 21 — Travel ("여기로 이동")
 
-Status: planned (2026-10-28; unit M4 on `feat/travel` from integ `60f92c6`: round 1 `db3f01b`, round 2 the review's
-fixes; shipped when it is merged; the menu entry is wired in a later round, after this merges). The owner,
+Status: shipped (2026-10-28, deploy 35, main 17c09b6): the search, the walk, the stops and the engine API below
+are the implemented contract, not a future target (unit M4, `feat/travel`). The context-menu entry that calls it is wired
+in unit M3's merge round (spec 17), after this. The owner,
 2026-10-28, verbatim: "그리고 우클릭시 여기로 이동도 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령". Spec 17's context menu (unit M3, `feat/ingame-menu`) draws the entry; this spec owns the search, the
 walk and the API the entry calls. Related: spec 19 (the turn model, O1c held keys = unit K2), spec 20 (smooth motion).
 
@@ -212,7 +213,12 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
   still runs every tick while a step is not due, so the stops stay immediate. The travel's key is a prompt take, so
   it already moves K2's `last_step`: the held walk and the travel share one step time; keep it so.
 - N2: K2's own command-prompt test (K2 `engine.rs:81`) lacks `!line_input` beside `travel::command_prompt`
-  (`travel.rs:450`); the merge keeps one predicate for both.
+  (`travel.rs:450`); the merge keeps one predicate for both. Done in K2 round 6 (2026-10-28): the travel reads
+  `engine::command_prompt`, and the line editor's flag stays only where it decides a result, in `other_prompt`
+  (the line editor up is a `Prompt` stop whatever else is set). The line editor never runs while A4-0x7a2c is set
+  (it is entered only from a command's handler, after the command read cleared the flag), so no caller of the
+  one predicate reads otherwise; `the_one_command_prompt_predicate_decides_the_travel_as_before` checks the
+  travel's two decisions against the old predicate over all 48 flag combinations.
 
 ## Trace (STV, before code)
 
