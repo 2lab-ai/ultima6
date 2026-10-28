@@ -6,7 +6,7 @@ tags: [ultima6, ui, hd, wide, input]
 
 # 23 — Message scrollback
 
-Status: implemented, not merged (2026-10-28, unit T2 / D2, branch `feat/message-scroll` from integ/r1027 60f92c6; round 1 06b1ab0, round 2 0976064, integ/r1027 52cc339 merged in as a1bacfd, round 3 b74f910; integ/r1027 17c09b6 (K2, C2, M4 travel, T1 talk clicks) merged in as 54db292, round 4 on top of it). The same owner message asked for the Job and Name buttons and the clickable keywords: that is unit T1 (spec 22, branch `feat/talk-clicks`), merged into integ before D2 (decision 12); round 4 is D2's merge round with it.
+Status: shipped (deploy 36, main 9e8f133, 2026-10-29; round 5 4cc706d). This document is the implemented contract, not a future target. History: unit T2 / D2, branch `feat/message-scroll` from integ/r1027 60f92c6; round 1 06b1ab0, round 2 0976064, integ/r1027 52cc339 merged in as a1bacfd, round 3 b74f910; integ/r1027 17c09b6 (K2, C2, M4 travel, T1 talk clicks) merged in as 54db292, round 4 on top of it, round 5 4cc706d. The same owner message asked for the Job and Name buttons and the clickable keywords: that is unit T1 (spec 22, branch `feat/talk-clicks`), merged into integ before D2 (decision 12).
 
 Owner's words (2026-10-28, verbatim): "그리고 메세지창에서 스크롤로 지난 대화 볼수 있게 해줘 오른족에 스크롤바도 추가해줘". In the same message the owner corrected that UI must be the game's own (in-game), not web-page elements (the brief's summary): everything here is drawn by the engine into the frame, in the game's colours; the page adds no element.
 
