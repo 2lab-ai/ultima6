@@ -4,9 +4,10 @@
 use std::cell::RefCell;
 
 use super::print::put_raw;
+use super::scrollback::CellKind;
 use super::seams;
 use super::text::{self, PAGED};
-use crate::engine::{Io, Key, Typed};
+use crate::engine::{Io, Key, Typed, command_prompt};
 use crate::state::State;
 
 /// What a poll took: a game code (never 0), a Hangul syllable typed as text (port, spec 08
@@ -41,7 +42,7 @@ enum Text {
 /// (0x105d06..0x105d0e loads A4-0x7a46 into D0 before the take), whose word is 1 in the image
 /// (0x153caa) and clear only while the line editor reads (0x107cd6, set back at 0x107d5a). So
 /// with the flag set the take is the newest key press queued, every other press dropped
-/// ([`crate::engine::Io::take_newest_key`]): a held key, whose auto-repeat keeps adding
+/// ([`take_drained`]): a held key, whose auto-repeat keeps adding
 /// presses, gives one command a poll. The original's ring also holds each release, as a 0
 /// (0x151c32), so there a key let go before the poll leaves a 0 last and its press is lost;
 /// here (spec 19 O1b) a release takes back only the key's queued repeats
@@ -56,11 +57,12 @@ enum Text {
 async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
     let key = loop {
         if text == Text::Dropped {
-            if !io.key_ready() {
+            let prompt = command_prompt(&state.borrow());
+            if !io.key_ready_at(prompt) {
                 return Polled::None;
             }
             if state.borrow().ui.input.drain {
-                match io.take_newest_key() {
+                match take_drained(state, io) {
                     Some(key) => break key,
                     None => return Polled::None,
                 }
@@ -84,6 +86,26 @@ async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
         0 => Polled::None,
         code => Polled::Code(code),
     }
+}
+
+/// Replaces: 0x134e7c's drain (the loop at 0x134e84..0x134e98: every key press queued taken, the
+/// last kept), the take of the key waits' poll while the drain flag A4-0x7a46 is set
+/// ([`crate::engine::Io::take_newest_key_at`]).
+///
+/// Port (spec 19 O1c): the take says whether it is the command prompt's
+/// ([`crate::engine::command_prompt`] as the state is at the take: the prompt can come up within
+/// a tick, after the repeats a turn queued), and there the platform's repeats of direction keys
+/// are taken back and the press it takes is counted ([`crate::engine::Io::prompt_takes`]: the
+/// platform's instrument, not the game's state), from which a platform paces a held direction
+/// key. Public for the platforms' tests, whose stand-ins for the command prompt read as it does.
+#[doc(hidden)]
+pub fn take_drained(state: &RefCell<State>, io: &Io) -> Option<Key> {
+    let prompt = command_prompt(&state.borrow());
+    let key = io.take_newest_key_at(prompt)?;
+    if prompt {
+        io.count_prompt_take();
+    }
+    Some(key)
 }
 
 /// Original: 0x105c8e (ui: poll for a key; while none, show one frame of the spinning cursor at the
@@ -147,7 +169,8 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
             // Port (spec 11): a symbol, never a character of the HD font.
             let paper = ui.paper.as_ref();
             io.draw(|fb| text::draw_symbol(fb, (font, hangul), &w, glyph, (col, row), paper));
-            let refresh = ui.input.idle_refresh;
+            super::scrollback::note(&mut s.ui, &w, glyph, (col, row), CellKind::Symbol);
+            let refresh = s.ui.input.idle_refresh;
             s.gfx.actor_anim_due = 1;
             refresh
         };
@@ -177,6 +200,7 @@ async fn idle_wait(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
     let w = *ui.text.win();
     let (font, hangul) = (ui.font.as_ref(), ui.hangul.as_deref());
     io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
+    super::scrollback::note(ui, &w, 0x20, (col, row), CellKind::Char);
     forget(ui, col, row);
     ui.text.drawn = true;
     ui.text.win_mut().fg = saved;
@@ -235,9 +259,11 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
         }
         let w = *win;
         io.draw(|fb| text::draw_char(fb, font, hangul, &w, 0x20, col, row));
+        super::scrollback::note(ui, &w, 0x20, (col, row), CellKind::Char);
         forget(ui, col, row);
     } else {
         io.draw(|fb| text::draw_typed(fb, (font, hangul), &w, c, (col, row)));
+        super::scrollback::note(ui, &w, c, (col, row), CellKind::Typed);
         forget(ui, col, row);
         let win = ui.text.win_mut();
         win.col = win.col.wrapping_add(1);
@@ -247,10 +273,15 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
                 win.row += 1;
             } else if win.flags & text::SCROLL != 0 {
                 ui.text.drawn = true;
-                if ui.text.current == super::WindowId::Messages {
-                    super::talk::scroll(ui);
-                }
+                // Port (spec 22, 23): the keywords move up a row, those of the top row leave with
+                // it and are kept with it.
+                let spans = if ui.text.current == super::WindowId::Messages {
+                    super::talk::scroll(ui)
+                } else {
+                    Vec::new()
+                };
                 let w = *ui.text.win();
+                io.draw(|fb| super::scrollback::scrolled(ui, fb, &w, spans));
                 io.draw(|fb| text::scroll_window(fb, &w, ui.paper.as_ref()));
             }
         }

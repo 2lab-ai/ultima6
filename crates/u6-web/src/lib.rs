@@ -1531,6 +1531,27 @@ impl Game {
         }
     }
 
+    /// Spec 23: the wheel at frame pixel (x, y) (as [`Game::pointer`] maps it), `dy` lines (< 0
+    /// older, > 0 newer): over the message window while `game` runs it scrolls the message
+    /// history the frame shows, at once ([`Game::present`] shows it), and returns true (the caller
+    /// should then `preventDefault`); elsewhere, or before a start, false and nothing changes.
+    /// `dy` 0 moves nothing: whether the wheel is taken there (the page asks before it adds a
+    /// pixel delta to its carry). Never the game's input.
+    pub fn wheel(&mut self, x: i32, y: i32, dy: i32) -> bool {
+        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.engine
+            .as_mut()
+            .is_some_and(|e| e.wheel(word(x), word(y), dy))
+    }
+
+    /// Spec 23: lines the message history is scrolled back from the live bottom (0: live, and
+    /// before a start).
+    pub fn history_offset(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| u32::try_from(e.history_offset()).unwrap_or(u32::MAX))
+    }
+
     /// Spec 22 Contract 8: whether the game reads the player's words by click now (a
     /// conversation's read after "you say", op f7, from its start to its end; buttons drawn or
     /// not). The page releases a cancelled press off every target then. False before a start.
@@ -1878,14 +1899,20 @@ impl Game {
 
     /// A pointer button is down as the input handler has it: the last pointer event queued
     /// since the previous step (newer than the engine's), else the engine's handler pointer
-    /// ([`u6_core::Io::handler_pointer`]). False before a start.
+    /// ([`u6_core::Io::handler_pointer`]), or a press the message history holds (spec 23: the
+    /// handler sees no button then, [`u6_core::Engine::history_holding`]) unless the last pointer
+    /// event queued has every button up (the step that takes it ends the press: paced as
+    /// released, as a game press is). False before a start.
     fn pointer_held(&self) -> bool {
-        let buttons = last_buttons(&self.pending).or_else(|| {
+        let queued = last_buttons(&self.pending);
+        let buttons = queued.or_else(|| {
             self.engine
                 .as_ref()
                 .map(|e| e.io().handler_pointer().buttons)
         });
-        buttons.is_some_and(|b| b & 3 != 0)
+        let holding = queued.is_none_or(|b| b & 3 != 0)
+            && self.engine.as_ref().is_some_and(Engine::history_holding);
+        buttons.is_some_and(|b| b & 3 != 0) || holding
     }
 
     /// `engine`, just started, becomes the game on screen: no Save of it taken yet, no sound
@@ -2239,8 +2266,9 @@ mod tests {
         assert_eq!(game.pending, [p(42, 52, 0)], "moves after it collapse");
     }
 
-    /// Spec 22 Contract 7: a relaunch starts the page's stream again (`put_on_screen`: no button
-    /// handed to the new engine): a press the old engine took keeps no two moves apart after it.
+    /// Spec 22 Contract 5 "Positions": a relaunch starts the page's stream again (`put_on_screen`:
+    /// no button handed to the new engine): a press the old engine took keeps no two moves apart
+    /// after it.
     #[test]
     fn a_press_handed_before_a_relaunch_keeps_no_moves_apart_after_it() {
         let idle = || {
@@ -3163,6 +3191,71 @@ mod tests {
             "a start runs the launcher: `u` first"
         );
         assert!(!game.finished());
+    }
+
+    /// Spec 23 on the user's zip (read only; prints whether it ran, skips when the zip is absent
+    /// and fails then with `U6_REQUIRE_ARCHIVE=1`): passes at the prompt fill the message window
+    /// past its rows; scrolled back, a press on its bar is the history's until the release: the
+    /// game's handler sees no button, the pace runs at 1× as with one held, and the speed again
+    /// from the step that takes the release (queued, not yet stepped) on.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
+    fn a_press_the_message_history_holds_paces_at_1x() {
+        if !std::path::Path::new(ZIP).exists() {
+            let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+            assert!(!required, "U6_REQUIRE_ARCHIVE=1: {ZIP} is required");
+            println!("history pace: skipped ({ZIP} not present)");
+            return;
+        }
+        println!("history pace: ran");
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        let prompt = |game: &mut Game| {
+            for _ in 0..2000 {
+                if game.at_prompt() {
+                    return;
+                }
+                game.step(20);
+            }
+            panic!("the prompt");
+        };
+        prompt(&mut game);
+        for _ in 0..14 {
+            game.key_down("Space", " ", false, 0.0);
+            game.key_up("Space");
+            game.step(20);
+            prompt(&mut game);
+        }
+        assert!(game.wheel(200, 150, -3), "over the message window");
+        assert_eq!(game.history_offset(), 3);
+        game.set_speed(8.0);
+        let fast = game.pace(100.0);
+        game.ran(fast);
+        assert!(fast >= 40, "{fast} steps free");
+        // On the bar's track, above the thumb (a page older): the press the history's.
+        game.pointer(310, 113, 1);
+        game.step(20);
+        let engine = game.engine.as_ref().unwrap();
+        assert!(engine.history_holding(), "the history's press");
+        assert_eq!(
+            engine.io().handler_pointer().buttons,
+            0,
+            "no button for the game"
+        );
+        assert!(game.pending.is_empty());
+        assert_eq!(game.pace(100.0), 5, "held: 1×");
+        game.ran(5);
+        game.pointer(310, 113, 0);
+        // The release queued, the press still the history's: the step that takes it is paced as
+        // released.
+        assert!(game.engine.as_ref().unwrap().history_holding());
+        assert_eq!(game.pace(100.0), fast, "the release queued: the speed");
+        game.ran(fast);
+        game.step(20);
+        assert!(!game.engine.as_ref().unwrap().history_holding());
+        assert_eq!(game.pace(100.0), fast, "released: the speed");
     }
 
     /// On the user's zip (skipped when absent; read only): a start gives every buffer the source
@@ -5648,14 +5741,19 @@ mod tests {
 
     /// Spec 19 O1c on the user's zip: the castle start state of u6-core's held-key tests
     /// (`ui/tests/held_key.rs`: `game` at once with seed 0, the actors in the assault worktype 8
-    /// passed over with status bit 0x10, the fight broken off with `b`), at the prompt.
+    /// passed over with status bit 0x10, the fight broken off with `b`), at the prompt. Without
+    /// the zip the test that asked is skipped (None), and says so; with `U6_REQUIRE_ARCHIVE=1`
+    /// it fails instead (round 5, review b-1). Each use prints whether it ran.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn in_the_castle() -> Option<Game> {
         use std::cell::RefCell;
         if !std::path::Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
+            let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+            assert!(!required, "U6_REQUIRE_ARCHIVE=1 and {ZIP} not present");
+            eprintln!("castle fixture: skipped ({ZIP} not present)");
             return None;
         }
+        eprintln!("castle fixture: ran");
         let r = intake(vec![InputFile {
             name: "ultima-vi.zip".into(),
             data: std::fs::read(ZIP).quiet(),
@@ -6247,18 +6345,30 @@ mod tests {
         assert!(cells > paused, "walks on once it is up");
     }
 
-    /// A game that stands for the waits: it reads one key (with `prompt`, A4-0x7a2c and
-    /// A4-0x7a42 set: the command prompt, [`u6_core::engine::command_prompt`]; without, another
-    /// wait such as the line editor's), then waits 100 ms, over and over; the keys it read go to
-    /// `out`. It reads in order, as the line editor does (the command prompt's drain would take
-    /// the newest press queued).
+    /// A game that stands for the waits: it reads one key, then waits 100 ms, over and over;
+    /// the keys it read go to `out`. With `prompt` it is the command prompt (A4-0x7a2c and
+    /// A4-0x7a42 set, [`u6_core::engine::command_prompt`]) and reads as the prompt does, the
+    /// newest press queued by the drained take once a frame
+    /// ([`u6_core::ui::keyread::take_drained`]: the platform's direction repeats taken back, the
+    /// take counted); without, another wait such as the line editor's, reading in order with
+    /// every repeat.
     fn reader(prompt: bool, out: Rc<std::cell::RefCell<Vec<u6_core::engine::Typed>>>) -> Engine {
+        use u6_core::engine::Typed;
         let mut state = u6_core::State::empty();
         state.ui.input.accept = true;
         Engine::with_game(state, Files::default(), move |st, io| async move {
             loop {
-                st.borrow_mut().main.reading = u16::from(prompt);
-                let t = io.next_typed().await;
+                let t = if prompt {
+                    st.borrow_mut().main.reading = 1;
+                    loop {
+                        if let Some(k) = u6_core::ui::keyread::take_drained(&st, &io) {
+                            break Typed::Key(k);
+                        }
+                        io.vblank().await;
+                    }
+                } else {
+                    io.next_typed().await
+                };
                 st.borrow_mut().main.reading = 0;
                 out.borrow_mut().push(t);
                 io.sleep(100).await;
@@ -6322,12 +6432,14 @@ mod tests {
     /// (`key_down`, `key_repeat`, `key_up`) on [`reader`] at the command prompt, every read
     /// checked against the oracle: a paced press is always the newest walking direction, and a
     /// read of an older direction only consumes a physical press queued before the newest press
-    /// was made, at most once per direction change. Phase A: the down arrow held alone reads
-    /// only Down. Phase B: Down let go and pressed again, then Left pressed, in one frame: one
-    /// Down (that press, queued before Left; the reader reads in order, where the real prompt's
-    /// drain would take the newest, Left, and drop it), then only Left. Phase C: the browser's
-    /// repeat of Down is taken back at the prompt, so only Left (a repeat does not make the older
-    /// newer). Phase D: Left let go, only Down. Each phase lasts 400 ms at 1×.
+    /// was made, at most once per direction change; the command prompt's drain (round 5: the
+    /// reader reads as the prompt does) takes the newest of those, so here none is. Phase A:
+    /// the down arrow held alone reads only Down. Phase B: Down let go and pressed again, then
+    /// Left pressed, in one frame, both presses queued: the drain takes Left and drops that Down
+    /// press, so only Left.
+    /// Phase C: the browser's repeat of Down is taken back at the prompt, so only Left (a repeat
+    /// does not make the older newer). Phase D: Left let go, only Down. Each phase lasts 400 ms
+    /// at 1×.
     #[test]
     fn the_newest_held_arrow_walks_and_the_older_comes_back_at_its_release() {
         use u6_core::engine::Typed;
@@ -6352,15 +6464,23 @@ mod tests {
         assert!(game.key_up("ArrowDown"));
         assert!(down(&mut game, "ArrowDown"));
         assert!(down(&mut game, "ArrowLeft"));
-        let b = phase(&mut game);
+        // Round 6 (review opus N3): the page queued both presses (after Down's release), so the
+        // drain below has the Down press to drop.
+        let presses: Vec<InputEvent> = game
+            .pending
+            .iter()
+            .copied()
+            .filter(|e| matches!(e, InputEvent::Key(_)))
+            .collect();
         assert_eq!(
-            b.first(),
-            Some(&south),
-            "the Down press queued before Left's, once: {b:?}"
+            presses,
+            [InputEvent::Key(Key::Down), InputEvent::Key(Key::Left)],
+            "both presses queued"
         );
+        let b = phase(&mut game);
         assert!(
-            b.len() >= 3 && b[1..].iter().all(|&t| t == west),
-            "then only the newest: {b:?}"
+            b.len() >= 2 && b.iter().all(|&t| t == west),
+            "the Down press queued before Left's drained, only the newest: {b:?}"
         );
         assert!(repeat(&mut game, "ArrowDown"));
         let c = phase(&mut game);
