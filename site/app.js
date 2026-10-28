@@ -4054,8 +4054,22 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
-canvas.addEventListener('pointercancel', (e) =>
-  sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+// A cancelled press (the browser took the touch, a scroll or a zoom). While the game reads the
+// player's words by click (Game.reading_by_click: a conversation's read after "you say"), its
+// release goes to frame pixel (-1, -1), off every key cap and keyword, so it ends no click (spec 22
+// Contract 8: a key cap or a keyword types on a release over the target it was pressed on); at
+// every other time it is released where the touch was, as any release. A Wide window's drag
+// (`dragged`) ends as any release does, through dragWindow: its places kept and its release at
+// the rest pixel, where its press went, off every target.
+canvas.addEventListener('pointercancel', (e) => {
+  if (sentButtons !== 0 && !dragged && game && !crashed && game.reading_by_click()) {
+    sentButtons = 0;
+    game.pointer(-1, -1, 0);
+    showGamePointer();
+  } else {
+    sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
+  }
+});
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
