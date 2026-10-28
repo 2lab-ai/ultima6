@@ -6,10 +6,11 @@ use u6_formats::basetile::BaseTiles;
 use u6_formats::schedule::Schedules as ScheduleFile;
 
 use super::save::MODE_PLAY;
-use super::{OBJLIST_FILE, objlist, seams};
+use super::{OBJLIST_FILE, SIGHT_FILE, SavedSight, objlist, seams};
 use crate::actors::Schedules;
 use crate::engine::Io;
 use crate::files::Files;
+use crate::gfx::cache::SightMemory;
 use crate::state::{LoadError, State};
 
 /// Combat-mode byte of the A4-0x7b84 block (A4-0x7b0c).
@@ -52,15 +53,18 @@ pub fn boot_objlist(files: &Files) -> Result<&[u8], LoadError> {
     Ok(bytes)
 }
 
-/// The three files 0x105350 reads, parsed before anything changes.
+/// The three files 0x105350 reads, parsed before anything changes, and the port's remembered
+/// sight saved with them (spec 18).
 pub struct StateFiles {
     schedule: ScheduleFile,
     basetile: BaseTiles,
     objlist: Vec<u8>,
+    sight: Option<SightMemory>,
 }
 
 /// 0x105350's reads: `schedule` (0x202 bytes, then 5 per entry), `basetile` (0x800) and
-/// `savegame/objlist`: the one the last Save wrote, else the platform's file.
+/// `savegame/objlist`: the one the last Save wrote, else the platform's file. Port (spec 18): the
+/// remembered sight saved with that objlist ([`saved_sight`]).
 pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadError> {
     let schedule = parse(files, "schedule", ScheduleFile::parse)?;
     let basetile = parse(files, "basetile", BaseTiles::parse)?;
@@ -68,11 +72,41 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
         Some(saved) => saved.clone(),
         None => boot_objlist(files)?.to_vec(),
     };
+    let sight = saved_sight(s, files, &objlist);
     Ok(StateFiles {
         schedule,
         basetile,
         objlist,
+        sight,
     })
+}
+
+/// Port-only (spec 18, saved with the game): the remembered sight saved with `objlist`, the
+/// objlist load state reads. The file goes with the objlist: once this session wrote the objlist
+/// (a Save, or the character `u`), the one the last Save wrote with it ([`super::SaveLoad::sight`],
+/// none after `u` or a Save that wrote none), else the platform's [`SIGHT_FILE`]. Read only when
+/// it was written with these objlist bytes and is well formed ([`crate::gfx::cache::read_sight`]);
+/// otherwise none, and the memory stays empty.
+fn saved_sight(s: &State, files: &Files, objlist: &[u8]) -> Option<SightMemory> {
+    let file = match &s.saveload.objlist {
+        Some(_) => s.saveload.sight.as_ref().map(SavedSight::bytes),
+        None => files.get(SIGHT_FILE),
+    };
+    crate::gfx::cache::read_sight(file?, objlist).ok()
+}
+
+/// Port-only (spec 18, saved with the game): load state's read of the remembered sight at the
+/// boot (`game_main`, before the tail of 0x105350 it runs): the sight saved with the objlist the
+/// boot read ([`State::new_game`]'s, or `u`'s character this run: [`saved_sight`]). A boot
+/// without one keeps the empty memory it starts with.
+pub fn boot_sight(s: &mut State, files: &Files) {
+    let objlist = match &s.saveload.objlist {
+        Some(saved) => Some(saved.as_slice()),
+        None => boot_objlist(files).ok(),
+    };
+    if let Some(m) = objlist.and_then(|o| saved_sight(s, files, o)) {
+        s.gfx.cache.set_sight(m);
+    }
 }
 
 /// Original: 0x105350 (saveload: load state: schedule, base tiles, objlist; place the party)
@@ -84,10 +118,14 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
 /// 0x108ac4), A4-0x784e = 1, the window cache (0x108f90), the members back into the vehicle
 /// when aboard (0x10cda8) and the view flags (0x109e74) ([`crate::main_loop::finish_load_state`],
 /// which the boot runs too). Port (spec 18): the remembered sight is forgotten
-/// ([`crate::gfx::cache::RenderCache::forget_sight`]).
+/// ([`crate::gfx::cache::RenderCache::forget_sight`]), and the one saved with this objlist read
+/// right after ([`read_state_files`]).
 pub fn load_state(s: &mut State, io: &Io, files: StateFiles) {
     s.map.window_key = [-1; 3];
     s.gfx.cache.forget_sight();
+    if let Some(m) = files.sight {
+        s.gfx.cache.set_sight(m);
+    }
     s.actors.schedules = Schedules {
         first: files.schedule.first,
         total: files.schedule.records.len() as u16,

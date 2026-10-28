@@ -162,9 +162,9 @@ impl RenderCache {
 /// look fades by the whole game days since that sight ([`fade_of`], [`keeps`]); from
 /// [`FORGET_DAYS`] it is black, and forgotten at the next sweep (once a game hour). At most
 /// [`MAX_CELLS`] cells are kept, the oldest sight going first (about 24 bytes a cell of one
-/// layer: [`Remembered`]). Load state 0x105350 forgets it all
-/// ([`RenderCache::forget_sight`]); the window reset 0x133a96 does not. Never saved: it lives in
-/// the [`RenderCache`], outside the game state's equality.
+/// layer: [`Remembered`]). Load state 0x105350 forgets it all, then reads the one saved with its
+/// save ([`read_sight`]); the window reset 0x133a96 keeps it. It lives in the [`RenderCache`],
+/// outside the game state's equality; a Save writes it beside the save ([`saved`]).
 ///
 /// The look is the one of the last sight: a layer keeps its record and masktype resolved (an
 /// animdata substitution, 0x152cd2, changes only which record a tile draws) and the overlay frame
@@ -1481,17 +1481,15 @@ mod sight_tests {
     /// 0.9 KB more, it is about 3 300 stacks [computed].
     const STACKED_MOST: usize = 70;
 
-    /// Whether std's hashbrown groups its control bytes by 8 on this target: NEON on aarch64,
-    /// and the generic 64-bit word elsewhere, as on wasm32. With SSE2 (x86 and x86_64) the
-    /// groups are 16 bytes, an erase leaves a deleted entry far less often (hashbrown 0.16.1
-    /// src/raw/mod.rs:3297-3302), and what rests on deleted entries piling up (the stacks' table
-    /// stepping to 8 192 buckets, the cells' table's rehash at 2^19) may not come within the
-    /// tests' runs: those asserts hold only with 8-byte groups, and have not been run with
-    /// 16-byte ones.
-    const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
-        target_feature = "sse2",
-        any(target_arch = "x86", target_arch = "x86_64")
-    ));
+    /// Whether std's hashbrown groups its control bytes by 8 on this target, as it does on
+    /// aarch64 (NEON) and wasm32 (the generic 64-bit word); false on x86 and x86_64, whose
+    /// groups are SSE2's 16 bytes, and on every other target, not considered here (4-byte
+    /// groups on other 32-bit targets, 16 on loongarch64 with LSX). With 16-byte groups an erase
+    /// leaves a deleted entry far less often (hashbrown 0.16.1 src/raw/mod.rs:3297-3302), and
+    /// what rests on deleted entries piling up (the stacks' table stepping to 8 192 buckets, the
+    /// cells' table's rehash at 2^19) may not come within the tests' runs: those asserts are
+    /// asserted only with 8-byte groups, and have not been run with other widths.
+    const EIGHT_BYTE_GROUPS: bool = cfg!(any(target_arch = "aarch64", target_arch = "wasm32"));
 
     /// What [`the_bounds_hold_the_heap_under_16_mib`] measures with one cell in `every` stacked:
     /// the most cells held at any time, the cell table's buckets, the highest heap retained over
@@ -1546,10 +1544,11 @@ mod sight_tests {
     /// [`STACKED_MOST`]. The highest heap retained over the run, taken after each render's puts
     /// and before its cap, stays under 16 MiB, spec 18's ceiling; the cells are at most
     /// [`MAX_CELLS`] at any time (taken after each put) and the table at most 2^19 buckets (21
-    /// bytes each). At one in [`STACKED_MOST`] the stacks' table is at 8 192 buckets, and the
-    /// ceiling's stack count [computed] from the high-water sample (its bytes but 32 a stack,
-    /// then 32 bytes a stack up to 16 MiB) is 3 326: the boundary spec 18 states, for the
-    /// test's state. A change of either bound, of a cell's size or of the stacks has to move it.
+    /// bytes each). At one in [`STACKED_MOST`], with 8-byte control groups ([`EIGHT_BYTE_GROUPS`];
+    /// not asserted with other widths), the stacks' table is at 8 192 buckets, and the ceiling's
+    /// stack count [computed] from the high-water sample (its bytes but 32 a stack, then 32
+    /// bytes a stack up to 16 MiB) is 3 326: the boundary spec 18 states, for the test's state.
+    /// A change of either bound, of a cell's size or of the stacks has to move it.
     /// The peak of the table's growth is the integration test `sight_memory_peak`'s.
     #[test]
     fn the_bounds_hold_the_heap_under_16_mib() {
@@ -1587,7 +1586,7 @@ mod sight_tests {
     /// 1.76 million cells in Original on this aarch64 machine, whose control groups are 8 bytes
     /// (NEON, as on wasm32). Not run with 16-byte groups (SSE2), where deleted entries form far
     /// less often and the rehash may come past the test's limit: there the rehash is not
-    /// asserted ([`EIGHT_BYTE_GROUPS`]).
+    /// asserted ([`EIGHT_BYTE_GROUPS`]), and the print says which phase the run reached.
     #[test]
     fn the_cells_table_rehashes_in_place_at_2_19_buckets() {
         let l = Layer {
@@ -1624,7 +1623,12 @@ mod sight_tests {
             prev = c;
             m.cap();
         }
-        println!("{put} cells put to the first rehash at 2^19 buckets, the capacity up {rise}");
+        match phase {
+            3 => println!(
+                "{put} cells put to the first rehash at 2^19 buckets, the capacity up {rise}"
+            ),
+            p => println!("{put} cells put, no rehash at 2^19 buckets seen (phase {p} of 3)"),
+        }
         if EIGHT_BYTE_GROUPS {
             assert_eq!(phase, 3, "grown, deleted entries taken, rehashed");
         }
@@ -1649,3 +1653,7 @@ mod sight_tests {
         assert!((0..16).all(|i| !keeps(5, i % 4, i / 4)), "day 5: none");
     }
 }
+
+// Spec 18 (saved with the game, unit C3): the file a Save writes beside the savegame.
+mod saved;
+pub use saved::{MAX_SAVED_LAYERS, MAX_SIGHT_FILE_BYTES, SightFileError, read_sight};

@@ -94,16 +94,13 @@ fn is_table(size: usize, buckets: usize) -> bool {
 /// 1 KiB with its index.
 const COPIES: usize = 255 * 1024;
 
-/// Whether std's hashbrown groups its control bytes by 8 on this target (NEON on aarch64, the
-/// generic 64-bit word elsewhere, as on wasm32), as `u6_core::gfx::cache`'s tests define it.
-/// The 2^18 → 2^19 growth under the cap rests on deleted entries piling up; with SSE2's 16-byte
-/// groups they form far less often, and the growth, or a cap and 200 renders after it, may not
-/// come within the walk: there the test asserts only that the table never reaches 2^20 buckets.
-/// Not run with 16-byte groups.
-const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
-    target_feature = "sse2",
-    any(target_arch = "x86", target_arch = "x86_64")
-));
+/// Whether std's hashbrown groups its control bytes by 8 on this target, as on aarch64 (NEON)
+/// and wasm32 (the generic 64-bit word); false on x86 and x86_64 (SSE2's 16 bytes) and on every
+/// target not considered here, as `u6_core::gfx::cache`'s tests define it. The 2^18 → 2^19
+/// growth under the cap rests on deleted entries piling up; with 16-byte groups they form far
+/// less often, and the growth, or a cap and 200 renders after it, may not come before the grid
+/// ends. Not run with other widths than 8.
+const EIGHT_BYTE_GROUPS: bool = cfg!(any(target_arch = "aarch64", target_arch = "wasm32"));
 
 /// Spec 18 (the review's peak): the walk above, until the cells' table has grown to 2^19 buckets,
 /// 200 renders more have passed and the cap has acted after the growth (the cells held fell from
@@ -111,17 +108,21 @@ const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
 /// hold no cap). Measured over the heap at the first render (the game state, the engine's
 /// buffers): the peak and what is retained at the end.
 ///
-/// Only the cap lowers the cells held in this walk:
-/// - the clock stands still (the teleport, 0x1092fc, ticks the clock, 0x10368a, by 0 minutes),
-///   so every sight has one minute, no cell ages and the sweep forgets none: asserted, the
-///   calendar the same after every render;
-/// - every fall in the cells held lands on exactly seven eighths of the cap, 200 704, what the
-///   cap leaves when the sights share one minute (ties go by key): asserted. The cap acts above
-///   229 255 cells in Original (228 599 in Wide), so its drop is far more than a render adds;
-/// - `forget` (a cell's look not kept, the copy store full) never runs, since the store holds 255
-///   copies, a constant of the game data (the test named at [`COPIES`]), far under `MAX_COPIES`
-///   (8 192): a premise, not asserted, because the public API counts no copies; no load state
-///   (which forgets the whole memory) is in the walk.
+/// Only the cap lowers the cells held in this walk, each way of the others asserted:
+/// - the sweep: the clock stands still (the teleport, 0x1092fc, ticks the clock, 0x10368a, by 0
+///   minutes), so no cell ages and the sweep forgets none: the calendar the same after every
+///   render;
+/// - a fall in a render where the cap does not act (a load state's reset among them, which
+///   leaves at most a render's cells): every fall in the cells held lands on exactly seven
+///   eighths of the cap, 200 704, where the cap always lands (the oldest first, ties by key).
+///   The cap acts above 229 255 cells in Original (228 599 in Wide), so its drop is far more than
+///   a render adds;
+/// - `forget` (a cell's look not kept, the copy store full): it needs a full store, 8 192 copies
+///   (`MAX_COPIES`, about 5.4 MB), which the store, never freed, would still hold at the end; the
+///   heap retained at the end is at most the 2^19 table, the copies as in play ([`COPIES`]: 255,
+///   a constant of the game data) and 1 MiB, 12 319 744 bytes [computed], no room for it.
+///
+/// These run with every width of control groups.
 ///
 /// Then:
 /// - The table grew to 2^19 buckets once (one allocation of that table's size) and never to
@@ -132,8 +133,9 @@ const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
 ///   moment both live) and at most those, the copies and 1 MiB (the renders' own and the cap's
 ///   scratch).
 ///
-/// With 16-byte groups, where the walk may not reach the growth or 200 renders past it, only
-/// "never to 2^20" is asserted ([`EIGHT_BYTE_GROUPS`]).
+/// With other widths than 8 ([`EIGHT_BYTE_GROUPS`]), a walk that does not reach the growth, a cap
+/// and 200 renders past it before its grid ends waives the asserts of this list but "never to
+/// 2^20"; one that reaches them asserts them all.
 #[test]
 fn the_remembered_sight_peaks_once_as_its_table_grows() {
     let Some(files) = files() else { return };
@@ -186,11 +188,15 @@ fn the_remembered_sight_peaks_once_as_its_table_grows() {
         TABLES_19.load(Ordering::SeqCst),
         TABLES_20.load(Ordering::SeqCst),
     );
+    assert!(
+        retained <= table(1 << 19) + COPIES + (1 << 20),
+        "retained at the end: the 2^19 table, the copies as in play and 1 MiB (no full store)"
+    );
     let reached = grown.is_some_and(|(g, _, _)| capped && renders >= g + 200);
     if !EIGHT_BYTE_GROUPS && !reached {
         println!(
             "{renders} renders, the growth to 2^19 buckets with a cap and 200 renders after it \
-             not reached (16-byte groups: not asserted); peak {peak} bytes over the start"
+             not reached (not 8-byte groups: waived); peak {peak} bytes over the start"
         );
         assert_eq!(larger, 0, "never to 2^20 buckets");
         return;

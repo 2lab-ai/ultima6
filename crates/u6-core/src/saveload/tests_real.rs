@@ -79,6 +79,8 @@ enum Cmd {
     Rearm(Position),
     /// A change to the state, as the objects API makes it (2026-10-25: a spellbook given).
     Edit(fn(&mut State)),
+    /// The party teleported (0x1092fc) to (x, y, z) and the view rebuilt (spec 18's saved sight).
+    Teleport(u16, u16, u16),
 }
 
 /// The real game future (`main_loop::game_first`) with commands run at the start of a poll, inside
@@ -102,6 +104,10 @@ impl Future for Inject {
                 Cmd::Save => save(&mut s),
                 Cmd::Restore => restore(&mut s, &self.io).quiet(),
                 Cmd::Edit(edit) => edit(&mut s),
+                Cmd::Teleport(x, y, z) => {
+                    crate::map::travel::teleport(&mut s, x, y, z, 0);
+                    crate::map::view::update_view(&mut s);
+                }
                 Cmd::Rearm(at) => {
                     let o = &mut s.objects;
                     for e in 0x100..crate::objects::OBJECT_SLOTS {
@@ -2460,3 +2466,6 @@ fn book_equipped(s: &State) -> bool {
             && crate::inventory::equipped_index(&s, o) >= 0
     })
 }
+
+// Spec 18 (saved with the game): the remembered sight through a Save, a store and a boot.
+mod sight;

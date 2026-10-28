@@ -25,7 +25,8 @@
 // letterbox, fullscreen, the compositor's time and scale, the setting across the builds; spec 14:
 // the actor windows, the active one marked, the side panel's own window in another mode or a
 // conversation), the remembered sight (spec 18: on in the page, off in the harness, grey on
-// the canvas where the engine's frame remembers a cell out of sight), and the system's pointer
+// the canvas where the engine's frame remembers a cell out of sight, back after a reload from
+// the file a Save stored beside the save), and the system's pointer
 // (hidden over the canvas while a game runs where the engine's sprite is under the mouse, in
 // every layout, windowed and fullscreen; kept in the launcher, with the engine's pointer hidden,
 // through a press the context menu takes, over the speed badge, in the layouts' gaps, after a
@@ -12516,6 +12517,97 @@ test('remembered sight (spec 18): on in the page by default and kept off across 
   await fresh.reload();
   await started(fresh, FILES);
   assert.deepEqual(await kept(fresh), [false, 'off'], 'kept off: off after a reload');
+}, { needs: h.haveHfes });
+
+/// The game's RGBA frame and the canvas at the game pixels `places` (each pixel's S x S block on
+/// the canvas), the display frozen, and whether the engine's frame names each the remembered
+/// sight; the pixels under the pointer the page draws over the HD frame are `null`. Compared,
+/// never printed (the user's game).
+function pixelsAt(page, places) {
+  return page.evaluate((places) => {
+    const g = globalThis.__shownGame;
+    const c = document.getElementById('screen');
+    const s = c.width / 320;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const f = g.frame_rgba();
+    const [px, py, pw, ph] = g.hd_pointer();
+    return places.map(([x, y]) => {
+      if (x >= px && x < px + pw && y >= py && y < py + ph) return null;
+      const i = (y * 320 + x) * 4;
+      const block = [];
+      for (let k = 0; k < s * s; k += 1) {
+        const j = ((y * s + Math.floor(k / s)) * c.width + x * s + (k % s)) * 4;
+        block.push(d[j], d[j + 1], d[j + 2]);
+      }
+      return { frame: [f[i], f[i + 1], f[i + 2]], canvas: block, named: ((g.hd_source_at(x, y)[5] ?? 0) & 0x80) !== 0 };
+    });
+  }, places);
+}
+
+test('remembered sight (spec 18, saved with the game): what the room\'s door showed is grey once the door is closed; a Save (Ctrl-S, Y) stores savegame/u6sight beside the save; after a page reload the game resumes there and every one of those pixels is again named the remembered sight and the same grey in the game\'s frame and on the canvas at S 4; with the stored sight file removed, a reload shows them black (frames kept in U6_FRAMES_DIR when set)', async (env) => {
+  const { page } = await h.openPage(env, { memory: 'on' });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await walkSouth(page, 10);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  await keepBefore(page);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  const at = (await atPrompt(page)).leader;
+  await page.focus('#screen');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  const paths = await h.savedPaths(page);
+  assert.ok(paths.includes('savegame/u6sight') && paths.includes('savegame/objlist'), 'the remembered sight stored beside the save');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const m = await memoryShown(page, { before: true });
+  assert.deepEqual(memoryChecks(m), [], 'the remembered sight shown before the reload');
+  const was = await pixelsAt(page, m.places);
+  await keepFrame(page.locator('#screen'), 'c3-before-reload.png');
+
+  await page.reload();
+  await started(page, FILES);
+  assert.equal((await atPrompt(page)).leader, at, 'resumed where it was saved');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const now = await pixelsAt(page, m.places);
+  const both = was.map((p, i) => [p, now[i]]).filter(([a, b]) => a && b);
+  assert.ok(both.length * 10 >= m.places.length * 9, 'most of the pixels clear of the pointer both times');
+  assert.ok(both.every(([, b]) => b.named), 'after the reload: each named the remembered sight');
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  assert.ok(both.every(([a, b]) => same(a.frame, b.frame)), 'after the reload: the same grey in the game\'s frame');
+  assert.ok(both.every(([a, b]) => same(a.canvas, b.canvas)), 'after the reload: the same grey on the canvas');
+  const after = await memoryShown(page);
+  const shown = after.flagged >= 256 && ['frame', 'canvas'].every((w) => after[w].grey === after.flagged && after[w].lit * 2 > after.flagged);
+  assert.ok(shown, 'after the reload: the remembered sight shown, grey and not black');
+  const kept = await keepFrame(page.locator('#screen'), 'c3-after-reload.png');
+
+  // The control: the stored sight file removed, a reload shows those pixels black.
+  await page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('files', 'readwrite');
+      tx.objectStore('files').delete('save:savegame/u6sight');
+      tx.oncomplete = () => { db.close(); done(); };
+      tx.onerror = () => fail(tx.error);
+    };
+  }));
+  await page.reload();
+  await started(page, FILES);
+  assert.equal((await atPrompt(page)).leader, at, 'the save without its sight file resumes there too');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const bare = (await pixelsAt(page, m.places)).filter(Boolean);
+  const black = (p) => p.frame.every((v) => v === 0) && p.canvas.every((v) => v === 0);
+  assert.ok(bare.length > 0 && bare.every((p) => !p.named && black(p)), 'without the file: those pixels black');
+  console.log(`  receipt: spec 18 saved with the game: ${both.length} remembered pixels compared at S ${m.s}, the same after the reload, black without the file; frames kept: ${kept}`);
 }, { needs: h.haveHfes });
 
 // Spec 22 (conversation by click): koFixture's archive with the player's words after the

@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use u6_formats::objblk::ObjBlock;
 
-use super::objlist;
+use super::{SavedSight, objlist};
 use crate::engine::Io;
 use crate::objects::{BLOCK_COUNT, Slot};
 use crate::state::State;
@@ -95,7 +95,9 @@ fn members(s: &State) -> Vec<Slot> {
 /// (A4-0x7b84 = A4-0x2fd2), and `savegame/objlist` is written (disk check 0x1349a0 and open
 /// 0x134a54 are the platform's; the 25 tables of [`objlist::encode`]). After: the window cache
 /// rebuilt (0x108f90), the members back into the vehicle (0x10cda8, place 0x10), and the panel
-/// redrawn (A4-0x7afe + 1).
+/// redrawn (A4-0x7afe + 1). Port (spec 18, saved with the game): with the objlist, the remembered
+/// sight as the last render left it, bound to those objlist bytes ([`super::SIGHT_FILE`],
+/// [`crate::gfx::cache::RenderCache::sight_file`]; none when it holds no cell).
 pub fn save(s: &mut State) {
     s.objects.save_mode = MODE_PLAY;
     s.map.window_key = [-1; 3];
@@ -115,7 +117,10 @@ pub fn save(s: &mut State) {
         s.ui.panel.slots = Default::default();
     }
     s.actors.quest_flag = s.actors.quest_flag_copy as u8;
-    s.saveload.objlist = Some(objlist::encode(s));
+    let objlist = objlist::encode(s);
+    s.saveload.sight = s.gfx.cache.sight_file(&objlist).map(SavedSight::new);
+    s.saveload.sight_gen = s.saveload.generation;
+    s.saveload.objlist = Some(objlist);
     crate::map::region::refresh_region(s);
     if aboard(s) {
         for m in members(s) {

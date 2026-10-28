@@ -22,9 +22,11 @@
 // while an import runs: a replaced game's Save never lands over the save its replacement
 // started from. An imported savegame folder becomes the stored save once the game started
 // from it. After the stored save is removed, the next Save of the game on screen is stored
-// whole (objlist and every block). Sound: the first click or key on the canvas (or the Mute
-// button) starts an AudioContext; after each frame the page renders the game's
-// audio in wasm a little ahead and posts it to the AudioWorklet (site/audio-worklet.js).
+// whole (objlist and every block). A Save with something remembered stores the remembered sight
+// beside them (spec 18, `savegame/u6sight`), so a reload shows it again. Sound: the first click
+// or key on the canvas (or the Mute button) starts an AudioContext; after each frame the page
+// renders the game's audio in wasm a little ahead and posts it to the AudioWorklet
+// (site/audio-worklet.js).
 // A press on the canvas is first the game's pointer event, then the gesture that starts the
 // sound: the game queues it whatever the AudioContext does, and only once.
 //
@@ -300,6 +302,8 @@ let max_locale_pack_bytes = null;
 let max_pack_bytes = null;
 let max_save_bytes = null;
 let max_save_file_bytes = null;
+let max_save_file_bytes_of = null;
+let is_sight_file = null;
 let step_ms = null;
 let zip_sliced = null;
 let shown_map = null;
@@ -3107,20 +3111,23 @@ function needEngine() {
 const SAVE_PATH = /(^|\/)savegame\/[^/]+$/i;
 
 // The save files of a drop, read, in the original's names; a file over the save limits (the
-// engine's, which its start also applies to stored files) is left out before it is read.
-// Returns the files and the status note on what was left out.
+// engine's, which its start also applies to stored files: each file's own, the remembered sight's
+// larger than a block's, and the whole save's, which does not count the remembered sight's) is
+// left out before it is read. Returns the files and the status note on what was left out.
 async function readSaves(saveItems) {
   const files = [];
   const left = [];
   let total = 0;
   for (const { path, file } of saveItems) {
-    if (file.size > max_save_file_bytes() || total + file.size > max_save_bytes()) {
+    const name = `savegame/${path.split('/').pop()}`;
+    const counted = is_sight_file(name) ? 0 : file.size;
+    if (file.size > max_save_file_bytes_of(name) || total + counted > max_save_bytes()) {
       left.push(path);
       continue;
     }
     say('reading', path);
-    total += file.size;
-    files.push({ path: `savegame/${path.split('/').pop()}`, bytes: new Uint8Array(await file.arrayBuffer()) });
+    total += counted;
+    files.push({ path: name, bytes: new Uint8Array(await file.arrayBuffer()) });
   }
   const note = left.length === 0 ? ''
     : t('savesLeftOut', max_save_file_bytes(), max_save_bytes(), left.join(', '));
@@ -4496,8 +4503,8 @@ enqueue('opEngine', async () => {
   try {
     ({
       default: init, Game, HdPack, LocalePack, PackProbe, budget_ms, input_too_large, max_input_bytes,
-      max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, step_ms, zip_sliced,
-      shown_map,
+      max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, max_save_file_bytes_of,
+      is_sight_file, step_ms, zip_sliced, shown_map,
     } = await import(ENGINE_URL));
     wasm = await init();
     if (WIDE) placeWide(shown_map());
