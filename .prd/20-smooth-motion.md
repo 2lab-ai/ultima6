@@ -42,23 +42,36 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      step, near Ultima VII's medium walk of 400 ms per 16 px cell. Modern tile games use 100–270 ms but block input
      during the slide; this port must not block. Sources: W1 §2–§3.
    - A held walk (spec 19 O1c) steps every max(turn / speed, `MIN_STEP_MS` = 150) wall ms, and every paced step
-     slides: on some frame of each step the camera is drawn between the step's two cells, moved its way since the
-     frame before (`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`; in the page, test-web's
-     "a held walk in the page": the static layer drawn onto the screen off rest, moved against the step). A step
-     that snaps and is held at rest fails both (`SNAP_PX` set under a cell). The slide keeps its 360 engine ms, so
-     the picture moves on part of each step. Measured in the castle fixture (the assault's actors passed over), the
-     down arrow held 6 s on 60 Hz frames: per step, the frames that drew the slide off rest (moving: the camera or
-     a mover off its place) and those that drew the presenter's picture at rest (held: the early picture until the
-     turn's) over the frames to the next step, median and range; the other frames show the engine's frame
-     (2026-10-29):
+     slides. Both receipts (`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`; in the page,
+     test-web's "a held walk in the page", read from `Game.slide` per display frame, not from the page's draws, which
+     it makes only when the slide changed) count per display frame where the map is drawn: natively the camera of
+     the view shown, in the page the static layer's placement (the frame layer found by its role,
+     `Game::slide_layer_role`). A frame is off rest when the map is off its place; moving when it is also between
+     the step's two cells (on the step's side of rest, within one cell) and closer to rest than on the step's frame
+     before, which lay between them too (in the page, drawn onto the screen as well); backward when farther; stray
+     when off rest anywhere else. Every paced step needs two moving frames or more and none backward or stray. At 8×
+     a slide is 45 wall ms, 2.7 display frames: two frames off rest are sure (`slides_shown` shows no slide under
+     two), the first with no frame of the step before it, so there one moving frame (`moving_needed`). A slide frozen
+     at its start (`Track::offset` read at `start`), run backward in time, overshooting rest by half a cell, drawn on
+     the wrong side of rest, or snapped (`SNAP_PX` under a cell) fails both receipts. The slide keeps its 360 engine
+     ms, so the map moves on part of each step. Measured in the castle fixture (the assault's actors passed over),
+     the down arrow held 6 s on 60 Hz frames, per step over the frames to the next, median and range; "at rest" is
+     the presenter's picture with the map at its place (an early picture held until the turn's, or other objects
+     sliding), the other frames show the engine's frame (2026-10-29):
 
-     | speed | a step every (mean, Original / Wide) | Original moving | Original held | Wide moving | Wide held |
+     | speed | a step every (mean, Original / Wide) | build | off rest | moving | at rest |
      |---|---|---|---|---|---|
-     | 1× | 746 / 757 wall ms | 41 % (40–57) | 20 % (19–28) | 50 % (40–51) | 24 % (19–24) |
-     | 4× | 185 / 189 wall ms | 50 % (38–60) | 23 % (15–30) | 50 % (38–55) | 23 % (15–30) |
-     | 8× | 156 / 156 wall ms | 22 % (20–22) | 22 % (10–22) | 22 % (20–22) | 22 % (10–22) |
+     | 1× | 746 / 757 wall ms | Original | 41 % (40–57) | 29 % (29–38) | 20 % (19–28) |
+     | | | Wide | 50 % (40–51) | 33 % (27–37) | 24 % (19–24) |
+     | 4× | 185 / 189 wall ms | Original | 50 % (38–60) | 40 % (31–50) | 23 % (15–30) |
+     | | | Wide | 50 % (38–55) | 40 % (31–45) | 23 % (15–30) |
+     | 8× | 156 / 156 wall ms | Original | 22 % (20–22) | 11 % (10–11) | 22 % (10–22) |
+     | | | Wide | 22 % (20–22) | 11 % (10–11) | 22 % (10–22) |
 
-     (Round 9's 61–78 % counted the held frames as moving.)
+     The fewest moving frames in a step: 14 at 1×, 4 at 4×, 1 at 8× (both builds). In the page's start room (HD on,
+     1×, out of the start fight, from `Game.slide`), where a step takes 3.4 s and more, the two paced steps followed
+     by another were off rest on 10 % of their frames, moving on 7 % and at rest on 5–7 %. (Round 9's 61–78 %
+     counted the frames at rest as moving, round 10's the frames off rest, and its page figures the page's redraws.)
    - **Decision (W2's): D stays 360 ms of the presentation clock.** The constraints that fix it:
      - The floor: outside a fight a world turn's pictures come no sooner than `AFTER_TURN_MS` = 427 ms apart
        (Measured facts). A 360 ms slide ends before the next turn's picture, so each turn's moves are seen whole.
@@ -70,24 +83,25 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
        slide is shown at (at 8×, 45 wall ms against 150).
      A held walk that moves without a stop between its steps is unit W3's (`objects-menu-fog-motion/loop.md`, row
      W3); spec 19 O1c's "Measured live" is the same 1× symptom seen from the held key.
-   - **The held walk on the real clock (round 10).** In the start room out of the start fight (HD on, 1×, the page's
-     fixed seed), the virtual display's receipt above walks a paced step in 206 and 207 frames: 3433 and 3450 ms
-     (the paced steps followed by another). On the browser's own clock in the same room, K2's instrument
+   - **The held walk on the real clock (rounds 10–11).** In the start room out of the start fight (HD on, 1×, the
+     page's fixed seed), the virtual display's receipt above walks a paced step in 206 and 207 frames: 3433 and 3450
+     ms (the paced steps followed by another). On the browser's own clock in the same room, K2's instrument
      (`watchWalk`, `walkReceipt`) with each step's time, the ms the pace dropped and combat mode (test-web's "the
-     held walk on the real clock", 2026-10-29, the down arrow held with no browser repeat, two runs: alone, and in
-     the whole suite):
-     - motion on: paced steps of 4450, 5967 and 3650 wall ms, then 4517, 6033 and 4533 (the engine ms within a
-       frame of each), 0 ms dropped, out of combat at every step, no late step, each paced press taken 17–33 ms
-       (one or two frames) after the prompt came back;
-     - motion off: 4517, 5583 and 4533 wall ms, then 4517, 7283 and 3733 (the engine ms within a frame of each),
-       0 ms dropped, out of combat, no late step, taken 17–33 ms after the prompt.
+     held walk on the real clock", the down arrow held with no browser repeat; four runs, 2026-10-29, two alone and
+     two in the whole suite):
+     - motion on: paced steps of 4450, 5967 and 3650 wall ms; 4517, 6033 and 4533; 4450, 5966 and 4617; 4517, 6033
+       and 4533;
+     - motion off: 4517, 5583 and 4533 wall ms; 4517, 7283 and 3733; 4517, 6033 and 4533; 4517, 6033 and 4533;
+     - in every run the engine ms within a frame of the wall ms, 0 ms dropped, out of combat at every step, no late
+       step, each paced press taken 17–33 ms (one or two frames) after the prompt came back.
 
-     So the prompt takes the held key at once (no K2 defect), and the steps take as long with the switch off while
-     the page drops nothing (no W2 defect). The slow held walk at 1× is the turn's own length: the start room's
-     world turns between two prompts, 3.4–7.3 s here, as long on the virtual display as on the real clock. It
-     belongs to the turn's pace (spec 19 O2, and W3 for the held walk's continuity). The runs walked different
-     steps (the virtual display's down arrow 2 cells, the real clock's 4, and a turn's length varies with what the
-     room's actors do), so their ranges compare, not their steps one by one.
+     The receipt asserts, motion on and off, that no step leaves the prompt up with a paced press due (`late` 0) and
+     that each paced step's engine ms lie within two display frames of its wall ms; it bounds neither the ms dropped
+     nor the times. With a delay of 300 ms injected at each ready prompt (`U6_DELAY_TAKE_MS`, test-only) both fail.
+     What was seen: no slowdown that comes with motion on, and no delay of a held press at a ready prompt; the time
+     between two steps is the room's world turn (3.7–7.3 s on the real clock in these runs, the virtual display's
+     two paced steps 3.4 s; the runs walked different steps, and a turn's length varies with what the room's actors
+     do). That pace is the turn's (spec 19 O2), and W3's for the held walk's continuity.
 2. **The scene.** At each framed map present the engine records a port-only `MapScene` (`Scene` in u6-render's
    `motion` module; u6-core's `Shot` (`gfx/motion.rs`) holds it with what the render drew in place of a base):
    - the publication's engine time, the leader's cell and z, the view origin and size;
@@ -119,7 +133,12 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      - a new move during a slide restarts from the drawn position, or snaps if that is over 1.5 cells away;
      - a preview held for 2000 ms (`PREVIEW_MS`) with no picture of the engine's, or a foreign picture after it, shows
        the engine's frame: the party is drawn where the engine's picture has it (it jumps back) until the turn's
-       picture comes.
+       picture comes. Measured in the page's start room at 1×, HD off and on, Original and Wide (each way held in
+       turn; `the_early_picture_is_held_until_the_turns_picture_in_the_start_room`, 2026-10-29): over 23 steps whose
+       turns took 0.7–8.5 s (Original) and 1.2–8.7 s (Wide), the first publication after each early picture came 520
+       engine ms after it, so the hold never expired (1480 ms of margin) and no frame showed the old cell. The
+       turn's first picture is its refresh after the first pick (Measured facts), not its end. The receipt fails with
+       the hold at 500 ms.
 4. **The early picture (spec 19 O2, pure form).** Right after the leader's step (`actors::walk::paced_player_step`),
    the engine builds a scene on a clone of `State` (`update_view` and the draw lists on the clone; the clone is
    dropped; the clone holds no remembered sight, so the early picture reads the live state's). It hands
@@ -272,5 +291,5 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
 | Animation during a slide | The HD layers are made again only when what slides changes: a camera slide starts or restarts, a mover joins, restarts or leaves, the presenter starts again (a foreign picture, a snap, the switch). A publication that only lets the slides run on keeps them, so an animated tile or the clock keeps its frame for at most one slide; the slide's end shows the engine's frame. |
 | Actor entering or leaving sight | It is in one scene only, so it pops (spec 18's memory never holds actors). |
 | A click during a slide | Mapped through the published cell grid. The held walk is relative to the centred leader, so it is unaffected. |
-| The message history scrolled back (spec 23) | A slide keeps the history over the message window. Classic draws the slide into a copy of the engine's shown frame (the published frame, the history over it, the pointer sprite), HD over the HD frame composed with the history (`Engine::with_view_frame`); the slide's layers are clipped to the shown map (`a_slide_keeps_the_message_history_the_player_scrolled_back_to`; in the page, test-web's "while the history is scrolled back"). |
+| The message history scrolled back (spec 23) | A slide keeps the history over the message window. Classic draws the slide into a copy of the engine's shown frame (the published frame, the history over it, the pointer sprite), HD over the HD frame composed with the history (`Engine::with_view_frame`); the slide's layers are clipped to the shown map (`a_slide_keeps_the_message_history_the_player_scrolled_back_to`: the frames off rest, those holding the early picture at rest and the first after the slide; in the page, test-web's "while the history is scrolled back"). |
 | Key type-ahead | Fixed by spec 19 O1 (unit K1), which lands before this. Otherwise one hold queues up to 49 slides. |

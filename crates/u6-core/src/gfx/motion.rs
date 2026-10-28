@@ -662,11 +662,14 @@ mod tests {
     use u6_render::motion::{Cell, Node, Placed, Rank};
 
     /// Spec 20 Design 4 (C2's merge note 3): a copy of the state holds no remembered sight
-    /// (`RenderCache::clone`). This checks the copy only; that the early picture, made on such a
-    /// copy, shows the live state's remembered cells as the engine's picture does
+    /// (`RenderCache::clone`). It guards the early picture's copy of the state: one that kept the
+    /// store would copy the whole remembered sight (up to spec 18's cap) at every step, and would
+    /// be a second store the copy's renders could remember into and read from, apart from the live
+    /// one the turn's picture reads. This checks the copy only; that the early picture, made on
+    /// such a copy, shows the live state's remembered cells as the engine's picture does
     /// ([`preview`], `SightMemory::shown_in`) is the real-data receipt
     /// `remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them` (its
-    /// `early_bad`, `gfx/motion_real.rs`).
+    /// `early_bad`, `gfx/motion_real.rs`), which a copy keeping the store does not fail.
     #[test]
     fn a_copy_of_the_state_holds_no_remembered_sight() {
         let mut state = State::empty();

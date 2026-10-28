@@ -13145,26 +13145,72 @@ for (const mode of ['hd', 'layout', 'wide']) {
   }, { needs: h.haveHfes });
 }
 
-// Whether the static layer of `placed` (Game.slide's (layer, x, y) triples: the static layer
-// first, the frame layer last, drawn at rest) lies off its rest place, a cell up and left of the
-// frame layer's; and how far (Chebyshev, frame pixels).
-const staticOff = (placed) => {
-  const n = placed.length;
-  if (n < 6) return 0;
-  return Math.max(Math.abs(placed[1] - (placed[n - 2] - 16)), Math.abs(placed[2] - (placed[n - 1] - 16)));
+// The static layer's offset from its rest place in the slide the page draws: from
+// `placed` (Game.slide's (layer, x, y) triples) and `roles` (Game.slide_layer_role of each layer),
+// the triple of the static words (role 0) less the rest place, a cell up and left of the frame
+// layer's (the cursor and the border, role 1, drawn at rest); null with no slide placed.
+const staticOffset = (placed, roles) => {
+  const at = (role) => {
+    for (let k = 0; k + 2 < placed.length; k += 3) if (roles[placed[k]] === role) return [placed[k + 1], placed[k + 2]];
+    return null;
+  };
+  const [s, f] = [at(0), at(1)];
+  return s && f ? [s[0] - (f[0] - 16), s[1] - (f[1] - 16)] : null;
 };
 
 // One display frame of the virtual display in the page (`motionRing` installed): the leader, the
-// slide placed (Game.slide), and whether the frame drew the static layer onto the screen.
+// slide placed (Game.slide) with its layers' roles, and whether the frame drew the static layer
+// onto the screen.
 const runSlideFrame = (page) => page.evaluate(() => {
   const c = document.getElementById('screen');
+  const g = globalThis.__shownGame;
   globalThis.__slideDraws = [];
   window.__display.run();
   const draws = globalThis.__slideDraws;
   globalThis.__slideDraws = null;
   const onScreen = (d, k) => d.target === c || draws.some((e, j) => j > k && e.source === d.target && e.target === c);
-  return [c.dataset.leader, globalThis.__shownGame.slide(), draws.some((d, k) => d.isStatic && onScreen(d, k))];
+  const roles = Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i));
+  return [c.dataset.leader, g.slide(), roles, draws.some((d, k) => d.isStatic && onScreen(d, k))];
 });
+
+// One step's frames, as the native receipt counts them (u6-web `Progress`), on the static layer's
+// placement: `frame(off, drawn)` with its offset from rest (null: no slide placed, the HD frame
+// shown) and whether the frame drew the static layer onto the screen. Off rest, held at rest,
+// moving (drawn closer to rest along the step than on the step's frame before, which lay between
+// the step's two cells too: the map moving against the step, `k` pixels behind it with
+// 0 < k <= 16), backward (farther from rest than that frame) and stray (off rest, not between
+// the two cells).
+const progress = (dir) => {
+  const p = { dir, frames: 0, offRest: 0, held: 0, moving: 0, backward: 0, stray: 0, before: null };
+  // The map is drawn k pixels along the step from rest: the static layer at k · dir.
+  const behind = ([x, y]) => {
+    const k = dir[0] !== 0 ? x * dir[0] : y * dir[1];
+    return k >= 1 && k <= 16 && x === k * dir[0] && y === k * dir[1] ? k : null;
+  };
+  p.frame = (off, drawn) => {
+    p.frames += 1;
+    if (off === null) {
+      p.before = null;
+      return;
+    }
+    if (off[0] === 0 && off[1] === 0) {
+      p.held += 1;
+      p.before = 0;
+      return;
+    }
+    p.offRest += 1;
+    const k = behind(off);
+    if (k === null) {
+      p.stray += 1;
+      p.before = null;
+      return;
+    }
+    if (p.before !== null && p.before > k && p.before <= 16 && drawn) p.moving += 1;
+    else if (p.before !== null && p.before < k) p.backward += 1;
+    p.before = k;
+  };
+  return p;
+};
 
 // The median and the range of `values` (shares), as percents.
 const sharesLine = (values) => {
@@ -13176,16 +13222,16 @@ const sharesLine = (values) => {
 // Spec 20 against spec 19 O1c, in the page (HD on, 1×, the virtual 60 Hz display, whose clock
 // the key events' timeStamp follow; a fixed seed; out of the start fight): each way held in turn
 // (no repeat: the page's held walk adds the paced presses, which reach paced_player_step) until
-// the party stops for 5 s. Per frame, what the screen shows of the map: the slide's static layer
-// drawn off its rest place (moving), drawn at rest (held: an early picture until the turn's), or
-// the HD frame. Every step of the leader slides: on some frame of it the static layer is drawn
-// onto the screen off rest and moved the step's way back since the frame before (the camera
-// coming after the step, the map moving against it); a step that snaps, its picture held at rest,
-// has none. The paced ones (each hold's after its first, the press's own) are counted, and per
-// step the moving and held shares and the frames × 16.7 ms (the step's time on this display)
-// printed. One frame in the middle of a step's slide (the static layer half a cell off rest, a
-// hold's second step) is written for the dispatcher to read (U6_FRAMES_DIR, as keepFrame has it);
-// nothing of it is printed.
+// the party stops for 5 s. Per display frame, what the page shows of the map, from Game.slide (not
+// from the page's draws, which it makes only when the slide changed): the static layer placed off
+// its rest place, at rest (an early picture held until the turn's), or no slide (the HD frame);
+// counted by `progress`. Every step of the leader slides: two moving frames or more (each drawn
+// onto the screen), none backward and none stray; a slide frozen at any offset, run backward,
+// past rest or snapped fails it. Printed: per step its counts, the frames × 16.7 ms of each paced
+// step followed by another (the step's time on this display), and over those steps the off-rest,
+// moving and held shares. One frame in the middle of a step's slide (the static layer half a
+// cell off rest, a hold's second step) is written for the dispatcher to read (U6_FRAMES_DIR, as
+// keepFrame has it); nothing of it is printed.
 test('smooth motion (spec 20), a held walk in the page: every paced step slides', async (env) => {
   const { context, page } = await motionPage(env, 'hd', true, 1_700_000_000_000);
   assert.ok((await motionRing(page)) > 100, 'the ring found');
@@ -13196,26 +13242,20 @@ test('smooth motion (spec 20), a held walk in the page: every paced step slides'
   for (const dir of MOTION_DIRS) {
     await page.keyboard.down(dir.key);
     const steps = [];
-    let [leader, still, last] = [await motionLeader(page), 0, null];
+    let [leader, still] = [await motionLeader(page), 0];
     for (let i = 0; i < 3600 && still < 300; i += 1) {
-      const [now, placed, drawn] = await runSlideFrame(page);
+      const [now, placed, roles, drawn] = await runSlideFrame(page);
       if (now !== leader) {
         const [a, b] = [leader, now].map((l) => l.split(',').map(Number));
-        steps.push({ frames: 0, drawn: 0, moving: 0, held: 0, along: 0, dir: [b[0] - a[0], b[1] - a[1]] });
-        [leader, still, last] = [now, 0, null];
+        steps.push(progress([b[0] - a[0], b[1] - a[1]]));
+        [leader, still] = [now, 0];
       } else still += 1;
       const step = steps.at(-1);
       if (!step) continue;
-      step.frames += 1;
-      const off = drawn ? staticOff(placed) : 0;
-      step.drawn += drawn ? 1 : 0;
-      step.moving += drawn && off > 0 ? 1 : 0;
-      step.held += drawn && off === 0 ? 1 : 0;
-      // The static layer moved against the step since the frame before.
-      if (drawn && off > 0 && last && (placed[1] - last[0]) * step.dir[0] + (placed[2] - last[1]) * step.dir[1] < 0) step.along += 1;
-      last = drawn && off > 0 ? [placed[1], placed[2]] : null;
+      const off = staticOffset(placed, roles);
+      step.frame(off, drawn);
       // The middle of a step's slide (half a cell off rest), a hold's second step, once.
-      if (!kept && steps.length === 2 && drawn && off === 8) {
+      if (!kept && steps.length === 2 && drawn && off !== null && Math.max(Math.abs(off[0]), Math.abs(off[1])) === 8) {
         await keepFrame(page.locator('#screen'), 'held-walk-mid-slide-hd.png');
         kept = true;
       }
@@ -13226,30 +13266,35 @@ test('smooth motion (spec 20), a held walk in the page: every paced step slides'
   }
   const paced = holds.flatMap((hold) => hold.steps.slice(1));
   const all = holds.flatMap((hold) => hold.steps);
+  // The paced steps followed by another of the same hold (a hold's last runs to the stop).
+  const between = holds.flatMap((hold) => hold.steps.slice(1, -1));
   const walked = holds.map((hold) => `${hold.key} ${hold.steps.length}`).join(', ');
-  const row = (st) => [st.frames, st.drawn, st.moving, st.along];
-  assert.ok(paced.length >= 4, `paced steps held: ${walked}`);
-  assert.ok(all.every((st) => st.along > 0), `a slide drawn moving on every step (frames, drawn, off rest, moved against the step): ${JSON.stringify(all.map(row))}`);
-  // A step's time on this display: its frames to the next step of the same hold (a hold's last
-  // runs to the stop instead).
-  const ms = holds.flatMap((hold) => hold.steps.slice(1, -1)).map((st) => Math.round((st.frames * 1000) / 60));
-  console.log(`  receipt: a held walk at 1x in the page, steps per way held: ${walked}; ${paced.length} paced steps, per step (the frames to the next or to the stop, those that drew the static layer onto the screen, those off rest, those moved against the step) ${JSON.stringify(paced.map(row))}; the frames x 16.7 ms of each paced step followed by another ${ms.join(', ') || '-'} ms; moving share ${sharesLine(paced.map((st) => st.moving / st.frames))}, held share ${sharesLine(paced.map((st) => st.held / st.frames))}; every step slid; a mid-slide frame ${kept && process.env.U6_FRAMES_DIR ? 'written' : 'not written'}`);
+  const row = (st) => [st.frames, st.offRest, st.moving, st.held, st.backward, st.stray];
+  assert.ok(paced.length >= 4 && between.length >= 1, `paced steps held: ${walked}`);
+  assert.ok(all.every((st) => st.moving >= 2 && st.backward === 0 && st.stray === 0), `every step slides, two moving frames or more, none backward or stray (frames, off rest, moving, held, backward, stray): ${JSON.stringify(all.map(row))}`);
+  const ms = between.map((st) => Math.round((st.frames * 1000) / 60));
+  const share = (k) => sharesLine(between.map((st) => st[k] / st.frames));
+  console.log(`  receipt: a held walk at 1x in the page, steps per way held: ${walked}; ${paced.length} paced steps, per step (the frames to the next or to the stop, off rest, moving, held at rest, backward, stray) ${JSON.stringify(paced.map(row))}; the frames x 16.7 ms of each paced step followed by another ${ms.join(', ')} ms; over those steps off rest ${share('offRest')}, moving ${share('moving')}, held ${share('held')}; every step slid; a mid-slide frame ${kept && process.env.U6_FRAMES_DIR ? 'written' : 'not written'}`);
   await context.close();
 }, { needs: h.haveHfes });
 
-// Spec 20 Design 1 (round 10, review gpt b): the held walk on the browser's own clock (no virtual
-// display) in the start room of the receipt above (HD on, 1×, the same fixed seed, out of the
-// start fight by B), with smooth motion on and then off: each way held in turn with no browser
-// repeat (as `heldNoRepeat`) until the leader stepped four times, or 30 s of the game's clock, or
-// 2 s with no step, then let up. K2's instrument (`watchWalk`, `walkReceipt`: the late steps, the
-// paced takes and their waits from the prompt coming back) plus, per step of the leader, its
-// time on the page's clock and the engine's, the ms the pace dropped meanwhile
-// (Game.dropped_ms) and whether the party was in combat mode then (Game.combat_mode). A receipt:
-// it asserts only that each run walked; the verdict is spec 20 Design 1's.
-async function realClockHold(page, key) {
+// Spec 20 Design 1 (rounds 10–11, review gpt b, opus S4): the held walk on the browser's own clock
+// (no virtual display) in the start room of the receipt above (HD on, 1×, the same fixed seed, out
+// of the start fight by B), with smooth motion on and then off: each way held in turn with no
+// browser repeat (as `heldNoRepeat`) until the leader stepped four times, or 30 s of the game's
+// clock, or 2 s with no step, then let up. K2's instrument (`watchWalk`, `walkReceipt`: the late
+// steps, the paced takes and their waits from the prompt coming back) plus, per step of the
+// leader, its time on the page's clock and the engine's, the ms the pace dropped meanwhile
+// (Game.dropped_ms) and whether the party was in combat mode then (Game.combat_mode). Asserted
+// in both runs: no step left the prompt up with a paced press due (`late` 0), and each paced
+// step's engine ms within two display frames of its wall ms; the ms dropped and the times
+// themselves are printed, not bounded. `delayMs` (the control, U6_DELAY_TAKE_MS, test-only): each
+// time the prompt comes back during the hold the page runs no engine step for that many ms of its
+// clock, a held press waiting at a ready prompt.
+async function realClockHold(page, key, delayMs = 0) {
   await h.waitPrompt(page);
   await watchWalk(page);
-  await page.evaluate(() => {
+  await page.evaluate((delay) => {
     const g = globalThis.__shownGame;
     const watched = g.step;
     // One row per row of the log so far (the frames between the two hooks' installs too).
@@ -13259,7 +13304,23 @@ async function realClockHold(page, key) {
       watched.call(this, ms);
       extra.push([this.dropped_ms(), this.combat_mode()]);
     };
-  });
+    if (delay > 0) {
+      // Under watchWalk's hook, so the log still gets its row of each frame.
+      const proto = Object.getPrototypeOf(g);
+      const real = proto.step;
+      const takes = g.prompt_takes();
+      let upSince = null;
+      proto.step = function (ms) {
+        const log = window.__k2;
+        if (log && this.prompt_takes() > takes && this.at_prompt()) {
+          upSince ??= log.now;
+          if (log.now - upSince < delay) return;
+        } else upSince = null;
+        real.call(this, ms);
+      };
+      window.__k2.realStep = [proto, real];
+    }
+  }, delayMs);
   await page.keyboard.down(key);
   const t0 = await page.evaluate(() => globalThis.__clock);
   try {
@@ -13272,6 +13333,10 @@ async function realClockHold(page, key) {
     }, t0, { timeout: 180_000, polling: 'raf' });
   } finally {
     await page.keyboard.up(key);
+    await page.evaluate(() => {
+      const kept = window.__k2.realStep;
+      if (kept) kept[0].step = kept[1];
+    });
   }
   await coolDown(page, COOLDOWN_MS);
   await h.waitPrompt(page);
@@ -13304,8 +13369,9 @@ test('smooth motion (spec 20 Design 1), the held walk on the real clock in the s
     const shown = await page.evaluate(() => [globalThis.__shownGame.hd_on(), globalThis.__shownGame.motion()]);
     assert.deepEqual(shown, [true, motion], `motion ${motion}: HD on, motion as set`);
     const holds = [];
+    const delay = Number(process.env.U6_DELAY_TAKE_MS ?? 0);
     for (const dir of MOTION_DIRS) {
-      const hold = await realClockHold(page, dir.key);
+      const hold = await realClockHold(page, dir.key, delay);
       holds.push(hold);
       if (hold.steps.length >= 3) break;
     }
@@ -13318,7 +13384,15 @@ test('smooth motion (spec 20 Design 1), the held walk on the real clock in the s
     }
   }
   for (const line of lines) console.log(`  receipt: ${line}`);
-  for (const motion of [true, false]) assert.ok(runs[motion].some((hold) => hold.steps.length >= 2), `motion ${motion}: a hold walked`);
+  const frame = 1000 / 60;
+  for (const motion of [true, false]) {
+    assert.ok(runs[motion].some((hold) => hold.steps.length >= 2), `motion ${motion}: a hold walked`);
+    for (const { key, steps, w } of runs[motion]) {
+      assert.equal(w.late, 0, `motion ${motion}, ${key}: no step left the prompt up with a paced press due`);
+      const off = steps.slice(1).filter((st) => Math.abs(st.wall - st.engine) > 2 * frame);
+      assert.equal(off.length, 0, `motion ${motion}, ${key}: each paced step's engine ms within two frames of its wall ms (${off.length} not)`);
+    }
+  }
 }, { needs: h.haveHfes });
 
 // Spec 20 with spec 23 (round 10), in the page ('original': HD off; 'hd': HD on, the Original
@@ -13346,9 +13420,11 @@ test('smooth motion (spec 20) with the message history (spec 23): a step\'s slid
         const d = c.getContext('2d').getImageData(176 * s, 112 * s, 136 * s, 80 * s).data;
         let hash = 2166136261;
         for (let i = 0; i < d.length; i += 1) if (i % 4 !== 3) hash = Math.imul(hash ^ d[i], 16777619) >>> 0;
-        return { hash, sliding: g.sliding(), placed: g.slide(), offset: g.history_offset(), leader: c.dataset.leader };
+        const roles = Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i));
+        return { hash, sliding: g.sliding(), placed: g.slide(), roles, offset: g.history_offset(), leader: c.dataset.leader };
       });
-      return { ...seen, off: staticOff(seen.placed) };
+      const off = staticOffset(seen.placed, seen.roles);
+      return { ...seen, off: off === null ? 0 : Math.max(Math.abs(off[0]), Math.abs(off[1])) };
     };
     let stepped = false;
     for (const dir of MOTION_DIRS) {
