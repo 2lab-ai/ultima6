@@ -6,8 +6,8 @@ tags: [ultima6, ui, input, converse]
 
 # 22 — Conversation by click
 
-Status: in progress (2026-10-28; built in the worktree, not merged). Round r1027-r2 unit T1 (worktree `feat/talk-clicks` from integ/r1027 60f92c6;
-round 1 committed as 8f48620, round 2 on it: the reviews' findings). The message scrollback of the same message is spec 23
+Status: shipped (2026-10-28, deploy 35, main 17c09b6). The contract below is the implemented one, not a future target
+(unit T1, worktree `feat/talk-clicks`; round 5, tests and wording only, follows). The message scrollback of the same message is spec 23
 (unit T2).
 
 Owner, 2026-10-28, verbatim: "그리고 대화시 나오는 사람패널 밑에 job 대화랑 name 대화 버튼 만들고 (인게임 ui로) 클릭시 해당

@@ -6,8 +6,9 @@ tags: [ultima6, input, pathfinding, ui]
 
 # 21 — Travel ("여기로 이동")
 
-Status: planned (2026-10-28; unit M4 on `feat/travel` from integ `60f92c6`: round 1 `db3f01b`, round 2 the review's
-fixes; shipped when it is merged; the menu entry is wired in a later round, after this merges). The owner,
+Status: shipped (2026-10-28, deploy 35, main 17c09b6): the search, the walk, the stops and the engine API below
+are the implemented contract, not a future target (unit M4, `feat/travel`). The context-menu entry that calls it is wired
+in unit M3's merge round (spec 17), after this. The owner,
 2026-10-28, verbatim: "그리고 우클릭시 여기로 이동도 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령". Spec 17's context menu (unit M3, `feat/ingame-menu`) draws the entry; this spec owns the search, the
 walk and the API the entry calls. Related: spec 19 (the turn model, O1c held keys = unit K2), spec 20 (smooth motion).
 
