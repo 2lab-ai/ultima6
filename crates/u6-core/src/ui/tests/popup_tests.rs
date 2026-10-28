@@ -825,18 +825,28 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
 
 /// Spec 17 Presentation, Input (round 2b, gpt b MUST): a double click is one gesture of one
 /// button: the choosing press's button pressed again, nothing pressed for the game between. A
-/// right press at once at the same pixel after a left one chose Go here is no double click (the
-/// game's, or the opening of a menu: real data, `popup_real`); a press elsewhere, a key, typed
-/// text or a press of the platform's off the frame between them ends it, so the press back at
-/// the entry is the game's.
+/// right press at once at the same pixel after a left one chose Go here is no double click: it
+/// opens a menu there, new input, and nothing reaches the game (round 3, gpt b SHOULD; real data
+/// too, `popup_real`); a press elsewhere, a key, typed text or a press of the platform's off the
+/// frame between them ends it, so the press back at the entry is the game's. The synthetic state
+/// gets click region 0 over the shown map, so a right press there has a map menu to open (the
+/// tile's Look); the menu chosen from is opened in the middle of it.
 #[test]
 fn a_double_click_is_the_choosing_buttons_press_again_uninterrupted() {
-    let (s, io) = (prompt(), Io::new(Files::default()));
-    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let mut s = prompt();
+    let (x0, y0, x1, y1) = crate::geom::SHOWN;
+    s.ui.pointer.tables.regions = vec![[x0, y0, x1, y1].map(|v| v as i16)];
+    let io = Io::new(Files::default());
+    let mid = (((x0 + x1) / 2) as i16, ((y0 + y1) / 2) as i16);
+    let o = Open::new(&menu_of(&[menu::LOOK]), mid, &s, &[]);
     let go = (0..o.rows.len())
         .find(|&i| o.item(i).is_some_and(|it| it.code == GO_HERE))
         .expect("Go here");
     let (gx, gy) = row_point(&o, go);
+    assert!(
+        (x0..=x1).contains(&(gx as u16)) && (y0..=y1).contains(&(gy as u16)),
+        "the fixture: Go here's row over the shown map"
+    );
     let choose = |p: &mut Popup| {
         p.input(&s, &io, &[ptr(gx, gy, POINTER_LEFT)], true);
         p.input(&s, &io, &[ptr(gx, gy, 0)], true);
@@ -847,8 +857,12 @@ fn a_double_click_is_the_choosing_buttons_press_again_uninterrupted() {
     let right = ptr(gx, gy, POINTER_RIGHT);
     let out = p.input(&s, &io, &[right], true);
     assert!(
-        out == [right] || p.open().is_some(),
-        "a right press after the left choice: not its double click: {out:?}"
+        p.open().is_some() && p.took_new_input(),
+        "a right press after the left choice: not its double click; it opens a menu, new input"
+    );
+    assert!(
+        out.is_empty(),
+        "the opening press forwarded nowhere: {out:?}"
     );
     let between: [(&str, &[InputEvent], &[usize]); 4] = [
         (
@@ -921,6 +935,104 @@ fn a_double_click_is_timed_on_the_players_clock() {
         e.tick(&[ptr(gx, gy, 0)], 16);
         assert_eq!(e.go_here_asked().asked, [CELL_PRESSED], "chosen once");
     }
+}
+
+/// Spec 17 Layer flow, Close (round 3, gpt a MUST, decided in the spec): a press of the
+/// platform's off the frame with no menu open is not a press on the game. It is no new input (a
+/// travel under way goes on), and it still ends a double click: after Go here chosen, the second
+/// press at the first's pixel 200 wall ms on reaches the game. So for a mark before a button-less
+/// move, one at `input.len()` after it, and one in a tick with no events; with no mark (the
+/// control) the second press is the menu's.
+#[test]
+fn a_press_off_the_frame_with_no_menu_open_is_no_new_input_and_ends_a_double_click() {
+    let s = prompt();
+    let o = Open::new(&menu(), AT, &s, &[]);
+    let (gx, gy) = row_point(&o, 3);
+    assert_eq!(o.item(3).map(|i| i.code), Some(GO_HERE), "row 3: Go here");
+    let hover = ptr(gx + 1, gy, 0);
+    let cases: [(&str, &[InputEvent], &[usize]); 4] = [
+        ("before a move", &[hover], &[0]),
+        ("at input.len(), after a move", &[hover], &[1]),
+        ("in a tick with no events", &[], &[0]),
+        ("none (the control)", &[hover], &[]),
+    ];
+    for (what, events, marks) in cases {
+        let mut e = checkered_engine(&s);
+        let t0 = 50_000;
+        e.set_wall_clock(t0);
+        e.popup_mut().show(o.clone());
+        e.tick(&[ptr(gx, gy, POINTER_LEFT)], 16);
+        e.tick(&[ptr(gx, gy, 0)], 16);
+        assert_eq!(
+            e.go_here_asked().asked,
+            [CELL_PRESSED],
+            "{what}: Go here chosen"
+        );
+        assert!(e.context_menu().is_none(), "{what}: closed");
+        e.set_wall_clock(t0 + 100);
+        e.tick_dismissing(events, marks, 16);
+        assert!(
+            !e.popup_mut().took_new_input(),
+            "{what}: no menu open, so no new input"
+        );
+        assert!(e.context_menu().is_none(), "{what}: still closed");
+        e.set_wall_clock(t0 + 200);
+        let presses = e.game_presses();
+        e.tick(&[ptr(gx, gy, POINTER_LEFT)], 16);
+        let ended = !marks.is_empty();
+        assert_eq!(
+            e.game_presses() - presses,
+            u64::from(ended),
+            "{what}: the double click ended, the second press the game's: {ended}"
+        );
+        e.tick(&[ptr(gx, gy, 0)], 16);
+        assert_eq!(
+            e.go_here_asked().asked,
+            [CELL_PRESSED],
+            "{what}: chosen once"
+        );
+    }
+}
+
+/// Spec 17 Input and its checks (round 3, opus N6): the gate the page's test query takes from the
+/// engine (`Game::context_menu`, `Engine::context_menu_gate`) is the tick's: the command prompt up
+/// (the cross-hair up closes it though the command read waits), nothing queued for the game but
+/// the repeats the prompt takes back, and every event pending inert.
+#[test]
+fn the_context_menu_gate_is_the_ticks() {
+    let s = prompt();
+    let e = checkered_engine(&s);
+    let rep = InputEvent::Repeat(Key::Down);
+    let cases: [(&str, &[InputEvent], bool); 8] = [
+        ("nothing pending", &[], true),
+        ("a button-less move", &[ptr(5, 5, 0)], true),
+        ("a release", &[InputEvent::Release(Key::Down)], true),
+        ("a repeat the prompt takes back", &[rep], true),
+        ("a key", &[InputEvent::Key(Key::Down)], false),
+        ("a paced press", &[InputEvent::Paced(Key::Down)], false),
+        ("typed text", &[InputEvent::Text('x')], false),
+        ("a press", &[ptr(5, 5, POINTER_LEFT)], false),
+    ];
+    for (what, pending, opens) in cases {
+        assert_eq!(e.context_menu_gate(pending), opens, "{what} pending");
+    }
+    e.io().queue_event(rep);
+    assert!(
+        e.context_menu_gate(&[]),
+        "a repeat queued for the game: the prompt takes it back"
+    );
+    e.io().queue_event(InputEvent::Key(Key::Down));
+    assert!(!e.context_menu_gate(&[]), "a key queued for the game");
+    let mut aiming = s.clone();
+    aiming.ui.input.targeting = 1;
+    assert_eq!(
+        aiming.main.reading, 1,
+        "the fixture: the command read waits"
+    );
+    assert!(
+        !checkered_engine(&aiming).context_menu_gate(&[]),
+        "the cross-hair up: no command prompt"
+    );
 }
 
 /// Spec 17 Input with spec 19 O1c (round 2b, K2 merge note 1): a paced press of a held key is the
@@ -1016,6 +1128,9 @@ fn a_repeat_the_prompt_takes_back_is_inert_a_paced_press_is_not() {
         .find(|&i| o.item(i).is_some_and(|it| it.code == menu::ATTACK))
         .expect("Attack");
     let (x, y) = row_point(&o, row);
+    // A synthetic fixture, not a state the game reaches as such: the run's target read is marked
+    // waiting (the fields Run::step reads) while the command prompt's own fields stay up, so a
+    // repeat there is one the prompt takes back.
     let mut reads = s.clone();
     let i = &mut reads.ui.input;
     (i.target_pending, i.target_command, i.accept, i.in_wait) = (1, menu::ATTACK, true, true);

@@ -782,12 +782,12 @@ fn ring(fb: &mut Framebuffer, (x0, y0, x1, y1): (i32, i32, i32, i32), colour: u8
     }
 }
 
-/// An event that changes nothing the game reads (as the menu's opening and [`menu::Run::step`]'s
-/// quiet ask): a move of a button-less pointer, a key's release (never queued,
+/// An event that changes nothing the game reads (as the menu's opening, [`menu::Run::step`]'s
+/// quiet ask and [`crate::engine::Engine::context_menu_gate`] take it): a move of a button-less pointer, a key's release (never queued,
 /// [`InputEvent::Release`]), and at the command prompt (`prompt`,
 /// [`crate::engine::command_prompt`]) a platform's repeat of a direction key, which the engine
 /// takes back there (spec 19 O1c). A paced press is a press ([`InputEvent::Paced`]).
-fn inert(prompt: bool, ev: &InputEvent) -> bool {
+pub(crate) fn inert(prompt: bool, ev: &InputEvent) -> bool {
     match ev {
         InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
         InputEvent::Release(_) => true,
@@ -899,6 +899,11 @@ impl Popup {
         self.relay(s);
     }
 
+    /// The hidden rects a menu keeps off now ([`Popup::set_hidden`]).
+    pub fn hidden(&self) -> &[Rect] {
+        &self.hidden
+    }
+
     /// The open menu laid out again for `s` and the hidden rects, drawn again if it moved.
     fn relay(&mut self, s: &State) {
         let Some(open) = self.open.as_ref() else {
@@ -947,8 +952,10 @@ impl Popup {
     /// menu already held: an event while it is open, the press that opens it, a press while a
     /// chosen command waits. The tail of a choice is not: its press's held moves, a double click's
     /// press and release, the repeats and release of a key taken while open (the press's own
-    /// release reaches the game as a move with no button). Spec 21's merge contract: a travel
-    /// under way ends on it, so the travel Go here starts survives its own gesture.
+    /// release reaches the game as a move with no button). A press off the frame
+    /// ([`Popup::dismiss`]) is new only when it closed an open menu: with none open it ends a
+    /// double click and is not new. Spec 21's merge contract: a travel under way ends on it, so
+    /// the travel Go here starts survives its own gesture.
     pub fn took_new_input(&self) -> bool {
         self.new_input
     }
@@ -1278,7 +1285,9 @@ impl Popup {
 
     /// Closes an open menu as a press outside it would (the platform's press that reaches no
     /// frame pixel: off the canvas, in a gap or the letterbox); true when one was open. As a press,
-    /// it ends a double click.
+    /// it ends a double click, open or not. Only closing an open menu makes it new input
+    /// ([`Popup::took_new_input`]): with none open it is not a press on the game, so it stops no
+    /// travel (spec 17 Layer flow, Close).
     pub fn dismiss(&mut self) -> bool {
         let open = self.open.is_some();
         self.close();

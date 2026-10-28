@@ -2007,8 +2007,11 @@ test('the context menu (spec 17, unit M3) in Wide: a right press opens the engin
 // Spec 17 Presentation (round 2, item 7): the open menu `view` on `page`, its box in CSS pixels
 // inside the visible part of the canvas (logged with the hidden rects the page gave), and its
 // last entry that can run chosen by a left press on it inside that part: the menu closes and the
-// command runs (round 2b, gpt f MUST 2: Go here asks travel once, `Game.go_here_asked`; any other
-// command prints a line or leaves the prompt), which a cancel or a press outside never does.
+// command runs (round 2b, gpt f MUST 2: Go here asks travel once, `Game.go_here_asked`), which a
+// cancel or a press outside never does. Any other entry is one of the map commands (Attack..Use,
+// 0x81..0x88: a map menu's), each of which prints when it runs: from the command prompt (up
+// before the click, round 3, gpt d SHOULD 3) the prompt goes for its run and the message scroll
+// grows (round 3, opus S2: leaving the prompt alone is no receipt, a run held up leaves it too).
 async function menuVisibleAndChosen(page, view, where) {
   const rects = await visibleMenu(page, view);
   console.log(`  receipt: ${where}: menu ${rects.menu} in the visible canvas ${rects.visible} (viewport ${rects.viewport}); hidden frame rects given ${JSON.stringify(rects.hidden)}`);
@@ -2032,10 +2035,13 @@ async function menuVisibleAndChosen(page, view, where) {
     console.log(`  receipt: ${where}: Go here chosen: travel asked ${before.asked} -> ${after.asked}`);
     assert.equal(after.asked, before.asked + 1, `${where}: Go here asked travel once`);
   } else {
-    await page.waitForFunction((l) => globalThis.__shownGame.message_lines() > l
-      || document.getElementById('screen').dataset.prompt !== '1', before.lines, { timeout: 10_000, polling: 'raf' });
+    assert.ok(code >= 0x81 && code <= 0x88, `${where}: entry ${code} a map command, which prints`);
+    assert.equal(before.prompt, '1', `${where}: the command prompt up before the click`);
+    await page.waitForFunction(() => document.getElementById('screen').dataset.prompt !== '1', null, { timeout: 10_000, polling: 'raf' });
+    const left = await ran();
+    await page.waitForFunction((l) => globalThis.__shownGame.message_lines() > l, before.lines, { timeout: 10_000, polling: 'raf' });
     const after = await ran();
-    console.log(`  receipt: ${where}: command ${code} chosen: message lines ${before.lines} -> ${after.lines}, prompt ${after.prompt}`);
+    console.log(`  receipt: ${where}: command ${code} chosen: the prompt ${before.prompt} -> ${left.prompt}, message lines ${before.lines} -> ${after.lines}`);
     assert.equal(after.asked, before.asked, `${where}: no travel asked`);
   }
   return rects;
@@ -2288,9 +2294,12 @@ test('the context menu (spec 17, round 2b, opus S5): in fullscreen, the Original
     };
     const exit = document.getElementById('fullscreen-exit');
     const badge = document.getElementById('speed-badge');
+    const e = exit.getBoundingClientRect();
+    const hit = document.elementFromPoint((e.left + e.right) / 2, (e.top + e.bottom) / 2);
     return {
       hidden: [exit.hidden, badge.hidden],
       shown: [exit, badge].map((el) => getComputedStyle(el).visibility),
+      exitHit: hit === exit || exit.contains(hit),
       exit: toCanvas(exit),
       badge: toCanvas(badge),
       over: globalThis.__u6Layout.overCanvas,
@@ -2300,20 +2309,22 @@ test('the context menu (spec 17, round 2b, opus S5): in fullscreen, the Original
   });
   console.log(`  receipt: fullscreen, both hidden (${r.shown}): reserved on the canvas ${JSON.stringify(r.over)}; the engine's hidden frame rects ${JSON.stringify(r.engine)}`);
   assert.deepEqual(r.hidden, [true, true], 'precondition: the Exit button and the badge hidden');
+  assert.deepEqual(r.shown, ['hidden', 'hidden'], 'both hidden as drawn (their computed visibility)');
+  assert.equal(r.exitHit, false, 'the hidden Exit button takes no press (its middle hits something else)');
   const covers = (rects, [x0, y0, x1, y1]) => rects.some(([x, y, w, hh]) => x <= Math.floor(x0) && y <= Math.floor(y0) && x + w >= Math.ceil(x1) && y + hh >= Math.ceil(y1));
   const exitFrame = [r.exit[0] / r.scale[0], r.exit[1] / r.scale[1], r.exit[2] / r.scale[0], r.exit[3] / r.scale[1]];
   assert.ok(r.exit[2] > r.exit[0] && covers(r.over, r.exit), 'the hidden Exit button\'s box reserved on the canvas');
   assert.ok(r.badge[2] > r.badge[0] && covers(r.over, r.badge), 'the hidden badge\'s box reserved on the canvas');
   const quads = (flat) => Array.from({ length: flat.length / 4 }, (_, i) => flat.slice(4 * i, 4 * i + 4));
   assert.ok(covers(quads(r.engine), exitFrame), 'the engine keeps its menu off the Exit button\'s frame pixels');
-  // A menu open in fullscreen, the Exit button shown by a move: the frame kept.
+  // A menu open in fullscreen, the Exit button shown by a move: the frame kept. (No map menu
+  // reaches the Exit button in this layout, which lies over the side panel: the Wide test below
+  // puts a menu where it would.)
   await h.rightPress(page, ...HERO);
   await page.mouse.up({ button: 'right' });
   await page.mouse.move(...(await h.screenPoint(page, HERO[0] + 2, HERO[1] + 2)));
   await page.locator('#fullscreen-exit').waitFor({ state: 'visible', timeout: 10_000 });
-  const view = await h.menuView(page);
-  const meets = ([mx, my, mw, mh]) => !(mx + mw <= exitFrame[0] || exitFrame[2] <= mx || my + mh <= exitFrame[1] || exitFrame[3] <= my);
-  assert.ok(view && !meets(view.rect), 'the open menu clear of the Exit button');
+  assert.ok(await h.menuView(page), 'the menu open with the Exit button shown');
   await keepFrame(page.locator('#screen-box'), 'r2b-fullscreen-exit.png');
   await page.keyboard.press('Escape');
   await h.menuClosed(page);
@@ -2321,7 +2332,121 @@ test('the context menu (spec 17, round 2b, opus S5): in fullscreen, the Original
   await waitFull(page, 'off');
   await h.waitFrames(page, 3);
   assert.deepEqual(await over(), [], 'out of fullscreen again: nothing reserved');
-  console.log('  receipt: fullscreen reserves the Exit button and the badge, hidden or shown; the engine has the Exit button\'s frame rect; a menu open with the Exit button shown kept: pass');
+  console.log('  receipt: fullscreen reserves the Exit button and the badge, hidden or shown; both hidden as drawn, the hidden Exit button taking no press; the engine has the Exit button\'s frame rect; a menu open with the Exit button shown kept: pass');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17, round 3, gpt d SHOULDs 1-2, opus N3): in fullscreen in Wide at 16:9 (the canvas the whole screen, the windows moved down off the map\'s top), the Exit button lies over the map\'s top right and the speed badge over its top left; both start hidden as drawn and the hidden Exit button takes no press; for each, a right press near it whose menu, with the engine not told of it, would cover it opens one clear of it once the engine has its rect again (screenshot: the menu beside the badge)', async (env) => {
+  // The date line, the party and the attributes moved off the top of the canvas (frame corners
+  // on the canvas, as a drag keeps them): only the map lies under the Exit button and the badge.
+  const kept = { date: [700, 900], party: [100, 400], stats: [560, 400] };
+  const { page } = await bootWide(env, {
+    width: 1280,
+    height: 720,
+    init: `localStorage.setItem('u6.layout.windows', ${JSON.stringify(JSON.stringify(kept))});`,
+  });
+  const placed = await page.evaluate(() => Object.fromEntries(globalThis.__u6Layout.windows.map((w) => [w.name, w.outer.slice(0, 2)])));
+  assert.deepEqual([placed.date, placed.party, placed.stats], [kept.date, kept.party, kept.stats], 'precondition: the windows where kept');
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  await page.waitForFunction(() => document.getElementById('fullscreen-exit').hidden, null, { timeout: 10_000 });
+  await h.waitFrames(page, 3);
+  const state = () => page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const b = c.getBoundingClientRect();
+    const map = globalThis.__u6Layout.regions.find((r) => r.name === 'map');
+    // A page box in the map's frame pixels (x0, y0, x1, y1, the right and bottom edges excluded),
+    // through the canvas and the map's region on it.
+    const frame = (el) => {
+      const e = el.getBoundingClientRect();
+      const fx = (px) => map.from[0] + (((px - b.left) * c.width) / b.width - map.to[0]) * map.from[2] / map.to[2];
+      const fy = (py) => map.from[1] + (((py - b.top) * c.height) / b.height - map.to[1]) * map.from[3] / map.to[3];
+      return [fx(e.left), fy(e.top), fx(e.right), fy(e.bottom)];
+    };
+    const exit = document.getElementById('fullscreen-exit');
+    const badge = document.getElementById('speed-badge');
+    const e = exit.getBoundingClientRect();
+    const hit = document.elementFromPoint((e.left + e.right) / 2, (e.top + e.bottom) / 2);
+    return {
+      canvas: [b.left, b.top, b.width, b.height],
+      hidden: [exit.hidden, badge.hidden],
+      shown: [exit, badge].map((el) => getComputedStyle(el).visibility),
+      exitHit: hit === exit || exit.contains(hit),
+      exit: frame(exit),
+      badge: frame(badge),
+      engine: [...globalThis.__shownGame.menu_hidden()],
+    };
+  });
+  const s0 = await state();
+  console.log(`  receipt: Wide fullscreen 16:9: canvas ${s0.canvas}, the Exit button over frame ${s0.exit.map(Math.round)}, the badge over ${s0.badge.map(Math.round)}`);
+  assert.deepEqual(s0.canvas, [0, 0, 1280, 720], 'precondition: the canvas the whole screen');
+  assert.deepEqual(s0.hidden, [true, true], 'precondition: both hidden');
+  assert.deepEqual(s0.shown, ['hidden', 'hidden'], 'both hidden as drawn (their computed visibility)');
+  assert.equal(s0.exitHit, false, 'the hidden Exit button takes no press');
+  // The badge shown (one preset faster by the keypad's +, a speed key always), as in the frame kept
+  // below.
+  await page.keyboard.press('NumpadAdd');
+  await page.waitForFunction(() => !document.getElementById('speed-badge').hidden, null, { timeout: 10_000 });
+  await h.waitFrames(page, 3);
+  const s1 = await state();
+  const quads = (flat) => Array.from({ length: flat.length / 4 }, (_, i) => flat.slice(4 * i, 4 * i + 4));
+  const meets = ([x, y, w, hh], [x0, y0, x1, y1]) => x < x1 && x0 < x + w && y < y1 && y0 < y + hh;
+  const give = (rects) => page.evaluate((flat) => globalThis.__shownGame.set_menu_hidden(Int32Array.from(flat)), rects.flat());
+  // A right press at frame pixel `at` and its release: the menu it opened, or null.
+  const open = async (at) => {
+    await page.mouse.move(...(await h.screenPoint(page, ...at)));
+    await page.mouse.down({ button: 'right' });
+    const shown = await page.waitForFunction(() => (globalThis.__shownGame?.menu_view() ?? '') !== '', null,
+      { timeout: 3000, polling: 'raf' }).then(() => true, () => false);
+    await page.mouse.up({ button: 'right' });
+    await h.waitTicks(page, 2);
+    return shown ? h.menuView(page) : null;
+  };
+  // The canvas itself under frame pixel `at` (not an overlay over it).
+  const onCanvas = async (at) => {
+    const [x, y] = await h.screenPoint(page, ...at);
+    return page.evaluate(([px, py]) => document.elementFromPoint(px, py)?.id === 'screen', [x, y]);
+  };
+  const close = async () => {
+    await page.keyboard.press('Escape');
+    await h.menuClosed(page);
+    await h.waitTicks(page, 2);
+  };
+  const engine = quads(s1.engine);
+  // Presses on the map beside each, in its frame cell row 1 (the menu's rows start in the row
+  // after, frame row 16 less its rings, so its box reaches up into theirs): right of the Exit
+  // button (the menu then goes left of the press, the map's edge near) and left of the badge (it
+  // goes right).
+  const parts = [
+    ['the Exit button', s1.exit, [[899, 12], [898, 12], [899, 10], [898, 14], [899, 14]], 'r3-fullscreen-exit-wide.png'],
+    ['the speed badge', s1.badge, [[332, 12], [333, 12], [332, 10], [333, 14], [332, 14]], 'r3-fullscreen-badge.png'],
+  ];
+  for (const [what, over, candidates, frameName] of parts) {
+    const own = engine.filter((r) => meets(r, over));
+    assert.equal(own.length, 1, `the engine has ${what}'s rect: ${JSON.stringify(own)}`);
+    const without = engine.filter((r) => r !== own[0]);
+    let at = null;
+    let before = null;
+    for (const p of candidates) {
+      if (at) break;
+      if (!(await onCanvas(p)) || !(await h.contextMenuAt(page, ...p))) continue;
+      await give(without);
+      const v = await open(p);
+      if (v && meets(v.rect, over)) [at, before] = [p, v.rect];
+      if (v) await close();
+    }
+    assert.ok(at, `precondition: a press near ${what} whose menu covers it with the engine not told of it`);
+    await give(engine);
+    assert.deepEqual(quads([...(await page.evaluate(() => globalThis.__shownGame.menu_hidden()))]), engine, `${what}: the engine's rects back`);
+    const after = await open(at);
+    assert.ok(after, `${what}: the press at ${at} opens the menu again`);
+    console.log(`  receipt: Wide fullscreen: the press at ${at}: without ${what}'s rect the menu at ${before}, covering it; with it at ${after.rect}`);
+    assert.ok(!meets(after.rect, over), `${what}: the menu moved off it`);
+    await keepFrame(page.locator('#screen-box'), frameName);
+    await close();
+  }
+  await page.keyboard.press('NumpadSubtract');
+  await page.evaluate(() => document.exitFullscreen());
+  await waitFull(page, 'off');
 }, { needs: h.haveHfes });
 
 // Spec 19 O1b at the page: `key` held from the prompt on the focused canvas as a keyboard sends

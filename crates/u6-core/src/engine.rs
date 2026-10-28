@@ -937,8 +937,8 @@ impl Engine {
     /// advance the clock by `elapsed_ms`, poll the game once (also
     /// while it waits; never after it finished), bump the display generation, publish the front
     /// buffer if the game presented, then the vertical-blank work of the display (the pointer
-    /// sprite, at the handler's position, over the published frame,
-    /// [`crate::ui::pointer::vblank`]).
+    /// shape, [`crate::ui::pointer::update_shape`], then its sprite at the pointer shown,
+    /// [`Engine::pointer_at`], over the screen frame).
     ///
     /// Port-only (spec 17): with the context menu on, `input` goes through it first
     /// ([`crate::ui::popup::Popup::input_with`], on the platform's wall clock,
@@ -1119,7 +1119,8 @@ impl Engine {
     /// again over it) when the game `presented` (or its sources alone, `src_only`), the drawn menu
     /// changed, or at the `first` tick; then the shown frame, the screen frame with `sprite` over
     /// it, when the screen frame changed, the sprite moved or at the first tick. Unit D2's view
-    /// step (spec 20) goes between the two.
+    /// step (spec 23) goes in the first, after the published sync and before the menu is drawn:
+    /// published, view, menu, sprite.
     fn compose(
         &mut self,
         presented: bool,
@@ -1172,10 +1173,10 @@ impl Engine {
         }
     }
 
-    /// The pointer sprite drawn over the shown frame last ([`crate::ui::pointer::vblank`]'s, at
-    /// the handler's position; spec 17: the arrow at the context menu's pointer while the menu
-    /// takes the pointer), if any: its top left in frame pixels and its rows of values
-    /// 0..=3 (0 clear). Port-only use (spec 11 Design 7): a platform that shows the HD frame,
+    /// The pointer sprite drawn over the shown frame last (the tick's vertical-blank work:
+    /// [`crate::ui::pointer::update_shape`], then the sprite at the handler's position; spec 17:
+    /// the arrow at the context menu's pointer while the menu takes the pointer), if any: its top
+    /// left in frame pixels and its rows of values 0..=3 (0 clear). Port-only use (spec 11 Design 7): a platform that shows the HD frame,
     /// composed without it ([`Engine::published_frame`]), draws it over that frame itself.
     pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
@@ -1238,7 +1239,9 @@ impl Engine {
     }
 
     /// Port-only (spec 17): the context menu on or off (off by default: a right press is the
-    /// original's; off closes an open menu and drops a run).
+    /// original's; off closes an open menu and drops a run). A platform that runs the game faster
+    /// than 1× gives [`Engine::set_wall_clock`] too: without it a double click is timed on the
+    /// engine's clock, which runs as fast as the game is stepped.
     pub fn set_context_menu(&mut self, on: bool) {
         self.popup.set_on(on);
         self.redraw_menu();
@@ -1251,6 +1254,12 @@ impl Engine {
     pub fn set_context_menu_hidden(&mut self, rects: Vec<crate::ui::popup::Rect>) {
         self.popup.set_hidden(rects, &self.state.borrow());
         self.redraw_menu();
+    }
+
+    /// Port-only (spec 17 Presentation): the hidden frame rects the context menu keeps off now
+    /// (the last [`Engine::set_context_menu_hidden`]'s; none before).
+    pub fn context_menu_hidden(&self) -> &[crate::ui::popup::Rect] {
+        self.popup.hidden()
     }
 
     /// Port-only (spec 17 Presentation): closes an open context menu as a press outside it
@@ -1306,6 +1315,24 @@ impl Engine {
         self.popup
             .pointer()
             .unwrap_or_else(|| self.io.handler_pointer())
+    }
+
+    /// Port-only (spec 17 Input and its checks): the gate a tick puts before a right press that
+    /// would open the context menu, for a press after `pending` (the platform's events not yet
+    /// given to a tick): the command prompt up and the game not finished ([`command_prompt`]),
+    /// nothing queued for the game but the repeats the prompt takes back, and every event of
+    /// `pending` inert (a button-less move, a release, a repeat the prompt takes back). The
+    /// menu's own state (open, a chosen command waiting) is left out: a query for tests.
+    pub fn context_menu_gate(&self, pending: &[InputEvent]) -> bool {
+        let prompt = !self.finished && command_prompt(&self.state.borrow());
+        prompt
+            && self
+                .io
+                .events
+                .borrow()
+                .iter()
+                .all(|e| taken_back(prompt, e))
+            && pending.iter().all(|e| crate::ui::popup::inert(prompt, e))
     }
 
     /// Port-only (spec 17): the open context menu as drawn (no text), if one is open.

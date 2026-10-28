@@ -476,10 +476,10 @@ fn close(p: &mut Play) {
 
 /// Spec 17 Input (round 2b, gpt b MUST; K2 merge notes 2, 3 and 6), on the user's game: Go here
 /// chosen by a left click, a right press at once at the same pixel (within the double-click
-/// window) opens a menu and is new input (a right press is no double click of a left one); a
-/// right press in the same tick after a platform's repeat of a direction key, or with one left
-/// in the game's queue (the prompt takes both back), opens the menu too; after a paced press
-/// (a press) and with the game's cross-hair up (no command prompt) it opens none.
+/// window) opens a menu and is new input, and reaches no game (a right press is no double click
+/// of a left one); a right press in the same tick after a platform's repeat of a direction key,
+/// or with one left in the game's queue (the prompt takes both back), opens the menu too; after
+/// a paced press (a press) and with the game's cross-hair up (no command prompt) it opens none.
 #[test]
 fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
     const NAME: &str = "a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu";
@@ -492,9 +492,15 @@ fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
     let t0 = p.ms();
     p.click(go_at, POINTER_LEFT);
     assert_eq!(p.e.go_here_asked().asked.len(), 1, "Go here chosen");
+    let presses = p.e.game_presses();
     p.press(go_at, POINTER_RIGHT);
     println!("the right press {} ms after the choosing one", p.ms() - t0);
     assert!(p.ms() - t0 <= 500, "within the double-click window");
+    assert_eq!(
+        p.e.game_presses(),
+        presses,
+        "the right press at the choosing pixel reached no game"
+    );
     assert!(
         p.e.context_menu().is_some(),
         "the right press at the choosing pixel opens a menu"

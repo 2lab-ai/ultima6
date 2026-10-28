@@ -862,18 +862,20 @@ impl Game {
     }
 
     /// Spec 17: the context menu a right press at frame pixel (x, y) would open now: `""` unless
-    /// the prompt is up ([`Game::at_prompt`], pointer moves queued since the last step let
-    /// through) and the pixel is on the map or on an inventory or equipment slot (Wide's
-    /// included); else JSON `{kind: "map"|"panel", cell: [x, y] | null, underlined: code | null,
+    /// the engine's gate lets a right press after the page's queued events open one
+    /// ([`Engine::context_menu_gate`]: the command prompt up, nothing queued for the game but the
+    /// repeats it takes back, the events queued since the last step inert) and the pixel is on
+    /// the map or on an inventory or equipment slot (Wide's included); else JSON `{kind: "map"|"panel", cell: [x, y] | null, underlined: code | null,
     /// sections: [{object, kind: [type, frame] | null, entries: [{code, enabled, reason, theft}]}],
     /// go_here: {code, enabled, reason, theft} | null}`: codes only, no names (the engine draws
     /// the menu itself, `u6_core::ui::popup`). Reads the game only
     /// ([`u6_core::ui::menu::query`]); the page's tests use it.
     pub fn context_menu(&self, x: i32, y: i32) -> String {
-        if !self.prompt_up() {
-            return String::new();
-        }
-        let Some(e) = &self.engine else {
+        let Some(e) = self
+            .engine
+            .as_ref()
+            .filter(|e| e.context_menu_gate(&self.pending))
+        else {
             return String::new();
         };
         let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
@@ -940,14 +942,17 @@ impl Game {
         false
     }
 
-    /// Spec 17 Presentation: the frame rects the engine keeps its context menu off as the page
-    /// last gave them ([`Game::set_menu_hidden`]), x, y, width, height in turn: what reached the
-    /// engine, for the page's tests (the page's own `__u6Layout.hidden` is computed afresh).
+    /// Spec 17 Presentation: the frame rects the engine keeps its context menu off now
+    /// ([`Engine::context_menu_hidden`], as the page last gave them, [`Game::set_menu_hidden`]),
+    /// x, y, width, height in turn: what reached the engine, for the page's tests (the page's own
+    /// `__u6Layout.hidden` is computed afresh); none without a game.
     pub fn menu_hidden(&self) -> Vec<i32> {
-        self.menu_hidden
-            .iter()
-            .flat_map(|&(x0, y0, x1, y1)| [x0, y0, x1 - x0 + 1, y1 - y0 + 1])
-            .collect()
+        self.engine.as_ref().map_or_else(Vec::new, |e| {
+            e.context_menu_hidden()
+                .iter()
+                .flat_map(|&(x0, y0, x1, y1)| [x0, y0, x1 - x0 + 1, y1 - y0 + 1])
+                .collect()
+        })
     }
 
     /// Spec 17 (unit M4 seam): how many times "Go here" asked travel, counted from the start;
@@ -1651,36 +1656,6 @@ impl Game {
 }
 
 impl Game {
-    /// Spec 17: the engine's queue is empty and the page's holds nothing the game reads as an
-    /// event: the moves of a button-less pointer change nothing it reads, and a key's release is
-    /// applied where the engine queues the input, never one of its events
-    /// ([`InputEvent::Release`]).
-    fn quiet(&self) -> bool {
-        let inert = |ev: &InputEvent| match ev {
-            InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
-            InputEvent::Release(_) => true,
-            InputEvent::Key(_)
-            | InputEvent::Repeat(_)
-            | InputEvent::Paced(_)
-            | InputEvent::Text(_) => false,
-        };
-        self.engine
-            .as_ref()
-            .is_some_and(|e| e.io().pending_events() == 0)
-            && self.pending.iter().all(inert)
-    }
-
-    /// Spec 17: [`Game::at_prompt`] with the moves of a button-less pointer and the key releases
-    /// queued since the last step let through ([`Game::quiet`]): a right press just after either
-    /// still gets its menu.
-    fn prompt_up(&self) -> bool {
-        self.quiet()
-            && self
-                .engine
-                .as_ref()
-                .is_some_and(|e| e.state().main.reading == 1)
-    }
-
     /// [`Game::load_file`] without the JS error type.
     fn collect(&mut self, path: &str, data: Vec<u8>) -> Result<(), String> {
         let total = self.input_bytes.saturating_add(data.len());
@@ -5481,20 +5456,41 @@ mod tests {
         assert_eq!(game.game_presses(), presses, "nothing reached the game");
     }
 
-    /// Spec 17 Presentation (round 2b, gpt f SHOULD): `menu_hidden` reads back what reached the
-    /// engine through `set_menu_hidden`, rects with no area left out.
+    /// Spec 17 Presentation (round 2b, gpt f SHOULD; round 3, gpt c SHOULD): `menu_hidden` reads
+    /// the rects the engine holds, not the page's copy: none without a game; the rects given
+    /// before a game starts reach its engine when it goes on screen, and those given while it
+    /// runs at once; rects with no area are left out.
     #[test]
-    fn menu_hidden_reads_back_the_rects_given() {
+    fn menu_hidden_reads_back_the_rects_the_engine_holds() {
         let mut game = Game::new();
-        assert!(game.menu_hidden().is_empty(), "none at first");
         game.set_menu_hidden(vec![10, 20, 30, 40, 5, 5, 0, 9, 1, 2, 3]);
-        assert_eq!(game.menu_hidden(), [10, 20, 30, 40], "the rect with area");
+        assert!(game.menu_hidden().is_empty(), "no game: none held");
+        game.put_on_screen(synthetic_engine());
+        assert_eq!(
+            game.engine.as_ref().quiet().context_menu_hidden(),
+            [(10, 20, 39, 59)],
+            "given before the game: its engine holds the rect with area"
+        );
+        assert_eq!(game.menu_hidden(), [10, 20, 30, 40], "read from the engine");
+        game.set_menu_hidden(vec![0, 0, 8, 8]);
+        assert_eq!(
+            game.menu_hidden(),
+            [0, 0, 8, 8],
+            "given while it runs: the engine holds it at once"
+        );
     }
 
-    /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
+    /// The user's zip booted `game` first, stepped to its prompt; none (the test skips, saying
+    /// so) without it, unless `U6_REQUIRE_ARCHIVE=1` (the release receipt), which fails the test
+    /// instead.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn at_the_prompt() -> Option<Game> {
         if !std::path::Path::new(ZIP).exists() {
+            assert_ne!(
+                std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+                Ok("1"),
+                "U6_REQUIRE_ARCHIVE=1 and {ZIP} is missing"
+            );
             eprintln!("skipped: {ZIP} not present");
             return None;
         }

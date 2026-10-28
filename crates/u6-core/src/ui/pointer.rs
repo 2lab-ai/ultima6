@@ -300,8 +300,9 @@ pub fn sprite_as(ptr: &PointerState, shape: u16, p: Pointer) -> Option<SpriteFra
 
 /// Original: 0x162294 (graphics: vertical-blank server: pointer shape, sprite) [partial]
 ///
-/// The pointer shape (0x1051a6), then the sprite (0x1622d6); the engine runs it after every
-/// tick with the handler's pointer. Not ported: the BEAMCON0
+/// The pointer shape (0x1051a6), then the sprite (0x1622d6). The engine does not call it: its
+/// tick runs the two halves itself, [`update_shape`] and then the sprite at the pointer shown (the
+/// handler's, or the context menu's while it takes the pointer, spec 17). Not ported: the BEAMCON0
 /// write of the PAL / NTSC toggle (no display mode) and the frame flag 0x1624b0 that 0x1622be
 /// waits on (the engine's display generation, [`crate::engine::Io::vblank`]).
 pub fn vblank(s: &mut State, p: Pointer) -> Option<SpriteFrame> {

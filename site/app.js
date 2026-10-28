@@ -4236,8 +4236,10 @@ document.addEventListener('pointerdown', (e) => {
 }, true);
 // The game's context menu closed by a press of the page's (`Game.dismiss_menu`): in order with
 // the events queued for the next step (a right press on the canvas just before opens the menu at
-// that step, which this then closes there), else at once, the frame without it shown at once;
-// then the system's pointer where the game's is no longer (`showGamePointer`).
+// that step, which this then closes there; till that step, one or two frames, the frame shows
+// it still: the close is in order, and the events before it are not run yet), else at once, the
+// frame without it shown at once; then the system's pointer where the game's is no longer
+// (`showGamePointer`).
 function closeMenu() {
   if (game.dismiss_menu()) {
     game.present();
