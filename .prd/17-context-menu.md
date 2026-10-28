@@ -103,7 +103,9 @@ slot's own action are a single press (the icon's, or a left click on the slot). 
 - `Engine::set_context_menu_hidden(rects)`: the frame rects (x0, y0, x1, y1) the platform does not show; a menu keeps
   off them where it can, and an open one is laid out again (Where it is placed).
 - `Engine::dismiss_context_menu() -> bool`: closes an open menu for a press of the platform's that reaches no frame
-  pixel. `Engine::pointer_at() -> Pointer`: the menu's pointer while it takes it, else the game's (K3's OS cursor).
+  pixel, at once; `Engine::tick_dismissing(input, dismissals, ms)`: a tick with such presses at their places among
+  `input`'s events. `Engine::set_wall_clock(ms)`: the platform's wall clock, which a double click is timed on.
+  `Engine::pointer_at() -> Pointer`: the menu's pointer while it takes it, else the game's (K3's OS cursor).
   `Engine::game_presses()` / `Engine::game_keys()`: the presses and the key events the menu let through to the game,
   counted (tests). `Engine::go_here_asked()`: the stub's travel record (Unit M4 seam).
 - `Engine::context_menu() -> Option<View>`: the open menu as drawn: its box and text area in frame pixels, and per
@@ -117,11 +119,15 @@ slot's own action are a single press (the icon's, or a left click on the slot). 
   go_here: {code, enabled, reason, theft} | null}`, no names. `Game::game_buttons()`: the buttons the game's input
   handler has (what the engine let through; the page's tests), `Game::game_presses()`, `Game::game_keys()` and
   `Game::message_lines()` (counts, for the page's tests); `Game::published_rgba()`: the published frame as RGBA (the
-  page's tests tell the game's own screen changing from what a closed menu left). `Game::set_menu_hidden(rects)`: x, y, w, h in turn, passed
-  to the engine (kept for later starts); the page gives them before every step whenever they change
-  (`hiddenFrameRects` in `site/app.js`: in every view the canvas's parts outside the viewport through each region it
-  shows; in Wide's game view also each window's frame and the map's parts off the canvas). `Game::dismiss_menu()`:
-  the page's press off the canvas. `Game::menu_view() -> String`: `""` while closed, else JSON `{rect: [x, y, w, h],
+  page's tests tell the game's own screen changing from what a closed menu left). `Game::set_menu_hidden(rects)`: x,
+  y, w, h in turn, passed to the engine (kept for later starts; `Game::menu_hidden()` reads them back for the page's
+  tests); the page gives them before every step whenever they change (`hiddenFrameRects` in `site/app.js`: in every
+  view the canvas's parts outside the viewport and under the badge and the Exit button through each region it shows;
+  in Wide's game view also each window's frame and the map's parts off the canvas). `Game::dismiss_menu()`: the
+  page's press off the canvas, queued behind the events waiting for the next step (`Engine::tick_dismissing`), at
+  once when none wait. `Game::set_clock(now)` gives the engine the page's clock as its wall clock at each step.
+  `Game::go_here_asked()`: the stub's travel requests, counted. `Game::menu_view() -> String`: `""` while closed,
+  else JSON `{rect: [x, y, w, h],
   text: [x, y, w, h], hover, colours: [paper, ink, heading], rows: [{kind, code, enabled, reason, theft, y}]}` (frame
   pixels, 0xRRGGBB colours for the page's pixel checks; codes only). `Game::command_at` and the page's run are gone.
 
@@ -167,25 +173,41 @@ draws nothing of it and has no element for it.
   places beside the press (right and below first, then left, then above, then both) the first whose box meets none
   of the frame rects the platform does not show (`Engine::set_context_menu_hidden`, given by the page from its layout
   before every step, in every layout: the frame's parts the canvas shows outside the viewport, as a phone held
-  sideways scrolls the page past the canvas's bottom; in Wide also its windows over the map and the map's parts off
-  the canvas); with none such, the place in the bounds whose box meets the fewest of their pixels, the nearest to
-  the first place among those. An open menu is laid out again (the same entry highlighted) when those rects change
-  and when the language changes.
+  sideways scrolls the page past the canvas's bottom, and outside the visual viewport of a pinch-zoom, a canvas
+  pixel partly outside counted outside; under the page's elements over the canvas, the speed badge and fullscreen's
+  Exit button, a press on which leaves fullscreen: in fullscreen both at all times, shown or hidden, else each while
+  shown; in Wide also its windows over the map and the map's parts off the canvas); with none such, the place in
+  the bounds whose box meets the fewest of their pixels, the nearest to the first place among those. An open menu
+  is laid out again (the same entry highlighted) when those rects change and when the language changes.
 - **Input.** All of it goes through the engine's own input path (`Engine::tick`); nothing the menu takes reaches the
-  game's queue, and the game's pointer sample is not moved. A right press opens it only while the game accepts input
-  (`ui.input.accept`) at the prompt. The pointer: a move over an entry highlights it; a left press on an entry that
+  game's queue, and the game's pointer sample is not moved. A right press opens it only at the command prompt
+  (`engine::command_prompt`: A4-0x7a2c set, no cross-hair or panel cursor, the game accepting input), with nothing
+  before it in the tick or queued for the game but events that change nothing it reads (a button-less move, a
+  release, a platform's repeat of a direction key, which the prompt takes back; a paced press is a press). The
+  pointer: a move over an entry highlights it; a left press on an entry that
   can run chooses it; a left press on a disabled entry, a heading, the note or the frame does nothing; a left press
   outside or any right press closes it, and so does a press of the platform's that reaches no frame pixel (off the
-  canvas, on fullscreen's black sides: `Engine::dismiss_context_menu`; a press in the HD layout's gaps reaches the
-  rest of the screen, outside the box). Every press the menu takes is the menu's up to its release, and so is the
-  opening press: a held right button moved over the map sends nothing. After a choice, a press within the double
-  click's reach of the choosing one (500 ms on the game's clock, 4 frame pixels) is the menu's with its release, and
-  so is every press while a chosen command's target press waits: neither becomes the game's press or the command's
-  target. Keys: Up and Down move the highlight over the entries (wrapping, disabled ones included), Enter or Space
-  chooses the highlighted entry when it can run, a command letter (A, B, C, D, G, L, M, R, T, U, either case) chooses
-  its first entry that can run, Escape closes; every other key and typed text is taken and does nothing. Every key
+  canvas, on fullscreen's black sides; a press in the HD layout's gaps reaches the rest of the screen, outside the
+  box), in order with the events queued before it: with some waiting for the next tick it closes the menu there,
+  after them (`Engine::tick_dismissing`), else at once (`Engine::dismiss_context_menu`). Every press the menu takes
+  is the menu's up to its release, and so is the opening press: a held right button moved over the map sends
+  nothing. After a choice, the double click's second press is the menu's with its release: the choosing press's
+  button again, within 500 ms of it on the player's clock and 4 frame pixels of it, no press of any kind (the
+  pointer's, a key, typed text, the platform's off the frame) having reached the game between them. The player's
+  clock is the platform's wall clock (`Engine::set_wall_clock`; the web page's animation-frame time), not the
+  engine's: a double click is the player's gesture, and the engine's clock runs as fast as the game is stepped (8×
+  makes 200 ms of the player's 1600 of the engine's, and Max more), so on it every double click at speed would leak
+  its second press. Without a wall clock (a platform that gives none) it is the engine's, which is the player's at
+  1×. So is every press while a chosen command's target press waits: neither becomes the game's press or the
+  command's target. Keys: Up and Down move the highlight over the entries (wrapping, disabled ones included), Enter
+  or Space chooses the highlighted entry when it can run, a command letter (A, B, C, D, G, L, M, R, T, U, either
+  case) chooses its first entry that can run, Escape closes; every other key and typed text is taken and does
+  nothing. Every key
   the menu took (a set: a held Down and the Escape that closed it both) keeps its repeats the menu's until that key's
-  own release, open or closed, so no held key passes a turn. The pointer sprite while it is open follows the pointer
+  own release, open or closed, so no held key passes a turn. A platform's paced press of a held key (spec 19 O1c:
+  `InputEvent::Paced`) is that key held, not a press: it never ends the menu's hold on the key nor counts as its own
+  press, never moves the highlight and is no new input; a platform adds none for a key the menu holds
+  (`Engine::held_press`). The pointer sprite while it is open follows the pointer
   the menu took, in the arrow shape; otherwise the game's own shape (the cross-hair of a target read stays while the
   choosing button is held). `Engine::pointer_at` is the pointer as the screen shows it: the menu's while it takes
   it, else the game's.
@@ -203,14 +225,18 @@ included; no page handler opens anything) → `Game::pending` → `Game::step` �
 `contextmenu` default stays suppressed.
 
 ### §1 Entry
-`Engine::tick(input, ms)` (`engine.rs`), the menu on: before anything is queued, `Popup::input(&State, &Io, input,
-quiet)` with `quiet` = `io.pending_events() == 0`.
+`Engine::tick_dismissing(input, dismissals, ms)` (`engine.rs`; `Engine::tick` with none), the menu on: before anything
+is queued, `Popup::input_with(&State, &Io, input, quiet, now, dismissals)` with `quiet` = every event in the game's
+queue one the prompt takes back (`taken_back`; none at all elsewhere) and `now` the wall clock
+(`Engine::set_wall_clock`, else the engine's).
 
 ### §2 Input and its checks
-- The run held: `Run::step(state, quiet && input all inert)` (inert = a button-less pointer event or a key release)
+- The run held: `Run::step(state, quiet && input all inert)` (inert = a button-less pointer event, a key release, or
+  at the command prompt a repeat of a direction key, which the prompt takes back; never a key, a paced press or text)
   → `Release` appends the target press to the game's events, `Drop` forgets it.
-- A right press opens only if: the menu is closed, no run is held, `state.main.reading == 1`,
-  `state.ui.input.accept`, `quiet`, every earlier event of this tick's input inert, `menu::query(state, io, x, y)` is
+- A right press opens only if: the menu is closed, no run is held, `engine::command_prompt(state)` (A4-0x7a2c 1, no
+  cross-hair or panel cursor, `ui.input.accept`), `quiet`, every earlier event of this tick's input inert,
+  `menu::query(state, io, x, y)` is
   `Some`, and the laid-out menu has at least one entry (a query whose sections all came out empty opens nothing).
   Else the press is the game's.
 
@@ -224,9 +250,12 @@ quiet)` with `quiet` = `io.pending_events() == 0`.
   else `Run::start(state, code, at)` → icon press to the game's events, `Popup.run = Some(run)`. The menu closes
   (`version += 1`).
 - Close: Escape, a right press, a left press outside → `open = None` (`version += 1`), the press swallowed to its
-  release, the key kept in the taken set to its own release; `dismiss` (a press off the canvas) → `open = None`.
+  release, the key kept in the taken set to its own release; `dismiss` (a press off the canvas, at its place among
+  the tick's events) → `open = None`, new input, and the double click ended.
 - Relay: new hidden rects (`set_hidden`) or a language change after the poll while open → `Open::relaid` (the same
-  entry highlighted); `version += 1`, the engine drawing again at once (`redraw_menu`).
+  entry highlighted); `version += 1`, the engine drawing again at once (`redraw_menu` → `Engine::compose`, the one
+  composition of the screen and the shown frame a tick uses too, with the pointer sprite as it is then: a dismissed
+  menu's arrow gives way to the game's pointer in that frame).
 - Draw (after the poll): when the game presented or the menu's version moved, `layer.sync_from(published)`; open →
   `Open::draw(&mut layer, &State)` (the paper filled, the rings, `draw_char` per cell, `draw_halftone` for disabled
   labels, `draw_symbol` of glyph 0x1a at the highlight), `screen_version += 1`; `shown.sync_from(layer)`; the sprite

@@ -87,6 +87,11 @@
     }
     #fullscreen-exit { position: absolute; top: 8px; right: 8px; margin: 0; }
     #fullscreen-exit[hidden] { display: none; }
+    /* In fullscreen the Exit button and the speed badge keep their boxes while hidden, unseen and
+       out of the pointer's way, so the page keeps the context menu off their parts of the canvas
+       at all times (spec 17: app.js overCanvas); either shows at any time there. */
+    body:is([data-fullscreen="on"], [data-fullscreen="css"]) :is(#fullscreen-exit, #speed-badge)[hidden] {
+      display: inline-block; visibility: hidden; }
     /* The toolbar under the game screen: on a narrow screen its controls wrap; "behind" keeps its
        place while hidden, so a wider label never moves them. */
     #playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }

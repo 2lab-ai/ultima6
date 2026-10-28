@@ -435,6 +435,108 @@ fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
         "the menu's Use and the keyboard's leave the same state (the RNG, the world, the turn's \
          pacing), but for the keyboard's target cursor"
     );
+    // The whole state compared (round 2b, opus NIT 7), the allowed parts made the same first:
+    // `differing` names the parts only for the message, so a part it does not list cannot
+    // differ unseen.
+    let (mut menus, keys) = (p.st.borrow().clone(), k.st.borrow().clone());
+    menus.ui.input.cursor = keys.ui.input.cursor;
+    menus.ui.input.range = keys.ui.input.range;
+    assert!(
+        menus == keys,
+        "the whole state the same but for the allowed parts: {:?}",
+        differing(&menus, &keys)
+    );
+    println!("{NAME}: ran");
+}
+
+/// A view cell of bare ground two or more cells from the leader (its menu the tile's Look alone,
+/// with Go here) and its pixel.
+fn bare_ground(p: &Play) -> ((i16, i16), (i16, i16)) {
+    let leader = p.e.state().leader_position().expect("a leader");
+    let (lx, ly) = (leader.x as i16, leader.y as i16);
+    (-4..=4i16)
+        .flat_map(|dy| (-4..=4i16).map(move |dx| (dx, dy)))
+        .filter(|&(dx, dy)| dx.abs().max(dy.abs()) >= 2)
+        .map(|(dx, dy)| (lx + dx, ly + dy))
+        .find_map(|(x, y)| {
+            let at = p.pixel(x as u16, y as u16);
+            let m = menu::query(&p.e.state(), p.e.io(), at.0, at.1)?;
+            let bare = m.sections.len() == 1 && m.sections[0].object == -1;
+            (bare && m.go_here.is_some() && m.cell == Some((x, y))).then_some(((x, y), at))
+        })
+        .expect("bare ground near the leader")
+}
+
+/// Escape closes the open menu, then the prompt again.
+fn close(p: &mut Play) {
+    assert!(p.e.context_menu().is_some(), "open");
+    p.key(Key::Escape);
+    assert!(p.e.context_menu().is_none(), "closed");
+}
+
+/// Spec 17 Input (round 2b, gpt b MUST; K2 merge notes 2, 3 and 6), on the user's game: Go here
+/// chosen by a left click, a right press at once at the same pixel (within the double-click
+/// window) opens a menu and is new input (a right press is no double click of a left one); a
+/// right press in the same tick after a platform's repeat of a direction key, or with one left
+/// in the game's queue (the prompt takes both back), opens the menu too; after a paced press
+/// (a press) and with the game's cross-hair up (no command prompt) it opens none.
+#[test]
+fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
+    const NAME: &str = "a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (_, at) = bare_ground(&p);
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    let t0 = p.ms();
+    p.click(go_at, POINTER_LEFT);
+    assert_eq!(p.e.go_here_asked().asked.len(), 1, "Go here chosen");
+    p.press(go_at, POINTER_RIGHT);
+    println!("the right press {} ms after the choosing one", p.ms() - t0);
+    assert!(p.ms() - t0 <= 500, "within the double-click window");
+    assert!(
+        p.e.context_menu().is_some(),
+        "the right press at the choosing pixel opens a menu"
+    );
+    assert!(p.e.popup_mut().took_new_input(), "and is new input");
+    p.release(go_at);
+    close(&mut p);
+    let rep = InputEvent::Repeat(Key::Down);
+    let right = InputEvent::Pointer {
+        x: at.0,
+        y: at.1,
+        buttons: POINTER_RIGHT,
+    };
+    p.e.tick(&[rep, right], STEP_MS);
+    assert!(
+        p.e.context_menu().is_some(),
+        "after a repeat in the same tick: open"
+    );
+    p.release(at);
+    close(&mut p);
+    p.e.io().queue_event(rep);
+    p.e.tick(&[right], STEP_MS);
+    assert!(
+        p.e.context_menu().is_some(),
+        "with a repeat left in the game's queue: open"
+    );
+    assert_eq!(p.e.io().pending_events(), 0, "the prompt took it back");
+    p.release(at);
+    close(&mut p);
+    p.st.borrow_mut().ui.input.targeting = 1;
+    p.press(at, POINTER_RIGHT);
+    assert!(
+        p.e.context_menu().is_none(),
+        "no menu with the cross-hair up (no command prompt)"
+    );
+    p.release(at);
+    p.st.borrow_mut().ui.input.targeting = 0;
+    let paced = InputEvent::Paced(Key::Down);
+    p.e.tick(&[paced, right], STEP_MS);
+    assert!(p.e.context_menu().is_none(), "after a paced press: none");
+    p.release(at);
+    p.settle(4000);
     println!("{NAME}: ran");
 }
 
@@ -450,17 +552,7 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
     p.beside_a_door();
     let leader = p.e.state().leader_position().expect("a leader");
     let (lx, ly) = (leader.x as i16, leader.y as i16);
-    let ground = (-4..=4i16)
-        .flat_map(|dy| (-4..=4i16).map(move |dx| (dx, dy)))
-        .filter(|&(dx, dy)| dx.abs().max(dy.abs()) >= 2)
-        .map(|(dx, dy)| (lx + dx, ly + dy))
-        .find_map(|(x, y)| {
-            let at = p.pixel(x as u16, y as u16);
-            let m = menu::query(&p.e.state(), p.e.io(), at.0, at.1)?;
-            let bare = m.sections.len() == 1 && m.sections[0].object == -1;
-            (bare && m.go_here.is_some() && m.cell == Some((x, y))).then_some(((x, y), at))
-        });
-    let (cell, at) = ground.expect("bare ground near the leader");
+    let (cell, at) = bare_ground(&p);
     let v = p.open_at(at);
     // The underlined command, when Rest or Combat, comes first (`b` above underlines Combat).
     let codes: Vec<u16> = v.rows.iter().filter_map(|r| r.code).collect();
@@ -608,6 +700,23 @@ fn a_wide_inventory_slot_menu_keeps_its_rows_whole() {
         .expect("an item in the inventory slot's list");
     let v = p.open_at(at);
     let open = p.e.popup_mut().open().expect("open").clone();
+    // The fixture needs the fallback (round 2b, gpt d SHOULD): the slot's part pressed (its list,
+    // below its name row) has fewer whole cells across, inside the menu's rings, than its widest
+    // row asks (`place`'s room).
+    let rings = open.rings.len() as i32;
+    let cell = 8;
+    let (list_x0, list_x1) = (i32::from(x0) + (0xf0 - 0xa8), i32::from(x1));
+    let room =
+        (list_x1 - rings + 1).div_euclid(cell) - (list_x0 + rings + cell - 1).div_euclid(cell);
+    println!(
+        "the list part: {room} cells across, the widest row {} cells",
+        open.want.0
+    );
+    assert!(at.0 >= list_x0 as i16, "the press in the list part");
+    assert!(
+        room < open.want.0,
+        "the list part cannot hold the widest row"
+    );
     let (sx0, sy0, sx1, sy1) = crate::geom::SHOWN;
     let in_map = v.rect.0 >= i32::from(sx0)
         && v.rect.1 >= i32::from(sy0)
@@ -626,6 +735,10 @@ fn a_wide_inventory_slot_menu_keeps_its_rows_whole() {
         (open.text.2, open.text.3),
         open.want,
         "no row cut, no label or reason cut short"
+    );
+    assert!(
+        in_map,
+        "placed in the shown map, the part pressed being too narrow"
     );
     assert!(
         v.rect.0 >= 0

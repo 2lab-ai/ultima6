@@ -1965,14 +1965,20 @@ globalThis.__u6Layout = {
   get rest() {
     return [...(WIDE ? WIDE_REST : LAYOUT_REST)];
   },
-  // Spec 17: the frame rects the canvas does not show now (`hiddenFrameRects`), and the canvas's
-  // parts outside the viewport (`offViewport`).
+  // Spec 17: the frame rects the canvas does not show now (`hiddenFrameRects`, computed afresh:
+  // what the engine has is `Game.menu_hidden`), the canvas's parts outside the viewport
+  // (`offViewport`) and under the page's elements over it (`overCanvas`), and the pure rule of
+  // the former (`offViewportOf`).
   get hidden() {
     return hiddenFrameRects();
   },
   get offViewport() {
     return offViewport();
   },
+  get overCanvas() {
+    return overCanvas();
+  },
+  offViewportOf: (box, size, view) => offViewportOf(box, size, view),
   get size() {
     return WIDE ? [WIDE_W, WIDE_H] : [LAYOUT_W, LAYOUT_H];
   },
@@ -2549,9 +2555,10 @@ function wideToCanvas(gx, gy) {
 // scrolls the page past the canvas's bottom; none while it fits, as in fullscreen) through each
 // region of the frame the canvas shows (`shownRegions`); in Wide's game view also the map under
 // each window shown (its frame and title strip included, mapped back through the map's region)
-// and the map's parts off the canvas (it covers the canvas, so it can overflow two sides). The
-// engine keeps its context menu off them where it can (`Game.set_menu_hidden`), and lays an open
-// one out again when they change.
+// and the map's parts off the canvas (it covers the canvas, so it can overflow two sides); and the
+// canvas's parts under the page's elements over it (`overCanvas`: the Exit button, a press on
+// which leaves fullscreen, and the speed badge). The engine keeps its context menu off them where
+// it can (`Game.set_menu_hidden`), and lays an open one out again when they change.
 function hiddenFrameRects() {
   const toFrame = ({ from: [fx, fy, fw, fh], to: [mx, my, mw, mh] }, [x, y, w, h]) => {
     const x0 = Math.max(fx, Math.floor(fx + ((x - mx) * fw) / mw));
@@ -2561,7 +2568,7 @@ function hiddenFrameRects() {
     return [x0, y0, x1 - x0, y1 - y0];
   };
   const hidden = [];
-  const off = offViewport();
+  const off = [...offViewport(), ...overCanvas()];
   for (const region of shownRegions()) {
     for (const rect of off) {
       const cut = intersect(rect, region.to);
@@ -2585,21 +2592,56 @@ function shownRegions() {
   if (!WIDE) return LAYOUT_REGIONS;
   return [...(wideMap ? [wideMap] : []), ...shownWindows()];
 }
-// The canvas's parts outside the viewport (the document's client box, without its scroll bars),
-// as [x, y, w, h] in canvas pixels: at most one each left, right, above and below the part it
-// shows; none for a canvas with no box.
+// The canvas's parts outside the part of the viewport the player sees (`offViewportOf`): the
+// visual viewport (pinch-zoom shows only part of the layout viewport, `visualViewport`, where the
+// browser has one) within the document's client box (without its scroll bars).
 function offViewport() {
-  const box = canvas.getBoundingClientRect();
-  if (box.width === 0 || box.height === 0) return [];
-  const view = document.documentElement;
-  const [sx, sy] = [canvas.width / box.width, canvas.height / box.height];
-  const [cw, ch] = [canvas.width, canvas.height];
-  const x0 = clamp(Math.floor(-box.left * sx), 0, cw);
-  const x1 = clamp(Math.ceil((view.clientWidth - box.left) * sx), x0, cw);
-  const y0 = clamp(Math.floor(-box.top * sy), 0, ch);
-  const y1 = clamp(Math.ceil((view.clientHeight - box.top) * sy), y0, ch);
+  const doc = document.documentElement;
+  const vv = globalThis.visualViewport;
+  const [w, h] = [doc.clientWidth, doc.clientHeight];
+  const view = vv
+    ? [Math.max(vv.offsetLeft, 0), Math.max(vv.offsetTop, 0),
+      Math.min(vv.offsetLeft + vv.width, w), Math.min(vv.offsetTop + vv.height, h)]
+    : [0, 0, w, h];
+  return offViewportOf(canvas.getBoundingClientRect(), [canvas.width, canvas.height], view);
+}
+// Of a canvas `size` [w, h] pixels whose box is `box` ({left, top, width, height}, client
+// pixels), the parts outside the client rect `view` [left, top, right, bottom], as [x, y, w, h]
+// in canvas pixels: at most one each left, right, above and below the part it shows, whose limits
+// are rounded inward (a canvas pixel partly outside the view is outside: the menu keeps off it);
+// none for a box with no area. Pure (the page's tests feed it fractional boxes and views).
+function offViewportOf(box, [cw, ch], [vl, vt, vr, vb]) {
+  if (!(box.width > 0 && box.height > 0)) return [];
+  // Each limit in canvas pixels, the product taken before the quotient (a box the view's size
+  // exactly maps to whole pixels), within a millionth of a pixel of a whole one taken as it.
+  const px = (v, from, size, n) => ((v - from) * n) / size;
+  const up = (v) => Math.ceil(v - 1e-6);
+  const down = (v) => Math.floor(v + 1e-6);
+  const x0 = clamp(up(px(vl, box.left, box.width, cw)), 0, cw);
+  const x1 = clamp(down(px(vr, box.left, box.width, cw)), x0, cw);
+  const y0 = clamp(up(px(vt, box.top, box.height, ch)), 0, ch);
+  const y1 = clamp(down(px(vb, box.top, box.height, ch)), y0, ch);
   return [[0, 0, x0, ch], [x1, 0, cw - x1, ch], [x0, 0, x1 - x0, y0], [x0, y1, x1 - x0, ch - y1]]
     .filter(([, , w, h]) => w > 0 && h > 0);
+}
+// The canvas pixels under the page's elements over the canvas (`OVER_CANVAS`), as [x, y, w, h],
+// rounded outward (a pixel partly under one is under it): in fullscreen both, shown or not (the
+// stylesheet keeps a hidden one's box there, unseen: the Exit button shows at any move of the
+// pointer, the badge at a change of speed, either over a row the menu drew under it); else each
+// while it shows.
+function overCanvas() {
+  const box = canvas.getBoundingClientRect();
+  if (!(box.width > 0 && box.height > 0)) return [];
+  const [cw, ch] = [canvas.width, canvas.height];
+  const full = fullNow();
+  return OVER_CANVAS.filter((el) => full || !el.hidden).map((el) => {
+    const r = el.getBoundingClientRect();
+    const x0 = clamp(Math.floor(((r.left - box.left) * cw) / box.width), 0, cw);
+    const x1 = clamp(Math.ceil(((r.right - box.left) * cw) / box.width), x0, cw);
+    const y0 = clamp(Math.floor(((r.top - box.top) * ch) / box.height), 0, ch);
+    const y1 = clamp(Math.ceil(((r.bottom - box.top) * ch) / box.height), y0, ch);
+    return [x0, y0, x1 - x0, y1 - y0];
+  }).filter(([, , w, h]) => w > 0 && h > 0);
 }
 // The common part of two rects ([x, y, w, h]), or null for none.
 function intersect([ax, ay, aw, ah], [bx, by, bw, bh]) {
@@ -4101,7 +4143,9 @@ function pointerPixel(e) {
 // shows over them: the speed badge, which lets the pointer through to the canvas, and the Exit
 // button, under which a press held on the canvas (captured: every press is, `pointerdown`) moves
 // on, the canvas's cursor shown and the game given each move (the hidden input never covers it:
-// opacity 0; the context menu takes the pointer, a press on the canvas closes it first).
+// opacity 0). The context menu is the engine's, drawn in the frame like the rest of the game, its
+// arrow the game's pointer while it holds the pointer (`Game.game_pointer`); the page keeps it off
+// these elements (`hiddenFrameRects`).
 const OVER_CANVAS = [badge, fullscreenExit];
 for (const kind of ['pointerdown', 'pointermove', 'pointerup']) {
   window.addEventListener(kind, (e) => {
@@ -4121,18 +4165,19 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Where the game's pointer is against the system's at client point (x, y), as the page and the
-// engine show now: `game`, the engine's sprite drawn (Game.game_pointer: shown) at the very game
-// pixel the point reaches, the point on the canvas, under none of OVER_CANVAS, in a part of the
-// game (not a gap or a margin of the HD layout, a letterbox side, a Wide window's frame or title
-// strip: `pointerGap`), and no press the context menu takes held; `hold`, the same but for a
-// pointer event at that pixel queued for the next step (the mouse's own move, which the sprite
-// takes at that step: the cursor stays as it is, so a move never flickers it), for one frame at
-// most: the frame's end decides again from where the step put the sprite (where a context-menu
-// entry's target press, queued at that step after the move, put it elsewhere, `page` from
-// then; the cursor was hidden over the sprite's old place for that one frame); else `page`. The
-// engine decides where the sprite is, whatever moved it (the page's moves, a context-menu entry's
-// presses, a window dragged: the rest of the screen), so a layout, a view or a box changed under
-// a still mouse shows the system's pointer until the mouse moves again.
+// engine show now: `game`, the engine's sprite drawn (Game.game_pointer: shown; the context
+// menu's arrow while it holds the pointer) at the very game pixel the point reaches, the point on
+// the canvas, under none of OVER_CANVAS, in a part of the game (not a gap or a margin of the HD
+// layout, a letterbox side, a Wide window's frame or title strip: `pointerGap`); `hold`, the
+// same but for a pointer event at that pixel queued for the next step (the mouse's own move,
+// which the sprite takes at that step: the cursor stays as it is, so a move never flickers it),
+// for one frame at most: the frame's end decides again from where the step put the sprite (where
+// the engine moved it at that step itself, a context-menu entry's target press among the events
+// it gave the game, `page` from then; the cursor was hidden over the sprite's old place for that
+// one frame); else `page`. The engine decides where the sprite is, whatever moved it (the page's
+// moves, the context menu's arrow while it holds the pointer, a chosen entry's presses, a window
+// dragged: the rest of the screen), so a layout, a view or a box changed under a still mouse
+// shows the system's pointer until the mouse moves again.
 function gameUnder(x, y) {
   if (!game || crashed || leaving) return 'page';
   const inside = (r) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
@@ -4189,12 +4234,16 @@ document.addEventListener('pointerdown', (e) => {
   if (e.target === canvas || !game || crashed) return;
   closeMenu();
 }, true);
-// The game's context menu closed by a press of the page's (`Game.dismiss_menu`), the frame
-// without it shown at once.
+// The game's context menu closed by a press of the page's (`Game.dismiss_menu`): in order with
+// the events queued for the next step (a right press on the canvas just before opens the menu at
+// that step, which this then closes there), else at once, the frame without it shown at once;
+// then the system's pointer where the game's is no longer (`showGamePointer`).
 function closeMenu() {
-  if (!game.dismiss_menu()) return;
-  game.present();
-  draw();
+  if (game.dismiss_menu()) {
+    game.present();
+    draw();
+  }
+  showGamePointer();
 }
 
 // The context menu (spec 17) is the game's: a right press goes to the engine like any other

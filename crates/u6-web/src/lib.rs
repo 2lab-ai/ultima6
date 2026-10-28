@@ -549,6 +549,12 @@ pub struct Game {
     /// Spec 17 Presentation: the frame rects the page shows something else over
     /// ([`Game::set_menu_hidden`]).
     menu_hidden: Vec<(i32, i32, i32, i32)>,
+    /// Spec 17: the page's presses that reached no frame pixel while events waited for the next
+    /// step ([`Game::dismiss_menu`]), each the index in `pending` it stands before.
+    dismissals: Vec<usize>,
+    /// Spec 17: the page's clock as a whole millisecond once the page gave one
+    /// ([`Game::set_clock`]), the context menu's double-click clock ([`Engine::set_wall_clock`]).
+    wall: Option<u64>,
 }
 
 impl Default for Game {
@@ -596,6 +602,8 @@ impl Game {
             modifiers: false,
             sight_memory: false,
             menu_hidden: Vec::new(),
+            dismissals: Vec::new(),
+            wall: None,
         };
         game.redraw();
         game
@@ -897,10 +905,12 @@ impl Game {
     }
 
     /// Spec 17 Presentation: the frame rects the page shows something else over (in Wide its
-    /// windows over the map and the map's parts off the canvas), as `rects` x, y, width, height
-    /// in turn (frame pixels; a rect with no area or a trailing part is left out): the engine's
-    /// context menu, opened later, keeps off them where it can. Kept for every game started
-    /// after.
+    /// windows over the map and the map's parts off the canvas; the canvas's parts off the
+    /// viewport and under the page's elements over it), as `rects` x, y, width, height in turn
+    /// (frame pixels; a rect with no area or a trailing part is left out): the engine's context
+    /// menu keeps off them where it can, one opened from then and one open now (laid out again at
+    /// once, [`Engine::set_context_menu_hidden`]). Kept for every game started after
+    /// ([`Game::menu_hidden`]).
     pub fn set_menu_hidden(&mut self, rects: Vec<i32>) {
         self.menu_hidden = rects
             .chunks_exact(4)
@@ -914,11 +924,38 @@ impl Game {
 
     /// Spec 17 Presentation: a press of the page's that reaches no frame pixel (off the canvas,
     /// in the HD layout's gaps, on the letterbox) closes an open context menu, as a press outside
-    /// it in the frame does; true when one was open. Nothing reaches the game.
+    /// it in the frame does, in order with the events queued before it: while some wait for the
+    /// next step it closes the menu there, after them ([`Engine::tick_dismissing`]; a right press
+    /// queued just before opens the menu at that step, which it then closes), and returns false;
+    /// else at once, true when one was open (the frame without it composed). Nothing reaches the
+    /// game.
     pub fn dismiss_menu(&mut self) -> bool {
+        let Some(engine) = &mut self.engine else {
+            return false;
+        };
+        if self.pending.is_empty() {
+            return engine.dismiss_context_menu();
+        }
+        self.dismissals.push(self.pending.len());
+        false
+    }
+
+    /// Spec 17 Presentation: the frame rects the engine keeps its context menu off as the page
+    /// last gave them ([`Game::set_menu_hidden`]), x, y, width, height in turn: what reached the
+    /// engine, for the page's tests (the page's own `__u6Layout.hidden` is computed afresh).
+    pub fn menu_hidden(&self) -> Vec<i32> {
+        self.menu_hidden
+            .iter()
+            .flat_map(|&(x0, y0, x1, y1)| [x0, y0, x1 - x0 + 1, y1 - y0 + 1])
+            .collect()
+    }
+
+    /// Spec 17 (unit M4 seam): how many times "Go here" asked travel, counted from the start;
+    /// 0 before one (counts only: no cell).
+    pub fn go_here_asked(&self) -> u32 {
         self.engine
-            .as_mut()
-            .is_some_and(Engine::dismiss_context_menu)
+            .as_ref()
+            .map_or(0, |e| e.go_here_asked().asked.len() as u32)
     }
 
     /// Spec 17 (round 2): the presses the engine let through to the game (button-down edges of
@@ -1053,7 +1090,10 @@ impl Game {
                 self.pending.push(press);
             }
             let takes = engine.prompt_takes();
-            engine.tick(&self.pending, ms);
+            if let Some(wall) = self.wall {
+                engine.set_wall_clock(wall);
+            }
+            engine.tick_dismissing(&self.pending, &self.dismissals, ms);
             if engine.prompt_takes() != takes {
                 self.last_step = Some(self.clock);
             }
@@ -1063,6 +1103,7 @@ impl Game {
             }
         }
         self.pending.clear();
+        self.dismissals.clear();
     }
 
     /// Converts the engine's frame into the RGBA frame ([`Game::frame_ptr`]) when it changed
@@ -1207,21 +1248,22 @@ impl Game {
 
     /// The game's pointer, for the page to tell whether it lies under the system's (index.html
     /// hides the system's there): `[x, y, shown, queued, qx, qy]`. (x, y), the frame pixel the
-    /// engine placed its sprite at in the last step: the input handler's pointer
-    /// ([`u6_core::Io::handler_pointer`], the VBlank server's, which no other call moves);
-    /// `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the pointer not hidden:
-    /// 0x1622d6 parks a hidden one below the frame), else 0, in any program and with HD on or
-    /// off. `queued` 1 while a pointer event waits for the next step (the page's
-    /// [`Game::pointer`], a context-menu entry's [`Game::command_at`]), (qx, qy) the last one's
-    /// pixel as queued; else 0, 0, 0. The queue is as of now: a context-menu entry's target
-    /// press joins it only at the step that runs it ([`Game::step`]), after what was queued
-    /// before, so (qx, qy) is where the sprite goes at the next step but for that press, which
-    /// the next read after that step shows. All 0 before a start.
+    /// engine placed its sprite at in the last step or since ([`Engine::pointer_at`]): the
+    /// context menu's while it takes the pointer's events (spec 17: its arrow over the open menu),
+    /// else the input handler's ([`u6_core::Io::handler_pointer`], the VBlank server's, which no
+    /// other call moves); `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the
+    /// pointer not hidden: 0x1622d6 parks a hidden one below the frame), else 0, in any program
+    /// and with HD on or off. `queued` 1 while a pointer event of the page's waits for the next
+    /// step ([`Game::pointer`]), (qx, qy) the last one's pixel as queued; else 0, 0, 0. The queue
+    /// is as of now: the presses of a context-menu entry chosen at the next step are the engine's
+    /// own, given the game at that step after what was queued before, so (qx, qy) is where the
+    /// sprite goes at the next step but for them, which the next read after that step shows. All
+    /// 0 before a start.
     pub fn game_pointer(&self) -> Vec<i32> {
         let Some(e) = &self.engine else {
             return vec![0; 6];
         };
-        let at = e.io().handler_pointer();
+        let at = e.pointer_at();
         let shown = e.sprite().is_some() && e.state().ui.pointer.shown;
         let queued = self.pending.iter().rev().find_map(|ev| match *ev {
             InputEvent::Pointer { x, y, .. } => Some((x, y)),
@@ -1496,6 +1538,8 @@ impl Game {
     pub fn set_clock(&mut self, now: f64) {
         if now.is_finite() {
             self.clock = now;
+            // Spec 17: the context menu's double click is timed on the page's clock too.
+            self.wall = Some(now.max(0.0) as u64);
         }
     }
 
@@ -1524,7 +1568,9 @@ impl Game {
     /// as DOM `buttons`. Ignored before the game starts.
     pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         if self.engine.is_some() {
-            queue_pointer(&mut self.pending, x, y, buttons);
+            // A move after a queued dismissal stays after it.
+            let kept = self.dismissals.last().copied().unwrap_or(0);
+            queue_pointer(&mut self.pending, kept, x, y, buttons);
         }
     }
 
@@ -1613,7 +1659,10 @@ impl Game {
         let inert = |ev: &InputEvent| match ev {
             InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
             InputEvent::Release(_) => true,
-            _ => false,
+            InputEvent::Key(_)
+            | InputEvent::Repeat(_)
+            | InputEvent::Paced(_)
+            | InputEvent::Text(_) => false,
         };
         self.engine
             .as_ref()
@@ -1872,6 +1921,7 @@ impl Game {
         self.audio = None;
         self.engine = Some(engine);
         self.pending.clear();
+        self.dismissals.clear();
         self.held.clear();
         self.last_step = None;
         self.redraw();
@@ -1983,8 +2033,9 @@ fn pointer_pixels(e: &Engine) -> ([u32; 4], Vec<u8>) {
 }
 
 /// Queues a pointer event; a move right after one with the same buttons replaces it (the game
-/// samples the pointer once per frame and takes a run of moves at once anyway).
-fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
+/// samples the pointer once per frame and takes a run of moves at once anyway), unless that one
+/// is among the first `kept` (a dismissal of the menu stands after them, [`Game::dismiss_menu`]).
+fn queue_pointer(pending: &mut Vec<InputEvent>, kept: usize, x: i32, y: i32, buttons: u8) {
     let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
     let ev = InputEvent::Pointer {
         x: word(x),
@@ -1993,7 +2044,7 @@ fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
     };
     let same =
         |e: &InputEvent| matches!(*e, InputEvent::Pointer { buttons: b, .. } if b == buttons & 3);
-    if pending.last().is_some_and(same) {
+    if pending.len() > kept && pending.last().is_some_and(same) {
         pending.pop();
     }
     pending.push(ev);
@@ -2143,19 +2194,25 @@ mod tests {
     fn pointer_moves_collapse_and_button_changes_queue() {
         let mut q = Vec::new();
         let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
-        queue_pointer(&mut q, 10, 10, 0);
-        queue_pointer(&mut q, 20, 30, 0);
-        queue_pointer(&mut q, 20, 30, 1);
-        queue_pointer(&mut q, 21, 31, 5);
-        queue_pointer(&mut q, 21, 31, 0);
+        queue_pointer(&mut q, 0, 10, 10, 0);
+        queue_pointer(&mut q, 0, 20, 30, 0);
+        queue_pointer(&mut q, 0, 20, 30, 1);
+        queue_pointer(&mut q, 0, 21, 31, 5);
+        queue_pointer(&mut q, 0, 21, 31, 0);
         assert_eq!(q, [p(20, 30, 0), p(21, 31, 1), p(21, 31, 0)]);
         q.push(InputEvent::Key(Key::Space));
-        queue_pointer(&mut q, 99_999, -99_999, 2);
+        queue_pointer(&mut q, 0, 99_999, -99_999, 2);
         assert_eq!(
             q.last(),
             Some(&p(i16::MAX, i16::MIN, 2)),
             "a key in between keeps both"
         );
+        // A move right after one a dismissal stands after (spec 17: `kept`) is queued after it.
+        let n = q.len();
+        queue_pointer(&mut q, n, 7, 7, 2);
+        assert_eq!(q.len(), n + 1, "kept: not replaced");
+        queue_pointer(&mut q, n, 8, 8, 2);
+        assert_eq!(q[n..], [p(8, 8, 2)], "past it: replaced as before");
         let mut game = Game::new();
         game.pointer(5, 5, 1);
         assert!(game.pending.is_empty(), "no game, nothing queued");
@@ -5144,6 +5201,13 @@ mod tests {
                 still(&game, "a held move");
             }
             game.ran(k);
+            // K3 merge note 7: the page's game pointer is the menu's while it takes the pointer.
+            let gp = game.game_pointer();
+            assert_eq!(
+                (gp[0], gp[1], gp[2], gp[3]),
+                (x, y, 1, 0),
+                "game_pointer: the menu's, drawn, nothing queued"
+            );
         }
         game.pointer(hx - 30, hy, 0);
         game.step(20);
@@ -5190,11 +5254,37 @@ mod tests {
             want,
             "Game::published_rgba: the published frame"
         );
-        assert_ne!(
-            game.published_rgba(),
-            game.frame_rgba(),
-            "the menu in the frame only"
-        );
+        // The menu in the frame only (round 2b, opus NIT 5): the frame differs from the published
+        // one in most of the menu's box, and outside it only under the pointer's sprite.
+        {
+            let (frame, published) = (game.frame_rgba(), game.published_rgba());
+            let sprite = game.engine.as_ref().quiet().sprite().cloned();
+            let under_sprite = |x: i32, y: i32| {
+                sprite.as_ref().is_some_and(|sp| {
+                    let (sx, sy) = (i32::from(sp.x), i32::from(sp.y));
+                    (sx..sx + 16).contains(&x) && (sy..sy + sp.rows.len() as i32).contains(&y)
+                })
+            };
+            let (x0, y0, x1, y1) = v.rect;
+            let (mut boxed, mut differ, mut outside) = (0, 0, 0);
+            for y in 0..u6_render::HEIGHT as i32 {
+                for x in 0..u6_render::WIDTH as i32 {
+                    let i = (y as usize * u6_render::WIDTH + x as usize) * 4;
+                    let d = frame[i..i + 3] != published[i..i + 3];
+                    if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                        boxed += 1;
+                        differ += usize::from(d);
+                    } else if !under_sprite(x, y) {
+                        outside += usize::from(d);
+                    }
+                }
+            }
+            println!(
+                "RGBA frame: {differ} of {boxed} box pixels differ; outside, off the sprite, {outside}"
+            );
+            assert!(differ * 2 > boxed, "the menu in the RGBA frame's box");
+            assert_eq!(outside, 0, "outside the box only the sprite differs");
+        }
         let look = row_of(&v, 0x84).expect("Look offered");
         assert!(v.rows[look].enabled(), "Look can run");
         click(&mut game, row_point(&v, look), 1);
@@ -5270,6 +5360,137 @@ mod tests {
         assert_eq!(game.leader_position(), at, "the hero where he was");
         assert!(game.at_prompt(), "the prompt up");
     }
+    /// One display frame of the page's loop at its clock `t` (wall ms) after `dt`: the clock
+    /// given, then the steps the pace gives (at most 40: Max's budget here), as `app.js` `frame`
+    /// runs them.
+    fn page_frame(game: &mut Game, t: f64, dt: f64) {
+        game.set_clock(t);
+        let k = game.pace(dt).min(40);
+        for _ in 0..k {
+            game.step(step_ms());
+        }
+        game.ran(k);
+    }
+
+    /// [`page_frame`]s 16 wall ms apart from `t` on until the page's queued events all reached
+    /// the game: a frame with a press held runs at 1× (the pacer's rule), so the first after a
+    /// press may run no step.
+    fn settle(game: &mut Game, t: &mut f64) {
+        for _ in 0..20 {
+            *t += 16.0;
+            page_frame(game, *t, 16.0);
+            if game.pending.is_empty() {
+                return;
+            }
+        }
+        panic!("the queued events given within 20 frames");
+    }
+
+    /// Spec 17 Presentation, Input (round 2b, opus MUST 1), on the user's zip: at 8× and at Max
+    /// a double click on Go here, its second press stepped about 200 page (wall) ms after the
+    /// choosing one, is the menu's: no press reaches the game though the engine's clock ran on
+    /// for far more than the 500 ms window meanwhile; Go here asked once. About 600 page ms
+    /// after it, the press is the game's.
+    #[test]
+    fn a_double_click_at_speed_is_timed_on_the_pages_clock() {
+        for speed in [8.0, 0.0] {
+            for (gap, menus) in [(200.0, true), (600.0, false)] {
+                let Some(mut game) = at_the_prompt() else {
+                    return;
+                };
+                game.set_speed(speed);
+                let ms = |g: &Game| g.engine.as_ref().quiet().io().now_ms();
+                let (hx, hy) = hero_point();
+                let at = (hx + 32, hy);
+                let mut t = 1_000.0;
+                page_frame(&mut game, t, 16.0);
+                game.pointer(at.0, at.1, 2);
+                settle(&mut game, &mut t);
+                game.pointer(at.0, at.1, 0);
+                settle(&mut game, &mut t);
+                let v = drawn(&game).expect("the menu open");
+                let go = row_of(&v, u6_core::ui::menu::GO_HERE).expect("Go here");
+                assert!(v.rows[go].enabled(), "Go here can run");
+                let (gx, gy) = row_point(&v, go);
+                game.pointer(gx, gy, 1);
+                settle(&mut game, &mut t);
+                let (t0, e0) = (t, ms(&game));
+                assert!(drawn(&game).is_none(), "chosen: closed");
+                assert_eq!(game.go_here_asked(), 1, "Go here asked");
+                game.pointer(gx, gy, 0);
+                settle(&mut game, &mut t);
+                while t + 16.0 < t0 + gap {
+                    t += 16.0;
+                    page_frame(&mut game, t, 16.0);
+                }
+                let presses = game.game_presses();
+                game.pointer(gx, gy, 1);
+                settle(&mut game, &mut t);
+                let (wall, ran) = (t - t0, ms(&game) - e0);
+                println!(
+                    "speed {speed}: the second press {wall} page ms on, the engine's clock {ran} ms"
+                );
+                assert!(
+                    (gap..gap + 64.0).contains(&wall),
+                    "precondition: the gap as meant"
+                );
+                assert!(ran > 500, "the engine's clock past the window");
+                assert_eq!(
+                    game.game_presses() - presses,
+                    f64::from(u8::from(!menus)),
+                    "speed {speed}, {wall} page ms: the second press the menu's: {menus}"
+                );
+                game.pointer(gx, gy, 0);
+                settle(&mut game, &mut t);
+                assert_eq!(game.go_here_asked(), 1, "chosen once");
+            }
+        }
+    }
+
+    /// Spec 17 Presentation (round 2b, gpt e MUST), on the user's zip: a right press on the
+    /// canvas and then a press off it (`Game::dismiss_menu`), both before one step: the
+    /// dismissal waits its turn behind the press, so the step opens the menu and closes it,
+    /// and it ends closed; nothing reaches the game. With nothing queued the dismissal acts at
+    /// once.
+    #[test]
+    fn a_press_off_the_canvas_after_a_queued_right_press_leaves_the_menu_closed() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        let presses = game.game_presses();
+        game.pointer(hx, hy, 2);
+        assert!(!game.dismiss_menu(), "queued behind the right press");
+        game.pointer(hx + 3, hy, 2);
+        game.step(20);
+        assert!(drawn(&game).is_none(), "the menu ends closed");
+        assert_eq!(game.game_presses(), presses, "nothing reached the game");
+        game.pointer(hx + 3, hy, 0);
+        game.step(20);
+        assert!(
+            drawn(&game).is_none() && game.at_prompt(),
+            "closed, the prompt up"
+        );
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        game.pointer(hx, hy, 0);
+        game.step(20);
+        assert!(drawn(&game).is_some(), "opened by a right press alone");
+        assert!(game.dismiss_menu(), "nothing queued: closed at once");
+        assert!(drawn(&game).is_none(), "closed");
+        assert_eq!(game.game_presses(), presses, "nothing reached the game");
+    }
+
+    /// Spec 17 Presentation (round 2b, gpt f SHOULD): `menu_hidden` reads back what reached the
+    /// engine through `set_menu_hidden`, rects with no area left out.
+    #[test]
+    fn menu_hidden_reads_back_the_rects_given() {
+        let mut game = Game::new();
+        assert!(game.menu_hidden().is_empty(), "none at first");
+        game.set_menu_hidden(vec![10, 20, 30, 40, 5, 5, 0, 9, 1, 2, 3]);
+        assert_eq!(game.menu_hidden(), [10, 20, 30, 40], "the rect with area");
+    }
+
     /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn at_the_prompt() -> Option<Game> {

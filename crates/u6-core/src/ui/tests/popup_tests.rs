@@ -802,6 +802,389 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
         "its release: a move with no button"
     );
     assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "held: chosen once");
+    // Independent clicks pass (round 2b, gpt c SHOULD 3): the next press later than
+    // DOUBLE_CLICK_MS on the player's clock, or farther than DOUBLE_CLICK_PX, is the game's.
+    for (what, at, (x, y)) in [
+        ("later than 500 ms", 1_501, (gx, gy)),
+        ("farther than 4 px", 1_100, (gx + 5, gy)),
+        ("farther than 4 px down", 1_100, (gx, gy + 5)),
+    ] {
+        let mut p = popup_with(&o);
+        p.input_with(&s, &io, &[ptr(gx, gy, 1)], true, 1_000, &[]);
+        p.input_with(&s, &io, &[ptr(gx, gy, 0)], true, 1_000, &[]);
+        assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "{what}: chosen");
+        let second = [ptr(x, y, 1), ptr(x, y, 0)];
+        assert_eq!(
+            p.input_with(&s, &io, &second, true, at, &[]),
+            second,
+            "{what}: the next click is the game's"
+        );
+        assert_eq!(p.take_go_here(), None, "{what}: chosen once");
+    }
+}
+
+/// Spec 17 Presentation, Input (round 2b, gpt b MUST): a double click is one gesture of one
+/// button: the choosing press's button pressed again, nothing pressed for the game between. A
+/// right press at once at the same pixel after a left one chose Go here is no double click (the
+/// game's, or the opening of a menu: real data, `popup_real`); a press elsewhere, a key, typed
+/// text or a press of the platform's off the frame between them ends it, so the press back at
+/// the entry is the game's.
+#[test]
+fn a_double_click_is_the_choosing_buttons_press_again_uninterrupted() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let go = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == GO_HERE))
+        .expect("Go here");
+    let (gx, gy) = row_point(&o, go);
+    let choose = |p: &mut Popup| {
+        p.input(&s, &io, &[ptr(gx, gy, POINTER_LEFT)], true);
+        p.input(&s, &io, &[ptr(gx, gy, 0)], true);
+        assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
+    };
+    let mut p = popup_with(&o);
+    choose(&mut p);
+    let right = ptr(gx, gy, POINTER_RIGHT);
+    let out = p.input(&s, &io, &[right], true);
+    assert!(
+        out == [right] || p.open().is_some(),
+        "a right press after the left choice: not its double click: {out:?}"
+    );
+    let between: [(&str, &[InputEvent], &[usize]); 4] = [
+        (
+            "a press elsewhere",
+            &[ptr(200, 150, POINTER_LEFT), ptr(200, 150, 0)],
+            &[],
+        ),
+        ("a key", &[InputEvent::Key(Key::Char('x'))], &[]),
+        ("typed text", &[InputEvent::Text('x')], &[]),
+        ("a press off the frame", &[], &[0]),
+    ];
+    for (what, events, dismissals) in between {
+        let mut p = popup_with(&o);
+        choose(&mut p);
+        assert_eq!(
+            p.input_with(&s, &io, events, true, 0, dismissals),
+            events,
+            "{what}: the game's"
+        );
+        let back = ptr(gx, gy, POINTER_LEFT);
+        assert_eq!(
+            p.input(&s, &io, &[back], true),
+            [back],
+            "{what} between: the press back at the entry is the game's"
+        );
+    }
+}
+
+/// Spec 17 Presentation, Input (round 2b, opus MUST 1): a double click is timed on the player's
+/// clock (the platform's wall clock, `Engine::set_wall_clock`), which the engine's clock is not
+/// at any speed but 1×: the second press 499 ms after the choosing one on the wall clock is the
+/// menu's however far the engine's clock ran meanwhile (2 s: 8× and more), 501 ms after it the
+/// game's; without a wall clock the engine's clock times it.
+#[test]
+fn a_double_click_is_timed_on_the_players_clock() {
+    let s = prompt();
+    let o = Open::new(&menu(), AT, &s, &[]);
+    let (gx, gy) = row_point(&o, 3);
+    assert_eq!(o.item(3).map(|i| i.code), Some(GO_HERE), "row 3: Go here");
+    // The wall clock's gap between the presses (none: no wall clock), the engine's ms run
+    // between them, and whether the second press is the menu's.
+    for (wall, engine, menus) in [
+        (Some(499), 16, true),
+        (Some(501), 16, false),
+        (Some(200), 2_000, true),
+        (Some(600), 0, false),
+        (None, 600, false),
+        (None, 100, true),
+    ] {
+        let mut e = checkered_engine(&s);
+        let t0 = 50_000;
+        if wall.is_some() {
+            e.set_wall_clock(t0);
+        }
+        e.popup_mut().show(o.clone());
+        e.tick(&[ptr(gx, gy, POINTER_LEFT)], 16);
+        e.tick(&[ptr(gx, gy, 0)], 16);
+        assert!(e.context_menu().is_none(), "Go here chosen: closed");
+        e.tick(&[], engine);
+        if let Some(gap) = wall {
+            e.set_wall_clock(t0 + gap);
+        }
+        let presses = e.game_presses();
+        e.tick(&[ptr(gx, gy, POINTER_LEFT)], 16);
+        assert_eq!(
+            e.game_presses() - presses,
+            u64::from(!menus),
+            "wall {wall:?} ms, engine {engine} ms: the second press the menu's: {menus}"
+        );
+        e.tick(&[ptr(gx, gy, 0)], 16);
+        assert_eq!(e.go_here_asked().asked, [CELL_PRESSED], "chosen once");
+    }
+}
+
+/// Spec 17 Input with spec 19 O1c (round 2b, K2 merge note 1): a paced press of a held key is the
+/// platform's, not the player's: with Down pressed while the menu is open (the highlight on Go
+/// here) its paced presses neither move the highlight nor count as new input, Enter then chooses
+/// Go here, and after the close they, and Down's release, reach no game, the flag false; a key
+/// pressed for the game before the menu opened stays the menu's from its paced press to its
+/// release, which is the game's.
+#[test]
+fn a_paced_press_is_the_held_keys_not_the_players() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let go = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == GO_HERE))
+        .expect("Go here");
+    let mut p = popup_with(&o);
+    let feed = |p: &mut Popup, ev: InputEvent| {
+        let out = p.input(&s, &io, &[ev], true);
+        (out, p.took_new_input())
+    };
+    let (out, new) = feed(&mut p, InputEvent::Key(Key::Down));
+    assert!(out.is_empty() && new, "Down: the menu's, new");
+    assert_eq!(
+        p.open().map(|o| o.hover),
+        Some(go),
+        "the highlight on Go here"
+    );
+    let drawn = p.version();
+    for i in 0..3 {
+        let (out, new) = feed(&mut p, InputEvent::Paced(Key::Down));
+        assert!(out.is_empty(), "paced {i} while open: the menu's: {out:?}");
+        assert!(!new, "paced {i} while open: no new input");
+        assert_eq!(
+            p.open().map(|o| o.hover),
+            Some(go),
+            "paced {i}: the highlight stays"
+        );
+    }
+    assert_eq!(p.version(), drawn, "nothing drawn again");
+    let (out, new) = feed(&mut p, InputEvent::Key(Key::Enter));
+    assert!(out.is_empty() && new, "Enter: the menu's");
+    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+    for ev in [
+        InputEvent::Paced(Key::Down),
+        InputEvent::Paced(Key::Down),
+        InputEvent::Paced(Key::Down),
+        InputEvent::Release(Key::Down),
+        InputEvent::Release(Key::Enter),
+    ] {
+        let (out, new) = feed(&mut p, ev);
+        assert!(
+            out.is_empty(),
+            "{ev:?} after the close: the menu's: {out:?}"
+        );
+        assert!(!new, "{ev:?} after the close: the flag stays false");
+    }
+    let after = InputEvent::Paced(Key::Down);
+    assert_eq!(feed(&mut p, after).0, [after], "let go: the game's again");
+    // Left, pressed for the game before the menu opened: its paced presses are the menu's from
+    // then (never its own press), its release the game's.
+    let mut p = popup_with(&o);
+    let (out, new) = feed(&mut p, InputEvent::Paced(Key::Left));
+    assert!(
+        out.is_empty() && !new,
+        "Left's paced press while open: the menu's, not new"
+    );
+    assert_eq!(
+        p.open().map(|o| o.hover),
+        Some(o.hover),
+        "the highlight stays"
+    );
+    assert!(
+        feed(&mut p, InputEvent::Key(Key::Escape)).0.is_empty(),
+        "closed"
+    );
+    assert!(
+        feed(&mut p, InputEvent::Paced(Key::Left)).0.is_empty(),
+        "still the menu's"
+    );
+    let up = InputEvent::Release(Key::Left);
+    assert_eq!(feed(&mut p, up).0, [up], "its release: the game's");
+}
+
+/// Spec 17 Input with spec 19 O1c (round 2b, K2 merge note 2): a platform's repeat of a direction
+/// key at the command prompt, which the engine takes back there, is inert for a chosen command's
+/// target press (its run is stepped as with nothing queued); a paced press is a press, and away
+/// from the prompt a repeat is the game's too: the run holds.
+#[test]
+fn a_repeat_the_prompt_takes_back_is_inert_a_paced_press_is_not() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu_of(&[menu::ATTACK]), AT, &s, &[]);
+    let row = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == menu::ATTACK))
+        .expect("Attack");
+    let (x, y) = row_point(&o, row);
+    let mut reads = s.clone();
+    let i = &mut reads.ui.input;
+    (i.target_pending, i.target_command, i.accept, i.in_wait) = (1, menu::ATTACK, true, true);
+    assert!(
+        crate::engine::command_prompt(&reads),
+        "the fixture: at the prompt"
+    );
+    let mut away = reads.clone();
+    away.main.reading = 0;
+    let rep = InputEvent::Repeat(Key::Down);
+    let paced = InputEvent::Paced(Key::Down);
+    for (what, st, ev, released) in [
+        ("a repeat at the prompt", &reads, rep, true),
+        ("a paced press", &reads, paced, false),
+        ("a repeat away from the prompt", &away, rep, false),
+    ] {
+        let mut p = popup_with(&o);
+        p.input(&s, &io, &[ptr(x, y, 1)], true);
+        p.input(&s, &io, &[ptr(x, y, 0)], true);
+        assert!(p.run().is_some(), "{what}: Attack waits for its target");
+        let out = p.input(st, &io, &[ev], true);
+        let want: Vec<InputEvent> = if released {
+            std::iter::once(ev)
+                .chain(menu::left_press(AT.0, AT.1))
+                .collect()
+        } else {
+            vec![ev]
+        };
+        assert_eq!(out, want, "{what}: the target press released: {released}");
+        assert_eq!(
+            p.run().is_none(),
+            released,
+            "{what}: the run over: {released}"
+        );
+    }
+}
+
+/// Spec 17 (round 2b, K2 merge note 4): the key events the menu lets through are counted with the
+/// paced presses among them; a repeat the command prompt takes back never reaches the game and
+/// typed text is no key event: neither counts.
+#[test]
+fn the_game_keys_count_paced_presses_not_repeats_taken_back() {
+    let s = prompt();
+    let mut e = checkered_engine(&s);
+    for (ev, counted) in [
+        (InputEvent::Paced(Key::Down), 1),
+        (InputEvent::Repeat(Key::Down), 0),
+        (InputEvent::Repeat(Key::Char('x')), 1),
+        (InputEvent::Key(Key::Char('x')), 1),
+        (InputEvent::Release(Key::Char('x')), 1),
+        (InputEvent::Text('x'), 0),
+    ] {
+        let keys = e.game_keys();
+        e.tick(&[ev], 16);
+        assert_eq!(e.game_keys() - keys, counted, "{ev:?}");
+    }
+}
+
+/// Spec 17 (round 2b, K2 merge note 5): the platform adds no paced press for a held direction key
+/// the context menu holds: while it is open, and once it closed while it still has the key (taken
+/// with the menu open, not yet let up); the key's paced press comes back at its release.
+#[test]
+fn no_paced_press_for_a_key_the_menu_holds() {
+    let s = prompt();
+    let mut e = checkered_engine(&s);
+    let paced = Some(InputEvent::Paced(Key::Down));
+    assert_eq!(
+        e.held_press(&[], Some(Key::Down)),
+        paced,
+        "precondition: due at the prompt"
+    );
+    e.popup_mut().show(Open::new(&menu(), AT, &s, &[]));
+    assert_eq!(
+        e.held_press(&[], Some(Key::Down)),
+        None,
+        "the menu open: none"
+    );
+    e.tick(&[InputEvent::Key(Key::Down)], 16);
+    assert!(e.dismiss_context_menu(), "closed with Down still down");
+    assert_eq!(
+        e.held_press(&[], Some(Key::Down)),
+        None,
+        "closed, Down still the menu's: none"
+    );
+    e.tick(&[InputEvent::Release(Key::Down)], 16);
+    assert_eq!(
+        e.held_press(&[], Some(Key::Down)),
+        paced,
+        "let up: the game's again"
+    );
+}
+
+/// Spec 17 Presentation (round 2b, gpt e MUST): the platform's presses off the frame that came in
+/// a tick's input close the menu where they stand among its events: before Down, Down is the
+/// game's; after it, the menu took Down (the highlight moved) and then closed; the close is new
+/// input either way.
+#[test]
+fn a_dismissal_closes_the_menu_where_it_stands_among_the_events() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let down = InputEvent::Key(Key::Down);
+    let mut p = popup_with(&o);
+    let out = p.input_with(&s, &io, &[down], true, 0, &[0]);
+    assert!(
+        p.open().is_none() && p.took_new_input(),
+        "before Down: closed, new"
+    );
+    assert_eq!(out, [down], "Down after the close: the game's");
+    let mut p = popup_with(&o);
+    let drawn = p.version();
+    let out = p.input_with(&s, &io, &[down], true, 0, &[1]);
+    assert!(
+        p.open().is_none() && p.took_new_input(),
+        "after Down: closed, new"
+    );
+    assert!(out.is_empty(), "Down the menu's: {out:?}");
+    assert!(
+        p.version() > drawn + 1,
+        "the highlight moved, then the menu closed"
+    );
+    assert!(
+        p.input(&s, &io, &[InputEvent::Repeat(Key::Down)], true)
+            .is_empty(),
+        "Down's repeat the menu's still"
+    );
+}
+
+/// Spec 17 Presentation (round 2b, gpt a SHOULD, opus NIT 8): a menu closed outside a tick (a
+/// press of the platform's off the frame) draws the pointer as it is then: the game's at the input
+/// handler's place, not the menu's arrow cached from the last tick; the shown frame agrees with
+/// `pointer_at` at once.
+#[test]
+fn a_close_outside_a_tick_draws_the_pointer_as_it_is() {
+    let mut s = prompt();
+    let shape = crate::ui::pointer::Shape {
+        dx: 0,
+        dy: 0,
+        rows: vec![[1; 16]; 4],
+    };
+    s.ui.pointer.tables.shapes = vec![shape; 10];
+    s.ui.pointer.shown = true;
+    let mut e = checkered_engine(&s);
+    let o = Open::new(&menu(), AT, &s, &[]);
+    e.popup_mut().show(o.clone());
+    let (gx, gy) = row_point(&o, 1);
+    e.tick(&[ptr(gx, gy, 0)], 16);
+    let arrow = e.sprite().cloned().expect("the menu's arrow drawn");
+    assert_eq!((arrow.x, arrow.y), (gx, gy), "at the menu's pointer");
+    assert!(e.dismiss_context_menu(), "closed");
+    let at = e.pointer_at();
+    assert_eq!(at, e.io().handler_pointer(), "the handler's pointer again");
+    assert_ne!((at.x, at.y), (gx, gy), "elsewhere than the arrow");
+    let want = crate::ui::pointer::sprite(&e.state().ui.pointer, at);
+    assert_eq!(
+        e.sprite(),
+        want.as_ref(),
+        "the sprite at pointer_at, at once"
+    );
+    let (frame, screen) = (e.frame(), e.screen_frame());
+    let shows =
+        |x: i16, y: i16| frame.get(x as usize, y as usize) != screen.get(x as usize, y as usize);
+    assert!(
+        !shows(gx + 1, gy + 1),
+        "no arrow left at the menu's pointer"
+    );
+    assert!(
+        shows(at.x.max(0) + 1, at.y.max(0) + 1),
+        "the game's pointer drawn at its place"
+    );
 }
 
 /// Spec 21's merge contract with the menu: a travel ends when the menu took new input, and the
@@ -824,22 +1207,44 @@ fn the_tail_of_a_choice_is_not_new_input() {
     assert!(fed(&mut p, &s, ptr(gx, gy, 0)), "a move while open");
     assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press");
     assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
-    let tail = [
-        ptr(gx + 5, gy, 1),
-        ptr(gx + 5, gy, 0),
-        ptr(gx + 5, gy, 1),
-        ptr(gx + 5, gy, 0),
-    ];
-    for (i, ev) in tail.into_iter().enumerate() {
+    for (what, ev) in [
+        ("a held move", ptr(gx + 3, gy, 1)),
+        ("the release", ptr(gx + 3, gy, 0)),
+    ] {
+        assert!(!fed(&mut p, &s, ev), "the choosing press's {what}");
+    }
+    // Its double click: the second press 4 pixels off each way (DOUBLE_CLICK_PX), and its
+    // release: the menu's, neither reaching the game.
+    for (what, ev) in [
+        ("press", ptr(gx + 4, gy - 4, 1)),
+        ("release", ptr(gx + 4, gy - 4, 0)),
+    ] {
+        let out = p.input(&s, &io, &[ev], true);
         assert!(
-            !fed(&mut p, &s, ev),
-            "tail {i}: a held move, the release, a double click"
+            out.is_empty(),
+            "the double click's {what}: the menu's: {out:?}"
+        );
+        assert!(
+            !p.took_new_input(),
+            "the double click's {what}: no new input"
         );
     }
     assert!(
         !fed(&mut p, &s, ptr(gx + 6, gy, 0)),
         "then a move of the game's"
     );
+    // A press 5 pixels off is no double click: it reaches the game (the menu took nothing new).
+    let mut p = popup_with(&o);
+    assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press again");
+    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen again");
+    p.input(&s, &io, &[ptr(gx, gy, 0)], true);
+    let off = ptr(gx + 5, gy, 1);
+    assert_eq!(
+        p.input(&s, &io, &[off], true),
+        [off],
+        "5 pixels off: the game's press"
+    );
+    assert!(!p.took_new_input(), "the game's, not the menu's");
     let mut p = popup_with(&o);
     assert!(
         fed(&mut p, &s, InputEvent::Key(Key::Down)),
@@ -973,8 +1378,8 @@ fn shown_frame(e: &Engine) -> (Vec<u8>, Vec<u6_render::Rgb>, Option<Vec<u6_rende
 
 /// Spec 17 Presentation (round 2, opus MUST 2): in the HD font mode the menu's glyphs are listed
 /// for the HD font: the heading's, the enabled entry's, and the disabled entry's flagged
-/// half-toned (the page draws its HD glyph so); with the mode off the HD frame shows the classic
-/// checker. Closed and presented, the HD frame is the one before it opened, byte for byte (gpt f2
+/// half-toned (the page draws its HD glyph so); with the mode off nothing is listed and the screen
+/// frame (which the HD frame scales then) holds the classic checker. Closed and presented, the HD frame is the one before it opened, byte for byte (gpt f2
 /// MUST 1), and so is the shown frame with its palette and source plane (gpt f2 SHOULD 2).
 #[test]
 fn the_hd_font_lists_the_menus_cells_the_disabled_row_half_toned() {
@@ -1110,14 +1515,27 @@ fn turned_off_it_forgets_what_it_took() {
         p.input(&s, &io, &[InputEvent::Key(Key::Down)], true)
             .is_empty()
     );
+    assert!(p.took_new_input(), "Down: new input");
     p.set_on(false);
     assert!(p.pointer().is_none(), "off: no pointer of the menu's");
+    assert!(
+        !p.took_new_input(),
+        "off: no new input left to read (opus NIT 1)"
+    );
     p.set_on(true);
     let rep = InputEvent::Repeat(Key::Down);
     assert_eq!(
         p.input(&s, &io, &[rep], true),
         [rep],
         "the held key: the game's again"
+    );
+    // A fresh press at once, the right button still held (gpt c SHOULD 1): the game's, before
+    // any release could put right what the menu held.
+    let fresh = ptr(x, y, POINTER_RIGHT | POINTER_LEFT);
+    assert_eq!(
+        p.input(&s, &io, &[fresh], true),
+        [fresh],
+        "a fresh press after it is on again: the game's"
     );
     let up = ptr(x, y, 0);
     assert_eq!(
@@ -1145,6 +1563,17 @@ fn an_open_menu_is_laid_out_again_for_new_hidden_rects_and_language() {
     e.set_context_menu_hidden(vec![o.rect()]);
     let moved = e.context_menu().expect("still open");
     assert_ne!(moved.rect, o.view().rect, "moved off what is hidden");
+    let ((mx0, my0, mx1, my1), (hx0, hy0, hx1, hy1)) = (moved.rect, o.rect());
+    assert!(
+        mx1 < hx0 || hx1 < mx0 || my1 < hy0 || hy1 < my0,
+        "the moved box meets nothing hidden (gpt c SHOULD 2): {:?} off {:?}",
+        moved.rect,
+        o.rect()
+    );
+    assert!(
+        mx0 >= 0 && my0 >= 0 && mx1 < u6_render::WIDTH as i32 && my1 < u6_render::HEIGHT as i32,
+        "and stays in the frame"
+    );
     assert_eq!(moved.hover, hover, "the same entry highlighted");
     assert!(e.popup_mut().version() > v, "drawn again");
     assert!(e.screen_version() > screen, "at once, no tick");

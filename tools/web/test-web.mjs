@@ -27,10 +27,10 @@
 // conversation), the remembered sight (spec 18: on in the page, off in the harness, grey on
 // the canvas where the engine's frame remembers a cell out of sight), and the system's pointer
 // (hidden over the canvas while a game runs where the engine's sprite is under the mouse, in
-// every layout, windowed and fullscreen; kept in the launcher, with the engine's pointer hidden,
-// through a press the context menu takes, over the speed badge, in the layouts' gaps, after a
-// context-menu entry or a touch moved the game's pointer and once the game stopped; right again
-// under a still mouse).
+// every layout, windowed and fullscreen, the context menu's arrow included while it takes the
+// pointer; kept in the launcher, with the engine's pointer hidden, over the speed badge, in the
+// layouts' gaps, after a context-menu entry or a touch moved the game's pointer and once the game
+// stopped; right again under a still mouse).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
 // page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
@@ -1361,6 +1361,7 @@ test('the context menu (spec 17): keepFrame refuses a frames directory inside th
 
 const USE = 0x88;
 const LOOK = 0x84;
+const GO_HERE = 0x100; // spec 17: "Go here" (u6-core ui::menu::GO_HERE)
 // The game pixel at the middle of view cell (col, row) of the Original map window (11 x 11 cells
 // of 16 pixels, cell c from x 16c, the window clipped to (8, 8)..(167, 167): the edge cells show
 // half); the leader's is (5, 5) at (88, 88). The edge cells' middle is their shown half's.
@@ -1633,8 +1634,10 @@ const releaseSteps = (page) => page.evaluate(() => {
 // `px` in the layout `name`: every heading has pixels of the heading's colour, every entry that
 // can run ink pixels; a disabled entry (past the first row, without the theft mark) has pixels
 // other than the paper, and where the canvas shows the half-tone at its own pixel grid (the HD
-// font, or the frame one to one) never two side by side, while an entry that runs has. Logs the
-// counts; returns the disabled rows checked.
+// font, or the frame one to one) never two side by side, while an entry that runs has; at least
+// one disabled entry is checked (round 2b, gpt f MUST 1: every caller claims the half-tone, so an
+// open menu without one fails rather than passing on none). Logs the counts; returns the disabled
+// rows checked.
 function checkMenuContent(name, px) {
   const heads = px.rows.filter((r) => r.kind === 'head');
   const on = px.rows.filter((r) => r.kind === 'entry' && r.enabled);
@@ -1648,6 +1651,7 @@ function checkMenuContent(name, px) {
   console.log(`  receipt: ${name} (layout ${px.layout}, font ${px.font}, ${grid ? 'canvas' : 'game'} pixel grid): ${heads.length} heading(s), ${sum(heads, 'head')} heading-colour pixels; ${on.length} entries that run, ${sum(on, 'ink')} ink pixels, ${sum(on, key)} side by side; ${off.length} disabled, ${sum(off, 'ink') + sum(off, 'other')} not paper, ${sum(off, key)} side by side; box ${px.boxed} canvas pixels, ${px.differ} differ from before it opened`);
   assert.ok(heads.length > 0 && heads.every((r) => r.head > 0), `${name}: every heading in the heading's colour`);
   assert.ok(on.length > 0 && on.every((r) => r.ink > 0), `${name}: every entry that runs in ink`);
+  assert.ok(off.length > 0, `${name}: a disabled entry to check (${off.length})`);
   assert.ok(off.every((r) => r.ink + r.other > 0), `${name}: a disabled entry drawn`);
   assert.ok(off.every((r) => r[key] === 0), `${name}: a disabled entry half-toned`);
   assert.ok(on.some((r) => r[key] > 0), `${name}: an entry that runs drawn whole`);
@@ -1922,8 +1926,8 @@ test('the context menu (spec 17): the underlined command is its first entry: Loo
   }
 }, { needs: h.haveHfes });
 
-// The menu in the layout `page` shows, on a cell near `hero` whose menu has a disabled entry (the
-// hero's own cell when none has): open with the pointer kept still at the press point, no page
+// The menu in the layout `page` shows, on a cell near `hero` whose menu has a disabled entry (none
+// fails: the half-tone is what it checks): open with the pointer kept still at the press point, no page
 // element for it while it is open, every game pixel of its box shown (none under a Wide window or
 // off the canvas: the page gives the engine what it hides, `Game.set_menu_hidden`), its box on the
 // canvas whole and clear of every Wide window's frame, its content (`checkMenuContent`); closed
@@ -1932,7 +1936,8 @@ test('the context menu (spec 17): the underlined command is its first entry: Loo
 async function menuInLayout(page, hero, name, frame = null) {
   const taken = () => page.evaluate(() => globalThis.__taken.length);
   assert.equal(await pageMenus(page), 0, 'no page element for a menu');
-  const cell = (await disabledCell(page, hero)) ?? hero;
+  const cell = await disabledCell(page, hero);
+  assert.ok(cell, `${name}: a cell near the hero whose menu has a disabled entry`);
   await page.mouse.move(...(await h.screenPoint(page, ...cell)));
   await h.waitTicks(page, 5);
   await h.waitFrames(page, 2);
@@ -1974,7 +1979,7 @@ test('the context menu (spec 17, unit M3) in the HD layout with the HD font: a r
   const { page } = await bootLayout(env, { font: 'hd' });
   await h.waitFrames(page, 3);
   assert.equal(await page.evaluate(() => document.body.dataset.font), 'hd', 'the HD font drawn');
-  await menuInLayout(page, HERO, 'menu-hero-hd', 'r2-hd-disabled.png');
+  await menuInLayout(page, HERO, 'menu-hero-hd', 'r2b-hd-disabled.png');
   const taken = () => page.evaluate(() => globalThis.__taken.length);
   const t0 = await taken();
   await h.rightPress(page, ...HERO);
@@ -1996,12 +2001,14 @@ test('the context menu (spec 17, unit M3) in Wide: a right press opens the engin
   const { page } = await bootWide(env);
   const view = await h.contextMenuAt(page, ...WIDE_HERO);
   assert.ok(view && view.kind === 'map', 'a map menu on the hero');
-  await menuInLayout(page, WIDE_HERO, 'menu-hero-wide', 'r2-wide-disabled-page.png');
+  await menuInLayout(page, WIDE_HERO, 'menu-hero-wide', 'r2b-wide-disabled-page.png');
 }, { needs: h.haveHfes });
 
 // Spec 17 Presentation (round 2, item 7): the open menu `view` on `page`, its box in CSS pixels
 // inside the visible part of the canvas (logged with the hidden rects the page gave), and its
-// last entry that can run chosen by a left press on it inside that part (the menu closes).
+// last entry that can run chosen by a left press on it inside that part: the menu closes and the
+// command runs (round 2b, gpt f MUST 2: Go here asks travel once, `Game.go_here_asked`; any other
+// command prints a line or leaves the prompt), which a cancel or a press outside never does.
 async function menuVisibleAndChosen(page, view, where) {
   const rects = await visibleMenu(page, view);
   console.log(`  receipt: ${where}: menu ${rects.menu} in the visible canvas ${rects.visible} (viewport ${rects.viewport}); hidden frame rects given ${JSON.stringify(rects.hidden)}`);
@@ -2011,8 +2018,26 @@ async function menuVisibleAndChosen(page, view, where) {
   const [px, py] = await h.screenPoint(page, ...h.rowPoint(view, last));
   const [vx, vy, vw, vh] = rects.visible;
   assert.ok(px >= vx && py >= vy && px < vx + vw && py < vy + vh, `${where}: its last entry that can run inside it`);
+  const ran = () => page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    return { asked: g.go_here_asked(), lines: g.message_lines(), prompt: document.getElementById('screen').dataset.prompt };
+  });
+  const before = await ran();
   await page.mouse.click(px, py);
   await h.menuClosed(page);
+  const code = view.rows[last].code;
+  if (code === GO_HERE) {
+    await h.waitTicks(page, 3);
+    const after = await ran();
+    console.log(`  receipt: ${where}: Go here chosen: travel asked ${before.asked} -> ${after.asked}`);
+    assert.equal(after.asked, before.asked + 1, `${where}: Go here asked travel once`);
+  } else {
+    await page.waitForFunction((l) => globalThis.__shownGame.message_lines() > l
+      || document.getElementById('screen').dataset.prompt !== '1', before.lines, { timeout: 10_000, polling: 'raf' });
+    const after = await ran();
+    console.log(`  receipt: ${where}: command ${code} chosen: message lines ${before.lines} -> ${after.lines}, prompt ${after.prompt}`);
+    assert.equal(after.asked, before.asked, `${where}: no travel asked`);
+  }
   return rects;
 }
 
@@ -2051,7 +2076,7 @@ test('the context menu (spec 17, round 2): on a phone held sideways (844 x 390, 
   await h.waitTicks(page, 3);
   await h.waitFrames(page, 2);
   const view = await h.menuView(page);
-  await keepFrame(page.locator('#screen-box'), 'r2-small-viewport.png');
+  await keepFrame(page.locator('#screen-box'), 'r2b-small-viewport.png');
   const sideways = await menuVisibleAndChosen(page, view, 'phone sideways');
   assert.ok(sideways.hidden.length > 0, 'phone sideways: the hidden rects named the part below');
   for (let i = 0; i < 4; i += 1) {
@@ -2109,6 +2134,194 @@ test('the context menu (spec 17, round 2): on a phone held sideways (844 x 390, 
   await h.menuClosed(page);
   await h.waitTicks(page, 10);
   assert.equal(await taken(), t0, 'fullscreen: the press on the black side gave the game nothing');
+}, { needs: h.haveHfes });
+
+// Spec 17 Presentation (round 2b, gpt e SHOULD 1, opus NIT 6): the canvas's parts outside the
+// view by the page's own rule (`__u6Layout.offViewportOf`), on fractional boxes, scales and
+// views, against a count of every canvas pixel: a pixel is outside exactly when part of it lies
+// outside the view (the visible limits rounded inward), the rects disjoint and on the canvas.
+function offViewportOracle(box, [cw, ch], [vl, vt, vr, vb], rects) {
+  const EPS = 1e-6;
+  const inX = (x) => box.left + (x * box.width) / cw >= vl - EPS && box.left + ((x + 1) * box.width) / cw <= vr + EPS;
+  const inY = (y) => box.top + (y * box.height) / ch >= vt - EPS && box.top + ((y + 1) * box.height) / ch <= vb + EPS;
+  const hits = new Uint8Array(cw * ch);
+  for (const [x, y, w, hh] of rects) {
+    assert.ok(x >= 0 && y >= 0 && x + w <= cw && y + hh <= ch && w > 0 && hh > 0, `a rect on the canvas: ${[x, y, w, hh]}`);
+    for (let j = y; j < y + hh; j += 1) for (let i = x; i < x + w; i += 1) hits[j * cw + i] += 1;
+  }
+  const xs = Array.from({ length: cw }, (_, x) => inX(x));
+  const ys = Array.from({ length: ch }, (_, y) => inY(y));
+  let [wrong, double, outside] = [0, 0, 0];
+  for (let y = 0; y < ch; y += 1) {
+    for (let x = 0; x < cw; x += 1) {
+      const out = !(xs[x] && ys[y]);
+      const k = hits[y * cw + x];
+      outside += Number(out);
+      double += Number(k > 1);
+      wrong += Number(out !== (k === 1));
+    }
+  }
+  return { wrong, double, outside };
+}
+
+test('the context menu (spec 17, round 2b): the canvas\'s parts outside the view round its visible limits inward on fractional boxes, scales and views (a pixel partly outside is outside), each pixel counted once; the visual viewport (pinch-zoom) is the view where the browser has one', async (env) => {
+  const { page } = await h.openPage(env, { setup: null });
+  await h.load(page, env);
+  const cases = [
+    { box: { left: 10.4, top: -5.5, width: 640.5, height: 400.25 }, size: [1280, 800], view: [0, 0, 500.7, 300.2] },
+    { box: { left: -33.3, top: 12.75, width: 1281.9, height: 801.1 }, size: [320, 200], view: [0, 0, 1024, 700] },
+    { box: { left: 0.25, top: 0.5, width: 959.5, height: 599.75 }, size: [1280, 800], view: [100.5, 50.25, 600.75, 350.5] },
+    { box: { left: 0, top: 0, width: 1366, height: 768 }, size: [1280, 720], view: [0, 0, 1366, 768] },
+  ];
+  for (const [i, c] of cases.entries()) {
+    const rects = await page.evaluate(({ box, size, view }) => globalThis.__u6Layout.offViewportOf(box, size, view), c);
+    const o = offViewportOracle(c.box, c.size, c.view, rects);
+    console.log(`  receipt: case ${i}: ${rects.length} rect(s), ${o.outside} canvas pixels outside, ${o.wrong} counted wrong, ${o.double} twice`);
+    assert.equal(o.wrong, 0, `case ${i}: every pixel partly outside, and only those, in a rect`);
+    assert.equal(o.double, 0, `case ${i}: none twice`);
+  }
+  assert.equal((await page.evaluate((c) => globalThis.__u6Layout.offViewportOf(c.box, c.size, c.view), cases[3])).length, 0, 'a canvas the view\'s size exactly: nothing outside');
+  // The visual viewport: a zoomed part of the layout viewport (a stand-in with its fields, as a
+  // pinch-zoom gives it), the canvas's parts outside it.
+  const vv = await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const before = globalThis.__u6Layout.offViewport;
+    const b = c.getBoundingClientRect();
+    const zoom = { offsetLeft: b.left + b.width / 4, offsetTop: b.top + b.height / 4, width: b.width / 3, height: b.height / 3 };
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: zoom });
+    const after = globalThis.__u6Layout.offViewport;
+    const doc = document.documentElement;
+    const want = globalThis.__u6Layout.offViewportOf(b, [c.width, c.height], [zoom.offsetLeft, zoom.offsetTop,
+      Math.min(zoom.offsetLeft + zoom.width, doc.clientWidth), Math.min(zoom.offsetTop + zoom.height, doc.clientHeight)]);
+    delete window.visualViewport;
+    return { before, after, want, size: [c.width, c.height] };
+  });
+  console.log(`  receipt: the visual viewport a third of the canvas: ${vv.after.length} rects outside it (before ${vv.before.length})`);
+  assert.deepEqual(vv.after, vv.want, 'offViewport reads the visual viewport');
+  assert.equal(vv.after.length, 4, 'the canvas outside it on all four sides');
+});
+
+test('the context menu (spec 17, round 2b, gpt e MUST): a right press on the canvas and then a press off it, both before one step of the game (the virtual display): the press off the canvas closes, at that step, the menu the right press opens there, so it ends closed and the game is given nothing; the right press alone opens it', async (env) => {
+  const { page } = await menuPage(env);
+  const taken = () => page.evaluate(() => globalThis.__taken.length);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const t0 = await taken();
+  const at = await h.screenPoint(page, ...HERO);
+  const off = await page.evaluate(() => [3, document.documentElement.clientHeight - 3]);
+  assert.ok(await page.evaluate(([x, y]) => document.elementFromPoint(x, y) !== document.getElementById('screen'), off), 'precondition: that point off the canvas');
+  await page.mouse.move(...at);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+  await page.mouse.move(...off);
+  await page.mouse.down();
+  await page.mouse.up();
+  const queued = await page.evaluate(() => globalThis.__shownGame.keys_pending());
+  await h.runFrames(page, 4);
+  assert.ok(queued > 0, 'precondition: the right press still queued when the press off the canvas came');
+  assert.equal(await h.menuView(page), null, 'the menu ends closed');
+  assert.equal(await taken(), t0, 'the game was given nothing');
+  await page.mouse.move(...at);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+  await h.runFrames(page, 4);
+  assert.ok(await h.menuView(page), 'the right press alone opens it');
+  await page.keyboard.press('Escape');
+  await h.runFrames(page, 4);
+  assert.equal(await h.menuView(page), null, 'Escape closes it');
+  console.log('  receipt: a right press and a press off the canvas before one step: the menu closed, nothing given the game; the right press alone: open: pass');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17, round 2b, gpt f SHOULD 3): the viewport shrunk and the opening press and its release queued before one frame of the game at Max (the virtual display; a press held would run that frame at 1x, maybe no step): its first step already has the new hidden rects (`Game.menu_hidden`, what reached the engine, read at that step), so the hero\'s menu it opens goes above him at once', async (env) => {
+  const { page } = await bootLayout(env, { width: 844, height: 390, font: 'hd' });
+  await page.evaluate(() => document.getElementById('screen').scrollIntoView({ block: 'start' }));
+  await h.waitFrames(page, 3);
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 3);
+  const before = await page.evaluate(() => [...globalThis.__shownGame.menu_hidden()]);
+  await page.setViewportSize({ width: 844, height: 260 });
+  await page.evaluate(() => {
+    document.getElementById('screen').scrollIntoView({ block: 'start' });
+    const g = globalThis.__shownGame;
+    g.set_speed(0);
+    const step = Object.getPrototypeOf(g).step;
+    globalThis.__first = null;
+    g.step = function (ms) {
+      const hidden = [...g.menu_hidden()];
+      step.call(this, ms);
+      if (globalThis.__first === null) globalThis.__first = { hidden, menu: g.menu_view() };
+    };
+  });
+  await page.mouse.move(...(await h.screenPoint(page, ...HERO)));
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+  await h.runFrames(page, 1);
+  const first = await page.evaluate(() => ({ ...globalThis.__first, page: globalThis.__u6Layout.hidden.flat() }));
+  await h.runFrames(page, 3);
+  const view = first.menu ? JSON.parse(first.menu) : null;
+  console.log(`  receipt: the first step: hidden rects ${JSON.stringify(first.hidden)} (before the resize ${JSON.stringify(before)}); the menu's text area ${view?.text}, the press at ${HERO}`);
+  assert.ok(first.hidden, 'precondition: a step ran in that one frame');
+  assert.notDeepEqual(first.page, before, 'precondition: the resize changed the hidden rects');
+  assert.deepEqual(first.hidden, first.page, 'the first step had the page\'s new rects');
+  assert.ok(view, 'that first step opened the menu');
+  assert.ok(view.text[1] + view.text[3] <= HERO[1], 'laid out for them at once: above the hero');
+  await page.keyboard.press('Escape');
+  await h.runFrames(page, 4);
+  assert.equal(await h.menuView(page), null, 'closed');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17, round 2b, opus S5): in fullscreen, the Original layout filling a 16:10 screen, the page keeps the Exit button\'s and the speed badge\'s parts of the canvas from the menu at all times, shown or hidden (the stylesheet keeps their boxes there), as hidden frame rects the engine has; out of fullscreen, with the badge hidden, none; a menu open in fullscreen with the Exit button shown (screenshot)', async (env) => {
+  const { page } = await menuPage(env, { width: 1280, height: 800 });
+  const over = () => page.evaluate(() => globalThis.__u6Layout.overCanvas);
+  assert.deepEqual(await over(), [], 'out of fullscreen, the badge hidden: nothing reserved');
+  await page.click('#fullscreen');
+  await waitFull(page, 'on');
+  await page.waitForFunction(() => document.getElementById('fullscreen-exit').hidden, null, { timeout: 10_000 });
+  await h.waitFrames(page, 3);
+  const r = await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const b = c.getBoundingClientRect();
+    const toCanvas = (el) => {
+      const e = el.getBoundingClientRect();
+      return [(e.left - b.left) * c.width / b.width, (e.top - b.top) * c.height / b.height,
+        (e.right - b.left) * c.width / b.width, (e.bottom - b.top) * c.height / b.height];
+    };
+    const exit = document.getElementById('fullscreen-exit');
+    const badge = document.getElementById('speed-badge');
+    return {
+      hidden: [exit.hidden, badge.hidden],
+      shown: [exit, badge].map((el) => getComputedStyle(el).visibility),
+      exit: toCanvas(exit),
+      badge: toCanvas(badge),
+      over: globalThis.__u6Layout.overCanvas,
+      engine: [...globalThis.__shownGame.menu_hidden()],
+      scale: [c.width / globalThis.__shownGame.width(), c.height / globalThis.__shownGame.height()],
+    };
+  });
+  console.log(`  receipt: fullscreen, both hidden (${r.shown}): reserved on the canvas ${JSON.stringify(r.over)}; the engine's hidden frame rects ${JSON.stringify(r.engine)}`);
+  assert.deepEqual(r.hidden, [true, true], 'precondition: the Exit button and the badge hidden');
+  const covers = (rects, [x0, y0, x1, y1]) => rects.some(([x, y, w, hh]) => x <= Math.floor(x0) && y <= Math.floor(y0) && x + w >= Math.ceil(x1) && y + hh >= Math.ceil(y1));
+  const exitFrame = [r.exit[0] / r.scale[0], r.exit[1] / r.scale[1], r.exit[2] / r.scale[0], r.exit[3] / r.scale[1]];
+  assert.ok(r.exit[2] > r.exit[0] && covers(r.over, r.exit), 'the hidden Exit button\'s box reserved on the canvas');
+  assert.ok(r.badge[2] > r.badge[0] && covers(r.over, r.badge), 'the hidden badge\'s box reserved on the canvas');
+  const quads = (flat) => Array.from({ length: flat.length / 4 }, (_, i) => flat.slice(4 * i, 4 * i + 4));
+  assert.ok(covers(quads(r.engine), exitFrame), 'the engine keeps its menu off the Exit button\'s frame pixels');
+  // A menu open in fullscreen, the Exit button shown by a move: the frame kept.
+  await h.rightPress(page, ...HERO);
+  await page.mouse.up({ button: 'right' });
+  await page.mouse.move(...(await h.screenPoint(page, HERO[0] + 2, HERO[1] + 2)));
+  await page.locator('#fullscreen-exit').waitFor({ state: 'visible', timeout: 10_000 });
+  const view = await h.menuView(page);
+  const meets = ([mx, my, mw, mh]) => !(mx + mw <= exitFrame[0] || exitFrame[2] <= mx || my + mh <= exitFrame[1] || exitFrame[3] <= my);
+  assert.ok(view && !meets(view.rect), 'the open menu clear of the Exit button');
+  await keepFrame(page.locator('#screen-box'), 'r2b-fullscreen-exit.png');
+  await page.keyboard.press('Escape');
+  await h.menuClosed(page);
+  await page.evaluate(() => document.exitFullscreen());
+  await waitFull(page, 'off');
+  await h.waitFrames(page, 3);
+  assert.deepEqual(await over(), [], 'out of fullscreen again: nothing reserved');
+  console.log('  receipt: fullscreen reserves the Exit button and the badge, hidden or shown; the engine has the Exit button\'s frame rect; a menu open with the Exit button shown kept: pass');
 }, { needs: h.haveHfes });
 
 // Spec 19 O1b at the page: `key` held from the prompt on the focused canvas as a keyboard sends
@@ -2573,7 +2786,7 @@ test('the virtual display stamps an event once, between frames when asked (harne
 // was; the arrow let up (its keyup takes nothing) and the menu closed with Escape, still there.
 test('the context menu opened while an arrow is held lets it go: the hero walks no further under the menu or after it (spec 19 O1c, spec 17)', async (env) => {
   const { page } = await menuPage(env);
-  const menu = page.locator('#context-menu');
+  const shown = async () => (await h.menuView(page)) !== null;
   await h.virtualDisplay(page, 60);
   await h.runFrames(page, 2);
   const leader = () => page.evaluate(() => document.getElementById('screen').dataset.leader);
@@ -2607,14 +2820,17 @@ test('the context menu opened while an arrow is held lets it go: the hero walks 
   }, 5000);
   assert.ok(frames > 0, 'the prompt came back with the arrow still down');
   const at = await leader();
-  await h.rightPress(page, 88, 88);
+  // The engine's menu (spec 17), on the virtual display: the press and its release queued, then
+  // the frames that open it.
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  await page.mouse.down({ button: 'right' });
   await page.mouse.up({ button: 'right' });
   const under = await h.runFrames(page, 600);
-  const open = await menu.isVisible();
+  const open = await shown();
   await page.keyboard.up(used);
   await page.keyboard.press('Escape');
-  await menu.waitFor({ state: 'hidden' });
   const after = await h.runFrames(page, 120);
+  assert.ok(!(await shown()), 'Escape closed it');
   const queued = await page.evaluate(() => document.getElementById('screen').dataset.keys);
   console.log(`  receipt: ${used} held, the prompt back ${frames} frames after its step; position changes while the menu was open ${under.seen.length - 1}, after it ${after.seen.length - 1}; keys queued at the end ${queued}`);
   assert.ok(open, 'the menu stayed open');
@@ -13063,7 +13279,7 @@ test('the system\'s pointer (`game` with the engine\'s pointer hidden): J in the
   console.log(`  receipt: \`game\` with its pointer hidden: the system's pointer kept at ${checks.length} mouse places the engine took, HD on and off: pass`);
 }, { needs: h.haveZip });
 
-test('the system\'s pointer (Original layout): hidden over the canvas while the game runs, where the game draws its own at the mouse (read from the HD pointer, and with HD off from the classic frame), windowed and fullscreen; kept while the press that opened the context menu is held, and while the press outside that closed it is held with the mouse back on the game\'s pointer (it does not follow the mouse then); a move after it hides it again', async (env) => {
+test('the system\'s pointer (Original layout): hidden over the canvas while the game runs, where the game draws its own at the mouse (read from the HD pointer, and with HD off from the classic frame), windowed and fullscreen; with the engine\'s context menu (spec 17) hidden too while the press that opened it is held and moved (the menu\'s arrow at the mouse), and while the press outside that closed it is held with the mouse moved away and back (the menu takes that press and draws the game\'s pointer at the mouse); after it the game\'s pointer follows the mouse again', async (env) => {
   const { page } = await menuPage(env);
   await trackMouse(page);
   let c = await cursorOn(page);
@@ -13095,34 +13311,37 @@ test('the system\'s pointer (Original layout): hidden over the canvas while the 
   await page.evaluate(() => document.getElementById('hd').click());
   await page.waitForFunction(() => globalThis.__shownGame.hd_on(), null, { timeout: 10_000 });
   await fullscreenCursor(page, 'Original');
-  // The press that opened the context menu, held: none of it reaches the game.
+  // The press that opened the context menu, held: none of it reaches the game; the engine draws
+  // the menu's arrow at the mouse (`Game.game_pointer`: the menu's pointer), so the system's
+  // stays hidden over it (K3 merge note 13).
   await h.waitPrompt(page);
   await h.rightPress(page, 88, 88);
   c = await settled(page, 'the opening press held');
-  assert.ok(c.pointer === 'page' && c.canvas === 'auto', 'the press that opened the menu: the canvas keeps the system\'s pointer');
+  assert.ok(c.pointer === 'game' && c.canvas === 'none', 'the press that opened the menu: the menu\'s arrow under the mouse, the system\'s pointer hidden');
   await page.mouse.move(...(await h.screenPoint(page, 120, 104)), { steps: 3 });
   c = await settled(page, 'held and moved');
-  assert.ok(c.pointer === 'page' && c.canvas === 'auto', 'held and moved: the canvas keeps the system\'s pointer');
+  assert.ok(c.pointer === 'game' && c.canvas === 'none', 'held and moved: the arrow follows, the system\'s pointer hidden');
   await page.mouse.up({ button: 'right' });
-  // A plain game pixel off the menu, given to the game; then the press outside that closes the
-  // menu, held (none of it reaches the game), the mouse moved away and back to that pixel: the
-  // game's pointer is there but does not follow the mouse, so the system's shows.
+  assert.ok(await h.menuView(page), 'precondition: the menu open');
+  // A plain game pixel off the menu's box; then the press outside that closes the menu, held
+  // (none of it reaches the game), the mouse moved away and back to that pixel: the menu takes
+  // the held press's moves and draws the game's pointer at the mouse, so the system's stays hidden.
   const plain = SCROLL_POINTS[1];
   const q = await h.screenPoint(page, ...plain);
-  const off2 = await page.evaluate(([x, y]) => document.elementFromPoint(x, y) === document.getElementById('screen'), q);
-  assert.ok(off2, 'precondition: that pixel is off the menu');
-  await mouseTo(page, ...plain);
+  const box = (await h.menuView(page)).rect;
+  assert.ok(plain[0] < box[0] || plain[1] < box[1] || plain[0] >= box[0] + box[2] || plain[1] >= box[1] + box[3], 'precondition: that pixel is off the menu');
+  await page.mouse.move(...q);
   await page.mouse.down();
-  await page.locator('#context-menu').waitFor({ state: 'hidden', timeout: 10_000 });
+  await h.menuClosed(page);
   await page.mouse.move(q[0] - 40, q[1] - 30, { steps: 3 });
   await page.mouse.move(...q, { steps: 3 });
-  c = await settled(page, 'the closing press held, back on the game\'s pointer', 4);
+  c = await settled(page, 'the closing press held, back at that pixel', 4);
   const [ex, ey] = await page.evaluate(() => [...globalThis.__shownGame.game_pointer()]);
   assert.ok(ex === plain[0] && ey === plain[1], 'precondition: the game\'s pointer under the mouse again');
-  assert.ok(c.pointer === 'page' && c.canvas === 'auto', 'the closing press held: the canvas keeps the system\'s pointer');
+  assert.ok(c.pointer === 'game' && c.canvas === 'none', 'the closing press held: the game\'s pointer at the mouse, the system\'s hidden');
   await page.mouse.up();
   await pointerFollows(page, ...SCROLL_POINTS, 'Original, after the menu');
-  console.log('  receipt: Original: the system\'s pointer hidden over the canvas at 6 points (2 with HD on, 1 with it off, 1 fullscreen, 2 after the menu), the game\'s at the mouse at each; kept through the opening press and the held closing press: pass');
+  console.log('  receipt: Original: the system\'s pointer hidden over the canvas at 6 points (2 with HD on, 1 with it off, 1 fullscreen, 2 after the menu), the game\'s at the mouse at each; hidden over the engine menu\'s arrow through the held opening press and over the game\'s pointer through the held closing press: pass');
 }, { needs: h.haveHfes });
 
 test('the system\'s pointer (HD layout): hidden over the canvas where a region of the game shows the game\'s own pointer at the mouse, windowed and fullscreen; in a gap between the regions and on the paper round them (the game\'s pointer at the nearest edge there) the canvas keeps it', async (env) => {
@@ -13208,38 +13427,41 @@ test('the system\'s pointer (the speed badge): over the badge, which lets the po
   console.log('  receipt: the speed badge: the system\'s pointer over it, the game given the move under it; hidden off it, and again once the badge hid under a still mouse: pass');
 }, { needs: h.haveHfes });
 
-test('the system\'s pointer under a still mouse (HD layout): a context menu closed by Escape with the mouse on the game\'s pointer leaves it hidden there, and with the mouse on an entry (the game\'s pointer where the press left it) shows it; HD switched off, and fullscreen, each put another game pixel under the mouse, so the canvas shows it, and back hides it, with no move each time', async (env) => {
+test('the system\'s pointer under a still mouse (HD layout): a context menu closed by Escape with the mouse on the game\'s pointer leaves it hidden there, and with the mouse on an entry too (the engine\'s menu took the move, its arrow under the mouse, and closing brings the game\'s pointer there); HD switched off, and fullscreen, each put another game pixel under the mouse, so the canvas shows it, and back hides it, with no move each time', async (env) => {
   const { page } = await bootLayout(env);
   await trackMouse(page);
-  const top = (p) => page.evaluate(([x, y]) => {
-    const el = document.elementFromPoint(x, y);
-    return { menu: document.getElementById('context-menu').contains(el), cursor: getComputedStyle(el).cursor };
-  }, p);
+  const top = (p) => page.evaluate(([x, y]) => ({ cursor: getComputedStyle(document.elementFromPoint(x, y)).cursor }), p);
   // The menu opened over the game's pointer and closed with the mouse still there: hidden.
   await mouseTo(page, 88, 88);
   const press = await testMouse(page);
   await h.rightPress(page, 88, 88);
   await page.mouse.up({ button: 'right' });
+  assert.ok(await h.menuView(page), 'precondition: the menu shown before Escape');
   await page.keyboard.press('Escape');
-  await page.locator('#context-menu').waitFor({ state: 'hidden', timeout: 10_000 });
+  await h.menuClosed(page);
   let c = await settledCursor(page, 'game', 'a menu closed on the game\'s pointer');
   const still = await top(press);
-  assert.ok(!still.menu && still.cursor === 'none' && c.canvas === 'none', 'a menu closed by Escape, the mouse on the game\'s pointer: the system\'s pointer hidden');
+  assert.ok(still.cursor === 'none' && c.canvas === 'none', 'a menu closed by Escape, the mouse on the game\'s pointer: the system\'s pointer hidden');
   // The menu opened again, the mouse onto its first entry: the menu takes the move (the game is
-  // not given it); Escape: the game's pointer where the press left it, the system's shown.
+  // not given it) and draws its arrow there, the system's hidden; Escape brings the game's
+  // pointer to the menu's (`close_here`), under the mouse: still hidden, no move.
   await h.rightPress(page, 88, 88);
   await page.mouse.up({ button: 'right' });
-  const item = await page.locator('#context-menu [role="menuitem"]').first().boundingBox();
-  const on = [item.x + item.width / 2, item.y + item.height / 2];
+  const view = await h.menuView(page);
+  const first = view.rows.findIndex((r) => r.kind === 'entry');
+  const on = await h.screenPoint(page, ...h.rowPoint(view, first));
   await page.mouse.move(...on);
-  await h.waitFrames(page, 3);
-  const open = await top(on);
-  assert.ok(open.menu && open.cursor !== 'none', 'precondition: the mouse on the menu, its own cursor');
+  c = await settledCursor(page, 'game', 'the mouse on the menu\'s entry');
+  assert.ok(await h.menuView(page), 'precondition: the menu shown before Escape');
+  assert.ok((await top(on)).cursor === 'none' && c.canvas === 'none', 'precondition: the menu\'s arrow under the mouse, the system\'s pointer hidden');
   await page.keyboard.press('Escape');
-  await page.locator('#context-menu').waitFor({ state: 'hidden', timeout: 10_000 });
+  await h.menuClosed(page);
   c = await settled(page, 'a menu closed on its entry', 3);
   const closed = await top(on);
-  assert.ok(!closed.menu && c.pointer === 'page' && closed.cursor === 'auto', 'a menu closed by Escape, the mouse on its entry, no move: the canvas under the mouse shows the system\'s pointer');
+  const pixel = await mousePixel(page);
+  const [ex, ey] = await page.evaluate(() => [...globalThis.__shownGame.game_pointer()]);
+  assert.ok(pixel.on && ex === pixel.pixel[0] && ey === pixel.pixel[1], 'precondition: the game\'s pointer brought under the mouse');
+  assert.ok(c.pointer === 'game' && closed.cursor === 'none', 'a menu closed by Escape, the mouse on its entry, no move: the game\'s pointer under the mouse, the system\'s hidden');
   await pointerFollows(page, SCROLL_POINTS[1], SCROLL_POINTS[0], 'HD layout');
   // A change under the still mouse: the game pixel under it (`__mousePixel`, through the layout
   // then in effect) another, the system's pointer shown; undone, the same pixel again, hidden.
@@ -13267,25 +13489,28 @@ test('the system\'s pointer under a still mouse (HD layout): a context menu clos
   };
   await away(hd(false), hd(true), 'HD off');
   await away(full(true), full(false), 'fullscreen');
-  console.log('  receipt: under a still mouse: a menu closed on the game\'s pointer (hidden) and on its entry (shown), HD off and on again, fullscreen in and out, each the cursor it needs by the next frames: pass');
+  console.log('  receipt: under a still mouse: a menu closed on the game\'s pointer and on its entry (the game\'s pointer brought there: hidden both), HD off and on again, fullscreen in and out, each the cursor it needs by the next frames: pass');
 }, { needs: h.haveHfes });
 
-test('the system\'s pointer and a context-menu entry (opus M1): Look chosen by a click, the mouse moved one game pixel at once and then still, both before a step of the game (the virtual display); once the prompt is back the game\'s pointer is where the entry\'s target press (queued after the move) left it, not under the mouse, and the canvas keeps the system\'s pointer', async (env) => {
+test('the system\'s pointer and a context-menu entry (opus M1): Look chosen by a click, the mouse moved one game pixel at once and then still, both before a step of the game (the virtual display); once the prompt is back the game\'s pointer is where the entry\'s target press (the engine\'s, after the move) left it, not under the mouse, and the canvas keeps the system\'s pointer', async (env) => {
   const { page } = await menuPage(env);
   await trackMouse(page);
   const target = viewCell(6, 5);
   await h.rightPress(page, ...target);
   await page.mouse.up({ button: 'right' });
-  const item = await page.locator(`#context-menu [data-code="${LOOK}"]`).boundingBox();
-  const [mx, my] = [item.x + item.width / 2, item.y + item.height / 2];
+  const view = await h.menuView(page);
+  const look = rowOf(view, LOOK);
+  assert.ok(look >= 0 && view.rows[look].enabled, 'precondition: Look offered, able to run');
+  const [mx, my] = await h.screenPoint(page, ...h.rowPoint(view, look));
   const one = await page.evaluate(() => document.getElementById('screen').getBoundingClientRect().width / 320);
-  // No step of the game from the click to the move: the move is queued before the entry's
-  // target press, which its command queues once it reads the target.
+  // No step of the game from the click to the move: the click and the move are queued for the
+  // same step, before the entry's target press, which the engine gives the game once its command
+  // reads the target.
   await h.virtualDisplay(page, 60);
   await page.mouse.click(mx, my);
-  await page.locator('#context-menu').waitFor({ state: 'hidden', timeout: 10_000 });
   await page.mouse.move(mx + one, my);
   await h.runFrames(page, 60);
+  assert.equal(await h.menuView(page), null, 'the click chose Look: the menu closed');
   // A portrait (someone on the cell: the game's people walk) waits for a key: Space, which
   // moves no pointer, until the prompt is back.
   let back = false;

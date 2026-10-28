@@ -57,6 +57,8 @@ pub enum Refusal {
     Unreachable,
     /// No leader stands on the map.
     NoLeader,
+    /// The command loop's program is not running (the opening, the main menu).
+    NoGame,
 }
 
 /// Unit M4's seam (spec 21 `travel::reachable`): why travel to map cell `target` (world x, y on
@@ -66,11 +68,11 @@ pub fn travel_reason(_s: &State, _target: (i16, i16)) -> Option<Refusal> {
     None
 }
 
-/// How "Go here" shows refusal `r`: `Here` and `NoLeader` leave the entry out (`None`); every
-/// other refusal disables it with its reason.
+/// How "Go here" shows refusal `r`: `Here`, `NoLeader` and `NoGame` leave the entry out
+/// (`None`); every other refusal disables it with its reason.
 pub fn go_here_reason(r: Refusal) -> Option<Reason> {
     match r {
-        Refusal::Here | Refusal::NoLeader => None,
+        Refusal::Here | Refusal::NoLeader | Refusal::NoGame => None,
         Refusal::Aboard => Some(Reason::Aboard),
         Refusal::Combat => Some(Reason::Combat),
         Refusal::Foe => Some(Reason::Foe),
@@ -88,7 +90,8 @@ pub fn travel_to(travel: &mut Travel, target: (i16, i16)) {
 }
 
 /// The longest a press after the press that chose an entry is taken for its double click (the
-/// menu's, with its release), on the engine's clock: the common desktop default.
+/// menu's, with its release), on the player's clock ([`Popup::input_with`]'s `now`, the
+/// platform's wall clock): the common desktop default.
 const DOUBLE_CLICK_MS: u64 = 500;
 /// How far from the choosing press (frame pixels, each way) a press is its double click.
 const DOUBLE_CLICK_PX: i16 = 4;
@@ -779,14 +782,30 @@ fn ring(fb: &mut Framebuffer, (x0, y0, x1, y1): (i32, i32, i32, i32), colour: u8
     }
 }
 
-/// An event that changes nothing the game reads (as [`menu::Run::step`]'s quiet asks): a move of
-/// a button-less pointer, a key's release (never queued, [`InputEvent::Release`]).
-fn inert(ev: &InputEvent) -> bool {
+/// An event that changes nothing the game reads (as the menu's opening and [`menu::Run::step`]'s
+/// quiet ask): a move of a button-less pointer, a key's release (never queued,
+/// [`InputEvent::Release`]), and at the command prompt (`prompt`,
+/// [`crate::engine::command_prompt`]) a platform's repeat of a direction key, which the engine
+/// takes back there (spec 19 O1c). A paced press is a press ([`InputEvent::Paced`]).
+fn inert(prompt: bool, ev: &InputEvent) -> bool {
     match ev {
         InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
         InputEvent::Release(_) => true,
-        _ => false,
+        InputEvent::Repeat(_) => crate::engine::taken_back(prompt, ev),
+        InputEvent::Key(_) | InputEvent::Paced(_) | InputEvent::Text(_) => false,
     }
+}
+
+/// The press that chose an entry, for its double click ([`Popup::double_click`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Chose {
+    /// The player's clock at the press ([`Popup::input_with`]'s `now`, ms).
+    at: u64,
+    /// Its frame pixel.
+    x: i16,
+    y: i16,
+    /// The button it pressed ([`POINTER_LEFT`]).
+    button: u8,
 }
 
 /// The original's command letters at the prompt (`main_loop/commands.rs` `letter_code`).
@@ -832,9 +851,11 @@ pub struct Popup {
     version: u64,
     /// Frame rects the platform shows something else over ([`Popup::set_hidden`]).
     hidden: Vec<Rect>,
-    /// The press that chose an entry: the engine's clock (ms) and its frame pixel, for its
-    /// double click ([`DOUBLE_CLICK_MS`], [`DOUBLE_CLICK_PX`]).
-    chose: Option<(u64, i16, i16)>,
+    /// The press that chose an entry, for its double click ([`DOUBLE_CLICK_MS`],
+    /// [`DOUBLE_CLICK_PX`]), until a press reaches the game.
+    chose: Option<Chose>,
+    /// The player's clock in the current [`Popup::input_with`] (ms).
+    now: u64,
     /// The map cell "Go here" chose, for the engine ([`Popup::take_go_here`]).
     go_here: Option<(i16, i16)>,
     /// The last [`Popup::input`] took an event that is not the tail of a gesture the menu already
@@ -858,6 +879,7 @@ impl Popup {
             self.buttons = 0;
             self.chose = None;
             self.go_here = None;
+            self.new_input = false;
         }
     }
 
@@ -866,9 +888,9 @@ impl Popup {
     }
 
     /// The frame rects the platform shows something else over (Wide's page windows over the
-    /// map, the parts of the frame off the canvas or the viewport): a menu keeps off them where
-    /// it can ([`Open::new`]); one open when they change is laid out again for them (`s`). None
-    /// by default.
+    /// map, the parts of the frame off the canvas or the viewport, under the page's own elements
+    /// over the canvas): a menu opened from then keeps off them where it can ([`Open::new`]),
+    /// and one open when they change is laid out again for them (`s`) at once. None by default.
     pub fn set_hidden(&mut self, rects: Vec<Rect>, s: &State) {
         if rects == self.hidden {
             return;
@@ -909,6 +931,13 @@ impl Popup {
         self.pointer
     }
 
+    /// Key `k`'s events are the menu's now: it is open, or it took the key (its repeats are the
+    /// menu's to the key's release); a platform adds no paced press for it then
+    /// ([`crate::engine::Engine::held_press`]).
+    pub fn holds(&self, k: Key) -> bool {
+        self.open.is_some() || self.keys.iter().any(|&(t, _)| t == k)
+    }
+
     /// The map cell "Go here" chose since the last call, once (unit M4's travel starts there).
     pub fn take_go_here(&mut self) -> Option<(i16, i16)> {
         self.go_here.take()
@@ -937,10 +966,8 @@ impl Popup {
         }
     }
 
-    /// The input of one tick as the game is to get it: the run stepped first (its target press
-    /// after this tick's events, [`Run::step`]), then each event either the menu's or the game's,
-    /// with the presses of a choice in its place. `quiet`: nothing is queued for the game. While
-    /// a run was held at the tick's start, every press of its events is the menu's.
+    /// [`Popup::input_with`] on the engine's clock (`io`), with no dismissal: a platform without
+    /// a wall clock of its own (at 1× the engine's is the player's).
     pub fn input(
         &mut self,
         s: &State,
@@ -948,11 +975,33 @@ impl Popup {
         input: &[InputEvent],
         quiet: bool,
     ) -> Vec<InputEvent> {
+        self.input_with(s, io, input, quiet, io.now_ms(), &[])
+    }
+
+    /// The input of one tick as the game is to get it: the run stepped first (its target press
+    /// after this tick's events, [`Run::step`]), then each event either the menu's or the game's,
+    /// with the presses of a choice in its place. `quiet`: nothing is queued for the game but what
+    /// the engine takes back. `now`: the player's clock (the platform's wall clock, ms), which a
+    /// double click is timed on. `dismissals`: the platform's presses that reached no frame pixel
+    /// ([`Popup::dismiss`]), each at its place among the events (before `input[i]`; `input.len()`
+    /// after them all), in order. While a run was held at the tick's start, every press of its
+    /// events is the menu's.
+    pub fn input_with(
+        &mut self,
+        s: &State,
+        io: &Io,
+        input: &[InputEvent],
+        quiet: bool,
+        now: u64,
+        dismissals: &[usize],
+    ) -> Vec<InputEvent> {
         let mut tail = Vec::new();
         self.new_input = false;
+        self.now = now;
+        let prompt = crate::engine::command_prompt(s);
         let held = self.run.is_some();
         if let Some(run) = self.run {
-            match run.step(s, quiet && input.iter().all(inert)) {
+            match run.step(s, quiet && input.iter().all(|e| inert(prompt, e))) {
                 Step::Hold => {}
                 Step::Release(press) => {
                     tail.extend(press);
@@ -963,11 +1012,18 @@ impl Popup {
         }
         let mut out = Vec::with_capacity(input.len() + tail.len());
         let mut calm = quiet;
-        for &ev in input {
+        let mut marks = dismissals.iter().copied().peekable();
+        for (i, &ev) in input.iter().enumerate() {
+            while marks.next_if(|&m| m <= i).is_some() {
+                self.new_input |= self.dismiss();
+            }
             if !self.take(s, io, ev, (calm, held), &mut out) {
-                calm &= inert(&ev);
+                calm &= inert(prompt, &ev);
                 out.push(ev);
             }
+        }
+        if marks.next().is_some() {
+            self.new_input |= self.dismiss();
         }
         out.extend(tail);
         out
@@ -1004,12 +1060,20 @@ impl Popup {
                 self.pointer_event(s, io, (x, y), buttons, (calm, held), out)
             }
             InputEvent::Key(k) | InputEvent::Repeat(k) | InputEvent::Paced(k) => {
-                let repeat = matches!(ev, InputEvent::Repeat(_) | InputEvent::Paced(_));
+                // A paced press (spec 19 O1c) is the platform's, for a key held: as a repeat it
+                // never ends the menu's hold on the key nor counts as the key's own press, and it
+                // never moves the highlight nor is new input (the player pressed nothing).
+                let paced = matches!(ev, InputEvent::Paced(_));
+                let repeat = paced || matches!(ev, InputEvent::Repeat(_));
                 let taken = self.keys.iter().position(|&(t, _)| t == k);
                 if self.open.is_none() {
-                    // A press with the menu closed is the game's, and so is the key from then on.
-                    if !repeat && let Some(i) = taken {
-                        self.keys.remove(i);
+                    // A press with the menu closed is the game's, and so is the key from then on;
+                    // it ends a double click.
+                    if !repeat {
+                        if let Some(i) = taken {
+                            self.keys.remove(i);
+                        }
+                        self.chose = None;
                     }
                     return repeat && taken.is_some();
                 }
@@ -1017,8 +1081,10 @@ impl Popup {
                     Some(i) => self.keys[i].1 |= !repeat,
                     None => self.keys.push((k, !repeat)),
                 }
-                self.new_input = true;
-                self.key_event(s, k, repeat, out);
+                if !paced {
+                    self.new_input = true;
+                    self.key_event(s, k, repeat, out);
+                }
                 true
             }
             InputEvent::Release(k) => {
@@ -1030,6 +1096,9 @@ impl Popup {
                 took
             }
             InputEvent::Text(_) => {
+                if self.open.is_none() {
+                    self.chose = None;
+                }
                 self.new_input |= self.open.is_some();
                 self.open.is_some()
             }
@@ -1069,19 +1138,25 @@ impl Popup {
             return true;
         }
         if self.open.is_none() {
-            if down != 0 && (held || self.run.is_some() || self.double_click(io, x, y)) {
+            let double = down != 0 && self.double_click(down, x, y);
+            if down != 0 && (held || self.run.is_some() || double) {
                 // A press while a chosen command waits for its target, or the second press of a
                 // double click on the entry: the menu's, with its release. The double click is
                 // the choice's tail; a press while the command waits is new.
-                self.new_input |= !self.double_click(io, x, y);
+                self.new_input |= !double;
                 self.chose = None;
                 self.swallow = true;
                 self.mute = true;
                 self.pointer = Some(at);
                 return true;
             }
+            if down != 0 {
+                // Any other press (the game's, or the one that opens the menu) ends a double
+                // click: one is the choosing press and the next, uninterrupted.
+                self.chose = None;
+            }
             let press = b == POINTER_RIGHT && before == 0;
-            if press && calm && self.run.is_none() && s.main.reading == 1 && s.ui.input.accept {
+            if press && calm && self.run.is_none() && crate::engine::command_prompt(s) {
                 let open = menu::query(s, io, x, y).map(|m| Open::new(&m, (x, y), s, &self.hidden));
                 if let Some(open) = open.filter(|o| !o.entries().is_empty()) {
                     self.open = Some(open);
@@ -1108,7 +1183,12 @@ impl Popup {
             match open.row_at(x, y) {
                 Some(i) => {
                     if open.item(i).is_some_and(|item| item.enabled()) {
-                        self.chose = Some((io.now_ms(), x, y));
+                        self.chose = Some(Chose {
+                            at: self.now,
+                            x,
+                            y,
+                            button: POINTER_LEFT,
+                        });
                         self.choose(s, i, out);
                     }
                 }
@@ -1121,13 +1201,16 @@ impl Popup {
         true
     }
 
-    /// A press at frame pixel (x, y) now is the second press of a double click on the entry
-    /// chosen last.
-    fn double_click(&self, io: &Io, x: i16, y: i16) -> bool {
-        self.chose.is_some_and(|(t, cx, cy)| {
-            io.now_ms().saturating_sub(t) <= DOUBLE_CLICK_MS
-                && (x - cx).abs() <= DOUBLE_CLICK_PX
-                && (y - cy).abs() <= DOUBLE_CLICK_PX
+    /// A press of buttons `down` at frame pixel (x, y) now is the second press of a double click
+    /// on the entry chosen last: the choosing press's button alone, within [`DOUBLE_CLICK_MS`] of
+    /// it on the player's clock and [`DOUBLE_CLICK_PX`] of its pixel, no press between them having
+    /// reached the game ([`Popup::chose`] is cleared then).
+    fn double_click(&self, down: u8, x: i16, y: i16) -> bool {
+        self.chose.is_some_and(|c| {
+            down == c.button
+                && self.now.saturating_sub(c.at) <= DOUBLE_CLICK_MS
+                && (x - c.x).abs() <= DOUBLE_CLICK_PX
+                && (y - c.y).abs() <= DOUBLE_CLICK_PX
         })
     }
 
@@ -1194,11 +1277,13 @@ impl Popup {
     }
 
     /// Closes an open menu as a press outside it would (the platform's press that reaches no
-    /// frame pixel: off the canvas, in a gap or the letterbox); true when one was open.
+    /// frame pixel: off the canvas, in a gap or the letterbox); true when one was open. As a press,
+    /// it ends a double click.
     pub fn dismiss(&mut self) -> bool {
         let open = self.open.is_some();
         self.close();
         self.pointer = None;
+        self.chose = None;
         open
     }
 

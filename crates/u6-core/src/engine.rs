@@ -84,7 +84,7 @@ pub fn command_prompt(s: &State) -> bool {
 
 /// Port (spec 19 O1c): `e` is taken back at the command prompt: a platform's repeat of a
 /// direction key, with `prompt` ([`command_prompt`]).
-fn taken_back(prompt: bool, e: &InputEvent) -> bool {
+pub(crate) fn taken_back(prompt: bool, e: &InputEvent) -> bool {
     prompt && matches!(e, InputEvent::Repeat(k) if k.is_direction())
 }
 
@@ -298,6 +298,13 @@ impl Io {
     /// Events queued and not yet consumed.
     pub fn pending_events(&self) -> usize {
         self.events.borrow().len()
+    }
+
+    /// Puts `e` at the end of the game's queue as a tick left it there (tests: a queue a tick
+    /// does not make on its own).
+    #[cfg(test)]
+    pub(crate) fn queue_event(&self, e: InputEvent) {
+        self.events.borrow_mut().push_back(e);
     }
 
     /// The screen as it was last published (the picture on display, before this poll's draws).
@@ -822,6 +829,10 @@ pub struct Engine {
     /// Port-only (spec 17): the key events (presses, repeats, releases) the menu let through to
     /// the game ([`Engine::game_keys`]).
     game_keys: u64,
+    /// Port-only (spec 17): the platform's wall clock (ms) as last given
+    /// ([`Engine::set_wall_clock`]), which the context menu times a double click on; `None`
+    /// until then (the engine's clock instead).
+    wall_ms: Option<u64>,
     /// The screen frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
     /// Bumped each time `shown` is composed again ([`Engine::frame_version`]).
@@ -907,6 +918,7 @@ impl Engine {
             game_presses: 0,
             passed_buttons: 0,
             game_keys: 0,
+            wall_ms: None,
             shown: Framebuffer::new(),
             shown_version: 0,
             src_version: 0,
@@ -929,15 +941,37 @@ impl Engine {
     /// [`crate::ui::pointer::vblank`]).
     ///
     /// Port-only (spec 17): with the context menu on, `input` goes through it first
-    /// ([`crate::ui::popup::Popup::input`]): what it takes never reaches the queue, and a choice's
-    /// presses take their place; the menu is drawn over the published frame ([`Engine::screen_frame`]).
+    /// ([`crate::ui::popup::Popup::input_with`], on the platform's wall clock,
+    /// [`Engine::set_wall_clock`]): what it takes never reaches the queue, and a choice's presses
+    /// take their place; the menu is drawn over the published frame ([`Engine::screen_frame`]).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
+        self.tick_dismissing(input, &[], elapsed_ms);
+    }
+
+    /// [`Engine::tick`] with the platform's presses that reached no frame pixel (off the canvas,
+    /// in the HD layout's gaps or the letterbox) in order among `input`'s events: each closes an
+    /// open context menu where it stands (before `input[i]` for index `i`, after them all for
+    /// `input.len()`; ascending), as [`Engine::dismiss_context_menu`] does at once.
+    pub fn tick_dismissing(&mut self, input: &[InputEvent], dismissals: &[usize], elapsed_ms: u32) {
         let through;
         let input = if self.popup.on() {
-            let quiet = self.io.pending_events() == 0;
-            through = self
-                .popup
-                .input(&self.state.borrow(), &self.io, input, quiet);
+            // Nothing queued for the game but the repeats the prompt takes back (below).
+            let prompt = !self.finished && command_prompt(&self.state.borrow());
+            let quiet = self
+                .io
+                .events
+                .borrow()
+                .iter()
+                .all(|e| taken_back(prompt, e));
+            let now = self.wall_ms.unwrap_or_else(|| self.io.now_ms());
+            through = self.popup.input_with(
+                &self.state.borrow(),
+                &self.io,
+                input,
+                quiet,
+                now,
+                dismissals,
+            );
             for e in &through {
                 match *e {
                     InputEvent::Pointer { buttons, .. } => {
@@ -945,10 +979,15 @@ impl Engine {
                         self.game_presses += u64::from(b & !self.passed_buttons != 0);
                         self.passed_buttons = b;
                     }
-                    InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Release(_) => {
+                    // The prompt takes it back: it never reaches the game.
+                    InputEvent::Repeat(_) if taken_back(prompt, e) => {}
+                    InputEvent::Key(_)
+                    | InputEvent::Repeat(_)
+                    | InputEvent::Paced(_)
+                    | InputEvent::Release(_) => {
                         self.game_keys += 1;
                     }
-                    _ => {}
+                    InputEvent::Text(_) => {}
                 }
             }
             // Unit M4's seam (spec 21): "Go here" chosen in this input starts travel to its cell
@@ -1047,12 +1086,51 @@ impl Engine {
                 self.src_publishes += u64::from(src_only);
             }
         }
-        // Port-only (spec 17 Presentation): the screen frame is the published one with the menu
-        // over it, synced again (and the menu drawn again over it) whenever either changed.
+        crate::ui::pointer::update_shape(&mut self.state.borrow_mut());
+        let first = self.ticks == 1;
+        let sprite = self.sprite_now();
+        self.compose(presented, src_only, first, sprite);
+    }
+
+    /// The pointer sprite as it is now, its shape as last updated
+    /// ([`crate::ui::pointer::update_shape`], the vertical blank's): at the input handler's
+    /// position ([`crate::ui::pointer::sprite`]); spec 17, while the context menu takes the pointer,
+    /// at the menu's instead (the game's sample stays where the game took it), in the arrow over
+    /// the open menu, else (a press it took, held) in the game's own shape.
+    fn sprite_now(&self) -> Option<crate::ui::pointer::SpriteFrame> {
+        let s = self.state.borrow();
+        let ptr = &s.ui.pointer;
+        match self.popup.pointer() {
+            Some(p) => {
+                let shape = if self.popup.open().is_some() {
+                    0
+                } else {
+                    ptr.shape
+                };
+                crate::ui::pointer::sprite_as(ptr, shape, p)
+            }
+            None => crate::ui::pointer::sprite(ptr, self.io.handler_pointer()),
+        }
+    }
+
+    /// Composes the frames the platform reads, the one place both are (a tick's, and a change of
+    /// the drawn menu outside one, [`Engine::redraw_menu`]): the screen frame, the published one
+    /// with the context menu over it (spec 17 Presentation), synced again (and the menu drawn
+    /// again over it) when the game `presented` (or its sources alone, `src_only`), the drawn menu
+    /// changed, or at the `first` tick; then the shown frame, the screen frame with `sprite` over
+    /// it, when the screen frame changed, the sprite moved or at the first tick. Unit D2's view
+    /// step (spec 20) goes between the two.
+    fn compose(
+        &mut self,
+        presented: bool,
+        src_only: bool,
+        first: bool,
+        sprite: Option<crate::ui::pointer::SpriteFrame>,
+    ) {
         let drawn = self.popup.version();
         let menu_moved = drawn != self.drawn_popup;
         let layered = presented || menu_moved;
-        if layered || src_only || self.ticks == 1 {
+        if layered || src_only || first {
             self.layer.sync_from(&mut self.io.published.borrow_mut());
             if let Some(open) = self.popup.open() {
                 open.draw(&mut self.layer, &self.state.borrow());
@@ -1060,20 +1138,7 @@ impl Engine {
             self.drawn_popup = drawn;
             self.layer_version += u64::from(layered || src_only);
         }
-        let at = self.io.handler_pointer();
-        let mut sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
-        if let Some(p) = self.popup.pointer() {
-            // The menu's pointer: the game's sample stays where the game took it. In the arrow
-            // over the open menu, else (a press it took, held) in the game's own shape.
-            let ptr = &self.state.borrow().ui.pointer;
-            let shape = if self.popup.open().is_some() {
-                0
-            } else {
-                ptr.shape
-            };
-            sprite = crate::ui::pointer::sprite_as(ptr, shape, p);
-        }
-        if layered || sprite != self.sprite || self.ticks == 1 {
+        if layered || sprite != self.sprite || first {
             self.shown.sync_from(&mut self.layer);
             if let Some(sp) = &sprite {
                 sp.draw(&mut self.shown);
@@ -1180,7 +1245,9 @@ impl Engine {
     }
 
     /// Port-only (spec 17 Presentation): the frame rects (x0, y0, x1, y1 inclusive) the platform
-    /// shows something else over: a context menu opened later keeps off them where it can.
+    /// shows something else over: a context menu opened from then keeps off them where it can,
+    /// and one open now is laid out again for them and drawn again at once
+    /// ([`crate::ui::popup::Popup::set_hidden`]).
     pub fn set_context_menu_hidden(&mut self, rects: Vec<crate::ui::popup::Rect>) {
         self.popup.set_hidden(rects, &self.state.borrow());
         self.redraw_menu();
@@ -1195,24 +1262,24 @@ impl Engine {
         open
     }
 
-    /// The screen frame and the shown frame again when the drawn menu changed outside a tick
-    /// (laid out again, dismissed), as a tick composes them.
+    /// The screen frame and the shown frame again after a change of the menu outside a tick
+    /// (laid out again, dismissed, turned off), as a tick composes them ([`Engine::compose`]):
+    /// the sprite as it is now ([`Engine::sprite_now`], so a dismissed menu's arrow gives way to
+    /// the game's pointer in the same frame). Nothing before the first tick, which composes both.
     fn redraw_menu(&mut self) {
-        let drawn = self.popup.version();
-        if drawn == self.drawn_popup {
+        if self.ticks == 0 {
             return;
         }
-        self.layer.sync_from(&mut self.io.published.borrow_mut());
-        if let Some(open) = self.popup.open() {
-            open.draw(&mut self.layer, &self.state.borrow());
-        }
-        self.drawn_popup = drawn;
-        self.layer_version += 1;
-        self.shown.sync_from(&mut self.layer);
-        if let Some(sp) = &self.sprite {
-            sp.draw(&mut self.shown);
-        }
-        self.shown_version += 1;
+        let sprite = self.sprite_now();
+        self.compose(false, false, false, sprite);
+    }
+
+    /// Port-only (spec 17): the platform's wall clock now (ms on any timeline that only moves
+    /// forward), which the context menu times a double click on: a click is the player's, so
+    /// its window is the player's time at any speed, where the engine's clock runs as fast as
+    /// the game is stepped. Until given, the engine's clock (the player's at 1×).
+    pub fn set_wall_clock(&mut self, ms: u64) {
+        self.wall_ms = Some(ms);
     }
 
     /// Port-only (spec 17): the presses the context menu let through to the game (button-down
@@ -1221,8 +1288,9 @@ impl Engine {
         self.game_presses
     }
 
-    /// Port-only (spec 17): the key events (presses, repeats and releases) the context menu let
-    /// through to the game, counted while it is on; the keys it takes itself are left out.
+    /// Port-only (spec 17): the key events (presses, repeats, paced presses and releases) the
+    /// context menu let through to the game, counted while it is on; the keys it takes itself
+    /// and the repeats the command prompt takes back are left out.
     pub fn game_keys(&self) -> u64 {
         self.game_keys
     }
@@ -1358,6 +1426,10 @@ impl Engine {
     pub fn held_press(&self, input: &[InputEvent], held: Option<Key>) -> Option<InputEvent> {
         let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. }) && !taken_back(true, e);
         let held = held.filter(|k| k.is_direction())?;
+        // Spec 17: a key the context menu holds (open, or the key its own) is the menu's.
+        if self.popup.on() && self.popup.holds(held) {
+            return None;
+        }
         let prompt = !self.finished && command_prompt(&self.state.borrow());
         let waiting = input.iter().any(key) || self.io.events.borrow().iter().any(key);
         (prompt && !waiting).then_some(InputEvent::Paced(held))
