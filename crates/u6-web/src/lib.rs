@@ -2191,8 +2191,9 @@ mod tests {
         assert_eq!(game.pending, [p(42, 52, 0)], "moves after it collapse");
     }
 
-    /// Spec 22 Contract 7: a relaunch starts the page's stream again (`put_on_screen`: no button
-    /// handed to the new engine): a press the old engine took keeps no two moves apart after it.
+    /// Spec 22 Contract 5 "Positions": a relaunch starts the page's stream again (`put_on_screen`:
+    /// no button handed to the new engine): a press the old engine took keeps no two moves apart
+    /// after it.
     #[test]
     fn a_press_handed_before_a_relaunch_keeps_no_moves_apart_after_it() {
         let idle = || {

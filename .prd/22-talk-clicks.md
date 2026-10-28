@@ -107,9 +107,11 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
      wait, one event a take (`Io::take_pointer_upto(1)`), the hover drawn after each, up to a click's release: that
      release puts its keys in front of the queue and ends the pass. The events queued after it wait behind those keys
      for the next reader, which takes them as its own pointer events once the keys are taken (their Enter ends this
-     read) and does with them what such events do there: a string read (f9) takes them and types nothing for them
-     (tested); read from the code, not tested, a next f7 read starts with `talk::begin` and then hit-tests them in its
-     first pass (`ui/keyread.rs` `edit_line`). Elsewhere the original's event wait takes one a pass. So presses
+     read) and does with them what such events do there: a string read (f9) takes them one change of the buttons a
+     pass and types nothing for them (tested); a next f7 read starts with `talk::begin` and then hit-tests them in its
+     first pass (`ui/keyread.rs` `edit_line`, read from the code), and a click there on a keyword the answer showed
+     types it (tested).
+     Elsewhere the original's event wait takes one a pass. So presses
      and releases queued together, on targets or off them, are taken before the wait's next frame up to a click's
      release, and a press and its release queued together alone type the word in that pass and leave no pointer event
      behind it.
@@ -119,7 +121,9 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
      keeps them apart too: `Game::pointer` (`crates/u6-web/src/lib.rs` `queue_pointer`) replaces the pointer event
      queued last only by a move with the same buttons, and only when that event is a move itself: its buttons equal
      those of the pointer event queued before it, or, none queued, those of the last one `Game::step` handed to the
-     engine (`Game::handed`). A press or a release is never replaced, so the held moves after a press follow it.
+     engine (`Game::handed`). A press or a release is never replaced, so the held moves after a press follow it. A
+     relaunch (`put_on_screen`, a new engine on screen) starts that stream again: `Game::handed` goes back to 0, so a
+     press the old engine took keeps no two moves after the relaunch apart.
    - The injected keys go in front of the queue without the input handler's ring limit (`KEY_RING`, 49 keys, applied
      to what `Engine::tick` queues): harmless, as the editor takes them all in that pass and its budget bounds the line
      as for typed keys.
@@ -230,11 +234,14 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   submits it; a press the scroll moves types on its release where the keyword went; the ASCII and Hangul draft is
   checked before the clicks (two cells echoed; submitted as it is) and a click puts exactly one Backspace per cell
   in front of the queue (`talk::INJECTED`, a test hook). Engine, round 4: a braced keyword whose inner space
-  overflows its row, then a newline, then a keyword at a later row's start are two words (the empty rest row spends
-  the wrap); the hover-scroll case has its control (the same hover with nothing scrolled takes `abc`, both parts
-  inverse); the cancelled press's case types a draft of its own; a hover, and a click where Name was, queued after a
-  click on Job wait behind its keys, are taken by the f9 read that follows (the hover in its first pass, the press and
-  release in its next passes, one a pass) and type nothing there. Web (`crates/u6-web/src/lib.rs`): a run of moves
+  overflows its row, then a newline, then a keyword at a later row's start: that keyword carries no rest link (the
+  empty rest row spends the wrap; its word is its own either way, as a rest follows only the row directly above); the
+  hover-scroll case has its control (the same hover with nothing scrolled takes `abc`, both parts inverse); the
+  cancelled press's case types a draft of its own; a hover, and a click where Name was, queued after a click on Job
+  wait behind its keys, are taken by the f9 read that follows (the hover in its first pass, the press and the release
+  in its next two, one a pass) and type nothing there (the hover half cannot tell which read took the hover; the
+  click half shows the f7 read took none of it). Round 5: a click queued after the click on Job, on the keyword
+  `job`'s answer shows, is taken by the next f7 read the answer jumps back to and types that keyword there. Web (`crates/u6-web/src/lib.rs`): a run of moves
   collapses and a press or a release stays where its event put it (release then hover, press then held moves, a
   release of a press the engine has), also through `Game::step`'s hand-over; a press the old engine took keeps no two
   moves apart after a relaunch (`put_on_screen` resets `Game::handed`: tested, not left as an optimisation);
@@ -253,7 +260,8 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   pointer back over Name in the cancel's frame, is released off every target, types nothing, the words are still
   read and the input line is the line before the touch (after the game took the press: Name pressed in the read,
   `Game::talk_target`, before the cancel is sent); Wide, a window dragged by its title strip during the read and
-  cancelled keeps its place at once and the next move reaches the game at its own pixel; a
+  cancelled queues its release at the rest pixel, keeps its place at once, and the next move reaches the game at its
+  own pixel; a
   press on it in the canvas sends no key and ends the conversation with the same message-window pixels as typing
   `name` + Enter, every cell but the prompt's turning cursor (the one cell that changes from frame to frame there,
   found in each run, the same in both), Original and Wide (frames with `U6_FRAMES_DIR`).

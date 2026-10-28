@@ -12716,9 +12716,11 @@ for (const layout of ['original', 'wide']) {
     if (layout === 'wide') {
       // Wide, the windows view: a touch on the date line's title strip during the read drags that
       // window and the browser cancels it. The drag ends as any release does (dragWindow): its
-      // place kept at once and no drag left over, so the next move reaches the game at its own
-      // pixel (over Name), not at the rest pixel the drag sent.
-      const date = (await wideShown(page)).windows.find((w) => w.name === 'date');
+      // release queued at the rest pixel, where its press went, its place kept at once and no
+      // drag left over, so the next move reaches the game at its own pixel (over Name), not at
+      // the rest pixel the drag sent.
+      const shownLayout = await wideShown(page);
+      const date = shownLayout.windows.find((w) => w.name === 'date');
       const strip = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5, date.bar[1] + date.bar[3] / 2 + 0.5);
       const to = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5 - 200, date.bar[1] + date.bar[3] / 2 + 0.5 + 100);
       const over = await h.screenPoint(page, ...NAME_BUTTON);
@@ -12730,14 +12732,17 @@ for (const layout of ['original', 'wide']) {
         send('pointerdown', 'touch', 1, sx, sy);
         send('pointermove', 'touch', 1, tx, ty);
         send('pointercancel', 'touch', 0, tx, ty);
+        const r = g.game_pointer();
+        const released = [r[3], r[4], r[5]];
         const kept = JSON.parse(localStorage.getItem('u6.layout.windows'))?.date ?? null;
         const shown = globalThis.__u6Layout.windows.find((w) => w.name === 'date').outer.slice(0, 2);
         send('pointermove', 'mouse', 0, ox, oy);
         const p = g.game_pointer();
-        return { reading, kept, shown, queued: p[3], at: [p[4], p[5]] };
+        return { reading, released, kept, shown, queued: p[3], at: [p[4], p[5]] };
       }, [strip, to, over]);
       assert.equal(drag.reading, true, 'the drag during the read');
       assert.deepEqual(drag.shown, [date.outer[0] - 200, date.outer[1] + 100], 'the date line dragged');
+      assert.deepEqual(drag.released, [1, ...shownLayout.rest], 'the cancel queued the release at the rest pixel');
       assert.deepEqual(drag.kept, drag.shown, 'the cancelled drag kept its place (u6.layout.windows)');
       assert.deepEqual([drag.queued, drag.at], [1, NAME_BUTTON], 'the next move queued at its own pixel, not the rest pixel');
       await page.mouse.move(...over);
