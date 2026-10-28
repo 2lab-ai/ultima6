@@ -487,7 +487,10 @@ impl Polled<'_> {
         }
         let mut buttons = self.buttons;
         self.input.iter().any(|e| match *e {
-            InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Text(_) => true,
+            InputEvent::Key(_)
+            | InputEvent::Repeat(_)
+            | InputEvent::Paced(_)
+            | InputEvent::Text(_) => true,
             InputEvent::Release(_) => false,
             InputEvent::Pointer { buttons: b, .. } => {
                 let pressed = b & !buttons != 0;

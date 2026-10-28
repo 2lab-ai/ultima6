@@ -55,6 +55,56 @@ pub enum Key {
     Char(char),
 }
 
+impl Key {
+    /// Port (spec 19 O1c): one of the four direction keys, the ones a held key walks with at
+    /// the game's pace ([`Engine::held_press`]).
+    pub fn is_direction(self) -> bool {
+        matches!(self, Key::Up | Key::Down | Key::Left | Key::Right)
+    }
+}
+
+/// Port (spec 19 O1c): the shortest wall time between two steps of a held direction key: a
+/// platform adds a press for it ([`Engine::held_press`]) only once it has been down this long
+/// and the command prompt took its last press (the key's own or a paced one) this long ago
+/// ([`paced_press_due`]). Above about 4.3× a turn ends within it (the castle's 640 ms is 80
+/// wall ms at 8×), so a tap is one step at any speed and a held walk keeps an even cadence,
+/// max(turn / speed, this).
+pub const MIN_STEP_MS: u32 = 150;
+
+/// Port (spec 19 O1c): whether a held direction key is due its next paced press: down
+/// `down_ms` wall ms since its press, and `since_step_ms` since the command prompt last took a
+/// press ([`Io::prompt_takes`]; None: never), both at least [`MIN_STEP_MS`]. The key's own
+/// press is the platform's and comes at once; this paces only the presses added after it, from
+/// the step the prompt last took, so the interval holds between steps however late a frame
+/// delivered the one before.
+pub fn paced_press_due(down_ms: f64, since_step_ms: Option<f64>) -> bool {
+    let min = f64::from(MIN_STEP_MS);
+    down_ms >= min && since_step_ms.is_none_or(|ms| ms >= min)
+}
+
+/// Port (spec 19 O1c): the command loop waits for a command key: A4-0x7a2c set (only around
+/// the command read, 0x1041d8), no cross-hair or panel cursor (A4-0x7a60 clear) and key events
+/// taken as commands (A4-0x7a42 set: no more prompt). There a platform paces a held direction
+/// key ([`Engine::held_press`]) and the platform's own repeats of a direction key are taken
+/// back ([`InputEvent::Repeat`]); every other wait reads them.
+pub fn command_prompt(s: &State) -> bool {
+    s.main.reading == 1 && s.ui.input.targeting == 0 && s.ui.input.accept
+}
+
+/// Port (spec 19 O1c): `e` is taken back at the command prompt: a platform's repeat of a
+/// direction key, with `prompt` ([`command_prompt`]).
+fn taken_back(prompt: bool, e: &InputEvent) -> bool {
+    prompt && matches!(e, InputEvent::Repeat(k) if k.is_direction())
+}
+
+/// Port (spec 19 O1c): of the keys a platform has down, oldest first (each with what the
+/// platform keeps beside it, such as its press time), the newest direction key: the one a
+/// held walk goes on with. A repeat of an older key does not make it newer (a platform keeps
+/// each held key at its first press), and once the newest is let go the one before it walks.
+pub fn newest_direction<T>(held: impl DoubleEndedIterator<Item = (Key, T)>) -> Option<(Key, T)> {
+    held.rev().find(|(k, _)| k.is_direction())
+}
+
 /// One input event, queued by the platform and consumed in order by the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InputEvent {
@@ -63,7 +113,16 @@ pub enum InputEvent {
     Key(Key),
     /// Port (spec 19 O1b): a press the platform's auto-repeat sent for a key still held, read as
     /// a press ([`Io::next_key`]) unless the key's [`InputEvent::Release`] took it back first.
+    /// Port (spec 19 O1c): at the command prompt ([`command_prompt`]) a direction key's repeat
+    /// is taken back, in the input of a tick and in the queue, so the paced press
+    /// ([`InputEvent::Paced`]) is the one step source there; the cross-hair, the more prompt,
+    /// the line editor and every other wait read it.
     Repeat(Key),
+    /// Port (spec 19 O1c): a press of a held direction key the platform added at the command
+    /// prompt ([`Engine::held_press`]), paced by [`MIN_STEP_MS`]. Read as a press; the key's
+    /// release takes it back as it does a repeat, and the command prompt's take-back of the
+    /// platform's repeats leaves it.
+    Paced(Key),
     /// Port (spec 19 O1b): the key let go (platforms send it for each key a held physical key
     /// gave, whatever the modifiers are at the release). It is never queued and takes no slot of
     /// the ring ([`KEY_RING`]): where the engine queues the input ([`Engine::tick`]), while
@@ -175,6 +234,12 @@ pub struct Io {
     window_cache: Cell<bool>,
     /// Port-only: [`Io::set_sight_memory`].
     sight_memory: Cell<bool>,
+    /// Port (spec 19 O1c): the state of the game this `Io` serves, set once by the engine that
+    /// made it, so a take reads whether the command prompt waits ([`command_prompt`]) as it is
+    /// at the take.
+    prompt_state: OnceCell<std::rc::Weak<RefCell<State>>>,
+    /// Port (spec 19 O1c): [`Io::prompt_takes`].
+    prompt_takes: Cell<u64>,
 }
 
 impl Io {
@@ -196,6 +261,36 @@ impl Io {
             back_writes: Cell::new(0),
             window_cache: Cell::new(true),
             sight_memory: Cell::new(false),
+            prompt_state: OnceCell::new(),
+            prompt_takes: Cell::new(0),
+        }
+    }
+
+    /// Port (spec 19 O1c): the presses the command prompt has taken ([`command_prompt`] at the
+    /// take: a key, a repeat it did not take back, a paced press), ever. A platform stamps the
+    /// step's time when it moves ([`paced_press_due`]).
+    pub fn prompt_takes(&self) -> u64 {
+        self.prompt_takes.get()
+    }
+
+    /// Whether the command prompt waits now ([`command_prompt`]; false for an `Io` no engine
+    /// serves, and while the state is borrowed mutably, which no take does).
+    fn at_command_prompt(&self) -> bool {
+        let Some(state) = self.prompt_state.get().and_then(std::rc::Weak::upgrade) else {
+            return false;
+        };
+        let at = state.try_borrow().map(|s| command_prompt(&s));
+        debug_assert!(
+            at.is_ok(),
+            "a key taken while the state is borrowed mutably"
+        );
+        at.unwrap_or(false)
+    }
+
+    /// One press taken: counted when the command prompt took it ([`Io::prompt_takes`]).
+    fn took(&self, prompt: bool) {
+        if prompt {
+            self.prompt_takes.set(self.prompt_takes.get() + 1);
         }
     }
 
@@ -229,6 +324,7 @@ impl Io {
             InputEvent::Pointer { x, y, buttons } => Some(Pointer::apply(x, y, buttons)),
             InputEvent::Key(_)
             | InputEvent::Repeat(_)
+            | InputEvent::Paced(_)
             | InputEvent::Release(_)
             | InputEvent::Text(_) => None,
         });
@@ -268,15 +364,19 @@ impl Io {
 
     /// True when the next queued event is a key (a pointer event before it is taken first, by
     /// [`Io::take_pointer`]). Text at the front of the queue is dropped first (a reader of keys
-    /// takes none), so it never holds back the events behind it.
+    /// takes none), so it never holds back the events behind it; so, at the command prompt, is
+    /// a repeat it takes back ([`InputEvent::Repeat`]).
     pub fn key_ready(&self) -> bool {
+        let prompt = self.at_command_prompt();
         let mut events = self.events.borrow_mut();
-        while matches!(events.front(), Some(InputEvent::Text(_))) {
+        while let Some(e) = events.front()
+            && (matches!(e, InputEvent::Text(_)) || taken_back(prompt, e))
+        {
             events.pop_front();
         }
         matches!(
             events.front(),
-            Some(InputEvent::Key(_) | InputEvent::Repeat(_))
+            Some(InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Paced(_))
         )
     }
 
@@ -287,17 +387,23 @@ impl Io {
     /// [`crate::ui::keyread`]): every key press queued (presses and repeats) is taken and the
     /// newest is the one given. Text goes with them (a reader of keys takes none); pointer
     /// events keep their places (the original's pointer is no code of the ring). None when no
-    /// key press is queued.
+    /// key press is queued. At the command prompt the repeats it takes back go too, and are not
+    /// given ([`InputEvent::Repeat`]).
     pub fn take_newest_key(&self) -> Option<Key> {
+        let prompt = self.at_command_prompt();
         let mut newest = None;
         self.events.borrow_mut().retain(|e| match *e {
-            InputEvent::Key(k) | InputEvent::Repeat(k) => {
+            _ if taken_back(prompt, e) => false,
+            InputEvent::Key(k) | InputEvent::Repeat(k) | InputEvent::Paced(k) => {
                 newest = Some(k);
                 false
             }
             InputEvent::Text(_) | InputEvent::Release(_) => false,
             InputEvent::Pointer { .. } => true,
         });
+        if newest.is_some() {
+            self.took(prompt);
+        }
         newest
     }
 
@@ -308,11 +414,22 @@ impl Io {
     }
 
     /// Port-only (spec 08 Design 4, slice K5a): as [`Io::key_ready`] for the line editor: true
-    /// when the next queued event is a key or a character of text (nothing is dropped).
+    /// when the next queued event is a key or a character of text (nothing is dropped but, at
+    /// the command prompt, the repeats it takes back, [`InputEvent::Repeat`]).
     pub fn typed_ready(&self) -> bool {
+        let prompt = self.at_command_prompt();
+        let mut events = self.events.borrow_mut();
+        while events.front().is_some_and(|e| taken_back(prompt, e)) {
+            events.pop_front();
+        }
         matches!(
-            self.events.borrow().front(),
-            Some(InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Text(_))
+            events.front(),
+            Some(
+                InputEvent::Key(_)
+                    | InputEvent::Repeat(_)
+                    | InputEvent::Paced(_)
+                    | InputEvent::Text(_)
+            )
         )
     }
 
@@ -555,10 +672,15 @@ pub struct NextKey<'a> {
 impl Future for NextKey<'_> {
     type Output = Key;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Key> {
+        let prompt = self.io.at_command_prompt();
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(InputEvent::Key(key) | InputEvent::Repeat(key)) => return Poll::Ready(key),
+                Some(e) if taken_back(prompt, &e) => {}
+                Some(InputEvent::Key(key) | InputEvent::Repeat(key) | InputEvent::Paced(key)) => {
+                    self.io.took(prompt);
+                    return Poll::Ready(key);
+                }
                 Some(InputEvent::Pointer { x, y, buttons }) => {
                     self.io.pointer.set(Pointer::apply(x, y, buttons));
                 }
@@ -577,10 +699,13 @@ pub struct NextTyped<'a> {
 impl Future for NextTyped<'_> {
     type Output = Typed;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Typed> {
+        let prompt = self.io.at_command_prompt();
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(InputEvent::Key(key) | InputEvent::Repeat(key)) => {
+                Some(e) if taken_back(prompt, &e) => {}
+                Some(InputEvent::Key(key) | InputEvent::Repeat(key) | InputEvent::Paced(key)) => {
+                    self.io.took(prompt);
                     return Poll::Ready(Typed::Key(key));
                 }
                 Some(InputEvent::Text(c)) => return Poll::Ready(Typed::Text(c)),
@@ -765,6 +890,7 @@ impl Engine {
     {
         let state = Rc::new(RefCell::new(state));
         let io = Rc::new(Io::new(files));
+        let _ = io.prompt_state.set(Rc::downgrade(&state));
         let task: Task = Box::pin(game(Rc::clone(&state), Rc::clone(&io)));
         Engine {
             state,
@@ -792,8 +918,9 @@ impl Engine {
     }
 
     /// One host tick: queue `input` (keys past the handler's ring, [`KEY_RING`], and text past
-    /// [`TEXT_RING`] are dropped; a release is applied, [`InputEvent::Release`]), advance the
-    /// clock by `elapsed_ms`, poll the game once (also
+    /// [`TEXT_RING`] are dropped; a release is applied, [`InputEvent::Release`]; at the command
+    /// prompt the repeats it takes back are dropped, from the queue too, [`InputEvent::Repeat`]),
+    /// advance the clock by `elapsed_ms`, poll the game once (also
     /// while it waits; never after it finished), bump the display generation, publish the front
     /// buffer if the game presented, then the vertical-blank work of the display (the pointer
     /// sprite, at the handler's position, over the published frame,
@@ -820,13 +947,22 @@ impl Engine {
                     .count()
             };
             let (mut keys, mut texts) = (count(false), count(true));
-            let cancel = {
+            let (cancel, prompt) = {
                 let s = self.state.borrow();
-                s.main.program == main_loop::Program::Game && s.ui.input.drain
+                let cancel = s.main.program == main_loop::Program::Game && s.ui.input.drain;
+                (cancel, !self.finished && command_prompt(&s))
             };
+            if prompt {
+                let before = events.len();
+                events.retain(|q| !taken_back(true, q));
+                keys -= before - events.len();
+            }
             for &e in input {
                 let (held, room) = match e {
-                    InputEvent::Key(_) | InputEvent::Repeat(_) => (&mut keys, KEY_RING),
+                    _ if taken_back(prompt, &e) => continue,
+                    InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Paced(_) => {
+                        (&mut keys, KEY_RING)
+                    }
                     InputEvent::Text(_) => (&mut texts, TEXT_RING),
                     InputEvent::Pointer { .. } => {
                         events.push_back(e);
@@ -835,7 +971,9 @@ impl Engine {
                     InputEvent::Release(k) => {
                         if cancel {
                             let before = events.len();
-                            events.retain(|q| *q != InputEvent::Repeat(k));
+                            events.retain(|q| {
+                                *q != InputEvent::Repeat(k) && *q != InputEvent::Paced(k)
+                            });
                             keys -= before - events.len();
                         }
                         continue;
@@ -1138,6 +1276,28 @@ impl Engine {
         }
         self.io.keys_owned() | crate::ui::target::keys_owned(&self.state.borrow())
     }
+
+    /// Port (spec 19 O1c): the press a platform adds to `input` before a tick for `held`, the
+    /// direction key it has down ([`newest_direction`]; a walking one: first pressed without
+    /// Ctrl, Alt or Meta, and due by [`paced_press_due`]): its paced press
+    /// ([`InputEvent::Paced`]) when the command loop waits for a command key
+    /// ([`command_prompt`]) and no key waits, neither queued nor in `input` (pointer events may,
+    /// and the platform's repeats of direction keys, which the prompt takes back). So a held
+    /// direction key is pressed again at the first command prompt it is due at and walks one
+    /// step a turn or one per [`MIN_STEP_MS`], whichever is longer, the one step source there;
+    /// every other wait reads the platform's own repeat. None otherwise, and for any other key.
+    pub fn held_press(&self, input: &[InputEvent], held: Option<Key>) -> Option<InputEvent> {
+        let key = |e: &InputEvent| !matches!(e, InputEvent::Pointer { .. }) && !taken_back(true, e);
+        let held = held.filter(|k| k.is_direction())?;
+        let prompt = !self.finished && command_prompt(&self.state.borrow());
+        let waiting = input.iter().any(key) || self.io.events.borrow().iter().any(key);
+        (prompt && !waiting).then_some(InputEvent::Paced(held))
+    }
+
+    /// Port (spec 19 O1c): [`Io::prompt_takes`].
+    pub fn prompt_takes(&self) -> u64 {
+        self.io.prompt_takes()
+    }
 }
 
 #[cfg(test)]
@@ -1304,6 +1464,184 @@ mod tests {
             "the key past a full ring is lost"
         );
         assert_eq!(queued.len(), 50, "the pointer event is kept");
+    }
+
+    /// Spec 19 O1c (review S1 and NIT, round 4 item 1): every branch of
+    /// [`Engine::held_press`]. At the command prompt (A4-0x7a2c set, no cross-hair, A4-0x7a42
+    /// set) with nothing waiting a held direction key gives its paced press, pointer events or
+    /// not, and the platform's repeats of direction keys (taken back there) or not; a key
+    /// queued, a key, a letter's repeat or a release in this step's input, a game finished,
+    /// another key, no key, another wait (A4-0x7a2c clear), a cross-hair (A4-0x7a60 set) or a
+    /// more prompt (A4-0x7a42 clear) give none.
+    #[test]
+    fn a_held_press_comes_only_at_a_quiet_command_prompt() {
+        let engine = |reading: u16, targeting: u8, accept: bool, ends: bool| {
+            let mut s = State::empty();
+            s.main.reading = reading;
+            s.ui.input.targeting = targeting;
+            s.ui.input.accept = accept;
+            Engine::with_game(s, Files::default(), move |_state, io| async move {
+                if !ends {
+                    io.sleep(u32::MAX).await;
+                }
+            })
+        };
+        let left = Some(Key::Left);
+        let pointer = InputEvent::Pointer {
+            x: 1,
+            y: 2,
+            buttons: 0,
+        };
+        let paced = Some(InputEvent::Paced(Key::Left));
+        let os = InputEvent::Repeat(Key::Down);
+        let e = engine(1, 0, true, false);
+        assert_eq!(e.held_press(&[], left), paced, "quiet prompt");
+        assert_eq!(e.held_press(&[pointer], left), paced, "pointer events");
+        assert_eq!(e.held_press(&[os], left), paced, "a direction's repeat");
+        assert_eq!(e.held_press(&[key('a')], left), None, "a key in the input");
+        let letter = InputEvent::Repeat(Key::Char('a'));
+        assert_eq!(e.held_press(&[letter], left), None, "a letter's repeat");
+        let up = InputEvent::Release(Key::Down);
+        assert_eq!(e.held_press(&[up], left), None, "a release in the input");
+        assert_eq!(
+            e.held_press(&[], Some(Key::Char('x'))),
+            None,
+            "not a direction"
+        );
+        assert_eq!(e.held_press(&[], None), None, "none held");
+        let mut e = engine(1, 0, true, false);
+        e.tick(&[pointer], 16);
+        assert_eq!(e.held_press(&[], left), paced, "a pointer event queued");
+        let mut e = engine(1, 0, true, false);
+        e.tick(&[key('a')], 16);
+        assert_eq!(e.held_press(&[], left), None, "a key queued");
+        assert_eq!(
+            engine(0, 0, true, false).held_press(&[], left),
+            None,
+            "another wait"
+        );
+        assert_eq!(
+            engine(1, 1, true, false).held_press(&[], left),
+            None,
+            "a cross-hair"
+        );
+        assert_eq!(
+            engine(1, 0, false, false).held_press(&[], left),
+            None,
+            "a more prompt"
+        );
+        let mut e = engine(1, 0, true, true);
+        e.tick(&[], 16);
+        assert!(e.finished());
+        assert_eq!(e.held_press(&[], left), None, "finished");
+    }
+
+    /// Spec 19 O1c (round 4 item 1): at the command prompt ([`command_prompt`]) the platform's
+    /// repeats of direction keys are taken back, in a tick's input and in the queue, also those
+    /// queued while a turn ran and met by a prompt that comes up within a tick (the take reads
+    /// the prompt as it is then); a press, a paced press and a letter's repeat are read, and
+    /// counted ([`Io::prompt_takes`]). The cross-hair, the more prompt and every other wait
+    /// (A4-0x7a2c clear) read the repeats. A game that waits 100 ms with A4-0x7a2c clear, then
+    /// sets it with `targeting` and `accept` and reads one key, over and over.
+    #[test]
+    fn the_command_prompt_takes_back_the_platforms_repeats_of_direction_keys() {
+        let run = |targeting: u8, accept: bool, input: &[(u32, InputEvent)]| {
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let out = Rc::clone(&seen);
+            let mut s = State::empty();
+            s.ui.input.targeting = targeting;
+            s.ui.input.accept = accept;
+            let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+                loop {
+                    io.sleep(100).await;
+                    st.borrow_mut().main.reading = 1;
+                    let k = io.next_key().await;
+                    st.borrow_mut().main.reading = 0;
+                    out.borrow_mut().push(k);
+                }
+            });
+            for t in 0..60 {
+                let now: Vec<InputEvent> = input
+                    .iter()
+                    .filter(|(at, _)| *at == t)
+                    .map(|&(_, e)| e)
+                    .collect();
+                e.tick(&now, 20);
+            }
+            let read = seen.borrow().clone();
+            (read, e.prompt_takes())
+        };
+        let (os, paced) = (InputEvent::Repeat(Key::Left), InputEvent::Paced(Key::Left));
+        let letter = InputEvent::Repeat(Key::Char('a'));
+        // Repeats queued during the first wait (ticks 0..4), the prompt up from the tick that
+        // ends it; then a repeat at the prompt, a paced press, a press and a letter's repeat.
+        let input = [
+            (0, os),
+            (2, os),
+            (4, os),
+            (8, os),
+            (9, paced),
+            (16, key('x')),
+            (24, letter),
+            (26, os),
+        ];
+        let (read, takes) = run(0, true, &input);
+        assert_eq!(
+            read,
+            [Key::Left, Key::Char('x'), Key::Char('a')],
+            "the paced press, the press and the letter's repeat"
+        );
+        assert_eq!(takes, 3, "counted");
+        for (targeting, accept, what) in [(1, true, "a cross-hair"), (0, false, "a more prompt")] {
+            let (read, takes) = run(targeting, accept, &input);
+            assert_eq!(read.len(), input.len(), "{what} reads them all: {read:?}");
+            assert_eq!(takes, 0, "{what}: not the command prompt");
+        }
+        let mut s = State::empty();
+        s.ui.input.accept = true;
+        let mut e = Engine::with_game(s, Files::default(), |_st, io| async move {
+            for _ in 0..3 {
+                io.next_key().await;
+            }
+        });
+        e.tick(&[os, os, os], 20);
+        assert!(e.finished(), "another wait (A4-0x7a2c clear) reads them");
+    }
+
+    /// Spec 19 O1c: a paced press waiting in the queue is taken back by its key's release, as a
+    /// repeat is, while the key waits drain.
+    #[test]
+    fn a_release_takes_back_a_paced_press() {
+        let mut s = State::empty();
+        s.main.program = main_loop::Program::Game;
+        s.ui.input.drain = true;
+        let mut e = Engine::with_game(s, Files::default(), |_state, io| async move {
+            io.sleep(u32::MAX).await;
+        });
+        e.tick(&[InputEvent::Paced(Key::Left)], 16);
+        assert_eq!(e.io().pending_events(), 1);
+        e.tick(&[InputEvent::Release(Key::Left)], 16);
+        assert_eq!(e.io().pending_events(), 0, "taken back");
+    }
+
+    /// Spec 19 O1c (D1', round 4 item 3): [`paced_press_due`] at its edges: a key down less
+    /// than [`MIN_STEP_MS`] is not due whatever the last step; down that long it is due with no
+    /// step yet or the last one that old, and not with one sooner.
+    #[test]
+    fn a_held_walk_is_due_once_down_and_stepped_the_minimum_interval_ago() {
+        let min = f64::from(MIN_STEP_MS);
+        assert!(!paced_press_due(min - 1.0, None), "a tap");
+        assert!(!paced_press_due(min - 1.0, Some(1000.0)), "down too short");
+        assert!(paced_press_due(min, None), "no step yet");
+        assert!(
+            paced_press_due(1000.0, Some(min)),
+            "the last step old enough"
+        );
+        assert!(
+            !paced_press_due(1000.0, Some(min - 1.0)),
+            "the last step too recent"
+        );
+        assert!(!paced_press_due(1000.0, Some(0.0)), "a step this frame");
     }
 
     #[test]

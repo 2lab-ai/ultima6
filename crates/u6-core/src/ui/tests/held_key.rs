@@ -6,7 +6,9 @@
 //! and the fight broken off with `b` (tools/oracle/game.mjs townSetup), fed at the hosts' step
 //! ([`STEP_MS`]) as a platform sends a key: the press, its auto-repeat at the owner's macOS rate
 //! (`InitialKeyRepeat` 15, `KeyRepeat` 2: the first repeat 225 ms after the press, then one every
-//! 30 ms) and the release, each in the tick it falls in. Against it the original's model, the
+//! 30 ms) and the release, each in the tick it falls in, and the press the platform paces at
+//! the command prompt (spec 19 O1c, [`Engine::held_press`], which takes the auto-repeat's
+//! presses back there; 1×, so engine ms are wall ms). Against it the original's model, the
 //! probe's "latest-only" row: one press put in at each prompt the key is down at, so its steps
 //! are the prompts reached while the key is down. Skips without the zip; prints step counts and
 //! engine ms only. The other tests read a drained key wait and the line editor on the test
@@ -85,14 +87,16 @@ struct Hold {
 
 /// Holds `key` from the prompt for `ms` of engine time, then idles until the prompt with nothing
 /// queued. `platform`: the platform's events (the press at 0, its repeats from
-/// [`FIRST_REPEAT_MS`] every [`REPEAT_MS`] while down, the release at `ms`); else the original's
-/// model (a press at each prompt while the key is down). A step counts as held when it shows
-/// after a tick that ends no later than `ms`.
+/// [`FIRST_REPEAT_MS`] every [`REPEAT_MS`] while down, the release at `ms`, and while down its
+/// paced press, [`crate::engine::paced_press_due`] from the last press the prompt took); else
+/// the original's model (a press at each prompt while the key is down). A step counts as held
+/// when it shows after a tick that ends no later than `ms`.
 fn hold(e: &mut Engine, key: Key, ms: u64, platform: bool) -> Hold {
     let t0 = e.io().now_ms();
     let repeats = (FIRST_REPEAT_MS..ms).step_by(REPEAT_MS as usize);
     let mut due = std::iter::once(0).chain(repeats).peekable();
     let mut released = false;
+    let mut last_step: Option<u64> = None;
     let mut at = leader(e);
     let mut h = Hold {
         held: 0,
@@ -115,10 +119,21 @@ fn hold(e: &mut Engine, key: Key, ms: u64, platform: bool) -> Hold {
                 input.push(InputEvent::Release(key));
                 released = true;
             }
+            let since = last_step.map(|t| (now - t) as f64);
+            if !released
+                && crate::engine::paced_press_due(now as f64, since)
+                && let Some(press) = e.held_press(&input, Some(key))
+            {
+                input.push(press);
+            }
         } else if now < ms && at_prompt(e) {
             input.push(InputEvent::Key(key));
         }
+        let takes = e.prompt_takes();
         e.tick(&input, STEP_MS);
+        if e.prompt_takes() != takes {
+            last_step = Some(now);
+        }
         h.most_queued = h.most_queued.max(e.io().pending_events());
         let p = leader(e);
         let then = e.io().now_ms() - t0;
@@ -140,7 +155,9 @@ fn hold(e: &mut Engine, key: Key, ms: u64, platform: bool) -> Hold {
 /// The probe's held rows (south, the way open for about 10 cells) for a hold of `ms`: the
 /// original's model, then the platform's events. A hold that starts at the prompt has its press
 /// taken there, so all that waits at the release is repeats, and the release takes them back:
-/// no step after it (with the drain alone the newest repeat would give one).
+/// no step after it (with the drain alone the newest repeat would give one). At the prompt the
+/// repeats are taken back and the paced press steps (the castle's turns outlast
+/// [`crate::engine::MIN_STEP_MS`] at 1×, so once a prompt, as the model).
 fn held_south(files: &Files, ms: u64) -> (Hold, Hold) {
     let model = hold(&mut castle(files), Key::Down, ms, false);
     let platform = hold(&mut castle(files), Key::Down, ms, true);

@@ -6,8 +6,10 @@ tags: [ultima6, ui, input]
 
 # 17 — Context menu
 
-Status: in progress (2026-10-27). Item 2 of `objects-menu-fog-motion/ssot.md`. Research: round 1 unit M1
-(`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build: round 2 unit M2.
+Status: shipped (2026-10-27, deploy 30, main bd3e670). The contract below is the implemented one, not a future
+target. Item 2 of `objects-menu-fog-motion/ssot.md`. Research: round 1 unit M1
+(`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build: round 2 unit M2; live check:
+`objects-menu-fog-motion/loop.md`, deploy 30.
 
 ## Measured facts (main 88eb5b0, re-read at 587d973)
 
