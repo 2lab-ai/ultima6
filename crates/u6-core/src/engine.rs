@@ -949,6 +949,14 @@ impl Engine {
         self.view.holding()
     }
 
+    /// Port-only (spec 23 Design 11): the bytes the message history and the view of it hold on the
+    /// heap together ([`crate::ui::scrollback::Scrollback::heap_bytes`] and
+    /// [`crate::ui::scrollback::View::heap_bytes`]): at most two bounds of lines.
+    pub fn history_heap_bytes(&self) -> usize {
+        let sb = &self.state.borrow().ui.scrollback;
+        sb.heap_bytes() + self.view.heap_bytes(sb)
+    }
+
     /// Port-only (spec 23): moves whenever the frame the HD view composes
     /// ([`Engine::with_view_frame`]) may have changed: the published frame, or the message history
     /// shown over it.

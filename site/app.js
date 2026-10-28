@@ -4035,6 +4035,12 @@ canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
 canvas.addEventListener('pointercancel', (e) =>
   sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+// A capture lost with a button still down for the game (no pointerup follows: the capture taken
+// away, the canvas hidden): every button up for it, as at a cancel. After a release the game has
+// them up already, and nothing is sent.
+canvas.addEventListener('lostpointercapture', (e) => {
+  if (sentButtons !== 0) sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
+});
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
@@ -4042,14 +4048,15 @@ canvas.addEventListener('contextmenu', (e) => {
 // --- the message history (spec 23) ---------------------------------------------------------------
 // The wheel over the message window scrolls the history the engine draws in it (Game.wheel; the
 // engine draws the lines and the scrollbar into its frame, the page adds nothing); elsewhere it
-// does nothing, and with Ctrl it is the browser's zoom. One notch is one line: a line- or
-// page-mode event one line in its direction, pixel deltas (a trackpad's) added up at
-// WHEEL_LINE_PX CSS pixels a line. The carry takes only events the engine takes (asked first,
-// Game.wheel with 0 lines), and is dropped when the direction turns, at a wheel it does not take,
-// when the pointer leaves the message window or the canvas, and at a key. The position goes
-// through the layout as a held pointer's does (`layoutToGame` with `held`): over a window's frame
-// or title strip, a gap or a window in front of the message window it is the rest pixel, outside
-// the message window.
+// does nothing, and with Ctrl it is the browser's zoom. An event with no vertical delta (a
+// horizontal swipe) is the browser's anywhere: the engine is not asked, the event not cancelled
+// and the carry untouched. One notch is one line: a line- or page-mode event one line in its
+// direction, pixel deltas (a trackpad's) added up at WHEEL_LINE_PX CSS pixels a line. The carry
+// takes only events the engine takes (asked first, Game.wheel with 0 lines), and is dropped when
+// the direction turns, at a wheel it does not take, when the pointer leaves the message window or
+// the canvas, and at a key. The position goes through the layout as a held pointer's does
+// (`pixelAt` with `held`): over a window's frame or title strip, a gap or a window in front of
+// the message window it is the rest pixel, outside the message window.
 const WHEEL_LINE_PX = 100;
 let wheelCarry = 0;
 function wheelLines(e) {
@@ -4060,22 +4067,18 @@ function wheelLines(e) {
   wheelCarry -= lines * WHEEL_LINE_PX;
   return lines;
 }
+// The game pixel of wheel or move event `e` as a held pointer's; null on a canvas with no box.
 function wheelPixel(e) {
   const box = canvas.getBoundingClientRect();
   if (box.width === 0 || box.height === 0) return null;
-  if (shownView === FRAME) {
-    return [Math.floor(((e.clientX - box.left) * game.width()) / box.width),
-      Math.floor(((e.clientY - box.top) * game.height()) / box.height)];
-  }
-  const px = ((e.clientX - box.left) * canvas.width) / box.width;
-  const py = ((e.clientY - box.top) * canvas.height) / box.height;
-  return layoutToGame(px, py, true);
+  return pixelAt(e.clientX, e.clientY, box, true);
 }
 canvas.addEventListener('wheel', (e) => {
   if (!game || crashed || e.ctrlKey) {
     wheelCarry = 0;
     return;
   }
+  if (e.deltaY === 0) return;
   const at = wheelPixel(e);
   if (!at || !game.wheel(at[0], at[1], 0)) {
     wheelCarry = 0;

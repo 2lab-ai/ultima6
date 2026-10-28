@@ -1707,7 +1707,9 @@ impl Game {
     /// A pointer button is down as the input handler has it: the last pointer event queued
     /// since the previous step (newer than the engine's), else the engine's handler pointer
     /// ([`u6_core::Io::handler_pointer`]), or a press the message history holds (spec 23: the
-    /// handler sees no button then, [`u6_core::Engine::history_holding`]). False before a start.
+    /// handler sees no button then, [`u6_core::Engine::history_holding`]) unless the last pointer
+    /// event queued has every button up (the step that takes it ends the press: paced as
+    /// released, as a game press is). False before a start.
     fn pointer_held(&self) -> bool {
         let queued = self.pending.iter().rev().find_map(|e| match *e {
             InputEvent::Pointer { buttons, .. } => Some(buttons),
@@ -1721,7 +1723,8 @@ impl Game {
                 .as_ref()
                 .map(|e| e.io().handler_pointer().buttons)
         });
-        let holding = self.engine.as_ref().is_some_and(Engine::history_holding);
+        let holding = queued.is_none_or(|b| b & 3 != 0)
+            && self.engine.as_ref().is_some_and(Engine::history_holding);
         buttons.is_some_and(|b| b & 3 != 0) || holding
     }
 
@@ -2814,7 +2817,7 @@ mod tests {
     /// Spec 23 on the user's zip (skipped when absent; read only): passes at the prompt fill the
     /// message window past its rows; scrolled back, a press on its bar is the history's until the
     /// release: the game's handler sees no button, the pace runs at 1× as with one held, and the
-    /// speed again after the release.
+    /// speed again from the step that takes the release (queued, not yet stepped) on.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn a_press_the_message_history_holds_paces_at_1x() {
@@ -2861,6 +2864,11 @@ mod tests {
         assert_eq!(game.pace(100.0), 5, "held: 1×");
         game.ran(5);
         game.pointer(310, 113, 0);
+        // The release queued, the press still the history's: the step that takes it is paced as
+        // released.
+        assert!(game.engine.as_ref().unwrap().history_holding());
+        assert_eq!(game.pace(100.0), fast, "the release queued: the speed");
+        game.ran(fast);
         game.step(20);
         assert!(!game.engine.as_ref().unwrap().history_holding());
         assert_eq!(game.pace(100.0), fast, "released: the speed");

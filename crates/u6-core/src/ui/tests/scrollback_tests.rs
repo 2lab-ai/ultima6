@@ -327,6 +327,57 @@ fn a_bound_of_lines_all_patch_keeps_the_stated_size() {
     );
 }
 
+/// Fills the message window's rect in colour 9, which no cell draws: a line that scrolls off then
+/// is all patch.
+fn fill_window(io: &Io) {
+    io.draw(|fb| {
+        for y in Y {
+            for x in X {
+                fb.set(x, y, 9);
+            }
+        }
+    });
+}
+
+#[test]
+fn the_history_and_the_view_together_hold_at_most_two_bounds() {
+    // A bound of lines all patch, published; then a bound more, never published: the view keeps
+    // the first bound (on the published frame), the history the second.
+    let n = HISTORY as u16;
+    let e = run(
+        game_state(),
+        &[],
+        usize::from(n) + 8,
+        move |st, io| async move {
+            for _ in 0..n + 20 {
+                fill_window(&io);
+                printf(&st, &io, b"\n", &[]).await;
+            }
+            io.present();
+            io.vblank().await;
+            for _ in 0..n {
+                fill_window(&io);
+                printf(&st, &io, b"\n", &[]).await;
+            }
+        },
+    );
+    let one = e.state().ui.scrollback.heap_bytes();
+    let both = e.history_heap_bytes();
+    println!(
+        "a history and a view of two bounds all patch: {one} + {} bytes",
+        both - one
+    );
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    assert!(
+        (2_200_000..2_400_000).contains(&one),
+        "the history about 2.3 MB: {one}"
+    );
+    assert!(
+        (4_400_000..4_800_000).contains(&both),
+        "the two about 4.5 MB (spec 23 Design 11): {both}"
+    );
+}
+
 #[test]
 fn the_wheel_shows_a_kept_line_as_it_looked_before_it_scrolled_off() {
     let mut s = game_state();
@@ -906,13 +957,21 @@ fn drag_interrupted(interrupt: InputEvent, delivered: Seen) {
         vec![at((BAR_X, grab - 30), POINTER_LEFT)],
         vec![at((BAR_X, grab - 30), 0)],
     ];
-    let (mut held, mut holding) = (Vec::new(), Vec::new());
+    let (mut held, mut holding, mut offsets) = (Vec::new(), Vec::new(), Vec::new());
     for step in &steps {
         e.tick(step, 16);
         held.push(e.io().handler_pointer().buttons);
         holding.push(e.history_holding());
+        offsets.push(e.history_offset());
     }
     let seen = log.borrow();
+    // The thumb (top 50 of a span of 60 over 30 lines) 10 pixels up: 10 lines back. The interrupt
+    // returns to the live bottom, and each move after it leaves the view there.
+    assert_eq!(
+        offsets,
+        [5, 10, 0, 0, 0, 0],
+        "the drag moved the view, the interrupt ended it"
+    );
     assert!(held.iter().all(|&b| b == 0), "handler {held:?}");
     assert_eq!(
         holding,
@@ -927,11 +986,6 @@ fn drag_interrupted(interrupt: InputEvent, delivered: Seen) {
         seen.iter().filter(|s| **s == delivered).count(),
         1,
         "the interrupt reached the game"
-    );
-    assert_eq!(
-        e.history_offset(),
-        0,
-        "the interrupt left the history; the drag after it moved nothing"
     );
 }
 
@@ -1007,6 +1061,57 @@ fn a_press_while_the_game_holds_a_button_is_the_games() {
 }
 
 #[test]
+fn new_text_during_a_thumb_drag_at_the_bound_moves_the_view_by_the_new_lines() {
+    // Spec 23 Decision 9: at the bound, a line kept while the thumb is held anchors the view (5)
+    // up to the drag's next move, which sets the offset from the thumb's place again: the view
+    // moves by exactly the line kept (no count frozen for the drag).
+    let n = (HISTORY + 20) as u16;
+    let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+        for i in 0..n {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+        }
+        io.present();
+        io.sleep(500).await;
+        printf(&st, &io, b"x\n", &[]).await;
+        io.present();
+        loop {
+            io.vblank().await;
+        }
+    });
+    e.tick(&[], 16);
+    let before = e.state().ui.scrollback.total();
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    assert!(e.wheel(IN.0, IN.1, -50));
+    let (top, len) = scrollback::thumb(80, 10, HISTORY, 50);
+    let grab = 112 + (top + len / 2) as i16;
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    let dragged = e.history_offset();
+    for _ in 0..100 {
+        if e.state().ui.scrollback.total() != before {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    let new = e.state().ui.scrollback.total() - before;
+    assert_eq!(new, 1, "one line kept during the drag");
+    assert_eq!(
+        e.state().ui.scrollback.lines().len(),
+        HISTORY,
+        "at the bound"
+    );
+    assert_eq!(e.history_offset(), dragged + 1, "anchored at the publish");
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    assert_eq!(
+        e.history_offset(),
+        dragged,
+        "the drag's next move, the thumb where it was: the view moved by the line kept"
+    );
+    e.tick(&[at((BAR_X, grab), 0)], 16);
+    assert!(!e.history_holding());
+}
+
+#[test]
 fn at_the_bound_a_source_only_publish_keeps_the_view() {
     let mut s = game_state();
     s.ui.paper = Some(speck_paper().0);
@@ -1057,9 +1162,9 @@ fn at_the_bound_a_source_only_publish_keeps_the_view() {
 #[test]
 fn another_history_returns_the_view_to_the_live_bottom() {
     // The game prints 25 lines (16 kept), then after half a second its history is another's (a
-    // new game's state, as a relaunch makes): fewer lines, or as many as the view had (16: the
-    // count alone does not tell, the view's newest line does).
-    for again in [5u16, 16] {
+    // new game's state, as a relaunch makes): fewer lines, as many as the view had (16: the count
+    // alone does not tell), or a bound more than the view's (its newest line out of reach).
+    for again in [5u16, 16, (HISTORY + 40) as u16] {
         let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
             for i in 0..25u16 {
                 printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
@@ -1068,6 +1173,14 @@ fn another_history_returns_the_view_to_the_live_bottom() {
             }
             io.sleep(500).await;
             st.borrow_mut().ui.scrollback = Default::default();
+            // As a new game's screen: the window cleared to its paper (its lines then no patch).
+            io.draw(|fb| {
+                for y in Y {
+                    for x in X {
+                        fb.set(x, y, PAPER);
+                    }
+                }
+            });
             for i in 0..again {
                 printf(&st, &io, b"n%d\n", &[Arg::Word(i)]).await;
             }
@@ -1089,9 +1202,21 @@ fn another_history_returns_the_view_to_the_live_bottom() {
         assert_eq!(total, u64::from(again), "{again}: the other history");
         assert_eq!(e.history_offset(), 0, "{again}: the live bottom");
         assert!(same_frame(e.frame(), &e.published_frame()), "{again}");
-        // Its lines are the view's from then on.
-        assert!(e.wheel(IN.0, IN.1, -100));
-        let kept = e.state().ui.scrollback.lines().len();
-        assert_eq!(e.history_offset(), kept, "{again}");
+        // Its lines are the view's from then on: at the oldest, the window shows its oldest lines
+        // kept, then (fewer than the rows) its live rows.
+        let live = shown_rows(&e.published_frame());
+        assert!(e.wheel(IN.0, IN.1, -(HISTORY as i32) - 100));
+        let want: Vec<String> = {
+            let s = e.state();
+            let lines = s.ui.scrollback.lines();
+            assert_eq!(e.history_offset(), lines.len(), "{again}");
+            let kept = lines.iter().map(|l| line_text(l));
+            kept.chain(live).take(10).collect()
+        };
+        assert_eq!(
+            shown_rows(e.frame()),
+            want,
+            "{again}: the other history's rows"
+        );
     }
 }

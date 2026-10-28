@@ -1,10 +1,13 @@
 //! Spec 23's independent baseline: with the message history never scrolled back, the shown, the
 //! published and the HD frames are the frames of the tree without the feature. The digests below
-//! were recorded by this same file at 60f92c6 (the parent commit, before spec 23 existed), so
-//! the oracle shares none of the feature's code. A scripted run prints and scrolls the message
-//! window over a paper with a speck in it, then takes presses on the bar's column and inside the
-//! window, keys, a repeat, a release and text (each one the game prints a line for) and lines on
-//! a timer; no wheel. Digests only (FNV-1a 64), no pixels.
+//! were recorded by this same file at 52cc339 (the parent: the tree without spec 23, through
+//! `git archive` of it with this file added), so the oracle shares none of the feature's code.
+//! A scripted run prints and scrolls the message window over a paper with a speck in it, then
+//! takes presses on the bar's column and inside the window, keys, a repeat, a release and text
+//! (each one the game prints a line for) and lines on a timer; no wheel. Each frame digest takes
+//! the colour indices, the sources and the palette; the HD frames at 2× and 4×, with the HD font
+//! off and on (then the cells the frame lists for the page's text too). Digests only (FNV-1a 64),
+//! no pixels.
 
 use u6_render::hd::Scale;
 use u6_render::{BITMAP_PAPER, Framebuffer, Src};
@@ -16,22 +19,34 @@ use crate::main_loop::Program;
 use crate::ui::text::Paper;
 
 /// The digests of the parent's run ([`digests`]): the shown frame, the published frame, the HD
-/// frames at 2× and 4×, each over every tick, and the ticks.
+/// frames at 2× and 4× ([`HD`]), each over every tick, and the ticks.
 #[cfg(not(feature = "wide"))]
-const PARENT: [u64; 5] = [
-    0x2952_cebe_a714_8e55,
-    0x2952_cebe_a714_8e55,
-    0xb714_d7a8_bdc0_7565,
-    0x115b_5165_7f55_62d1,
+const PARENT: [u64; 7] = [
+    0x0b5c_6282_be1c_1455,
+    0x0b5c_6282_be1c_1455,
+    0x60b9_aa83_7c75_e169,
+    0xb4cb_b4c2_b890_5855,
+    0x71dd_33d2_ec52_2322,
+    0x6632_3fc8_3f0d_91f6,
     154,
 ];
 #[cfg(feature = "wide")]
-const PARENT: [u64; 5] = [
-    0x97ae_862b_3a94_f655,
-    0x97ae_862b_3a94_f655,
-    0x37ac_142c_3bb8_ea65,
-    0x46d9_f2de_47b7_7ad1,
+const PARENT: [u64; 7] = [
+    0x9a75_332e_bd49_6c55,
+    0x9a75_332e_bd49_6c55,
+    0xbfe9_5414_095b_d869,
+    0x80e5_3000_f856_a855,
+    0x3c8a_0c30_1a75_c022,
+    0xc856_0015_8fc4_9df6,
     154,
+];
+
+/// The HD views digested: the scale and the HD font mode.
+const HD: [(Scale, bool); 4] = [
+    (Scale::X2, false),
+    (Scale::X4, false),
+    (Scale::X2, true),
+    (Scale::X4, true),
 ];
 
 /// A paper all [`PAPER`] but one pixel of colour 7 inside the window's last row (x 200, y 190).
@@ -53,15 +68,36 @@ fn mix(h: &mut u64, words: impl IntoIterator<Item = u64>) {
     }
 }
 
-/// A frame's colours and its sources, each pixel two words.
+/// A frame's colours and its sources, each pixel two words, then its palette, a word a colour.
 fn frame_words(fb: &Framebuffer) -> impl Iterator<Item = u64> + '_ {
     let src = fb.src();
-    fb.pixels().iter().enumerate().flat_map(move |(i, &c)| {
+    let pixels = fb.pixels().iter().enumerate().flat_map(move |(i, &c)| {
         let s = src.map_or(Src::CLASSIC, |p| p[i]);
         let a = (u64::from(c) << 32) | (u64::from(s.kind as u8) << 16) | u64::from(s.flags);
         let b = (u64::from(s.ver) << 32) | (u64::from(s.u) << 16) | u64::from(s.v);
         [a, (u64::from(s.id) << 48) ^ b]
-    })
+    });
+    let palette = fb
+        .palette
+        .iter()
+        .map(|c| (u64::from(c.r) << 16) | (u64::from(c.g) << 8) | u64::from(c.b));
+    pixels.chain(palette)
+}
+
+/// What an HD view shows after a present that returned `wrote`: whether it wrote, its RGBA when it
+/// did (else the same as before), and the cells it lists for the HD font (none with the mode off).
+fn hd_words(v: &HdView, wrote: bool) -> Vec<u64> {
+    let mut out = vec![u64::from(wrote)];
+    if wrote {
+        out.extend(v.rgba().iter().map(|&w| u64::from(w)));
+    }
+    let rgb = |c: u6_render::Rgb| (u64::from(c.r) << 16) | (u64::from(c.g) << 8) | u64::from(c.b);
+    out.push(v.glyphs().len() as u64);
+    for g in v.glyphs() {
+        out.push((u64::from(g.x) << 32) | (u64::from(g.y) << 16) | u64::from(g.code));
+        out.push((rgb(g.ink) << 24) | rgb(g.paper));
+    }
+    out
 }
 
 /// The input of tick `t` after the game's lines (none past the script).
@@ -93,7 +129,7 @@ fn script(t: usize) -> Vec<InputEvent> {
 }
 
 /// The scripted run's digests ([`PARENT`]'s order).
-fn digests() -> [u64; 5] {
+fn digests() -> [u64; 7] {
     let mut s = state();
     s.main.program = Program::Game;
     let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
@@ -150,15 +186,16 @@ fn digests() -> [u64; 5] {
     });
     e.enable_src_plane();
     let blank = Framebuffer::new();
-    let mut hd: Vec<HdView> = [Scale::X2, Scale::X4]
+    let mut hd: Vec<HdView> = HD
         .into_iter()
-        .map(|scale| {
+        .map(|(scale, font)| {
             let mut v = HdView::new();
             v.set(true, scale);
+            v.set_font(font);
             v
         })
         .collect();
-    let mut out = [0xcbf2_9ce4_8422_2325u64; 5];
+    let mut out = [0xcbf2_9ce4_8422_2325u64; 7];
     let ticks = usize::from(lines) + 4 + 120;
     for t in 0..ticks {
         let input = t
@@ -169,13 +206,10 @@ fn digests() -> [u64; 5] {
         mix(&mut out[1], frame_words(&e.published_frame()));
         for (k, v) in hd.iter_mut().enumerate() {
             let wrote = v.present(Some(&e), &blank);
-            mix(&mut out[2 + k], [u64::from(wrote)]);
-            if wrote {
-                mix(&mut out[2 + k], v.rgba().iter().map(|&w| u64::from(w)));
-            }
+            mix(&mut out[2 + k], hd_words(v, wrote));
         }
     }
-    out[4] = ticks as u64;
+    out[6] = ticks as u64;
     out
 }
 
@@ -183,5 +217,8 @@ fn digests() -> [u64; 5] {
 fn with_no_scroll_the_frames_are_the_parents() {
     let got = digests();
     println!("{got:#018x?}");
-    assert_eq!(got, PARENT, "shown, published, HD 2×, HD 4×, ticks");
+    assert_eq!(
+        got, PARENT,
+        "shown, published, HD 2×, HD 4×, HD 2× and 4× with the HD font, ticks"
+    );
 }

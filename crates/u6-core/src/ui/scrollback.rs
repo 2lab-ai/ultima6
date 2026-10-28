@@ -11,7 +11,7 @@
 //! [`draw_view`] draws the view over a copy of the published frame; at offset 0 it draws nothing,
 //! so the frame is the original's.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 
@@ -25,8 +25,15 @@ use crate::engine::{InputEvent, POINTER_LEFT};
 /// the state, and the view's lines as of a publish, copy a pointer a line. A line of the window's
 /// 17 cells as drawn holds 102 bytes of cells and its shared header; with no patch, about 0.1 MB
 /// at the bound. The patch adds 4 bytes a pixel: at most every pixel of the row (1088), so a bound
-/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11).
+/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11). The view
+/// keeps the lines as of the last publish, those dropped since included, so the two together hold
+/// at most two bounds ([`View::heap_bytes`]).
 pub const HISTORY: usize = 500;
+/// The bytes of a kept line's shared allocation beside what the line holds: its two counts and the
+/// line.
+fn shared_bytes() -> usize {
+    2 * size_of::<usize>() + size_of::<Line>()
+}
 /// The thumb's least length, in pixels (one cell's height).
 pub const MIN_THUMB: usize = 8;
 /// The thumb's columns in the window's last cell (x 5..=7 of the cell) and the track's.
@@ -80,13 +87,37 @@ impl Line {
 }
 
 /// What the game drew in the message window ([`WindowId::Messages`]): the shadow of its rows and
-/// the lines kept, oldest first, at most [`HISTORY`].
+/// the lines kept, oldest first, at most [`HISTORY`], and the history's token ([`Generation`]).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Scrollback {
     rows: Vec<Line>,
     lines: VecDeque<Rc<Line>>,
     total: u64,
+    generation: Generation,
 }
+
+/// A history's token: every new [`Scrollback`] has its own and so does every copy of one, so the
+/// history the game draws into (moved with the state, never copied) keeps one token for as long as
+/// it is that history, and any other in its place (a new game's state, as a relaunch makes, or a
+/// copy put back) has another. The view compares tokens ([`View::publish`]). Equal whatever it is:
+/// two histories of the same lines compare equal.
+#[derive(Default)]
+struct Generation(Rc<()>);
+
+impl Clone for Generation {
+    /// Another token: a copy of a history is not that history.
+    fn clone(&self) -> Self {
+        Generation::default()
+    }
+}
+
+impl PartialEq for Generation {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Generation {}
 
 impl Scrollback {
     /// The lines kept, oldest first.
@@ -107,9 +138,8 @@ impl Scrollback {
     /// The bytes the lines and the shadow hold on the heap, by capacity: each kept line's shared
     /// allocation (its two counts and the line) and what the line holds.
     pub fn heap_bytes(&self) -> usize {
-        let shared = 2 * size_of::<usize>() + size_of::<Line>();
         self.lines.capacity() * size_of::<Rc<Line>>()
-            + self.lines.len() * shared
+            + self.lines.len() * shared_bytes()
             + self.rows.capacity() * size_of::<Line>()
             + self.lines.iter().map(|l| l.heap_bytes()).sum::<usize>()
             + self.rows.iter().map(Line::heap_bytes).sum::<usize>()
@@ -413,11 +443,13 @@ enum Gesture {
 
 /// What the player looks at (the engine's, not the game's): the lines kept as of the last publish
 /// (those kept after it are not on the published frame, and those dropped since stay until the
-/// next), the offset back from the live bottom (0 = live, at most the lines), the gesture, the
-/// pointer's buttons last queued, and a stamp that moves whenever what the view shows changed.
+/// next) and the token of their history, the offset back from the live bottom (0 = live, at most
+/// the lines), the gesture, the pointer's buttons last queued, and a stamp that moves whenever
+/// what the view shows changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct View {
     lines: Vec<Rc<Line>>,
+    generation: Rc<()>,
     offset: usize,
     published: u64,
     gesture: Gesture,
@@ -439,6 +471,21 @@ impl View {
     /// The lines kept as of the last publish.
     pub fn kept(&self) -> usize {
         self.lines.len()
+    }
+
+    /// The bytes the view holds on the heap that `sb` does not, by capacity: its vector of lines,
+    /// and each line it keeps that `sb` no longer holds (dropped since the last publish), with its
+    /// shared allocation. With [`Scrollback::heap_bytes`], at most two bounds of lines: the view
+    /// keeps at most [`HISTORY`] lines, `sb` at most [`HISTORY`] others.
+    pub fn heap_bytes(&self, sb: &Scrollback) -> usize {
+        let held: HashSet<*const Line> = sb.lines.iter().map(Rc::as_ptr).collect();
+        self.lines.capacity() * size_of::<Rc<Line>>()
+            + self
+                .lines
+                .iter()
+                .filter(|l| !held.contains(&Rc::as_ptr(l)))
+                .map(|l| shared_bytes() + l.heap_bytes())
+                .sum::<usize>()
     }
 
     /// Whether a press is the view's ([`View::input`]) until every button is up: the platforms
@@ -464,28 +511,17 @@ impl View {
     }
 
     /// At a publish: the lines kept now are those on the frame; scrolled back, the offset grows
-    /// by those kept since the last publish, so the same lines stay in view. Another history (a
-    /// new game's state, its newest line not the view's) returns the view to the live bottom.
+    /// by those kept since the last publish, so the same lines stay in view. Another history
+    /// (another token: a new game's state, whatever its lines) returns the view to the live
+    /// bottom.
     pub fn publish(&mut self, sb: &Scrollback) {
-        let same = match (self.lines.last(), sb.lines.back()) {
-            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
-            (a, b) => a.is_none() && b.is_none(),
-        };
+        let same = Rc::ptr_eq(&self.generation, &sb.generation.0);
         if same && sb.total == self.published {
             return;
         }
-        let new = sb.total.checked_sub(self.published).filter(|_| {
-            // The view's newest line is still in the history, `new` lines from its end.
-            let back = usize::try_from(sb.total - self.published).unwrap_or(usize::MAX);
-            match self.lines.last() {
-                None => true,
-                Some(last) => sb
-                    .lines
-                    .len()
-                    .checked_sub(back + 1)
-                    .is_none_or(|i| Rc::ptr_eq(&sb.lines[i], last)),
-            }
-        });
+        // The lines kept since the last publish, in the same history only.
+        let new = sb.total.checked_sub(self.published).filter(|_| same);
+        self.generation = Rc::clone(&sb.generation.0);
         self.published = sb.total;
         self.lines.clear();
         self.lines.extend(sb.lines.iter().cloned());

@@ -1,9 +1,11 @@
 //! Spec 23's independent baseline on real data: with the message history never scrolled back,
 //! three conversations near the start, on the boot's paper, show the shown, published and HD
 //! frames of the tree without the feature. The digests below were recorded by this same file at
-//! 60f92c6 (the parent commit, before spec 23 existed), so the oracle shares none of the
-//! feature's code. Skips where the zip is missing; prints digests and actor slots only, never
-//! the dialogue (FNV-1a 64, no pixels).
+//! 52cc339 (the parent: the tree without spec 23, through `git archive` of it with this file
+//! added), so the oracle shares none of the feature's code. Each frame digest takes the colour
+//! indices, the sources and the palette; the HD frames at 2× and 4×, with the HD font off and on
+//! (then the cells the frame lists for the page's text too). Skips where the zip is missing;
+//! prints digests and actor slots only, never the dialogue (FNV-1a 64, no pixels).
 
 use u6_render::hd::Scale;
 use u6_render::{Framebuffer, Src};
@@ -19,22 +21,34 @@ use crate::state::State;
 use u6_testkit::Quiet;
 
 /// The digests of the parent's run ([`digests`]): the shown frame, the published frame, the HD
-/// frames at 2× and 4×, each over every tick of the three conversations, and the ticks.
+/// frames at 2× and 4× ([`HD`]), each over every tick of the three conversations, and the ticks.
 #[cfg(not(feature = "wide"))]
-const PARENT: [u64; 5] = [
-    0x8d81_d607_43ef_7a2d,
-    0x8d81_d607_43ef_7a2d,
-    0x2878_9d3f_c18c_1feb,
-    0x4198_2404_a5a4_5b0b,
+const PARENT: [u64; 7] = [
+    0xb99d_a937_a0b7_90f9,
+    0xb99d_a937_a0b7_90f9,
+    0xff12_e770_187f_0d0d,
+    0xc031_3678_24a5_cc15,
+    0xa8cb_4736_560f_8111,
+    0xc30b_9745_0199_5885,
     54,
 ];
 #[cfg(feature = "wide")]
-const PARENT: [u64; 5] = [
-    0xd7f0_9957_71f2_8d35,
-    0xd7f0_9957_71f2_8d35,
-    0x25c8_3248_327c_1585,
-    0x5010_c5f8_d810_72d0,
+const PARENT: [u64; 7] = [
+    0x2fb2_80a6_4ce1_e871,
+    0x2fb2_80a6_4ce1_e871,
+    0x9429_a9d3_75d4_2dc7,
+    0x39d0_4be5_48a7_3096,
+    0x8675_e3d1_b5d7_d4e7,
+    0xd73c_dbf9_9a54_ecfa,
     54,
+];
+
+/// The HD views digested: the scale and the HD font mode.
+const HD: [(Scale, bool); 4] = [
+    (Scale::X2, false),
+    (Scale::X4, false),
+    (Scale::X2, true),
+    (Scale::X4, true),
 ];
 
 /// FNV-1a 64 of each word into `h`.
@@ -45,15 +59,36 @@ fn mix(h: &mut u64, words: impl IntoIterator<Item = u64>) {
     }
 }
 
-/// A frame's colours and its sources, each pixel two words.
+/// A frame's colours and its sources, each pixel two words, then its palette, a word a colour.
 fn frame_words(fb: &Framebuffer) -> impl Iterator<Item = u64> + '_ {
     let src = fb.src();
-    fb.pixels().iter().enumerate().flat_map(move |(i, &c)| {
+    let pixels = fb.pixels().iter().enumerate().flat_map(move |(i, &c)| {
         let s = src.map_or(Src::CLASSIC, |p| p[i]);
         let a = (u64::from(c) << 32) | (u64::from(s.kind as u8) << 16) | u64::from(s.flags);
         let b = (u64::from(s.ver) << 32) | (u64::from(s.u) << 16) | u64::from(s.v);
         [a, (u64::from(s.id) << 48) ^ b]
-    })
+    });
+    let palette = fb
+        .palette
+        .iter()
+        .map(|c| (u64::from(c.r) << 16) | (u64::from(c.g) << 8) | u64::from(c.b));
+    pixels.chain(palette)
+}
+
+/// What an HD view shows after a present that returned `wrote`: whether it wrote, its RGBA when it
+/// did (else the same as before), and the cells it lists for the HD font (none with the mode off).
+fn hd_words(v: &HdView, wrote: bool) -> Vec<u64> {
+    let mut out = vec![u64::from(wrote)];
+    if wrote {
+        out.extend(v.rgba().iter().map(|&w| u64::from(w)));
+    }
+    let rgb = |c: u6_render::Rgb| (u64::from(c.r) << 16) | (u64::from(c.g) << 8) | u64::from(c.b);
+    out.push(v.glyphs().len() as u64);
+    for g in v.glyphs() {
+        out.push((u64::from(g.x) << 32) | (u64::from(g.y) << 16) | u64::from(g.code));
+        out.push((rgb(g.ink) << 24) | rgb(g.paper));
+    }
+    out
 }
 
 /// The scroll's lines so far, the one being written last (as the transcript test reads them).
@@ -148,11 +183,11 @@ fn converse(state: &State, files: &crate::files::Files, npc: i16, each: &mut imp
 }
 
 /// The digests of the three conversations ([`PARENT`]'s order); `None` without the zip.
-fn digests() -> Option<[u64; 5]> {
+fn digests() -> Option<[u64; 7]> {
     let files = files()?;
     let base = with_text(&files);
     let blank = Framebuffer::new();
-    let mut out = [0xcbf2_9ce4_8422_2325u64; 5];
+    let mut out = [0xcbf2_9ce4_8422_2325u64; 7];
     let mut ticks = 0u64;
     let mut talked = 0;
     for npc in near(&base) {
@@ -160,11 +195,12 @@ fn digests() -> Option<[u64; 5]> {
         if name_from_script(&mut s, &files, npc).0.is_empty() {
             continue;
         }
-        let mut hd: Vec<HdView> = [Scale::X2, Scale::X4]
+        let mut hd: Vec<HdView> = HD
             .into_iter()
-            .map(|scale| {
+            .map(|(scale, font)| {
                 let mut v = HdView::new();
                 v.set(true, scale);
+                v.set_font(font);
                 v
             })
             .collect();
@@ -173,10 +209,7 @@ fn digests() -> Option<[u64; 5]> {
             mix(&mut out[1], frame_words(&e.published_frame()));
             for (k, v) in hd.iter_mut().enumerate() {
                 let wrote = v.present(Some(e), &blank);
-                mix(&mut out[2 + k], [u64::from(wrote)]);
-                if wrote {
-                    mix(&mut out[2 + k], v.rgba().iter().map(|&w| u64::from(w)));
-                }
+                mix(&mut out[2 + k], hd_words(v, wrote));
             }
             ticks += 1;
         });
@@ -187,7 +220,7 @@ fn digests() -> Option<[u64; 5]> {
         }
     }
     assert_eq!(talked, 3, "three conversations");
-    out[4] = ticks;
+    out[6] = ticks;
     Some(out)
 }
 
@@ -195,5 +228,8 @@ fn digests() -> Option<[u64; 5]> {
 fn with_no_scroll_three_conversations_show_the_parents_frames() {
     let Some(got) = digests() else { return };
     println!("{got:#018x?}");
-    assert_eq!(got, PARENT, "shown, published, HD 2×, HD 4×, ticks");
+    assert_eq!(
+        got, PARENT,
+        "shown, published, HD 2×, HD 4×, HD 2× and 4× with the HD font, ticks"
+    );
 }
