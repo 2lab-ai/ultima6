@@ -6247,7 +6247,8 @@ mod tests {
     /// was made, at most once per direction change; the command prompt's drain (round 5: the
     /// reader reads as the prompt does) takes the newest of those, so here none is. Phase A:
     /// the down arrow held alone reads only Down. Phase B: Down let go and pressed again, then
-    /// Left pressed, in one frame: the drain takes Left and drops that Down press, so only Left.
+    /// Left pressed, in one frame, both presses queued: the drain takes Left and drops that Down
+    /// press, so only Left.
     /// Phase C: the browser's repeat of Down is taken back at the prompt, so only Left (a repeat
     /// does not make the older newer). Phase D: Left let go, only Down. Each phase lasts 400 ms
     /// at 1×.
@@ -6275,6 +6276,19 @@ mod tests {
         assert!(game.key_up("ArrowDown"));
         assert!(down(&mut game, "ArrowDown"));
         assert!(down(&mut game, "ArrowLeft"));
+        // Round 6 (review opus N3): the page queued both presses (after Down's release), so the
+        // drain below has the Down press to drop.
+        let presses: Vec<InputEvent> = game
+            .pending
+            .iter()
+            .copied()
+            .filter(|e| matches!(e, InputEvent::Key(_)))
+            .collect();
+        assert_eq!(
+            presses,
+            [InputEvent::Key(Key::Down), InputEvent::Key(Key::Left)],
+            "both presses queued"
+        );
         let b = phase(&mut game);
         assert!(
             b.len() >= 2 && b.iter().all(|&t| t == west),

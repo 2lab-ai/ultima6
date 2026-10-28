@@ -1970,14 +1970,35 @@ function unwatchWalk(page) {
   });
 }
 
-// On the browser's own clock: frames until the page's clock, as `watchWalk` logs it, has run
-// `ms` past the release (a full cooldown, so a take after it would show).
+// Whether the hold `watchWalk` logs has cooled down (`span` ms of the page's clock): past the
+// release, and past the first step after it at a ready command prompt (the prompt up, nothing
+// waiting; round 6, review gpt b: a release inside a turn longer than the cooldown must still
+// reach a prompt where a key wrongly left held would be taken), or a take after the release
+// (the hold already failed). Runs in the page.
+function cooledDown(span) {
+  const log = window.__k2;
+  const steps = log.steps;
+  const from = log.releaseIndex;
+  if (from === null || steps[from] === undefined) return false;
+  for (let i = from; i < steps.length; i += 1) if (steps[i][4] !== steps[i - 1][4]) return true;
+  const ready = steps.findIndex((row, i) => i >= from && row[2]);
+  return ready >= 0 && log.now - steps[from][3] >= span && log.now - steps[ready][3] >= span;
+}
+
+// On the browser's own clock: frames until the hold has cooled down (`cooledDown`).
 async function coolDown(page, ms) {
-  await page.waitForFunction((span) => {
-    const log = window.__k2;
-    const at = log.steps[log.releaseIndex]?.[3];
-    return at !== undefined && log.now - at >= span;
-  }, ms, { timeout: 60_000, polling: 'raf' });
+  await page.waitForFunction(cooledDown, ms, { timeout: 120_000, polling: 'raf' });
+}
+
+// On the virtual display: frames, five at a time, until the hold has cooled down
+// (`cooledDown`), at most `max`.
+async function coolDownFrames(page, ms, max = 5000) {
+  let frames = 0;
+  while (!(await page.evaluate(cooledDown, ms))) {
+    assert.ok(frames < max, `cooled down within ${max} frames`);
+    await h.runFrames(page, 5);
+    frames += 5;
+  }
 }
 
 // What a watched hold did (the release: the first step after the window's keyup, `releaseIndex`).
@@ -1990,8 +2011,8 @@ async function coolDown(page, ms) {
 // of the hold, and the late steps: one that ran with the prompt up and a paced press due (the
 // minimum interval past the press and past the last take) and took nothing, with what the step
 // saw (for a failure: the press's time, the frame's, the last take's, the prompt before and the
-// keys pending); after the release, the takes (none expected) and the span of the page's clock
-// the log covers (the cooldown).
+// keys pending); after the release, the takes (none expected), the span of the page's clock the
+// log covers (the cooldown) and the first step at a ready command prompt with the span after it.
 function walkReceipt(log) {
   const { steps, pressedAt, pressIndex } = log;
   const released = log.releaseIndex ?? steps.length;
@@ -2040,8 +2061,11 @@ function walkReceipt(log) {
     }
   }
   const releasedAt = steps[released]?.[3] ?? null;
-  const cooldown = releasedAt === null ? 0 : (steps.at(-1)?.[3] ?? releasedAt) - releasedAt;
-  return { held, after, repeats: log.repeats, pressIndex, pressTaken, first, paced, late, lateAt, longestFrame, afterTakes, cooldown };
+  const end = steps.at(-1)?.[3] ?? releasedAt;
+  const cooldown = releasedAt === null ? 0 : end - releasedAt;
+  const ready = steps.findIndex((row, i) => i >= released && row[2]);
+  const afterReady = ready < 0 ? 0 : end - steps[ready][3];
+  return { held, after, repeats: log.repeats, pressIndex, pressTaken, first, paced, late, lateAt, longestFrame, afterTakes, cooldown, ready: ready < 0 ? null : ready - released, afterReady };
 }
 
 // One line for a receipt of `walkReceipt`.
@@ -2049,7 +2073,7 @@ function walkLine(key, w) {
   const walked = w.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL);
   const gaps = w.paced.map((p) => Math.round(p.gap)).join(', ') || '-';
   const first = w.first === null ? 'not taken' : `taken in step ${w.first.step - w.pressIndex + 1} after the keydown, ${w.first.delay.toFixed(1)} ms from its time`;
-  return `${key} held, ${w.repeats} browser repeats; ${w.held.length} steps while held, engine ms between them ${walked.map((s) => s.ms).join(', ') || '-'}, step() calls from the prompt to each ${walked.map((s) => s.fromPrompt).join(', ') || '-'}; the press ${first}; ${w.paced.length} paced presses taken, wall ms from the take before ${gaps}; the longest frame ${Math.round(w.longestFrame)} ms; ${w.late} steps left the prompt up with a press due${w.late > 0 ? ` (${JSON.stringify(w.lateAt)})` : ''}; after the keyup ${w.afterTakes} takes over a ${Math.round(w.cooldown)} ms cooldown, ${w.after.length} position changes`;
+  return `${key} held, ${w.repeats} browser repeats; ${w.held.length} steps while held, engine ms between them ${walked.map((s) => s.ms).join(', ') || '-'}, step() calls from the prompt to each ${walked.map((s) => s.fromPrompt).join(', ') || '-'}; the press ${first}; ${w.paced.length} paced presses taken, wall ms from the take before ${gaps}; the longest frame ${Math.round(w.longestFrame)} ms; ${w.late} steps left the prompt up with a press due${w.late > 0 ? ` (${JSON.stringify(w.lateAt)})` : ''}; after the keyup ${w.afterTakes} takes over a ${Math.round(w.cooldown)} ms cooldown (a ready prompt ${w.ready === null ? 'never' : `in step ${w.ready + 1} after it, ${Math.round(w.afterReady)} ms watched from there`}), ${w.after.length} position changes`;
 }
 
 // Spec 19 O1c at the page, on the browser's own clock (no virtual display): `key` pressed once on
@@ -2073,6 +2097,14 @@ async function heldNoRepeat(page, key) {
     await page.keyboard.up(key);
   }
   await coolDown(page, COOLDOWN_MS);
+  const failed = await page.evaluate(() => {
+    const s = window.__k2.steps;
+    for (let i = window.__k2.releaseIndex; i < s.length; i += 1) if (s[i][4] !== s[i - 1][4]) return true;
+    return false;
+  });
+  // A take after the keyup: the key was left held; the receipt says so at once (no wait for a
+  // prompt such a walk never leaves up).
+  if (failed) return walkReceipt(await unwatchWalk(page));
   await h.waitTaken(page);
   await h.waitPrompt(page);
   return walkReceipt(await unwatchWalk(page));
@@ -2089,7 +2121,9 @@ const COOLDOWN_MS = 2 * MIN_STEP_MS;
 // step runs with the prompt up and a paced press due and leaves it up, whether its steps walk or
 // the fight blocks them: D1', the prompt up at most one step in a row once due), the paced
 // presses at least the interval apart from the take before, and after the keyup nothing is taken
-// over a full cooldown (twice the interval of the page's clock, d-2) and nothing walks. The
+// over a full cooldown (twice the interval of the page's clock, d-2), reaching a ready command
+// prompt and a full cooldown from there (round 6: a release inside a long turn too), and nothing
+// walks. The
 // fight's geometry decides whether any way is open twice (a hero killed wakes on `h.WAKE_CELL`,
 // between the same foes, and may be blocked every way, `h.stepOnce`'s note), so the holds go on
 // over the directions and rounds until one walks so. A position change after a keyup is allowed
@@ -2100,13 +2134,15 @@ test('a held arrow with no browser repeat walks on at every command prompt once 
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   const keys = ['ArrowLeft', ...h.STEPS.map((s) => s.key).filter((k) => k !== 'ArrowLeft')];
-  const walks = (w) => w.held.length >= 2 && w.paced.length >= 2;
+  // Two cells or more walked (a wake onto the wake cell is no cell walked, as `walkLine` counts).
+  const walks = (w) => w.held.length >= 1 && 1 + w.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL).length >= 2 && w.paced.length >= 2;
   const holds = [];
   for (let round = 0; round < h.STEP_ROUNDS && !holds.some(walks); round += 1) {
     if (round > 0) await h.passTurn(page);
     for (const key of keys) {
       const w = await heldNoRepeat(page, key);
       holds.push({ ...w, key });
+      assert.equal(w.afterTakes, 0, `${key}: nothing taken after the keyup (${walkLine(key, w)})`);
       if (walks(w)) break;
     }
   }
@@ -2118,6 +2154,7 @@ test('a held arrow with no browser repeat walks on at every command prompt once 
     assert.equal(w.late, 0, `${w.key}: pressed again at every prompt once due`);
     assert.ok(w.paced.every((p) => p.gap >= MIN_STEP_MS), `${w.key}: the paced presses the interval after the take before`);
     assert.ok(w.cooldown >= COOLDOWN_MS, `${w.key}: watched a full cooldown after the keyup (${Math.round(w.cooldown)} ms)`);
+    assert.ok(w.ready !== null && w.afterReady >= COOLDOWN_MS, `${w.key}: a ready command prompt after the keyup, watched a full cooldown from it`);
     assert.equal(w.afterTakes, 0, `${w.key}: nothing taken after the keyup`);
     assert.ok(w.after.every((cell) => cell === h.WAKE_CELL), `${w.key}: no step after the keyup (a change only onto the wake cell)`);
   }
@@ -2146,8 +2183,7 @@ test('at Max a held arrow walks one step per minimum interval, no sooner and no 
     await page.keyboard.down(key);
     await h.runFrames(page, 90);
     await page.keyboard.up(key);
-    await h.runFrames(page, Math.ceil(COOLDOWN_MS / frame) + 2);
-    await h.runFramesToPrompt(page, 5000);
+    await coolDownFrames(page, COOLDOWN_MS);
     const w = walkReceipt(await unwatchWalk(page));
     holds.push({ ...w, key });
     console.log(`  receipt (Max): ${walkLine(key, w)}`);
@@ -2160,6 +2196,7 @@ test('at Max a held arrow walks one step per minimum interval, no sooner and no 
   for (const x of holds) {
     assert.ok(x.first !== null && x.first.step === x.pressIndex, `${x.key}: the press taken by the first step after its keydown`);
     assert.ok(x.cooldown >= COOLDOWN_MS && x.afterTakes === 0, `${x.key}: nothing taken over the cooldown after the keyup`);
+    assert.ok(x.ready !== null && x.afterReady >= COOLDOWN_MS, `${x.key}: a ready command prompt after the keyup, watched a full cooldown from it`);
     assert.ok(x.after.every((cell) => cell === h.WAKE_CELL), `${x.key}: no step after the keyup`);
   }
 }, { needs: h.haveHfes });
@@ -2190,7 +2227,7 @@ test('the held-walk receipt gives a press taken by a frame older than its stamp 
     await h.displayInputAt(page, 0);
     await h.runFrames(page, 40);
     await page.keyboard.up(key);
-    await h.runFrames(page, Math.ceil(COOLDOWN_MS / frame) + 2);
+    await coolDownFrames(page, COOLDOWN_MS);
     w = walkReceipt(await unwatchWalk(page));
     console.log(`  receipt (stamped 20 ms after the frame): ${walkLine(key, w)}`);
     if (w.paced.length >= 1) break;
@@ -2202,6 +2239,7 @@ test('the held-walk receipt gives a press taken by a frame older than its stamp 
   const fromPress = w.paced[0].at - (w.first.at - w.first.delay);
   assert.ok(fromPress >= MIN_STEP_MS - 0.01 && fromPress <= MIN_STEP_MS + frame + 0.01, `${key}: the paced take ${fromPress.toFixed(1)} ms after the press's stamp`);
   assert.equal(w.afterTakes, 0, `${key}: nothing taken after the keyup`);
+  assert.ok(w.ready !== null && w.afterReady >= COOLDOWN_MS, `${key}: a ready command prompt after the keyup, watched a full cooldown from it`);
 }, { needs: h.haveHfes });
 
 // Spec 19 O1c (round 5, review b-2), the page's Meta release on the virtual display: the down arrow

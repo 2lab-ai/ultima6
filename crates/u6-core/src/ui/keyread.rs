@@ -97,6 +97,7 @@ async fn poll(state: &RefCell<State>, io: &Io, text: Text) -> Polled {
 /// are taken back and the press it takes is counted ([`crate::engine::Io::prompt_takes`]: the
 /// platform's instrument, not the game's state), from which a platform paces a held direction
 /// key. Public for the platforms' tests, whose stand-ins for the command prompt read as it does.
+#[doc(hidden)]
 pub fn take_drained(state: &RefCell<State>, io: &Io) -> Option<Key> {
     let prompt = command_prompt(&state.borrow());
     let key = io.take_newest_key_at(prompt)?;

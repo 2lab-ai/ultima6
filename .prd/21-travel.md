@@ -212,7 +212,12 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
   still runs every tick while a step is not due, so the stops stay immediate. The travel's key is a prompt take, so
   it already moves K2's `last_step`: the held walk and the travel share one step time; keep it so.
 - N2: K2's own command-prompt test (K2 `engine.rs:81`) lacks `!line_input` beside `travel::command_prompt`
-  (`travel.rs:450`); the merge keeps one predicate for both.
+  (`travel.rs:450`); the merge keeps one predicate for both. Done in K2 round 6 (2026-10-28): the travel reads
+  `engine::command_prompt`, and the line editor's flag stays only where it decides a result, in `other_prompt`
+  (the line editor up is a `Prompt` stop whatever else is set). The line editor never runs while A4-0x7a2c is set
+  (it is entered only from a command's handler, after the command read cleared the flag), so no caller of the
+  one predicate reads otherwise; `the_one_command_prompt_predicate_decides_the_travel_as_before` checks the
+  travel's two decisions against the old predicate over all 48 flag combinations.
 
 ## Trace (STV, before code)
 

@@ -325,10 +325,14 @@ fn a_drained_key_wait_takes_the_newest_press_and_a_release_takes_back_its_repeat
 /// event wait's pointer sample takes one while a mouse walk waits, `ui/target.rs`), over and
 /// over; the right arrow's repeats come every tick throughout, queued during the waits and met
 /// by a prompt that comes up within a tick, and at the prompt; a paced press of it, a press of a
-/// letter and the letter's repeat come once each. Read: those three, in order, each counted, no
-/// direction repeat. After every tick that began at the prompt the queue holds only the presses
-/// not read yet (0 or 1): the tick drops the repeats that came while the prompt waited, the
-/// read those queued before it came up.
+/// letter and the letter's repeat come once each. Every other prompt (round 6, review opus S1)
+/// waits two frames before its first poll, as the event wait's pointer sample does when the
+/// prompt comes up during a held mouse walk (`ui/target.rs` `pointer_click`), so the repeats
+/// queued during the wait before it survive into the ticks that start at the prompt. Read: those
+/// three, in order, each counted, no direction repeat. After every tick that began at the prompt
+/// the queue holds only the presses not read yet (0 or 1): the tick drops the repeats that came
+/// while the prompt waited, from its input and from the queue (those a late prompt found), the
+/// read those queued before it came up. That check runs on many ticks, counted (review gpt a).
 #[test]
 fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_at_it() {
     let s = game_state();
@@ -340,10 +344,17 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
     let want = [code(&s, right), code(&s, Key::Char('a')), code(&s, letter)];
     let seen = Rc::new(RefCell::new(Vec::new()));
     let out = Rc::clone(&seen);
+    let late = Rc::new(std::cell::Cell::new(0));
+    let lates = Rc::clone(&late);
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
-        loop {
+        for cycle in 0.. {
             io.sleep(100).await;
             st.borrow_mut().main.reading = 1;
+            if cycle % 2 == 1 {
+                lates.set(lates.get() + 1);
+                io.vblank().await;
+                io.vblank().await;
+            }
             let code = loop {
                 let k = keyread::idle_poll(&st, &io).await;
                 if k != 0 {
@@ -360,8 +371,8 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
         (30, InputEvent::Key(Key::Char('a'))),
         (47, InputEvent::Repeat(letter)),
     ];
-    let mut sent = 0;
-    for t in 0..70 {
+    let (mut sent, mut checked) = (0, 0);
+    for t in 0..90 {
         let mut input = vec![InputEvent::Repeat(right)];
         if let Some(&(_, p)) = presses.iter().find(|(at, _)| *at == t) {
             input.push(p);
@@ -377,6 +388,7 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
         );
         let unread = sent - read;
         if at_prompt && e.state().main.reading == 1 {
+            checked += 1;
             assert_eq!(
                 e.io().pending_events(),
                 unread,
@@ -384,6 +396,15 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
             );
         }
     }
+    println!(
+        "{checked} ticks at the prompt checked, {} prompts polled two frames late",
+        late.get()
+    );
+    assert!(
+        checked >= 20,
+        "the queue checked at the prompt: {checked} ticks"
+    );
+    assert!(late.get() >= 2, "late prompts: {}", late.get());
     assert_eq!(
         *seen.borrow(),
         want,
