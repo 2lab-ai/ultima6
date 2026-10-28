@@ -6744,8 +6744,11 @@ mod tests {
         }
         assert!(!game.sliding(), "the first scene settled");
         publish_walk(&mut game);
-        frame(&mut game);
-        let published = game.presentation_ms();
+        game.step(pacer::STEP_MS);
+        // The step's publication's time: the engine's at the end of its tick
+        // ([`u6_core::engine::Published::time_ms`]).
+        let published = game.engine.as_ref().quiet().io().now_ms() as f64;
+        game.present();
         assert!(!game.slide().is_empty(), "the step slides");
         let b = game.hd_frame_rgba();
         let made = game.slide_layers_version();
@@ -6791,12 +6794,13 @@ mod tests {
     }
 
     /// Spec 20 Bounds, on the user's zip, in this build's layout: the bytes of the slide's layers
-    /// at the page's largest scale (HD 4×) over four steps east, each a move of the party: the
+    /// at the page's largest scale (HD 4×) over four taps east, each a move of the party: the
     /// wasm side's layers (colour indices, sources and drawn marks; each layer the slide and the
     /// kept ones share once), their composed words and changes, and the canvases of the test's
     /// stand-in for the page ([`Page`]: the layers' canvases only, not the page's screen canvas
-    /// nor Wide's compositing canvas). Each the most over the frames that drew a slide while it
-    /// ran, and the most of their sum on one frame.
+    /// nor Wide's compositing canvas). Each the most over the frames from the first tap on that
+    /// drew a move's slide while it ran (every move has some), and the most of their sum on one
+    /// frame.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn the_slide_layer_buffers_at_hd_4x() {
@@ -6823,6 +6827,8 @@ mod tests {
             (e.state().map.centre.x, e.state().map.centre.y)
         };
         let (mut moves, mut frames, mut at) = (0, 0, centre(&game));
+        // From the first press on: per move (1 to 4), the frames sampled while its slide ran.
+        let (mut pressed, mut per_move) = (false, [0usize; 5]);
         let (mut pixels, mut words, mut canvases, mut together) = (0usize, 0usize, 0usize, 0usize);
         let bytes = |l: &u6_render::motion::LayerPixels| {
             l.pixels.capacity()
@@ -6830,17 +6836,21 @@ mod tests {
                 + l.drawn.capacity() * std::mem::size_of::<bool>()
         };
         for i in 0..30_000 {
-            // The party's moves after the start (a cell east each).
+            // The party's moves after the first press (a cell east each).
             if centre(&game) != at {
-                moves += usize::from(i > 3000);
+                moves += usize::from(pressed);
                 at = centre(&game);
             }
             let settled = game.at_prompt() && !game.sliding();
             if moves == 4 && settled {
                 break;
             }
+            // A tap: pressed and let go at once, so the held walk (spec 19 O1c) adds no press.
             if i > 3000 && settled && game.pending.is_empty() {
-                game.key_down("ArrowRight", "ArrowRight", false, 0.0);
+                let t = game.clock;
+                game.key_down("ArrowRight", "ArrowRight", false, t);
+                game.key_up("ArrowRight");
+                pressed = true;
             }
             let k = game.pace(dt);
             for _ in 0..k {
@@ -6852,10 +6862,11 @@ mod tests {
             }
             game.present();
             let running = game.motion.presenter.active(game.presentation_ms());
-            if !page.take(&mut game) || !running || game.layers.slide.is_none() {
+            if !page.take(&mut game) || !running || game.layers.slide.is_none() || moves == 0 {
                 continue;
             }
             frames += 1;
+            per_move[moves.min(4)] += 1;
             let l = &game.layers;
             let mut held: Vec<&Rc<u6_render::motion::LayerPixels>> = Vec::new();
             for part in l.slide.iter().flat_map(|s| &s.parts) {
@@ -6888,8 +6899,8 @@ mod tests {
             together = together.max(these.iter().sum());
         }
         assert!(
-            moves == 4 && frames > 0,
-            "four moves, and frames drawn while a slide ran: {moves} moves, {frames} frames"
+            moves == 4 && per_move[1..].iter().all(|&n| n > 0),
+            "four moves, each with frames drawn while its slide ran: {moves} moves, {per_move:?}"
         );
         println!(
             "the slide's layers at HD 4x over {moves} moves, the most over the {frames} frames \
@@ -7693,6 +7704,77 @@ mod tests {
             assert!(
                 gaps.iter().all(|&g| (g - MIN).abs() <= frame),
                 "an even 150 ms at speed {speed} (0: Max): {shown:?}"
+            );
+        }
+    }
+
+    /// Spec 20 (S4) against spec 19 O1c's held walk, on the user's zip: in the castle with
+    /// smooth motion on, the down arrow held 6 wall s at 1×, 4× and 8× on 60 Hz frames, each
+    /// presented as the page does (after a frame that stepped or while sliding). Every paced
+    /// step of the leader slides: from it to the next step some frames draw the slide. Per step
+    /// (the first and the last left out) the moving share is the frames that drew the slide over
+    /// the frames to the next step; printed per speed with the steps' gaps.
+    #[test]
+    fn a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed() {
+        for speed in [1.0, 4.0, 8.0] {
+            let Some(mut game) = in_the_castle() else {
+                return;
+            };
+            game.set_motion(true);
+            game.set_speed(speed);
+            let t0 = game.clock;
+            assert!(down(&mut game, "ArrowDown"));
+            let mut at = game.leader_position();
+            // Per step: the frames to the next one, and those that drew the slide.
+            let mut steps: Vec<(usize, usize)> = Vec::new();
+            let mut gaps = Vec::new();
+            let mut last = None;
+            while game.clock - t0 < 6000.0 {
+                game.set_clock(game.clock + FRAME);
+                let k = game.pace(FRAME);
+                for _ in 0..k {
+                    game.step(20);
+                    if game.leader_position() != at {
+                        at = game.leader_position();
+                        steps.push((0, 0));
+                        if let Some(t) = last.replace(game.clock) {
+                            gaps.push(game.clock - t);
+                        }
+                    }
+                }
+                game.ran(k);
+                if k > 0 || game.sliding() {
+                    game.present();
+                }
+                if let Some(step) = steps.last_mut() {
+                    step.0 += 1;
+                    step.1 += usize::from(game.motion.drawn);
+                }
+            }
+            assert!(game.key_up("ArrowDown"));
+            let inner = &steps[1..steps.len().saturating_sub(1).max(1)];
+            assert!(
+                inner.len() >= 3,
+                "steps while held at {speed}x: {}",
+                steps.len()
+            );
+            assert!(
+                inner.iter().all(|&(_, drawn)| drawn > 0),
+                "a slide drawn on every paced step at {speed}x: {inner:?}"
+            );
+            let mut shares: Vec<f64> = (inner.iter())
+                .map(|&(frames, drawn)| drawn as f64 / frames as f64)
+                .collect();
+            shares.sort_by(f64::total_cmp);
+            let gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
+            println!(
+                "held 6 s at {speed}x: {} steps, a step every {gap:.0} wall ms on average; moving \
+                 share per step {:.0}% to {:.0}%, median {:.0}% (frames drawing the slide over the \
+                 frames to the next step)",
+                steps.len(),
+                100.0 * shares[0],
+                100.0 * shares[shares.len() - 1],
+                100.0 * shares[shares.len() / 2]
             );
         }
     }

@@ -623,10 +623,12 @@ impl Io {
 
     /// Port-only (spec 20): the game shown is another (load state 0x105350,
     /// [`crate::saveload::restore::load_state`], whose forgotten remembered sight the scenes kept
-    /// so far name; a new process taking over, [`crate::main_loop::take_over`]): the shots kept
-    /// are dropped, and until the engine queues a publication with a scene ([`Engine::tick`]; an
-    /// early picture is one) every scene kept snaps, the early picture's included, and an
-    /// unchanged picture is published again: no slide crosses it.
+    /// so far name; a new process taking over, [`crate::main_loop::take_over`]), or the platform
+    /// missed what the engine queued for it (the queue past [`PUBLISHED`],
+    /// [`Engine::queue_motion`]): the shots kept are dropped, and until the engine queues a
+    /// publication with a scene ([`Engine::tick`]; an early picture is one) every scene kept
+    /// snaps, the early picture's included, and an unchanged picture is published again: no slide
+    /// crosses it.
     pub(crate) fn break_motion(&self) {
         self.set_motion_break(true);
         self.shots.borrow_mut().clear();
@@ -921,8 +923,9 @@ const TEXT_RING: usize = KEY_RING;
 /// of them: more than a fight's turn records before its playback shows them.
 pub(crate) const SHOTS: usize = 64;
 
-/// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most, the oldest
-/// dropped past it, which breaks the game shown as a load does ([`Engine::queue_motion`]). A tick
+/// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most; past it they give
+/// way to one foreign publication, and the game shown breaks as at a load
+/// ([`Engine::queue_motion`]). A tick
 /// queues at most two (its early picture and its own), and a page takes them at each present,
 /// after at most [`crate::pacer::MAX_STEPS`] ticks, so a page never meets it; a host that ticks
 /// longer without taking them does.
@@ -1246,16 +1249,35 @@ impl Engine {
     }
 
     /// Port-only (spec 20): queues `publication` for the platform ([`Engine::take_motion`]). Past
-    /// [`PUBLISHED`] the oldest are dropped, and the platform never sees them: the game shown
-    /// breaks there as at a load ([`Io::break_motion`]), so the scenes kept after it snap until
-    /// one is queued, and a publication dropped (one that ended a break included) is not slid
-    /// across.
+    /// [`PUBLISHED`] the whole queue gives way to one foreign publication now, and the game shown
+    /// breaks there as at a load ([`Io::break_motion`]): the platform sees none of what was
+    /// queued, its presenter ends every slide at the foreign one, and the scenes kept after it
+    /// snap until one is queued. So no slide crosses a publication dropped (one that ended a
+    /// break included), and none runs from a scene before the queue into one after it.
     fn queue_motion(&mut self, publication: Published) {
         self.motion.push(publication);
         if self.motion.len() > PUBLISHED {
-            self.motion.drain(..self.motion.len() - PUBLISHED);
+            self.motion.clear();
+            self.motion.push(Published {
+                time_ms: self.io.now_ms(),
+                shot: None,
+                preview: false,
+            });
             self.io.break_motion();
         }
+    }
+
+    /// Port-only (spec 20, the Bounds receipts): every shot motion holds in the engine now: the
+    /// framed renders kept ([`SHOTS`]), the one kept last, the early picture made, and the
+    /// publications queued ([`PUBLISHED`]); a shot held in two places is listed twice.
+    #[cfg(test)]
+    pub(crate) fn motion_shots(&self) -> Vec<Rc<crate::gfx::motion::Shot>> {
+        let io = &self.io;
+        let mut out: Vec<_> = io.shots.borrow().iter().cloned().collect();
+        out.extend(io.last_shot.borrow().clone());
+        out.extend(io.preview.borrow().clone());
+        out.extend(self.motion.iter().filter_map(|p| p.shot.clone()));
+        out
     }
 
     /// Port-only (spec 20): with `on` each framed render of the map window keeps its scene
@@ -2366,11 +2388,11 @@ mod tests {
     }
 
     /// Spec 20: with [`PUBLISHED`] publications not taken, one more (a scene's, or an early
-    /// picture's) drops the oldest and breaks the game shown as a load does: the queue holds
-    /// [`PUBLISHED`], the break is pending (so the unchanged picture after an early picture is
-    /// published again), and the next scene snaps and ends it.
+    /// picture's) replaces the queue with one foreign publication at that time and breaks the
+    /// game shown as a load does. The break is pending (so after an early picture the unchanged
+    /// picture is published again, foreign too), and the next scene snaps and ends it.
     #[test]
-    fn a_full_queue_drops_the_oldest_and_breaks_the_game_shown() {
+    fn a_full_queue_gives_way_to_a_foreign_publication_and_breaks_the_game_shown() {
         for early in [false, true] {
             let mode = Rc::new(Cell::new(1u8));
             let mut e = scene_game(Rc::clone(&mode));
@@ -2385,17 +2407,14 @@ mod tests {
             }
             e.tick(&[], 20);
             assert!(e.io().motion_break(), "early {early}: past it, the break");
+            let now = e.io().now_ms();
             let p = e.take_motion();
-            assert_eq!(p.len(), PUBLISHED, "early {early}: the newest kept");
-            let last = &p[PUBLISHED - 1];
-            if early {
-                assert!(
-                    p[PUBLISHED - 2].preview && !last.preview && last.shot.is_none(),
-                    "the early picture, then the unchanged picture published again (foreign)"
-                );
-            } else {
-                assert!(last.shot.is_some(), "the scene that went past it kept");
-            }
+            assert_eq!(p.len(), 1 + usize::from(early), "early {early}: the queue");
+            assert!(
+                p.iter()
+                    .all(|q| q.shot.is_none() && !q.preview && q.time_ms == now),
+                "early {early}: foreign publications only, at the tick's time"
+            );
             mode.set(1);
             e.tick(&[], 20);
             let p = e.take_motion();
@@ -2405,6 +2424,92 @@ mod tests {
             );
             assert!(!e.io().motion_break(), "early {early}: and ends the break");
         }
+    }
+
+    /// Spec 20: after a queue past [`PUBLISHED`] (a scene's, or an early picture's, the scenes
+    /// before it not taken), the platform's take holds no scene that does not snap before the
+    /// first that does: nothing in it slides from a scene from before the queue.
+    #[test]
+    fn after_a_full_queue_no_scene_slides_before_one_snaps() {
+        for early in [false, true] {
+            let mode = Rc::new(Cell::new(1u8));
+            let mut e = scene_game(Rc::clone(&mode));
+            e.set_motion(true);
+            for _ in 0..PUBLISHED {
+                e.tick(&[], 20);
+            }
+            if early {
+                mode.set(0);
+                e.io().keep_preview(crate::gfx::motion::Shot::for_test(1));
+            }
+            e.tick(&[], 20);
+            mode.set(1);
+            e.tick(&[], 20);
+            e.tick(&[], 20);
+            let p = e.take_motion();
+            let scenes: Vec<bool> = (p.iter())
+                .filter_map(|q| q.shot.as_ref().map(|s| s.scene.snap))
+                .collect();
+            let first = scenes.iter().position(|&snap| snap);
+            assert!(first.is_some(), "early {early}: a scene that snaps");
+            assert!(
+                first == Some(0),
+                "early {early}: {} scenes that do not snap before the first that does",
+                first.unwrap_or(scenes.len())
+            );
+        }
+    }
+
+    /// Spec 20, a platform's side of a queue past [`PUBLISHED`] (a host that ticks on without
+    /// taking it): a presenter holds the scene published before a load (P0); after the load its
+    /// snapping scene, 255 foreign pictures and a scene go past the cap untaken. Fed the takes
+    /// from then on until a scene that snaps, the presenter never holds P0 beside a later scene.
+    #[test]
+    fn a_presenter_fed_past_a_full_queue_never_slides_from_the_scene_before_it() {
+        use u6_render::motion::Presenter;
+        let mode = Rc::new(Cell::new(1u8));
+        let mut e = scene_game(Rc::clone(&mode));
+        e.set_motion(true);
+        e.tick(&[], 20);
+        let mut p: Presenter<crate::gfx::motion::Shot> = Presenter::new();
+        let primed = e.take_motion().pop().and_then(|q| q.shot).expect("P0");
+        p.publish(Rc::clone(&primed), e.io().now_ms() as f64, true);
+        e.io().break_motion();
+        e.tick(&[], 20);
+        mode.set(2);
+        for _ in 0..PUBLISHED - 1 {
+            e.tick(&[], 20);
+        }
+        mode.set(1);
+        let (mut fed, mut snapped) = (0, false);
+        for _ in 0..8 {
+            e.tick(&[], 20);
+            for q in e.take_motion() {
+                let time = q.time_ms as f64;
+                match q.shot {
+                    None => p.foreign(),
+                    Some(shot) => {
+                        snapped |= shot.scene.snap;
+                        p.publish(shot, time, true);
+                    }
+                }
+                fed += 1;
+                let h = p.history();
+                assert!(
+                    !h.iter().any(|s| Rc::ptr_eq(s, &primed)) || h.len() == 1,
+                    "publication {fed}: P0 beside a later scene ({} held)",
+                    h.len()
+                );
+            }
+            if snapped {
+                break;
+            }
+        }
+        assert!(snapped, "a scene that snaps came");
+        assert!(
+            !p.history().iter().any(|s| Rc::ptr_eq(s, &primed)),
+            "P0 gone once it came"
+        );
     }
 
     /// Spec 20: the switch off drops what the engine held for the platform: the publications

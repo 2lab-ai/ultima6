@@ -661,6 +661,23 @@ mod tests {
     use std::mem::size_of;
     use u6_render::motion::{Cell, Node, Placed, Rank};
 
+    /// Spec 20 Design 4 (C2's merge note 3): a copy of the state holds no remembered sight
+    /// (`RenderCache::clone`), so the early picture, made on a copy, reads the live state's
+    /// ([`preview`], `SightMemory::shown_in`) and its render on the copy remembers nothing.
+    #[test]
+    fn a_copy_of_the_state_holds_no_remembered_sight() {
+        let mut state = State::empty();
+        let layer = Layer {
+            record: 1,
+            masktype: 0,
+            frame: 0,
+            frozen: None,
+        };
+        state.gfx.cache.memory.remember((0, 1, 1), vec![layer], 0);
+        assert_eq!(state.gfx.cache.memory.len(), 1, "a cell remembered");
+        assert_eq!(state.clone().gfx.cache.memory.len(), 0, "none in the copy");
+    }
+
     /// Spec 20 Bounds: [`Shot::heap_bytes`] of a shot built with known capacities is the figure
     /// worked by hand from this build's layouts (a 64-bit target): the `Rc`'s box 152 + 2 · 8,
     /// four cells' room 4 · 32, seven nodes' 7 · 8, three placed objects' 3 · 12, two remembered

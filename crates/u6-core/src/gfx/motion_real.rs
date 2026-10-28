@@ -1125,6 +1125,9 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
         // B against B' at the midpoint (classic, HD), and what the held HD layers draw of B at the
         // slide's end against B'.
         let (mut midpoint, mut held_at_end) = ([0usize; 2], 0);
+        // Where the sample of B against B' holds none: the changed pixels at rest, those off the
+        // shown map at the camera and those under the frame layer.
+        let mut unsampled = None;
         for (k, dt) in [0.0, 90.0, 180.0, 270.0, 350.0, SLIDE_MS]
             .into_iter()
             .enumerate()
@@ -1180,10 +1183,10 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
                 bad.push(("classic", k, n, d));
             }
             // B against B' on these pixels: from the midpoint the sample tells the two apart, but
-            // at the midpoint at 4 days in Original (Wide's sample there holds some). There
-            // the few pixels B' changes (the last grey ones going black) lie off the shown map at
-            // the camera's half cell, or under the frame layer's words (the cursor and the
-            // border), which the sample leaves out.
+            // at the midpoint at 4 days in Original (Wide's sample there holds some). There the
+            // few pixels B' changes (the last grey ones going black) lie off the shown map at the
+            // camera's half cell, or under the frame layer's words (the cursor and the border),
+            // which the sample leaves out: checked where the sample holds none.
             let faded = |pixels: &[(usize, usize)], (b, b2): (&[u32], &[u32])| {
                 (pixels.iter())
                     .filter(|&&(_, rest)| b[rest] != b2[rest])
@@ -1196,6 +1199,31 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
                 midpoint[0] += if dt == 180.0 { f } else { 0 };
                 if tells && f == 0 {
                     bad.push(("classic, B against B'", k, sampled.len(), f));
+                }
+                if f == 0 {
+                    // The changed pixels of the remembered cells at rest, those on the shown map
+                    // at this camera, and of these those under no mover: none under a mover, so
+                    // what is on the map is all under the frame layer.
+                    let none = |_: i32, _: i32| false;
+                    let mover = |x: i32, y: i32| {
+                        (movers.iter()).any(|&(mx, my)| {
+                            (mx..mx + 16).contains(&x) && (my..my + 16).contains(&y)
+                        })
+                    };
+                    let scene = &b2.0.scene;
+                    let at_rest = faded(&remembered_pixels(1, scene, (0, 0), &none), (&b.1, &b2.1));
+                    let on = faded(
+                        &remembered_pixels(1, scene, view.camera, &none),
+                        (&b.1, &b2.1),
+                    );
+                    let free = faded(
+                        &remembered_pixels(1, scene, view.camera, &mover),
+                        (&b.1, &b2.1),
+                    );
+                    unsampled = Some((at_rest, at_rest - on, free));
+                    if !(at_rest > on && on == free && free > 0) {
+                        bad.push(("why B against B' is 0", k, at_rest - on, free));
+                    }
                 }
             }
             // HD: the layers made from B over the HD frame now (the newest picture's, as the page
@@ -1265,6 +1293,12 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
         totals[2] += grey(&b.1);
         totals[3] += grey(&b2.1);
         totals[6] += held_at_end;
+        if let Some((at_rest, off, under)) = unsampled {
+            println!(
+                "{days} days: none of the {at_rest} pixels B' changes sampled at the midpoint: \
+                 {off} off the shown map at the camera, {under} under the frame layer"
+            );
+        }
         println!(
             "{days} to {} days: grey pixels of the shown map {} then {}; at the midpoint {} \
              classic and {} HD pixels sampled differ between B and B'; at the end the held HD \
@@ -1345,5 +1379,69 @@ fn the_heap_bytes_of_a_shot() {
         (engine + queued + history) * most,
         engine + paced + history,
         (engine + paced + history) * most
+    );
+}
+
+/// Spec 20 Bounds (C2's merge note 6: spec 18's memory figure is the remembered sight's alone,
+/// with motion off), on the user's zip, in this build's layout: the most heap bytes of the shots
+/// motion holds at once over a run with it on. The runs: the start fight, and the town's walk
+/// with every cell within 12 of the party remembered a day ago; a presenter fed as a page at 8×
+/// feeds it (the publications taken every 8 ticks). After each tick: the shots the engine holds
+/// ([`Engine::motion_shots`]) and those the presenter holds, each once ([`Shot::heap_bytes`]).
+#[test]
+fn the_shots_motion_holds_at_its_peak() {
+    let Some(files) = files() else { return };
+    // The most bytes held, the shots then, and the most shots held.
+    let mut peak = (0usize, 0usize, 0usize);
+    for (case, town) in [
+        ("the start fight", false),
+        ("the town's walk, remembered", true),
+    ] {
+        let mut game = boot(&files, 0, true);
+        if town {
+            remember_round(&mut game.1.borrow_mut(), 1);
+        }
+        let mut p: Presenter<Shot> = Presenter::new();
+        let (mut ticks, mut most) = (0usize, (0usize, 0usize, 0usize));
+        play(&mut game, town, |e| {
+            ticks += 1;
+            if ticks % 8 == 0 {
+                for publ in e.take_motion() {
+                    let time = publ.time_ms as f64;
+                    match publ.shot {
+                        None => p.foreign(),
+                        Some(shot) if publ.preview => p.preview(shot, time, true),
+                        Some(shot) => p.publish(shot, time, true),
+                    }
+                }
+            }
+            let mut held = e.motion_shots();
+            held.extend(p.history().iter().cloned());
+            let mut once: Vec<Rc<Shot>> = Vec::new();
+            for s in held {
+                if !once.iter().any(|o| Rc::ptr_eq(o, &s)) {
+                    once.push(s);
+                }
+            }
+            let bytes = once.iter().map(|s| s.heap_bytes()).sum::<usize>();
+            if bytes > most.0 {
+                most = (bytes, once.len(), most.2);
+            }
+            most.2 = most.2.max(once.len());
+        });
+        assert!(most.0 > 0, "{case}: shots held");
+        println!(
+            "{case}: {ticks} ticks; the most held at once {} bytes in {} shots; the most shots {}",
+            most.0, most.1, most.2
+        );
+        if most.0 > peak.0 {
+            peak = (most.0, most.1, peak.2);
+        }
+        peak.2 = peak.2.max(most.2);
+    }
+    println!(
+        "the shots motion holds with it on, at its peak over the runs: {} bytes in {} shots; the \
+         most shots at once {}",
+        peak.0, peak.1, peak.2
     );
 }

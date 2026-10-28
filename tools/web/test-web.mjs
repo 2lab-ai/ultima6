@@ -12942,7 +12942,7 @@ const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluat
   return { frames, sliding, drawn, along, misplaced, finals, indirect, ring, layers: g.slide_layers_version(), met: met(), leader: c.dataset.leader };
 }, [until, ref, max, dir]);
 
-for (const mode of ['hd', 'wide']) {
+for (const mode of ['hd', 'layout', 'wide']) {
   test(`smooth motion (spec 20 Design 5), ${mode} in fullscreen: a key pressed while a step's slide runs is taken (the party walks back on a slide of its own, the map drawn moving back); the border round the shown map keeps its pixels in every frame of the slides; once settled the page draws no slide (60 frames)`, async (env) => {
     const { context, page } = await motionPage(env, mode, true, Date.now());
     await page.click('#fullscreen');
@@ -12980,7 +12980,9 @@ for (const mode of ['hd', 'wide']) {
     assert.equal(step.out.misplaced + out.misplaced + after.misplaced, 0, `${mode}: each draw of the static layer where Game.slide places it, and each draw of it onto the screen where the layout puts the map`);
     const [finals, indirect] = [step.out.finals + out.finals + after.finals, step.out.indirect + out.indirect + after.indirect];
     assert.ok(indirect === 0 || finals > 0, `${mode}: draws onto the screen of the canvas the static layer went onto, checked`);
-    if (mode === 'wide') assert.ok(indirect > 0, `${mode}: the static layer goes onto Wide's frame canvas first`);
+    // The HD layout composes the slide in its ×4 frame first, Wide in its frame canvas: the
+    // draws onto the screen of those are what the checks above see there.
+    if (mode !== 'hd') assert.ok(indirect > 0, `${mode}: the static layer goes onto the layout's frame canvas first`);
     const settled = await page.evaluate(() => {
       const g = globalThis.__shownGame;
       globalThis.__slideCalls = 0;
@@ -12993,6 +12995,63 @@ for (const mode of ['hd', 'wide']) {
     await context.close();
   }, { needs: h.haveHfes });
 }
+
+// Spec 20 against spec 19 O1c, in the page (HD on, 1×, the virtual 60 Hz display, whose clock
+// the key events' timeStamp follow; a fixed seed; out of the start fight): each way held in turn
+// (no repeat: the page's held walk adds the paced presses, which reach paced_player_step) until
+// the party stops for 5 s; every step of the leader draws the slide's static layer onto the
+// screen on some of its frames, the paced ones (each hold's after its first, the press's own)
+// counted. One frame in the middle
+// of a step's slide is written for the dispatcher to read (U6_FRAMES_DIR, as keepFrame has it);
+// nothing of it is printed.
+test('smooth motion (spec 20), a held walk in the page: every paced step slides', async (env) => {
+  const { context, page } = await motionPage(env, 'hd', true, 1_700_000_000_000);
+  assert.ok((await motionRing(page)) > 100, 'the ring found');
+  // Out of the start fight (B), where each key is one member's turn.
+  await motionKey(page, 'b');
+  const holds = [];
+  let kept = false;
+  for (const dir of MOTION_DIRS) {
+    await page.keyboard.down(dir.key);
+    const steps = [];
+    let [leader, still] = [await motionLeader(page), 0];
+    for (let i = 0; i < 3600 && still < 300; i += 1) {
+      const [now, drawn] = await page.evaluate(() => {
+        const c = document.getElementById('screen');
+        globalThis.__slideDraws = [];
+        window.__display.run();
+        const draws = globalThis.__slideDraws;
+        globalThis.__slideDraws = null;
+        const onScreen = (d, k) => d.target === c || draws.some((e, j) => j > k && e.source === d.target && e.target === c);
+        return [c.dataset.leader, draws.some((d, k) => d.isStatic && onScreen(d, k))];
+      });
+      if (now !== leader) {
+        [leader, still] = [now, 0];
+        steps.push({ frames: 0, drawn: 0 });
+      } else still += 1;
+      const step = steps.at(-1);
+      if (!step) continue;
+      step.frames += 1;
+      step.drawn += drawn ? 1 : 0;
+      // A frame in the middle of a step's slide (its third drawn frame, a hold's second step),
+      // once.
+      if (!kept && steps.length === 2 && drawn && step.drawn === 3) {
+        await keepFrame(page.locator('#screen'), 'held-walk-mid-slide-hd.png');
+        kept = true;
+      }
+    }
+    await page.keyboard.up(dir.key);
+    await h.runFramesToPrompt(page, 60_000);
+    holds.push({ key: dir.key, steps });
+  }
+  const paced = holds.flatMap((hold) => hold.steps.slice(1));
+  const all = holds.flatMap((hold) => hold.steps);
+  const walked = holds.map((hold) => `${hold.key} ${hold.steps.length}`).join(', ');
+  assert.ok(paced.length >= 4, `paced steps held: ${walked}`);
+  assert.ok(all.every((st) => st.drawn > 0), `a slide drawn on every step: ${JSON.stringify(all.map((st) => [st.frames, st.drawn]))}`);
+  console.log(`  receipt: a held walk at 1x in the page, steps per way held: ${walked}; ${paced.length} paced steps, per step (the frames to the next or to the stop, those that drew the static layer onto the screen) ${JSON.stringify(paced.map((st) => [st.frames, st.drawn]))}; every step slid; a mid-slide frame ${kept && process.env.U6_FRAMES_DIR ? 'written' : 'not written'}`);
+  await context.close();
+}, { needs: h.haveHfes });
 
 // Page init script: per display frame of the page's loop (`frame`) while `__slideTimes` is an
 // array, [the frame's wall ms less the ms its steps and its present took (the page's own: the

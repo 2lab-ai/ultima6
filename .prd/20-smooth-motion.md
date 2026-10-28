@@ -34,11 +34,26 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
 
 1. **Timing rule.** A slide starts when a move is published and runs linear for D = 18 PAL frames = 360 engine ms.
    - The clock is engine time plus the pacer's carried fraction, so 2× gives 180 ms and 8× 45 ms.
-   - A held pointer button keeps 1×, so 360 ms (`pacer.rs:80-86`).
+   - A held pointer button keeps 1×, so 360 ms (`Pacer::rate`).
    - At Max, or when D at the current speed is under two display frames, there is no slide: the move snaps.
    - Why 360: under the 427 ms floor between world-turn pictures; no sampled fight move was cut; 55–58 % of the quiet
      step, near Ultima VII's medium walk of 400 ms per 16 px cell. Modern tile games use 100–270 ms but block input
      during the slide; this port must not block. Sources: W1 §2–§3.
+   - A held walk (spec 19 O1c) steps every max(turn / speed, `MIN_STEP_MS` = 150) wall ms, and every paced step
+     slides (`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`; in the page, test-web's "a held
+     walk in the page"). The slide keeps its 360 engine ms, so the picture moves on part of each step. Measured in
+     the castle, the down arrow held 6 s, the frames drawing a slide over the frames to the next step (median, and
+     range) (2026-10-28):
+
+     | speed | a step every | Original | Wide |
+     |---|---|---|---|
+     | 1× | 746–757 wall ms | 61 % (60–84 %) | 74 % (60–76 %) |
+     | 4× | 185–189 wall ms | 78 % (54–80 %) | 70 % (62–80 %) |
+     | 8× | 156 wall ms | 44 % (30–44 %) | 44 % (30–44 %) |
+
+     Kept at 360 ms for the owner to accept. A slide stretched to the held walk's cadence would leave the picture
+     behind the engine's after the last step: a slide's end would no longer be the engine's picture within 360 ms
+     of its publication.
 2. **The scene.** At each framed map present the engine records a port-only `MapScene` (`Scene` in u6-render's
    `motion` module; u6-core's `Shot` (`gfx/motion.rs`) holds it with what the render drew in place of a base):
    - the publication's engine time, the leader's cell and z, the view origin and size;
@@ -71,8 +86,9 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      - a preview held for 2000 ms (`PREVIEW_MS`) with no picture of the engine's, or a foreign picture after it, shows
        the engine's frame: the party is drawn where the engine's picture has it (it jumps back) until the turn's
        picture comes.
-4. **The early picture (spec 19 O2, pure form).** Right after the leader's step (`actors/walk.rs:76-88`), the engine
-   builds a scene on a clone of `State` (`update_view` and the draw lists on the clone; the clone is dropped). It hands
+4. **The early picture (spec 19 O2, pure form).** Right after the leader's step (`actors::walk::paced_player_step`),
+   the engine builds a scene on a clone of `State` (`update_view` and the draw lists on the clone; the clone is
+   dropped; the clone holds no remembered sight, so the early picture reads the live state's). It hands
    that scene to the presenter at once.
    - The party's slide then starts at the key, not 540 ms later.
    - The authoritative publication at the first pick's refresh is then a scene with the same party positions, so
@@ -90,7 +106,7 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
 5. **Renderers.**
    - **Original, classic:** during a slide, re-render the map rect each display frame in software (about 12 × 12 cells).
    - **HD (Original and Wide):** once per generation of the slides the engine blits the scene with a one-cell margin
-     through `blit_at` (`gfx/motion.rs`: the draws of `blit_back`, `gfx/blit.rs:98`, at any pixel; equal to the engine's
+     through `blit_at` (`gfx/motion.rs`: the draws of `gfx::blit::blit_back`, at any pixel; equal to the engine's
      picture in the 422 scenes the slide-end receipt draws again from scratch) into scene-sized layers: static, movers
      and occluders. The compositor composes each layer once; each display frame then draws them with the camera
      offset, clipped to the shown rect, under the frame's border and UI.
@@ -158,18 +174,21 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
    switch). Off is today's picture exactly.
 7. **Bounds.** What motion keeps and what bounds it. Spec 18's memory bounds count the remembered sight only, not
    these. Sizes are this build's layouts on the native build, from capacities, as `SightMemory::heap_bytes` counts.
-   - The engine keeps at most `SHOTS` = 64 framed renders until a publication shows one (`engine.rs:770`), with the
+   - The engine keeps at most `SHOTS` = 64 framed renders until a publication shows one (`engine::SHOTS`), with the
      one kept last and the early picture made in the poll. It queues at most `PUBLISHED` = 256 publications for the
-     platform (`engine.rs:777`). Past it the oldest are dropped, and the game shown breaks as at a load
-     (`Engine::queue_motion`, `engine.rs:1061-1067`): the platform never sees those publications, so the scenes kept
-     after them snap until one is queued (`a_full_queue_drops_the_oldest_and_breaks_the_game_shown`).
+     platform (`engine::PUBLISHED`). Past it the whole queue gives way to one foreign publication at that time, and
+     the game shown breaks as at a load (`Engine::queue_motion`): the platform sees none of what was queued, its
+     presenter ends every slide at the foreign one, and the scenes kept after it snap until one is queued
+     (`a_full_queue_gives_way_to_a_foreign_publication_and_breaks_the_game_shown`,
+     `a_presenter_fed_past_a_full_queue_never_slides_from_the_scene_before_it`).
    - The page never meets that cap, so a snapping publication that ends a load's break is never lost before the page
-     sees it. A tick queues at most two (its early picture, `engine.rs:966`, and its own, `:1049`). The page runs at
-     most `MAX_STEPS` = 64 ticks a display frame (`pacer.rs:96-112`, `site/app.js:3082`) and presents after any
-     frame that ran one (`site/app.js:3091-3092`). Each present takes the queue whole (`u6-web lib.rs:993`, `:1903`,
-     `:2213`). 2 × 64 ≤ 256 is asserted at compile time beside `PUBLISHED` (`engine.rs:778`). A host that ticks
-     longer without taking the queue meets the cap, and the break above.
-   - The presenter keeps `HISTORY` = 3 scenes (`u6-render motion.rs:57`); an early picture it holds, for at most
+     sees it. A tick queues at most two: its early picture (in `Engine::tick`, after the poll) and its own
+     (`Engine::match_motion`). The page runs at most `MAX_STEPS` = 64 ticks a display frame (`Pacer::due`, and the
+     budget loop in site/app.js `frame`) and presents after any frame that ran one (`frame`'s `game.present()`).
+     Each present takes the queue whole (`Game::present` → `Game::slide_view` → `Motion::take` →
+     `Engine::take_motion`). 2 × 64 ≤ 256 is asserted at compile time beside `PUBLISHED`. A host that ticks longer
+     without taking the queue meets the cap, and the break above.
+   - The presenter keeps `HISTORY` = 3 scenes (`u6_render::motion::HISTORY`); an early picture it holds, for at most
      `PREVIEW_MS`, is one of them.
    - The most a shot held in the receipt's runs is 12 264 bytes in Original and 69 864 in Wide (`Shot::heap_bytes`,
      its accounting checked on a shot built by hand: `a_shots_heap_bytes_are_its_capacities_worked_by_hand`; the runs
@@ -178,12 +197,17 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      remembered layers holds more. Estimated from them, at most 325 shots held at once take about 3.99 MB in
      Original and 22.7 MB in Wide; with the page's presents (at most 128 queued), 197 shots take about 2.42 MB and
      13.8 MB.
-   - The slide's layers at the page's largest scale, HD 4×, over four moves east, the most over the frames drawn
-     while a slide ran (`the_slide_layer_buffers_at_hd_4x`, 2026-10-28). In Original: 1.05 MB of layers (colour
-     indices, sources and drawn marks, in the wasm), 4.77 MB of composed words and changes (in the wasm), and
-     4.78 MB of canvases in the test's stand-in for the page (`Page`: the layers' canvases only; the page's screen
-     canvas and Wide's compositing canvas are not counted). The sum of these peaks is 10.6 MB, and the most on one
-     frame 10.58 MB. In Wide: 6.00, 27.4 and 27.4 MB; 60.9 MB both summed and on one frame. The words and canvases
+   - A run with motion on (`the_shots_motion_holds_at_its_peak`, 2026-10-28: the start fight, and the town's walk
+     with the cells round the party remembered, a presenter fed as a page at 8× feeds it): the shots the engine and
+     the presenter hold, each once, take at most 73 584 bytes in 6 shots in Original and 468 440 bytes in 7 shots in
+     Wide.
+   - The slide's layers at the page's largest scale, HD 4×, over four taps east, the most over the frames from the
+     first tap on that drew a move's slide while it ran, every move having some (`the_slide_layer_buffers_at_hd_4x`,
+     2026-10-28). In Original: 1.05 MB of layers (colour indices, sources and drawn marks, in the wasm), 4.77 MB of
+     composed words and changes (in the wasm), and 4.78 MB of canvases in the test's stand-in for the page (`Page`:
+     the layers' canvases only; the page's screen canvas and Wide's compositing canvas are not counted). The sum of
+     these peaks is 10.6 MB, and the most on one frame 10.58 MB. In Wide: 6.00, 27.4 and 27.4 MB; 60.9 MB both
+     summed and on one frame. The words and canvases
      take 4 · s² bytes a layer pixel at scale s, so at 2× a quarter of these.
 
 ## Receipts
