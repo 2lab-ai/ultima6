@@ -2459,8 +2459,8 @@ mod sight_memory_tests {
     /// remembered; the minute the old bound 131 072 was passed; at the end the cells, those with
     /// more than one layer and their share, the most held after a step, the walk's geometric
     /// bound (the start's view, then at most a new row of [`VIEW_W`] cells a step and a new view
-    /// a teleport) and the heap bytes. The cells held stay within the geometric bound, and the
-    /// cap forgot no cell over any run: five days fit.
+    /// a teleport) and the heap bytes. The cells held stay within the geometric bound after every
+    /// step, and the cap forgot no cell over any run: five days fit.
     #[cfg(feature = "wide")]
     #[test]
     #[ignore = "a cost receipt, run alone"]
@@ -2580,6 +2580,12 @@ mod sight_memory_tests {
                 }
                 let (t, n) = (minute(&e) - m0, e.state().gfx.cache.memory.len());
                 most = most.max(n);
+                let teleports = explorer.borrow().teleports;
+                let bound = VIEW_W * VIEW_H * (1 + teleports) + VIEW_W * steps;
+                assert!(
+                    n <= bound,
+                    "within the walk's geometric bound at every step"
+                );
                 while hours.len() as u64 <= t / 60 {
                     let lit = e.state().actors.objlist_tail[AMBIENT];
                     hours.push((n, lit));
@@ -2621,7 +2627,6 @@ mod sight_memory_tests {
             if !town {
                 assert!(minute(&e) - m0 >= 5 * 1440, "five game days walked");
             }
-            assert!(most <= bound, "within the walk's geometric bound");
             assert_eq!(m.evicted(), 0, "the cap forgot no cell");
             assert!(most < MAX_CELLS, "under the cap all along");
         }

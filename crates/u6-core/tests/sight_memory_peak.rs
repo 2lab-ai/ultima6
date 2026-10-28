@@ -7,7 +7,8 @@
 //! 2^19 buckets. What the memory retains is under 16 MiB (`the_bounds_hold_the_heap_under_16_mib`);
 //! the growth is the peak: for a moment the old table and the new live together. Prints counts
 //! only; one test, so nothing else allocates while it measures. Runs only where the owner's zip
-//! exists (never in CI: the data is not ours to ship).
+//! exists (never in CI: the data is not ours to ship), and prints `ran` or `skipped` so a gate
+//! log shows which.
 #![allow(clippy::disallowed_methods)] // reads the owner's zip
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -27,6 +28,9 @@ static NOW: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 /// The largest single allocation since the last reset.
 static LARGEST: AtomicUsize = AtomicUsize::new(0);
+/// The allocations of a cells' table of 2^19 buckets ([`is_table`]), and of 2^20 or more.
+static TABLES_19: AtomicUsize = AtomicUsize::new(0);
+static TABLES_20: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -35,6 +39,11 @@ unsafe impl GlobalAlloc for Counting {
             let now = NOW.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
             PEAK.fetch_max(now, Ordering::SeqCst);
             LARGEST.fetch_max(layout.size(), Ordering::SeqCst);
+            if is_table(layout.size(), 1 << 19) {
+                TABLES_19.fetch_add(1, Ordering::SeqCst);
+            } else if layout.size() >= table(1 << 20) {
+                TABLES_20.fetch_add(1, Ordering::SeqCst);
+            }
         }
         p
     }
@@ -50,7 +59,7 @@ static A: Counting = Counting;
 
 fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+        println!("sight_memory_peak: skipped ({ZIP} not present)");
         return None;
     }
     let data = std::fs::read(ZIP).quiet();
@@ -61,21 +70,36 @@ fn files() -> Option<Files> {
     Some(Files::new(r.files))
 }
 
-/// The bytes of a cells' table of `buckets` buckets in one allocation (std's hashbrown): an
-/// entry of 20 bytes and a control byte per bucket, and a group's width of control bytes more
-/// (at most 16).
+/// The bytes of a cells' table of `buckets` buckets in one allocation (std's hashbrown), but the
+/// group's width of control bytes more: an entry of 20 bytes and a control byte per bucket.
 fn table(buckets: usize) -> usize {
     buckets * 21
 }
 
+/// Whether an allocation of `size` bytes is a cells' table of `buckets` buckets: [`table`] and a
+/// group's width of control bytes (8 with NEON or on wasm32, 16 with SSE2), aligned to it.
+fn is_table(size: usize, buckets: usize) -> bool {
+    (table(buckets) + 8..=table(buckets) + 16).contains(&size)
+}
+
+/// The copy store as in play: its size is a constant of the game data, 255 copies on the owner's
+/// game (`real_the_copies_of_the_merged_records_are_a_constant_of_the_game_data`), each under
+/// 1 KiB with its index.
+const COPIES: usize = 255 * 1024;
+
 /// Spec 18 (the review's peak): the walk above, until the cells' table has grown to 2^19 buckets
 /// and 200 renders more (the cap acting after them). Measured over the heap at the first render
-/// (the game state, the engine's buffers): the peak and what is retained at the end. The table
-/// grew once to 2^19 buckets and never to 2^20, and the peak stays under 24 MiB: the two tables
-/// of the growth (16.5 MB), the copies, the cap's scratch and the renders' own.
+/// (the game state, the engine's buffers): the peak and what is retained at the end.
+/// - The table grew to 2^19 buckets once (one allocation of that table's size) and never to
+///   2^20.
+/// - The high-water was set at the render of that growth, and no later render passed it.
+/// - The peak is at least the two tables of the growth (2^18 and 2^19 buckets, 16.5 MB: for a
+///   moment both live) and at most those, the copies and 1 MiB (the renders' own and the cap's
+///   scratch).
 #[test]
 fn the_remembered_sight_peaks_once_as_its_table_grows() {
     let Some(files) = files() else { return };
+    println!("sight_memory_peak: ran");
     let mut s = State::new_game(&files).quiet();
     u6_core::main_loop::load_state_tail(&mut s);
     let e = Engine::with_game(State::empty(), Files::default(), |_, _| async {});
@@ -85,38 +109,58 @@ fn the_remembered_sight_peaks_once_as_its_table_grows() {
     let base = NOW.load(Ordering::SeqCst);
     PEAK.store(base, Ordering::SeqCst);
     LARGEST.store(0, Ordering::SeqCst);
-    let (mut renders, mut grown, mut most) = (0usize, None, 0);
+    TABLES_19.store(0, Ordering::SeqCst);
+    TABLES_20.store(0, Ordering::SeqCst);
+    let (mut renders, mut grown) = (0usize, None);
     let grid = (0..1024u16)
         .step_by(VIEW_H)
         .flat_map(|y| (0..1024u16).step_by(VIEW_W).map(move |x| (x, y)));
     for (x, y) in grid {
+        let (tables, before) = (
+            TABLES_19.load(Ordering::SeqCst),
+            PEAK.load(Ordering::SeqCst),
+        );
         u6_core::map::travel::teleport(&mut s, x, y, 0, 0);
         u6_core::map::view::update_view(&mut s);
         u6_core::gfx::anim::anim_tick(&mut s);
         u6_core::gfx::render_window(&mut s, io, true);
         renders += 1;
-        most = most.max(s.gfx.cache.sight_cells());
-        if grown.is_none() && LARGEST.load(Ordering::SeqCst) >= table(1 << 19) {
-            grown = Some(renders);
+        if grown.is_none() && TABLES_19.load(Ordering::SeqCst) > tables {
+            grown = Some((renders, before, PEAK.load(Ordering::SeqCst)));
         }
-        if grown.is_some_and(|g| renders >= g + 200) {
+        if grown.is_some_and(|(g, _, _)| renders >= g + 200) {
             break;
         }
     }
     let peak = PEAK.load(Ordering::SeqCst) - base;
     let retained = NOW.load(Ordering::SeqCst).saturating_sub(base);
     let largest = LARGEST.load(Ordering::SeqCst);
+    let (tables, larger) = (
+        TABLES_19.load(Ordering::SeqCst),
+        TABLES_20.load(Ordering::SeqCst),
+    );
+    let (at, before, after) = grown.quiet();
     println!(
-        "{renders} renders, the table grown at render {grown:?}; at most {most} cells, {} at the \
-         end; largest allocation {largest} bytes; peak {peak} bytes over the start, {retained} \
-         retained at the end",
+        "{renders} renders; the 2^19 table allocated {tables} times, first at render {at} (the \
+         high-water {} bytes over the start before it, {} after it); largest allocation \
+         {largest} bytes; peak {peak} bytes over the start, {retained} retained at the end, {} \
+         cells",
+        before - base,
+        after - base,
         s.gfx.cache.sight_cells()
     );
-    assert!(grown.is_some(), "the table grew to 2^19 buckets");
-    assert!(largest < table(1 << 20), "never to 2^20 buckets");
+    let low = table(1 << 18) + table(1 << 19);
+    let high = low + COPIES + (1 << 20);
+    assert_eq!(tables, 1, "the table grew to 2^19 buckets once");
+    assert_eq!(larger, 0, "never to 2^20 buckets");
+    assert!(after > before, "the growth's render raised the high-water");
+    assert_eq!(after - base, peak, "and no later render passed it");
     assert!(
-        most <= u6_core::gfx::cache::MAX_CELLS,
-        "at most MAX_CELLS cells"
+        peak >= low,
+        "the peak: at least the two tables of the growth"
     );
-    assert!(peak < 24 << 20, "the peak under 24 MiB");
+    assert!(
+        peak <= high,
+        "the peak: at most the tables, the copies and 1 MiB"
+    );
 }
