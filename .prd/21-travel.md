@@ -160,7 +160,7 @@ the map), `NoGame` (the command loop's program is not running: the opening, the 
    party member end from the leader in combat mode (`walk.rs:555-560`), the original's one leash.
 8. `Displaced`: at a prompt the leader is more than one cell from where it stood when the last step was pressed (from
    the plan's start before the first), or on another level, or another actor leads, or a Restore ran since the travel
-   started (`SaveLoad::restores`, counted at the end of `saveload::restore`, `restore.rs:149`; port-only, never
+   started (`SaveLoad::restores`, counted at the end of `saveload::restore`, `saveload/restore.rs`; port-only, never
    saved), wherever it left the leader: not a step's result (a level change on the way, a load, a teleport). A ladder,
    stairs or a gate as the target ends here, not as `Arrived`: the step onto it changes the level.
 9. `Gone`: no leader, or the game left the command loop's program.

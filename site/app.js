@@ -301,7 +301,6 @@ let max_input_bytes = null;
 let max_locale_pack_bytes = null;
 let max_pack_bytes = null;
 let max_save_bytes = null;
-let max_save_file_bytes = null;
 let max_save_file_bytes_of = null;
 let is_sight_file = null;
 let step_ms = null;
@@ -3119,24 +3118,33 @@ const SAVE_PATH = /(^|\/)savegame\/[^/]+$/i;
 // The save files of a drop, read, in the original's names; a file over the save limits (the
 // engine's, which its start also applies to stored files: each file's own, the remembered sight's
 // larger than a block's, and the whole save's, which does not count the remembered sight's) is
-// left out before it is read. Returns the files and the status note on what was left out.
+// left out before it is read, and the note names the limit that left out each. Of the remembered
+// sight's files (spec 18: any folder, any case of the name) only the one the engine keeps is
+// read: `Game::load_save` takes each within its limit in turn, a later one replacing the one
+// before, so the last of them; the others are not read. Returns the files and the status note on
+// what was left out.
 async function readSaves(saveItems) {
   const files = [];
   const left = [];
   let total = 0;
-  for (const { path, file } of saveItems) {
-    const name = `savegame/${path.split('/').pop()}`;
+  const nameOf = (path) => `savegame/${path.split('/').pop()}`;
+  const sight = saveItems.findLast(({ path, file }) =>
+    is_sight_file(nameOf(path)) && file.size <= max_save_file_bytes_of(nameOf(path)));
+  for (const item of saveItems) {
+    const { path, file } = item;
+    const name = nameOf(path);
     const counted = is_sight_file(name) ? 0 : file.size;
-    if (file.size > max_save_file_bytes_of(name) || total + counted > max_save_bytes()) {
-      left.push(path);
+    const most = max_save_file_bytes_of(name);
+    if (file.size > most || total + counted > max_save_bytes()) {
+      left.push(file.size > most ? t('saveOverFile', path, most) : t('saveOverAll', path, max_save_bytes()));
       continue;
     }
+    if (is_sight_file(name) && item !== sight) continue;
     say('reading', path);
     total += counted;
     files.push({ path: name, bytes: new Uint8Array(await file.arrayBuffer()) });
   }
-  const note = left.length === 0 ? ''
-    : t('savesLeftOut', max_save_file_bytes(), max_save_bytes(), left.join(', '));
+  const note = left.length === 0 ? '' : t('savesLeftOut', left.join(', '));
   return { files, note };
 }
 
@@ -4579,7 +4587,7 @@ enqueue('opEngine', async () => {
   try {
     ({
       default: init, Game, HdPack, LocalePack, PackProbe, budget_ms, input_too_large, max_input_bytes,
-      max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes, max_save_file_bytes_of,
+      max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes_of,
       is_sight_file, step_ms, zip_sliced, shown_map,
     } = await import(ENGINE_URL));
     wasm = await init();

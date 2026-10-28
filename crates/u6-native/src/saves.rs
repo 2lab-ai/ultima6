@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use u6_core::saveload::{SaveStore, StoreError};
+use u6_core::gfx::cache::MAX_SIGHT_FILE_BYTES;
+use u6_core::saveload::{SIGHT_FILE, SaveStore, StoreError};
 
 /// Directory part every save name starts with.
 const DIR: &str = "savegame";
@@ -43,6 +44,9 @@ impl DirStore {
 }
 
 impl SaveStore for DirStore {
+    /// Every file of the directory (none when it is missing), but the leftovers of an interrupted
+    /// write and a remembered sight's file larger than one can be (spec 18,
+    /// `MAX_SIGHT_FILE_BYTES`), which is left unread: the save loads with nothing remembered.
     fn load(&self) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
         let dir = self.dir();
         let mut out = BTreeMap::new();
@@ -59,8 +63,15 @@ impl SaveStore for DirStore {
             if !path.is_file() || name.ends_with(".part") {
                 continue;
             }
+            let file = format!("{DIR}/{name}");
+            if file.eq_ignore_ascii_case(SIGHT_FILE) {
+                let size = entry.metadata().map_err(|e| err(&path, e))?.len();
+                if size > MAX_SIGHT_FILE_BYTES as u64 {
+                    continue;
+                }
+            }
             let bytes = fs::read(&path).map_err(|e| err(&path, e))?;
-            out.insert(format!("{DIR}/{name}"), bytes);
+            out.insert(file, bytes);
         }
         Ok(out)
     }
@@ -124,6 +135,31 @@ mod tests {
         bad.clear();
         bad.insert("objlist".to_string(), vec![0]);
         assert!(store.store(&bad).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Spec 18 (saved with the game): a remembered sight's file larger than one can be
+    /// (`MAX_SIGHT_FILE_BYTES`) is not read, in any case of its name, while another file past
+    /// that size is; a sight file of that size is read.
+    #[test]
+    fn a_sight_file_past_its_limit_is_not_read() {
+        let root = scratch("sight-limit");
+        let dir = root.join(DIR);
+        fs::create_dir_all(&dir).unwrap();
+        let store = DirStore::new(&root);
+        fs::write(dir.join("objlist"), vec![0; MAX_SIGHT_FILE_BYTES + 1]).unwrap();
+        fs::write(dir.join("U6Sight"), vec![0; MAX_SIGHT_FILE_BYTES + 1]).unwrap();
+        let got = store.load().unwrap();
+        assert!(
+            got.keys().eq(["savegame/objlist"]),
+            "the sight file past its limit left unread"
+        );
+        fs::write(dir.join("U6Sight"), vec![0; MAX_SIGHT_FILE_BYTES]).unwrap();
+        let got = store.load().unwrap();
+        assert!(
+            got["savegame/U6Sight"].len() == MAX_SIGHT_FILE_BYTES,
+            "at its limit: read"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

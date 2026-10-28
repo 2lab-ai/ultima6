@@ -301,6 +301,29 @@ fn changed_since_lists_the_sight_file_of_the_save_that_wrote_it() {
     );
 }
 
+/// Spec 18: the save state's equality leaves the remembered sight's file out, as the game
+/// state's leaves the memory out (it lives in the render cache); every other field counts.
+#[test]
+fn the_save_states_equality_leaves_the_sight_file_out() {
+    let plain = SaveLoad::default();
+    let mut with = plain.clone();
+    with.sight = Some(SavedSight::new(vec![1, 2, 3]));
+    assert_eq!(with, plain, "the file left out");
+    let changed: [fn(&mut SaveLoad); 6] = [
+        |s| s.generation = 1,
+        |s| s.block_gen[68] = 1,
+        |s| s.objlist = Some(Vec::new()),
+        |s| s.names_raw = vec![0],
+        |s| s.restores = 1,
+        |s| s.sight_gen = 1,
+    ];
+    for (n, change) in changed.into_iter().enumerate() {
+        let mut other = with.clone();
+        change(&mut other);
+        assert_ne!(other, with, "field {n} counts");
+    }
+}
+
 #[test]
 fn mem_store_replaces_names_without_regard_to_case() {
     let mut store = MemStore::default();

@@ -668,8 +668,8 @@ export async function waitSettled(page, timeout = 60_000) {
   await page.waitForFunction(() => document.body.dataset.ops === '0', null, { timeout });
 }
 
-/// Drops `paths` (local files) plus `extra` ({ name, text } or { name, bytes: number[] }) on the
-/// drop zone, as a user drop.
+/// Drops `paths` (local files) plus `extra` ({ name, text }, { name, bytes: number[] } or
+/// { name, zeros: n }: n zero bytes, made in the page) on the drop zone, as a user drop.
 export async function dropFiles(page, paths, extra = []) {
   await page.evaluate(() => {
     if (document.getElementById('__t')) return;
@@ -681,8 +681,9 @@ export async function dropFiles(page, paths, extra = []) {
   await page.evaluate((extra) => {
     const dt = new DataTransfer();
     for (const file of document.getElementById('__t').files) dt.items.add(file);
-    for (const { name, text, bytes } of extra) {
-      dt.items.add(new File([bytes ? new Uint8Array(bytes) : text], name));
+    for (const { name, text, bytes, zeros } of extra) {
+      const body = bytes ? new Uint8Array(bytes) : zeros !== undefined ? new Uint8Array(zeros) : text;
+      dt.items.add(new File([body], name));
     }
     document.getElementById('drop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   }, extra);

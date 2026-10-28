@@ -301,13 +301,13 @@ fn with_file(store: &MemStore, name: &str, bytes: Option<Vec<u8>>) -> MemStore {
     s
 }
 
-/// Spec 18 (saved with the game: no file, another save's file, a malformed file): a save without
-/// [`SIGHT_FILE`] (an original's, or one made before the switch was on) boots with nothing
-/// remembered; so does the port's save with its objlist changed after the file was written (a
-/// later save of the original over it: here one talk flag), the new game with a stored file of
-/// another game, and the port's save with its file truncated or of another version. Each boots
-/// to the same state and the same frames as the same files without the sight file. A Save with
-/// the switch off writes the original's files alone.
+/// Spec 18 (saved with the game: another save's file, a malformed file): the port's save with its
+/// objlist changed after the file was written (a later save of the original over it: here one
+/// talk flag) boots with nothing remembered; so do the new game with a stored file of another
+/// game, and the port's save with its file truncated or of another version. Each boots to the
+/// same state and the same frames as the same files without the sight file (an original's save;
+/// that it boots as before C3 is round 1's scratch receipt against 54b9eea). A Save with the
+/// switch off from a fresh start (nothing ever remembered) writes the original's files alone.
 #[test]
 fn real_a_save_without_its_own_sight_file_boots_with_nothing_remembered() {
     let Some(files) =
@@ -329,7 +329,6 @@ fn real_a_save_without_its_own_sight_file_boots_with_nothing_remembered() {
         files: [(SIGHT_FILE.to_string(), file.clone())].into(),
     };
     let cases = [
-        ("an original's save", &plain, plain.clone()),
         (
             "the objlist changed after the file",
             &original_later,
@@ -351,6 +350,7 @@ fn real_a_save_without_its_own_sight_file_boots_with_nothing_remembered() {
             only_file,
         ),
     ];
+    let count = cases.len();
     for (what, without, with) in cases {
         let (a, b) = (boot_from(&files, without), boot_from(&files, &with));
         assert!(
@@ -374,8 +374,153 @@ fn real_a_save_without_its_own_sight_file_boots_with_nothing_remembered() {
         n == written.files.len() && !written.files.contains_key(SIGHT_FILE),
         "the original's files alone"
     );
-    println!(
-        "no sight file of its own: {} cases booted as without one",
-        5
+    println!("no sight file of its own: {count} cases booted as without one");
+}
+
+/// The run taken to a place `cells` east of where it stands and rendered there (the view's cells
+/// in sight remembered too).
+fn see_more(run: &mut Run, cells: u16) {
+    let c = run.e.state().map.centre;
+    run.command(Cmd::Teleport(c.x + cells, c.y, u16::from(c.z)));
+    run.idle(8);
+}
+
+/// Spec 18 (saved with the game: the switch): with the switch off, a memory the save already holds
+/// is written again by a Save. A game booted with the switch off from a store holding its save's
+/// file saves it again (the Save command: control-S, then Y): the flush lists the file, the bytes
+/// loaded but its binding (offsets 12..24, the objlist's length and digest), which names the
+/// objlist this Save wrote (the boot's ticks change two of its tables, the actors' type and frame
+/// and their worktype), and it reads back with that objlist.
+#[test]
+fn real_with_the_switch_off_a_save_writes_the_memory_it_loaded_again() {
+    let Some(files) = archive("real_with_the_switch_off_a_save_writes_the_memory_it_loaded_again")
+    else {
+        return;
+    };
+    let (_, store) = seen_and_saved(&files);
+    let mut f = files.clone();
+    attach(&mut f, &store).quiet();
+    let mut off = Run::boot_seeing(f, false);
+    assert!(off.cells() > 0, "the memory loaded");
+    off.press(Key::Char('\u{13}'));
+    off.press(Key::Char('y'));
+    assert!(off.e.state().saveload.generation == 1, "the Save");
+    let mut written = MemStore::default();
+    SaveSync::default().flush(&off.e, &mut written).quiet();
+    assert!(
+        written.files.contains_key(SIGHT_FILE),
+        "the switch off: the file listed again"
     );
+    let (loaded, again) = (&store.files[SIGHT_FILE], &written.files[SIGHT_FILE]);
+    let objlist = &written.files[OBJLIST_FILE];
+    let tables = table_diffs(&store.files[OBJLIST_FILE], objlist).len();
+    assert!(
+        again.len() == loaded.len() && again[..12] == loaded[..12] && again[24..] == loaded[24..],
+        "the file listed again: the bytes loaded but the binding"
+    );
+    assert!(
+        crate::gfx::cache::read_sight(again, objlist).is_ok(),
+        "bound to the objlist this Save wrote"
+    );
+    println!(
+        "the switch off: a Save of a loaded memory of {} cells wrote its {} bytes again ({tables} \
+         objlist tables moved)",
+        off.cells(),
+        again.len()
+    );
+}
+
+/// Spec 18 (saved with the game: the orders): Save A, then Save B with more seen: a Restore reads
+/// B's memory, and so does a boot from the store both were flushed into. Then the character `u`
+/// (a new game's objlist, a save generation of its own, no sight file): a Restore reads no
+/// memory, and a boot from the store (`u`'s objlist, A's and B's file still beside it) none.
+#[test]
+fn real_the_last_saves_memory_comes_back_and_none_after_u() {
+    let Some(files) = archive("real_the_last_saves_memory_comes_back_and_none_after_u") else {
+        return;
+    };
+    let (mut run, mut store) = seen_and_saved(&files);
+    let mut sync = SaveSync {
+        flushed: run.e.state().saveload.generation,
+    };
+    let a = run.e.state().saveload.sight.clone().quiet();
+    let held = run.cells();
+    see_more(&mut run, 24);
+    assert!(run.cells() > held, "more seen after Save A");
+    run.command(Cmd::Save);
+    sync.flush(&run.e, &mut store).quiet();
+    let b = run.e.state().saveload.sight.clone().quiet();
+    assert!(b.bytes() != a.bytes(), "Save B wrote another memory");
+    let objlist_b = store.files[OBJLIST_FILE].clone();
+    assert!(store.files.get(SIGHT_FILE).map(Vec::as_slice) == Some(b.bytes()));
+    see_more(&mut run, 24);
+    run.e.io().set_sight_memory(false);
+    run.command(Cmd::Restore);
+    assert!(
+        run.sight(&objlist_b).as_deref() == Some(b.bytes()),
+        "a Restore reads Save B's memory"
+    );
+    let mut f = files.clone();
+    attach(&mut f, &store).quiet();
+    let fresh = Run::boot_seeing(f, false);
+    assert!(
+        fresh.sight(&objlist_b).as_deref() == Some(b.bytes()),
+        "a boot from the store holds Save B's memory"
+    );
+
+    let new_game = boot_objlist(&files).quiet().to_vec();
+    assert!(new_game != objlist_b);
+    run.command(Cmd::Handoff(new_game.clone()));
+    sync.flush(&run.e, &mut store).quiet();
+    assert!(store.files[OBJLIST_FILE] == new_game, "u's objlist stored");
+    assert!(
+        store.files.get(SIGHT_FILE).map(Vec::as_slice) == Some(b.bytes()),
+        "B's file left beside it"
+    );
+    run.command(Cmd::Restore);
+    assert!(run.cells() == 0, "after u: a Restore reads no memory");
+    let (read, ..) = boot_from(&files, &store);
+    assert!(read == 0, "after u: a boot from the store reads none");
+    println!(
+        "the orders: Save A {} bytes, Save B {} bytes read back by a Restore and a boot; after u \
+         none",
+        a.bytes().len(),
+        b.bytes().len()
+    );
+}
+
+/// Spec 18 (saved with the game: a Restore without a file of its own): before any Save of the
+/// session, a Restore reads the platform's file; with none, or one it refuses (truncated), the
+/// memory the session gathered is forgotten whole, as before C3, and the two Restores leave the
+/// same state and frames.
+#[test]
+fn real_a_restore_without_its_own_sight_file_forgets_the_memory() {
+    let Some(files) = archive("real_a_restore_without_its_own_sight_file_forgets_the_memory")
+    else {
+        return;
+    };
+    let (_, store) = seen_and_saved(&files);
+    let plain = with_file(&store, SIGHT_FILE, None);
+    let mut short = store.files[SIGHT_FILE].clone();
+    short.pop();
+    let refused = with_file(&store, SIGHT_FILE, Some(short));
+    let mut after = Vec::new();
+    for (what, st) in [("no file", &plain), ("a truncated file", &refused)] {
+        let mut f = files.clone();
+        attach(&mut f, st).quiet();
+        let mut run = Run::boot_seeing(f, true);
+        see_more(&mut run, 24);
+        assert!(run.cells() > 0, "{what}: cells seen in the session");
+        run.e.io().set_sight_memory(false);
+        run.command(Cmd::Restore);
+        assert!(run.cells() == 0, "{what}: the Restore forgets them");
+        run.idle(8);
+        let fb = run.e.frame();
+        after.push((run.state(), fb.pixels().to_vec(), fb.palette.to_vec()));
+    }
+    assert!(
+        after[0] == after[1],
+        "the same state and frame after either Restore"
+    );
+    println!("a Restore without its own file: the memory forgotten, 2 cases alike");
 }

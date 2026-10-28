@@ -81,6 +81,9 @@ enum Cmd {
     Edit(fn(&mut State)),
     /// The party teleported (0x1092fc) to (x, y, z) and the view rebuilt (spec 18's saved sight).
     Teleport(u16, u16, u16),
+    /// The character `u` made: its objlist handed to the game (`intro::handoff::apply`, a new
+    /// save generation; spec 18's saved sight).
+    Handoff(Vec<u8>),
 }
 
 /// The real game future (`main_loop::game_first`) with commands run at the start of a poll, inside
@@ -108,6 +111,7 @@ impl Future for Inject {
                     crate::map::travel::teleport(&mut s, x, y, z, 0);
                     crate::map::view::update_view(&mut s);
                 }
+                Cmd::Handoff(objlist) => crate::intro::handoff::apply(&mut s, &objlist),
                 Cmd::Rearm(at) => {
                     let o = &mut s.objects;
                     for e in 0x100..crate::objects::OBJECT_SLOTS {

@@ -118,6 +118,8 @@ pub fn save(s: &mut State) {
     }
     s.actors.quest_flag = s.actors.quest_flag_copy as u8;
     let objlist = objlist::encode(s);
+    // The last Save's file goes before the new one is made (spec 18, Bounds).
+    s.saveload.sight = None;
     s.saveload.sight = s.gfx.cache.sight_file(&objlist).map(SavedSight::new);
     s.saveload.sight_gen = s.saveload.generation;
     s.saveload.objlist = Some(objlist);

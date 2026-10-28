@@ -839,7 +839,7 @@ test('a savegame folder file over the save limit is left out before it is read',
   await h.dropFiles(page, [], [{ name: 'PLAYER/SAVEGAME/objblkAA', bytes: new Array(30_000).fill(0) }]);
   await h.waitSettled(page);
   const s = await h.state(page);
-  assert.match(s.status, /Left out of the saved game \(a save file holds at most \d+ bytes/);
+  assert.match(s.status, /Left out of the saved game: PLAYER\/SAVEGAME\/objblkAA \(a save file of its name holds at most 24578 bytes\)\./);
   assert.match(s.status, /Nothing was imported/);
   assert.ok(!(await h.log(page)).some((e) => e.startsWith('read:')), 'nothing read');
   assert.deepEqual(await h.savedPaths(page), [], 'nothing stored');
@@ -12757,6 +12757,118 @@ test('remembered sight (spec 18, saved with the game): what the room\'s door sho
   const black = (p) => p.frame.every((v) => v === 0) && p.canvas.every((v) => v === 0);
   assert.ok(bare.length > 0 && bare.every((p) => !p.named && black(p)), 'without the file: those pixels black');
   console.log(`  receipt: spec 18 saved with the game: ${both.length} remembered pixels compared at S ${m.s}, the same after the reload, black without the file; frames kept: ${kept}`);
+}, { needs: h.haveHfes });
+
+// The largest file of the remembered sight the page takes (u6-core `MAX_SIGHT_FILE_BYTES`, its
+// value asserted in `the_file_of_a_full_memory_is_bounded`), and a block file's limit (2 bytes and
+// 0xc00 records of 8: u6-web `MAX_SAVE_FILE_BYTES`) and the whole save's (the objlist and the 69
+// blocks: `MAX_SAVE_BYTES`).
+const SIGHT_MAX = 7_421_996;
+const SAVE_FILE_MAX = 2 + 0xc00 * 8;
+const SAVE_MAX = 70 * SAVE_FILE_MAX;
+// The sight file's names in a drop's paths and in the read log (any folder, any case).
+const isSight = (path) => /(^|\/)savegame\/u6sight$/i.test(path);
+/// The files the page read since log entry `from` (harness `pageHooks`: each `arrayBuffer`).
+const readSince = async (page, from) => (await h.log(page)).slice(from)
+  .filter((e) => e.startsWith('read:start:')).map((e) => e.slice('read:start:'.length));
+
+test('remembered sight (spec 18, saved with the game): a dropped savegame folder holding the sight file several times (in another folder, in other cases of its name, each of the largest size the page takes) and once more past that size: only the copy the engine keeps, the last within its limit, is read; the game starts from the folder with that copy\'s memory, the same grey pixels as before; the one too large is named with the sight file\'s own limit; the stored save holds that copy alone, and a reload shows the memory again (frames kept in U6_FRAMES_DIR when set)', async (env) => {
+  const { page } = await h.openPage(env, { memory: 'on' });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await walkSouth(page, 10);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  await keepBefore(page);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  const at = (await atPrompt(page)).leader;
+  await page.focus('#screen');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  const stored = await h.savedFiles(page);
+  const sight = stored.find(({ path }) => path === 'savegame/u6sight');
+  assert.ok(sight && sight.bytes.length <= SIGHT_MAX, 'the Save stored the sight file');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const m = await memoryShown(page, { before: true });
+  assert.deepEqual(memoryChecks(m), [], 'the remembered sight shown before the drop');
+  const was = await pixelsAt(page, m.places);
+  // The page again, its game resumed (the virtual display gone); the stored save removed, so the
+  // memory after the drop can come only from the folder.
+  await page.reload();
+  await started(page, FILES);
+  await forgetVia(page, '#forget-save');
+  await h.waitSettled(page);
+  assert.deepEqual(await h.savedPaths(page), [], 'the stored save removed');
+
+  const folder = asFolder(stored);
+  const winner = folder.find(({ name }) => isSight(name)).name;
+  const others = ['OTHER/SAVEGAME/U6SIGHT', 'PLAYER/SAVEGAME/u6sight', 'PLAYER/savegame/U6Sight']
+    .map((name) => ({ name, zeros: SIGHT_MAX }));
+  const late = { name: 'LATE/SAVEGAME/u6SIGHT', zeros: SIGHT_MAX + 1 };
+  const from = (await h.log(page)).length;
+  await h.dropFiles(page, [], [...others, ...folder, late]);
+  const s = await started(page, FILES);
+  const sights = (await readSince(page, from)).filter(isSight);
+  assert.ok(sights.includes(winner), 'the copy the engine keeps read');
+  assert.deepEqual(sights, [winner], 'no other copy of the sight file read');
+  assert.ok(s.status.includes(`Left out of the saved game: ${late.name} (a save file of its name holds at most ${SIGHT_MAX} bytes).`), 'the one too large named with the sight file\'s limit');
+  assert.match(s.status, /The saved game \(\d+ files\) was imported/);
+  assert.equal((await atPrompt(page)).leader, at, 'the folder resumes where it was saved');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const now = await pixelsAt(page, m.places);
+  const both = was.map((p, i) => [p, now[i]]).filter(([a, b]) => a && b);
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  assert.ok(both.length * 10 >= m.places.length * 9, 'most of the pixels clear of the pointer both times');
+  assert.ok(both.every(([a, b]) => b.named && same(a.frame, b.frame) && same(a.canvas, b.canvas)), 'that copy\'s memory: each pixel named the remembered sight, the same grey in the frame and on the canvas');
+  const kept = (await h.savedFiles(page)).filter(({ path }) => isSight(path));
+  assert.equal(kept.length, 1, 'the stored save holds one sight file');
+  h.assertSame(kept[0].bytes, sight.bytes, 'the copy the engine kept');
+  await keepFrame(page.locator('#screen'), 'c3-r2-after-drop.png');
+
+  await page.reload();
+  await started(page, FILES);
+  assert.equal((await atPrompt(page)).leader, at, 'a reload resumes the stored folder');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const again = await pixelsAt(page, m.places);
+  const reloaded = was.map((p, i) => [p, again[i]]).filter(([a, b]) => a && b);
+  assert.ok(reloaded.length * 10 >= m.places.length * 9 && reloaded.every(([a, b]) => b.named && same(a.frame, b.frame)), 'after the reload: the same remembered pixels');
+  const frame = await keepFrame(page.locator('#screen'), 'c3-r2-after-drop-reload.png');
+  console.log(`  receipt: spec 18 dropped folder: ${others.length + 2} sight files dropped, ${sights.length} read; ${both.length} remembered pixels the same after the start and ${reloaded.length} after a reload; frames kept: ${frame}`);
+}, { needs: h.haveHfes });
+
+test('remembered sight (spec 18, saved with the game): a dropped savegame folder whose sight file is past a block file\'s limit, with the save\'s total used up by the other files, still has it taken: read, not left out, and stored with the save once the game started from it (synthetic sight bytes; the total filled with synthetic files)', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await walkAndSave(page);
+  const folder = asFolder(await h.savedFiles(page));
+  await forgetVia(page, '#forget-save');
+  await h.waitSettled(page);
+  let used = folder.reduce((sum, { bytes }) => sum + bytes.length, 0);
+  const fill = [];
+  while (used < SAVE_MAX) {
+    const n = Math.min(SAVE_FILE_MAX, SAVE_MAX - used);
+    fill.push({ name: `PLAYER/SAVEGAME/FILL${String(fill.length).padStart(2, '0')}`, zeros: n });
+    used += n;
+  }
+  const big = { name: 'PLAYER/SAVEGAME/U6SIGHT', zeros: 30_000 };
+  assert.ok(big.zeros > SAVE_FILE_MAX && used === SAVE_MAX, 'past a block\'s limit, the total used up');
+  const from = (await h.log(page)).length;
+  await h.dropFiles(page, [], [...folder, ...fill, big]);
+  const s = await started(page, FILES);
+  assert.ok((await readSince(page, from)).includes(big.name), 'the sight file read');
+  assert.ok(!s.status.includes('Left out'), 'nothing left out');
+  const kept = (await h.savedFiles(page)).filter(({ path }) => isSight(path));
+  assert.ok(kept.length === 1 && kept[0].bytes.length === big.zeros, 'stored with the save');
+  console.log(`  receipt: spec 18 sight file past a block's limit: ${big.zeros} bytes taken with ${fill.length} files filling the save's ${SAVE_MAX} bytes`);
 }, { needs: h.haveHfes });
 
 // --- the message history (spec 23) --------------------------------------------------------------

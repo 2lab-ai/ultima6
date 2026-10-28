@@ -21,7 +21,7 @@ Owner's words (2026-10-28, verbatim): "그리고 메세지창에서 스크롤로
 
 ## Measured facts (60f92c6)
 
-- The message window is the record `WindowId::Messages`, cells 22..=38 × 14..=23 (`ui/textstate.rs:170`), so pixels 176..=311 × 112..=191, in both builds (spec 13: the UI keeps its 320 × 200 coordinates; the page crops exactly this rect, `site/app.js:1588` `messages: from [176, 112, 136, 80]`, and Wide's 메시지 window shows the same region, `site/app.js:2127`).
+- The message window is the record `WindowId::Messages`, cells 22..=38 × 14..=23 (`ui/textstate.rs:170`), so pixels 176..=311 × 112..=191, in both builds (spec 13: the UI keeps its 320 × 200 coordinates; the page crops exactly this rect, `LAYOUT_REGIONS` in `site/app.js`, `messages: from [176, 112, 136, 80]`, and Wide's 메시지 window shows the same region, `WIDE_WINDOWS` there).
 - Text reaches the window's cells at five draw sites, all through `text::draw_cell` (`ui/text.rs:276`): `print::cell` (`ui/print.rs:29-35`: the assembled line, the centre padding, the more prompt's blank row), the key wait's cursor symbol and its erase (`ui/keyread.rs:149`, `:179`), the line editor's Backspace blank and its typed echo (`ui/keyread.rs:223`, `:225`).
 - The window scrolls at two sites, both `text::scroll_window` of the current window (`ui/print.rs:276`, `ui/keyread.rs:235`; `ui/text.rs:446`): the top row moves out of the rect and is lost (0x10525c), the bottom row is filled with the window's paper.
 - The paper under the rect, as the boot draws it, is the window's paper colour on 10 878 of its 10 880 pixels (probe, counts only).
@@ -72,7 +72,7 @@ Owner's words (2026-10-28, verbatim): "그리고 메세지창에서 스크롤로
 3. **Layer flow.** `dy` → `View::offset = clamp(offset − dy, 0, shown)` where `shown` = `View::lines.len()`, the lines kept as of the last publish; a change bumps `View::stamp`. `Engine::wheel` composes at once (trace deviation); `Engine::tick` composes whenever `stamp ≠ shown_stamp`: `shown.sync_from(published)` → `scrollback::draw_view(&ui, &view, &published, &mut shown)` → sprite → `shown_version += 1`. `draw_view`: view row r (0..10) shows combined line `shown − offset + r` of (`View::lines` ++ the published window's rows): a kept line → fill the row with its paper (`text::fill_rect`, naming the paper) → each cell through `draw_char` / `draw_typed` / `draw_symbol` → the patch; a live row → the published row r − (that index − shown) copied, paper sources renamed for the new row as `scroll_rect` does; then the bar (decision 7).
 4. **Side effects.** `View` only. `State` unchanged.
 5. **Error paths.** Offset already at an end: clamped, no stamp, nothing redrawn. No kept line: nothing.
-6. **Output.** `Engine::frame()` (RGBA path: `Game::present` → `redraw`, `u6-web/src/lib.rs:966`, `:1728`) with the view; HD: `HdView::present` keys on `(published_version, view stamp)` and composes `Engine::with_view_frame` (`hd.rs:150`).
+6. **Output.** `Engine::frame()` (RGBA path: `Game::present` → `redraw`, `u6-web/src/lib.rs`) with the view; HD: `HdView::present` keys on `(published_version, view stamp)` and composes `Engine::with_view_frame` (`hd.rs:150`).
 7. **Observability.** None logged (the lines are game text).
 
 ### S-C: the player's input returns to the live bottom

@@ -116,58 +116,66 @@ impl RenderCache {
     }
 }
 
-/// The layers a cell is written with: its own, `None` for a stacked cell whose stack is missing
-/// (it shows nothing) or that has more layers than a count holds (neither happens in play).
+/// The layers a cell is written with: its own, when the reader takes them all ([`read_sight`]: its
+/// key in range, at least one layer and at most a count's, each layer's record one of the
+/// records and its copy slot one of the copies); `None` otherwise, and for a stacked cell whose
+/// stack is missing (it shows nothing), so such a cell is left out rather than the whole file
+/// refused. None of these happens in play.
 fn written<'a>(m: &'a SightMemory, k: u32, c: &'a Remembered) -> Option<&'a [Layer]> {
-    m.layers_of(k, c).filter(|l| u16::try_from(l.len()).is_ok())
-}
-
-/// The keys of the cells the file holds, in increasing order: all of them while their layers fit
-/// [`MAX_SAVED_LAYERS`]; past it, the newest sights first, as the cap keeps them (of one minute,
-/// the highest keys), until the next would not fit.
-fn kept(m: &SightMemory) -> Vec<u32> {
-    let mut cells: Vec<(u32, u32, usize)> = (m.cells.iter())
-        .filter_map(|(&k, c)| written(m, k, c).map(|l| (k, c.seen, l.len())))
-        .collect();
-    let total: usize = cells.iter().map(|c| c.2).sum();
-    if total > MAX_SAVED_LAYERS {
-        cells.sort_unstable_by_key(|c| std::cmp::Reverse((c.1, c.0)));
-        let mut sum = 0;
-        let fit = cells
-            .iter()
-            .take_while(|c| {
-                sum += c.2;
-                sum <= MAX_SAVED_LAYERS
-            })
-            .count();
-        cells.truncate(fit);
+    if !key_in_range(k) {
+        return None;
     }
-    let mut keys: Vec<u32> = cells.into_iter().map(|c| c.0).collect();
-    keys.sort_unstable();
-    keys
+    let read = |l: &Layer| {
+        usize::from(l.record) < TILE_COUNT
+            && l.frozen.is_none_or(|s| usize::from(s) < m.frozen.len())
+    };
+    m.layers_of(k, c)
+        .filter(|l| !l.is_empty() && u16::try_from(l.len()).is_ok() && l.iter().all(read))
 }
 
-/// The file of memory `m` bound to `objlist` (the module docs); `None` when it holds no cell.
+/// The keys of the cells the file holds, in increasing order, and their layers together: all of
+/// them while their layers fit [`MAX_SAVED_LAYERS`]; past it, the newest sights first, as the cap
+/// keeps them (of one minute, the highest keys), until the next would not fit. In the usual case
+/// the keys are all it allocates (4 bytes a cell: spec 18, Bounds).
+fn kept(m: &SightMemory) -> (Vec<u32>, usize) {
+    let layers = |(&k, c): (&u32, &Remembered)| written(m, k, c).map(|l| (k, c.seen, l.len()));
+    let total: usize = m.cells.iter().filter_map(layers).map(|c| c.2).sum();
+    let mut keys = Vec::with_capacity(m.cells.len());
+    if total <= MAX_SAVED_LAYERS {
+        keys.extend(m.cells.iter().filter_map(layers).map(|c| c.0));
+        keys.sort_unstable();
+        return (keys, total);
+    }
+    let mut cells: Vec<(u32, u32, usize)> = m.cells.iter().filter_map(layers).collect();
+    cells.sort_unstable_by_key(|c| std::cmp::Reverse((c.1, c.0)));
+    let mut sum = 0;
+    for c in cells {
+        if sum + c.2 > MAX_SAVED_LAYERS {
+            break;
+        }
+        sum += c.2;
+        keys.push(c.0);
+    }
+    keys.sort_unstable();
+    (keys, sum)
+}
+
+/// The file of memory `m` bound to `objlist` (the module docs); `None` when it holds no cell. It
+/// writes the cells straight from the memory in [`kept`]'s order, into one buffer of the file's
+/// size.
 fn encode(m: &SightMemory, objlist: &[u8]) -> Option<Vec<u8>> {
     if m.cells.is_empty() {
         return None;
     }
-    let keys = kept(m);
-    let cells: Vec<(u32, &Remembered, &[Layer])> = (keys.iter())
-        .filter_map(|k| {
-            let c = m.cells.get(k)?;
-            Some((*k, c, written(m, *k, c)?))
-        })
-        .collect();
-    let layers: usize = cells.iter().map(|c| c.2.len()).sum();
-    let size = HEADER + COPY * m.frozen.len() + CELL * cells.len() + LAYER * layers;
+    let (keys, layers) = kept(m);
+    let size = HEADER + COPY * m.frozen.len() + CELL * keys.len() + LAYER * layers;
     let mut out = Vec::with_capacity(size);
     out.extend_from_slice(&MAGIC.to_le_bytes());
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(objlist.len() as u32).to_le_bytes());
     out.extend_from_slice(&digest(objlist).to_le_bytes());
     out.extend_from_slice(&m.swept.unwrap_or(NO_SWEEP).to_le_bytes());
-    for n in [m.frozen.len(), cells.len(), layers] {
+    for n in [m.frozen.len(), keys.len(), layers] {
         out.extend_from_slice(&(n as u32).to_le_bytes());
     }
     for f in &m.frozen {
@@ -180,7 +188,10 @@ fn encode(m: &SightMemory, objlist: &[u8]) -> Option<Vec<u8>> {
             })
         }));
     }
-    for (k, c, l) in cells {
+    for k in keys {
+        let Some((c, l)) = m.cells.get(&k).and_then(|c| Some((c, written(m, k, c)?))) else {
+            continue;
+        };
         out.extend_from_slice(&k.to_le_bytes());
         out.extend_from_slice(&c.seen.to_le_bytes());
         out.extend_from_slice(&(l.len() as u16).to_le_bytes());
@@ -198,10 +209,18 @@ fn encode(m: &SightMemory, objlist: &[u8]) -> Option<Vec<u8>> {
 struct Bytes<'a>(&'a [u8]);
 
 impl Bytes<'_> {
+    /// The next `N` bytes; zeros past the end (never reached: the length is checked first).
     fn take<const N: usize>(&mut self) -> [u8; N] {
-        let (head, rest) = self.0.split_at(N);
-        self.0 = rest;
-        head.try_into().unwrap_or([0; N])
+        match self.0.split_first_chunk::<N>() {
+            Some((head, rest)) => {
+                self.0 = rest;
+                *head
+            }
+            None => {
+                self.0 = &[];
+                [0; N]
+            }
+        }
     }
 
     fn u16(&mut self) -> u16 {
@@ -520,7 +539,9 @@ mod tests {
 
     /// Spec 18 (the read keeps the reading build's cap): a file holding `MAX_CELLS` cells, the
     /// most a file may (a build with fewer cells a render than this one), is capped at once to
-    /// seven eighths, the oldest first, so the next render's cells fit.
+    /// seven eighths, the oldest first, so the next render's cells fit. The cutoff falls inside
+    /// one minute: of its sights the lowest keys go first, so the cells kept are exactly the
+    /// highest keys of that minute.
     #[test]
     fn a_file_past_this_builds_cap_is_capped_at_the_read() {
         let mut m = SightMemory::default();
@@ -528,7 +549,8 @@ mod tests {
         m.fill_synthetic(7, 0, 1000, 1, 10);
         let file = encode(&m, OBJLIST).quiet();
         let back = read_sight(&file, OBJLIST).quiet();
-        assert_eq!(back.cells.len(), MAX_CELLS - MAX_CELLS / 8, "capped");
+        let target = MAX_CELLS - MAX_CELLS / 8;
+        assert_eq!(back.cells.len(), target, "capped");
         assert!(
             back.cells.len() + BOXES <= MAX_CELLS,
             "the next render fits"
@@ -537,6 +559,74 @@ mod tests {
             back.cells.values().all(|c| c.seen == minute32(50)),
             "the oldest went first"
         );
+        let mut tied: Vec<u32> = (m.cells.iter())
+            .filter(|(_, c)| c.seen == minute32(50))
+            .map(|(&k, _)| k)
+            .collect();
+        tied.sort_unstable();
+        let mut kept: Vec<u32> = back.cells.keys().copied().collect();
+        kept.sort_unstable();
+        assert!(
+            kept == tied[tied.len() - target..],
+            "of the cutoff's minute, the highest keys kept"
+        );
+    }
+
+    /// Spec 18 (the format): the header's bytes and a copy's transparency bits, fixed: the magic,
+    /// the version (u32), the objlist's length at 12 (u32) and its FNV-1a 64 digest at 16 (u64),
+    /// the sweep hour at 24 (u64), the counts of copies, cells and layers (u32 each); a copy's
+    /// record, its pixels, then pixel i's transparency as bit i mod 8 of byte i / 8.
+    #[test]
+    fn the_header_and_a_copys_bits_are_these_bytes() {
+        let mut m = SightMemory::default();
+        m.fill_copies(1, 0x0102);
+        for i in [0, 9, 255] {
+            m.frozen[0].transparent[i] = true;
+        }
+        m.remember((0, 0, 0), vec![layer(1, Some(0))], 10);
+        m.swept = Some(0x0807_0605_0403_0201);
+        let file = encode(&m, &[1, 2, 3]).quiet();
+        let header: [u8; HEADER] = [
+            0x75, 0x36, 0x73, 0x69, 0x67, 0x68, 0x74, 0x00, // u6sight, 0
+            0x01, 0x00, 0x00, 0x00, // version 1
+            0x03, 0x00, 0x00, 0x00, // the objlist: 3 bytes
+            0xab, 0xf5, 0x2c, 0x67, 0x18, 0x62, 0xaa, 0xd0, // FNV-1a 64 of 1, 2, 3
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // the sweep hour
+            0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(file[..HEADER], header, "the header");
+        assert_eq!(file[HEADER..HEADER + 2], [0x02, 0x01], "the copy's record");
+        let mut bits = [0u8; BITS];
+        (bits[0], bits[1], bits[31]) = (0x01, 0x02, 0x80);
+        assert_eq!(file[HEADER + 2 + PIXELS..HEADER + COPY], bits, "its bits");
+    }
+
+    /// Spec 18 (the bounds of the format): a cell the reader would refuse is left out of the file
+    /// rather than the file refused whole: a key out of range (level 6; x past a dungeon's 256),
+    /// a layer's record past the 2048, a copy slot past the copies, an empty stack. The file
+    /// reads back as the memory without them.
+    #[test]
+    fn a_cell_the_reader_refuses_is_left_out_of_the_file() {
+        let mut m = sample();
+        m.remember((6, 0, 0), vec![layer(1, None)], 30);
+        m.remember((1, 0x100, 0), vec![layer(1, None)], 30);
+        m.remember((0, 5, 5), vec![layer(2048, None)], 30);
+        m.remember((0, 6, 6), vec![layer(1, None), layer(1, Some(3))], 30);
+        let empty = cell_key((0, 7, 7));
+        m.remember((0, 7, 7), vec![layer(1, None), layer(2, None)], 30);
+        m.stacks.insert(empty, Vec::new());
+        let file = encode(&m, OBJLIST).quiet();
+        let back = read_sight(&file, OBJLIST).quiet();
+        assert!(picture(&back) == picture(&sample()), "the rest read back");
+    }
+
+    /// A cursor read past its bytes gives zeros, and nothing after them (no panic).
+    #[test]
+    fn a_read_past_the_end_gives_zeros() {
+        let mut b = Bytes(&[1, 2, 3]);
+        assert_eq!(b.take::<2>(), [1, 2]);
+        assert_eq!(b.take::<4>(), [0; 4]);
+        assert_eq!(b.take::<1>(), [0]);
     }
 
     /// Spec 18 (the byte cost): the file of a full memory, the cap's most cells after a render

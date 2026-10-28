@@ -21,7 +21,7 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
   view; a held click 60–105 (W1).
 - The compositor receives a flat per-pixel source plane (`crates/u6-render/src/lib.rs:130`) and composes the fixed frame
   (`u6-render/src/hd.rs:984`). The page draws only when the frame version, the view or the pointer changes
-  (`site/app.js:1379`).
+  (`draw` in `site/app.js`).
 - The draw lists hold tile words only, no object slot (`crates/u6-core/src/objects/draw.rs:50-53`); `draw_object`
   knows the slot (`:274-275`).
 - Building the view is not pure: when object type 0x188 first enters it, `update_view` draws from the game RNG

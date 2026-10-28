@@ -55,14 +55,15 @@ pub const OBJLIST_FILE: &str = "savegame/objlist";
 /// `objlist`, the 69 block files and their `.tmp` copies, so no name of its matches this one.
 pub const SIGHT_FILE: &str = "savegame/u6sight";
 
-/// [`SIGHT_FILE`] as a Save wrote it, shared by the clones of the state. Shown by its length only:
-/// it holds copies of the game's pixels.
+/// [`SIGHT_FILE`] as a Save wrote it, shared by the clones of the state. The bytes the Save
+/// encoded, held where they were written (no copy: spec 18, Bounds). Shown by its length only: it
+/// holds copies of the game's pixels.
 #[derive(Clone, PartialEq, Eq)]
-pub struct SavedSight(Rc<[u8]>);
+pub struct SavedSight(Rc<Vec<u8>>);
 
 impl SavedSight {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(Rc::from(bytes))
+        Self(Rc::new(bytes))
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -85,8 +86,10 @@ pub fn block_file(i: usize) -> String {
     format!("savegame/objblk{x}{y}")
 }
 
-/// What the save code keeps besides the game globals.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What the save code keeps besides the game globals. Its equality leaves out
+/// [`SaveLoad::sight`]: the file is the remembered sight's, which lives outside the game state's
+/// equality (spec 18; `crate::gfx::cache::RenderCache`).
+#[derive(Clone, Debug)]
 pub struct SaveLoad {
     /// Writes of `savegame/` files since boot (0x105716 runs, and the character `u` writes,
     /// [`crate::intro::handoff::apply`]); [`SaveSync`] flushes when it moves.
@@ -104,14 +107,37 @@ pub struct SaveLoad {
     /// to a pressed cell ends when it moves (`actors::travel`). Never saved.
     pub restores: u32,
     /// Port (spec 18, saved with the game): [`SIGHT_FILE`] as the last Save wrote it, bound to
-    /// [`SaveLoad::objlist`] (`None` until a Save, and after one that wrote none: nothing was
-    /// remembered; the character `u` writes none). A Restore reads it in place of the
+    /// the objlist that Save wrote (`None` until a Save, and after one that wrote none: nothing
+    /// was remembered). The character `u` writes none and leaves it as it is: [`SaveLoad::objlist`]
+    /// is then `u`'s, of another digest, so it is not read. A Restore reads it in place of the
     /// platform's file once [`SaveLoad::objlist`] is this session's.
     pub sight: Option<SavedSight>,
     /// The [`SaveLoad::generation`] of the Save that wrote [`SaveLoad::sight`] ([`changed_since`]
     /// lists the file after it; `u`'s generation does not).
     pub sight_gen: u32,
 }
+
+impl PartialEq for SaveLoad {
+    fn eq(&self, other: &Self) -> bool {
+        let SaveLoad {
+            generation,
+            block_gen,
+            objlist,
+            names_raw,
+            restores,
+            sight: _,
+            sight_gen,
+        } = self;
+        *generation == other.generation
+            && *block_gen == other.block_gen
+            && *objlist == other.objlist
+            && *names_raw == other.names_raw
+            && *restores == other.restores
+            && *sight_gen == other.sight_gen
+    }
+}
+
+impl Eq for SaveLoad {}
 
 impl Default for SaveLoad {
     fn default() -> Self {
