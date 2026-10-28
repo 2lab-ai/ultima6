@@ -552,7 +552,7 @@ Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2,
 | 0x134dd4 | fileio |  | Files (rule: spec 03 §4) | replaced |
 | 0x134e1c | fileio | M | `objects/mod.rs::pack_xyz`; `objects/mod.rs::set_xyz` | ported |
 | 0x134e62 | fileio | M | `objects/mod.rs::set_parent` | ported |
-| 0x134e7c | fileio | M | `engine.rs::take_newest_key`; `ui/keyread.rs::poll` | replaced |
+| 0x134e7c | fileio | M | `engine.rs::take_newest_key_at`; `ui/keyread.rs::poll`; `ui/keyread.rs::take_drained` | replaced |
 | 0x134eae | fileio | M | `ui/pointer.rs::set_shape` | ported |
 | 0x134ec4 | fileio |  | Files (rule: spec 03 §4) | replaced |
 | 0x134f08 | boot | M | `state.rs::load_boot_tables` | partial |
@@ -644,6 +644,8 @@ Marker addresses that are not function entries (tables cited on fields):
 - 0x1148b0: `intro/transfer.rs::ask_source`
 - 0x114d30: `intro/input.rs::pump`
 - 0x12786a: `actors/tables.rs::ambush_kinds`
+- 0x134e84: `ui/keyread.rs::take_drained`
+- 0x134e98: `ui/keyread.rs::take_drained`
 - 0x135588: `objects/mod.rs::location`
 - 0x137988: `objects/mod.rs::type_frame`
 - 0x139188: `actors/mod.rs::worktype`

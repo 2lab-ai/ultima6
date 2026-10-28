@@ -23,6 +23,8 @@ mod pointer_tests;
 mod popup_real;
 mod popup_tests;
 mod real_tests;
+mod scrollback_baseline;
+mod scrollback_tests;
 mod text_tests;
 mod typing_tests;
 mod wide_tests;

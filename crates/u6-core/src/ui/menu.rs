@@ -266,9 +266,10 @@ pub fn query(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
 }
 
 /// Port-only (unit M3): the "Go here" entry for map cell `cell` (world x, y on the leader's
-/// level): none on the leader's own cell or when unit M4 refuses it as `Here` or `NoLeader`,
-/// else disabled by its other refusals ([`super::popup::travel_reason`],
-/// [`super::popup::go_here_reason`]).
+/// level): none on the leader's own cell or when spec 21's travel refuses it as `Here`,
+/// `NoLeader` or `NoGame`, else disabled by its other refusals
+/// ([`crate::actors::travel::reachable`], the cell taken `as u16` as `Engine::travel_to` takes
+/// it, masked to the level there; [`super::popup::go_here_reason`]).
 fn go_here(s: &State, cell: (i16, i16)) -> Option<Entry> {
     let here = s
         .leader_position()
@@ -276,7 +277,7 @@ fn go_here(s: &State, cell: (i16, i16)) -> Option<Entry> {
     if here {
         return None;
     }
-    let reason = match super::popup::travel_reason(s, cell) {
+    let reason = match crate::actors::travel::reachable(s, (cell.0 as u16, cell.1 as u16)) {
         None => None,
         Some(r) => Some(super::popup::go_here_reason(r)?),
     };

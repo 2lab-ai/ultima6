@@ -71,11 +71,13 @@ fn lines_of(s: &State) -> Vec<String> {
     lines
 }
 
-/// Ticks without input until the game waits for a key with nothing queued (or ends).
-fn settle(e: &mut Engine) {
+/// Ticks without input until the game waits for a key with nothing queued (or ends); `watch`
+/// sees the engine after each tick.
+fn settle(e: &mut Engine, watch: &mut impl FnMut(&Engine)) {
     for _ in 0..32 {
         let before = lines_of(&e.state());
         e.tick(&[], 16);
+        watch(e);
         if e.finished() || (e.io().pending_events() == 0 && lines_of(&e.state()) == before) {
             return;
         }
@@ -92,17 +94,35 @@ pub(super) fn converse(
     npc: i16,
     lines: &[&str],
 ) -> (Vec<String>, bool) {
+    let e = converse_watched(state, files, npc, lines, false, |_| {});
+    let done = e.finished();
+    (lines_of(&e.state()), done)
+}
+
+/// [`converse`]'s run, the engine kept: with `paper` the boot's paper drawn first
+/// ([`crate::main_loop::draw_paper`]); `watch` sees the engine after each tick.
+fn converse_watched(
+    state: &State,
+    files: &Files,
+    npc: i16,
+    lines: &[&str],
+    paper: bool,
+    mut watch: impl FnMut(&Engine),
+) -> Engine {
     let leader = state.actors.party.leader_index;
     let prompt = latin(state.converse.text.as_ref().quiet().get(super::Msg::YouSay));
     let prompt = prompt.trim().to_string();
     let mut e = Engine::with_game(state.clone(), files.clone(), move |st, io| async move {
+        if paper {
+            crate::main_loop::draw_paper(&mut st.borrow_mut(), &io);
+        }
         talk(&Cx::new(&st, &io), leader, npc, true).await;
     });
     let mut lines = lines.iter();
     let mut tries = 0;
     let mut seen = Vec::new();
     for _ in 0..200 {
-        settle(&mut e);
+        settle(&mut e, &mut watch);
         if e.finished() {
             break;
         }
@@ -115,15 +135,16 @@ pub(super) fn converse(
         if e.state().ui.input.line_input || last.trim_end().ends_with(&prompt) {
             let Some(line) = lines.next() else { break };
             e.tick(&line_keys(line), 16);
+            watch(&e);
             tries = 0;
         } else {
             let k = [' ', 'n', 'y'][tries % 3];
             e.tick(&[InputEvent::Key(Key::Char(k))], 16);
+            watch(&e);
             tries += 1;
         }
     }
-    let done = e.finished();
-    (lines_of(&e.state()), done)
+    e
 }
 
 #[test]
@@ -160,10 +181,8 @@ fn every_script_loads_like_the_formats_parser() {
     assert!(loaded > 0, "scripts loaded");
 }
 
-#[test]
-fn three_npcs_near_the_start_answer_name_job_bye() {
-    let Some(files) = files() else { return };
-    let base = with_text(&files);
+/// The actors on the leader's level, nearest first (party members and empty slots aside).
+fn near_the_start(base: &State) -> Vec<i16> {
     let leader = base.leader_position().quiet();
     let members: Vec<u16> = base.actors.party.active().map(|id| id.0).collect();
     let mut near: Vec<(u32, i16)> = (2..0xe0i16)
@@ -179,10 +198,18 @@ fn three_npcs_near_the_start_answer_name_job_bye() {
         })
         .collect();
     near.sort();
+    near.into_iter().map(|(_, a)| a).collect()
+}
+
+#[test]
+fn three_npcs_near_the_start_answer_name_job_bye() {
+    let Some(files) = files() else { return };
+    let base = with_text(&files);
+    let near = near_the_start(&base);
     let prompt = latin(base.converse.text.as_ref().quiet().get(super::Msg::YouSay));
     let prompt = prompt.trim().to_string();
     let mut answered = 0;
-    for &(_, npc) in near.iter().take(40) {
+    for &npc in near.iter().take(40) {
         let mut s = base.clone();
         let (name, _) = name_from_script(&mut s, &files, npc);
         if name.is_empty() {
@@ -205,6 +232,160 @@ fn three_npcs_near_the_start_answer_name_job_bye() {
     assert!(
         answered == 3,
         "three NPCs answered name and job differently and said goodbye"
+    );
+}
+
+/// The message window's rows of `fb` (spec 23: cells 22..=38 × 14..=23), each its 8 pixel rows
+/// of colours.
+fn message_rows(fb: &u6_render::Framebuffer, m: &crate::ui::text::TextWindow) -> Vec<Vec<u8>> {
+    let (x0, w) = (usize::from(m.x) * 8, usize::from(m.width) * 8);
+    (0..usize::from(m.height))
+        .map(|r| {
+            let y0 = (usize::from(m.y) + r) * 8;
+            (0..8 * w)
+                .map(|k| fb.get(x0 + k % w, y0 + k / w).quiet())
+                .collect()
+        })
+        .collect()
+}
+
+/// Spec 23's real-data receipt: conversations near the start on the boot's paper, long enough to
+/// scroll the message window, then the wheel back a line at a time. Each line the window scrolled
+/// off shows, in the view's top row, the colours its row showed on the published frames before it
+/// scrolled off (rows above the cursor, which nothing draws again), the scrollbar's pixels (its
+/// cell column's last three pixels in the ink, over a cell of one colour) aside. Counts only.
+#[test]
+fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
+    use crate::ui::text::WindowId;
+    use std::collections::HashMap;
+    let Some(files) = files() else {
+        // As the baselines (opus S2, round 4): skipped without the zip, unless it is required.
+        let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+        assert!(
+            !required,
+            "U6_REQUIRE_ARCHIVE=1: the user's zip is required"
+        );
+        println!("scrollback receipt: skipped (no game files)");
+        return;
+    };
+    let mut base = with_text(&files);
+    base.main.program = crate::main_loop::Program::Game;
+    let m = *base.ui.text.window(WindowId::Messages);
+    let ink = base.ui.tables.colours.text;
+    let w = usize::from(m.width) * 8;
+    let bar = (w - 3)..w;
+    let (mut talks, mut kept, mut compared, mut equal, mut barred) = (0, 0, 0, 0, 0);
+    let (mut patched, mut agree, mut heap) = (0, 0, 0);
+    for &npc in near_the_start(&base).iter().take(40) {
+        let mut s = base.clone();
+        if name_from_script(&mut s, &files, npc).0.is_empty() {
+            continue;
+        }
+        // Every published frame: the lines kept so far, the cursor row, the window's rows.
+        let mut shots: Vec<(u64, u8, Vec<Vec<u8>>)> = Vec::new();
+        let mut version = 0;
+        let lines = ["name", "job", "bye"];
+        let mut e = converse_watched(&base, &files, npc, &lines, true, |e| {
+            if e.published_version() == version {
+                return;
+            }
+            version = e.published_version();
+            let st = e.state();
+            let row = st.ui.text.window(WindowId::Messages).row;
+            let rows = message_rows(&e.published_frame(), &m);
+            shots.push((st.ui.scrollback.total(), row, rows));
+        });
+        // Line number -> the colours its row showed (the same from every frame it was on).
+        let mut was: HashMap<u64, Vec<u8>> = HashMap::new();
+        for (total, row, rows) in &shots {
+            for (j, r) in rows.iter().enumerate().take(usize::from(*row)) {
+                let line = total + j as u64;
+                match was.get(&line) {
+                    Some(prev) => {
+                        assert!(
+                            prev == r,
+                            "a row above the cursor changed before it scrolled"
+                        );
+                        agree += 1;
+                    }
+                    None => {
+                        was.insert(line, r.clone());
+                    }
+                }
+            }
+        }
+        let (total, base_line, n_patched) = {
+            let sb = &e.state().ui.scrollback;
+            let len = sb.lines().len() as u64;
+            let patched = sb.lines().iter().filter(|l| !l.patch.is_empty()).count();
+            heap = heap.max(sb.heap_bytes());
+            (sb.total(), sb.total() - len, patched)
+        };
+        if total < u64::from(m.height) {
+            continue;
+        }
+        talks += 1;
+        patched += n_patched;
+        // Back a line at a time to the oldest line kept.
+        let mut back = 0;
+        while e.wheel(200, 150, -1) && e.history_offset() > back {
+            back = e.history_offset();
+        }
+        assert!(back > 0, "the wheel scrolled back");
+        kept += back;
+        // `U6_SCROLLBACK_FRAMES` (a directory): the first conversation's frame at the oldest line
+        // and half way back, RGBA8 at the frame's size (spec 23's frames, kept outside the repo).
+        let frames = std::env::var("U6_SCROLLBACK_FRAMES")
+            .ok()
+            .filter(|_| talks == 1);
+        while e.history_offset() > 0 {
+            let at = e.history_offset();
+            if let Some(dir) = &frames
+                && (at == back || at == back.div_ceil(2))
+            {
+                let mut rgba = Vec::new();
+                e.frame().write_rgba(&mut rgba);
+                let (w, h) = (u6_render::WIDTH, u6_render::HEIGHT);
+                let name = format!(
+                    "receipt-{}-back{at}-{w}x{h}.rgba",
+                    if w == 320 { "original" } else { "wide" }
+                );
+                std::fs::write(Path::new(dir).join(name), rgba).quiet();
+            }
+            let line = base_line + (back - at) as u64;
+            let top = message_rows(e.screen_frame(), &m).swap_remove(0);
+            if let Some(then) = was.get(&line) {
+                compared += 1;
+                // The bar draws over the last cell only where it shows one colour.
+                let plain = (0..8).all(|y| (w - 8..w).all(|x| then[y * w + x] == then[w - 8]));
+                let mut on_bar = false;
+                let same = (0..8 * w).all(|k| {
+                    if top[k] == then[k] {
+                        return true;
+                    }
+                    let ok = plain && bar.contains(&(k % w)) && top[k] == ink;
+                    on_bar |= ok;
+                    ok
+                });
+                assert!(same, "a kept line shows the colours its row showed");
+                equal += 1;
+                barred += usize::from(on_bar);
+            }
+            assert!(e.wheel(200, 150, 1), "the wheel goes forward again");
+            assert!(e.history_offset() < at, "a line forward");
+        }
+    }
+    println!(
+        "scrollback receipt: ran; {talks} conversations scrolled; {kept} lines kept and \
+         wheeled to; {compared} compared with their published rows, {equal} equal ({barred} \
+         under the bar, {agree} rows seen on two frames agreed); {patched} with patched pixels; \
+         at most {heap} bytes kept"
+    );
+    assert!(talks >= 3, "three conversations scrolled the window");
+    // Every line wheeled to was on a published frame above the cursor before it scrolled off.
+    assert!(
+        compared == kept && equal == compared,
+        "every kept line compared, and as it was"
     );
 }
 

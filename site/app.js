@@ -1651,6 +1651,12 @@ let x4 = null; // the offscreen canvas that holds the ×4 frame while the HD lay
 let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: none, or stale)
 let parchmentShown = null; // the parchment's colour the last whole paint drew (`parchmentNow`)
 let sentButtons = 0; // the pointer's buttons as last sent to the game
+// After a press the page released for the game (releaseUnfinished: a cancel, a lost capture):
+// the buttons it released (a mask), while still held, stay up for the game, each up to an event
+// with it up or a new press on the canvas (pointerdown), so a press the game saw end cannot start
+// again where the pointer comes back with it held; a button pressed after (a chorded press arrives
+// as a move) is the game's.
+let releasedHeld = 0;
 let mouseAt = null; // the mouse's client point as its last pointer event left it, or null
 // The canvas pixel mapped last (`layoutToGame`, `pixelAt`) shows no pixel of the game's at that
 // place: a gap or a margin round the game's regions, a letterbox side, a Wide window's frame or
@@ -4205,12 +4211,28 @@ function showGamePointer() {
 
 function sendPointer(e) {
   if (!game || crashed) return;
+  const id = e.pointerId;
+  if (releasedHeld) {
+    releasedHeld &= e.buttons & 3;
+    e = { type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: e.buttons & 3 & ~releasedHeld };
+  }
   const at = pointerPixel(e);
   if (!at) {
     if (e.type === 'pointerdown') closeMenu();
     return;
   }
   const buttons = e.buttons & 3;
+  // A button a move adds (a chorded press, which never comes as a pointerdown) while the canvas
+  // holds no capture (lost with a button down): the canvas takes it, so the release reaches the
+  // game wherever it happens (D2 r5 S2; a pointer the browser no longer has throws, and nothing is
+  // taken).
+  if (e.type === 'pointermove' && (buttons & ~sentButtons) !== 0 && id !== undefined && !canvas.hasPointerCapture(id)) {
+    try {
+      canvas.setPointerCapture(id);
+    } catch {
+      // No active pointer of that id: the moves stay the canvas's while over it.
+    }
+  }
   sentButtons = buttons;
   game.pointer(at[0], at[1], buttons);
   showGamePointer();
@@ -4218,17 +4240,98 @@ function sendPointer(e) {
 canvas.addEventListener('pointerdown', (e) => {
   canvas.focus();
   keepCanvas = false; // a press on the canvas gives a line being read the hidden input again
+  releasedHeld = 0;
   if (game && !crashed) canvas.setPointerCapture(e.pointerId);
   sendPointer(e);
   gesture();
 });
 canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
-canvas.addEventListener('pointercancel', (e) =>
-  sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+// A press that ends with no release the canvas sees, with a button still down for the game: a
+// cancelled press (the browser took the touch, a scroll or a zoom) or a capture lost (taken away,
+// the canvas hidden). Every button goes up for the game, once (after a release the game has them
+// up already, and nothing is sent), and those it released stay up for it while held
+// (`releasedHeld`).
+// While the game reads the player's words by click (Game.reading_by_click: a conversation's read
+// after "you say"), the release goes to frame pixel (-1, -1), off every key cap and keyword, so it
+// ends no click (spec 22 Contract 8: a key cap or a keyword types on a release over the target it
+// was pressed on); at every other time it is released where the pointer was, as any release. A
+// Wide window's drag (`dragged`) ends as any release does, through dragWindow: its places kept and
+// its release at the rest pixel, where its press went, off every target.
+function releaseUnfinished(e) {
+  if (!game || crashed || sentButtons === 0) return;
+  // The buttons the game holds now, and those released before still held (kept with them).
+  const [held, kept] = [sentButtons, releasedHeld];
+  if (!dragged && game.reading_by_click()) {
+    sentButtons = 0;
+    game.pointer(-1, -1, 0);
+    showGamePointer();
+  } else {
+    sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
+  }
+  releasedHeld = kept | held;
+}
+canvas.addEventListener('pointercancel', releaseUnfinished);
+canvas.addEventListener('lostpointercapture', releaseUnfinished);
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
+
+// --- the message history (spec 23) ---------------------------------------------------------------
+// The wheel over the message window scrolls the history the engine draws in it (Game.wheel; the
+// engine draws the lines and the scrollbar into its frame, the page adds nothing); elsewhere it
+// does nothing, and with Ctrl it is the browser's zoom. An event with no vertical delta (a
+// horizontal swipe) is the browser's anywhere: the engine is not asked, the event not cancelled
+// and the carry untouched. One notch is one line: a line- or page-mode event one line in its
+// direction, pixel deltas (a trackpad's) added up at WHEEL_LINE_PX CSS pixels a line. The carry
+// takes only events the engine takes (asked first, Game.wheel with 0 lines), and is dropped when
+// the direction turns, at a wheel it does not take, when the pointer leaves the message window or
+// the canvas, and at a key. The position goes through the layout as a held pointer's does
+// (`pixelAt` with `held`): over a window's frame or title strip, a gap or a window in front of
+// the message window it is the rest pixel, outside the message window.
+const WHEEL_LINE_PX = 100;
+let wheelCarry = 0;
+function wheelLines(e) {
+  if (e.deltaMode !== 0) return Math.sign(e.deltaY);
+  if (Math.sign(e.deltaY) !== Math.sign(wheelCarry)) wheelCarry = 0;
+  wheelCarry += e.deltaY;
+  const lines = Math.trunc(wheelCarry / WHEEL_LINE_PX);
+  wheelCarry -= lines * WHEEL_LINE_PX;
+  return lines;
+}
+// The game pixel of wheel or move event `e` as a held pointer's; null on a canvas with no box.
+function wheelPixel(e) {
+  const box = canvas.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+  return pixelAt(e.clientX, e.clientY, box, true);
+}
+canvas.addEventListener('wheel', (e) => {
+  if (!game || crashed || e.ctrlKey) {
+    wheelCarry = 0;
+    return;
+  }
+  if (e.deltaY === 0) return;
+  const at = wheelPixel(e);
+  if (!at || !game.wheel(at[0], at[1], 0)) {
+    wheelCarry = 0;
+    return;
+  }
+  e.preventDefault();
+  const lines = wheelLines(e);
+  if (lines !== 0) game.wheel(at[0], at[1], lines);
+}, { passive: false });
+canvas.addEventListener('pointermove', (e) => {
+  if (wheelCarry === 0 || !game || crashed) return;
+  const at = wheelPixel(e);
+  if (!at || !game.wheel(at[0], at[1], 0)) wheelCarry = 0;
+});
+canvas.addEventListener('pointerleave', () => {
+  wheelCarry = 0;
+});
+window.addEventListener('keydown', () => {
+  wheelCarry = 0;
+}, true);
+
 // A press anywhere off the canvas (capture: before the page's own controls take it).
 document.addEventListener('pointerdown', (e) => {
   if (e.target === canvas || !game || crashed) return;

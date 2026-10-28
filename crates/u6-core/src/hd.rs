@@ -39,13 +39,15 @@ use crate::state::State;
 
 /// Port-only (spec 07 HD0): the HD frame of an engine's published frame, on or off, at 2× or
 /// 4×. On, [`HdView::present`] composes it when the screen frame ([`Engine::screen_version`]:
-/// the published frame, spec 17's menu over it) or the setting changed since the frame it holds;
-/// off, it does nothing (the pack included: nothing of it runs). Spec 11 Design 7: the published frame is the
-/// screen without the pointer sprite ([`Engine::published_frame`]), so the HD frame and its glyph
-/// list are the screen as the game drew it, and a move of the sprite alone composes nothing; the
-/// platform draws the sprite over the HD frame ([`Engine::sprite`]). Spec 17 Presentation: the
-/// frame composed is the screen frame ([`Engine::screen_frame`], [`Engine::screen_version`]), the
-/// published frame with the context menu over it while one is open.
+/// the published frame, spec 23's history view and spec 17's menu over it, and the view's stamp)
+/// or the setting changed since the frame it holds; off, it does nothing (the pack included:
+/// nothing of it runs). Spec 11 Design 7: the published frame is the screen without the pointer
+/// sprite ([`Engine::published_frame`]), so the HD frame and its glyph list are the screen as the
+/// game drew it, and a move of the sprite alone composes nothing; the platform draws the sprite
+/// over the HD frame ([`Engine::sprite`]). Spec 17 Presentation and spec 23 Decision 12: the
+/// frame composed is the screen frame ([`Engine::screen_frame`]), the published frame with the
+/// message history the player scrolled back to over it and the context menu over that, the one
+/// composition the shown frame is made from too.
 pub struct HdView {
     on: bool,
     scale: Scale,
@@ -53,9 +55,10 @@ pub struct HdView {
     version: u64,
     compositor: Compositor,
     images: ImageCache,
-    /// What the frame holds: the published frame's version (`None` for the black frame before a
+    /// What the frame holds: the screen frame's version and the message history's view stamp
+    /// ([`Engine::screen_version`], [`Engine::view_version`]; `None` for the black frame before a
     /// start) and `version`; `None` before the first composition and after a start.
-    holds: Option<(Option<u64>, u64)>,
+    holds: Option<(Option<(u64, u64)>, u64)>,
 }
 
 impl Default for HdView {
@@ -147,13 +150,17 @@ impl HdView {
     }
 
     /// With HD on: composes the screen frame of `engine` ([`Engine::screen_frame`]: the published
-    /// frame and the context menu, without the pointer sprite; `blank` before a start) when the HD
-    /// frame does not hold it at the setting now. Returns whether a block of the HD frame changed.
+    /// frame, the message history while the player scrolls it back and the context menu, without
+    /// the pointer sprite; `blank` before a start) when the HD frame does not hold it at the
+    /// setting now. Returns whether a block of the HD frame changed.
     pub fn present(&mut self, engine: Option<&Engine>, blank: &Framebuffer) -> bool {
         if !self.on {
             return false;
         }
-        let key = (engine.map(Engine::screen_version), self.version);
+        let key = (
+            engine.map(|e| (e.screen_version(), e.view_version().1)),
+            self.version,
+        );
         if self.holds == Some(key) {
             return false;
         }

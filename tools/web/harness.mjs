@@ -1174,7 +1174,10 @@ let waits = 0;
 
 /// Waits until the game shows its prompt (waiting for a command key, nothing queued) for a few
 /// frames in a row, counted from this call: the world turns after a command (the start fight's)
-/// have run. The first look is at once, the others one per frame, after the page's frame.
+/// have run. The first look is at once, the others one per frame, after the page's frame. The
+/// prompt is `data-prompt` (`Game.at_prompt`: A4-0x7a2c set, nothing queued), not the context
+/// menu's gate (spec 19's command prompt also needs keys taken as commands and no cursor up), so
+/// with the more prompt or a cursor up a right press after it opens no menu (spec 17 round 4).
 export async function waitPrompt(page, timeout = 60_000) {
   waits += 1;
   await page.waitForFunction((id) => {

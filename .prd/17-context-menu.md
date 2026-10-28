@@ -9,7 +9,8 @@ tags: [ultima6, ui, input]
 Status: in progress (2026-10-28). Item 2 of `objects-menu-fog-motion/ssot.md`. Research: round 1 unit M1
 (`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build: round 2 unit M2 (shipped in deploy 30
 as a page overlay); in-game rework: unit M3 (branch `feat/ingame-menu`, from `60f92c6`). The entry "Go here" starts
-unit M4's travel (spec 21) through one seam that is a stub until M4 lands in integ.
+unit M4's travel (spec 21): wired in M3's round 4, the merge with integ/r1027 9e8f133 (M4 travel, T1, K2, D2), where
+the menu, the travel and spec 23's history view share one tick and one composition.
 
 Owner, 2026-10-28, verbatim: "문맥 메뉴 인게임 ui로 해줘 시발 왜 웹페이지 ui로 만듬?" and "우클릭시 여기로 이동도
 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령".
@@ -108,15 +109,17 @@ slot's own action are a single press (the icon's, or a left click on the slot). 
   `input`'s events. `Engine::set_wall_clock(ms)`: the platform's wall clock, which a double click is timed on.
   `Engine::pointer_at() -> Pointer`: the menu's pointer while it takes it, else the game's (K3's OS cursor).
   `Engine::game_presses()` / `Engine::game_keys()`: the presses and the key events the menu let through to the game,
-  counted (tests). `Engine::go_here_asked()`: the stub's travel record (Unit M4 seam).
+  counted (tests). `Engine::go_here_asked()`: the cells Go here asked travel to, each given to `Engine::travel_to`
+  (spec 21) as chosen (tests).
   `Engine::context_menu_gate(pending)`: the gate a tick puts before a right press that would open the menu (§2), for
   a press after `pending`, the platform's events not yet given to a tick (tests: `Game::context_menu`).
 - `Engine::context_menu() -> Option<View>`: the open menu as drawn: its box and text area in frame pixels, and per
   row its kind (heading, entry, note), its code, whether it can run, its reason, its theft mark and its pixel rows,
   the highlighted entry; no text (tests, the page's tests).
-- `Engine::screen_frame()` / `Engine::screen_version()`: the published frame with the menu over it, without the
-  pointer sprite, and its version (it moves when the published frame or the drawn menu changes). The shown frame
-  (`Engine::frame`) is it with the sprite; the HD frame is composed from it.
+- `Engine::screen_frame()` / `Engine::screen_version()`: the published frame with spec 23's history view and the menu
+  over it, without the pointer sprite, and its version (it moves when the published frame, the view or the drawn menu
+  changes). The shown frame (`Engine::frame`) is it with the sprite; the HD frame is composed from it, keyed on its
+  version and the view's stamp (spec 23 Decision 12).
 - `u6-web`: `Game::context_menu(x, y) -> String` (read only, for tests): `""` unless the engine's gate lets a right
   press after the page's queued events open one (`Engine::context_menu_gate`) and on the map or a slot; else JSON
   `{kind, cell, underlined, sections: [{object, kind, entries: [{code, enabled, reason, theft}]}], go_here: {code,
@@ -130,7 +133,7 @@ slot's own action are a single press (the icon's, or a left click on the slot). 
   and the Exit button through each region it shows; in Wide's game view also each window's frame and the map's parts
   off the canvas). `Game::dismiss_menu()`: the page's press off the canvas, queued behind the events waiting for the
   next step (`Engine::tick_dismissing`), at once when none wait. `Game::set_clock(now)` gives the engine the page's
-  clock as its wall clock at each step. `Game::go_here_asked()`: the stub's travel requests, counted.
+  clock as its wall clock at each step. `Game::go_here_asked()`: Go here's travel requests, counted.
   `Game::menu_view() -> String`: `""` while closed, else JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover,
   colours: [paper, ink, heading], rows: [{kind, code, enabled, reason, theft, y}]}` (frame pixels, 0xRRGGBB colours
   for the page's pixel checks; codes only). `Game::command_at` and the page's run are gone.
@@ -308,25 +311,28 @@ What the page menu had that the engine's does not (recorded 2026-10-28, round 2)
 - A text size that followed the phone's (CSS px): the menu is in the game's font at the frame's scale; on a small
   screen it is as small as the game's own text.
 
-## Unit M4 seam (spec 21)
+## Unit M4 wiring (spec 21, done in M3's round 4)
 
 The menu does not start travel itself. Choosing Go here records the cell in the menu (`Popup::choose`), and the
-engine hands it out right after the menu's input filter of the same tick (`Popup::take_go_here`, `Engine::tick`) to
-`ui::popup::travel_to(travel: &mut Travel, target: (i16, i16))`, which starts travel to the map cell (world x, y on
-the leader's level; the cell is the `i16` pair of the menu's `cell`, M4's `u16` coordinates by an `as` cast). M4's
-merge puts its own call there. Order in a tick (spec 21's merge contract): the menu's filter first; M4's
-`travel_press` sees only what passes it, plus `Popup::took_new_input()` (the menu took an event that is not the tail
-of a gesture it already held; a press off the canvas is new only when it closed an open menu); the chosen Go here is
-applied after `travel_press`; M4's own step key is appended after the filter and never fed to it. The tail of a
-choice is the menu's and not new: its press's held moves, a double click's press and release, the repeats and
+engine hands it out in the same tick (`Popup::take_go_here`, `Engine::tick_dismissing`) to M4's
+`Engine::travel_to(target: (u16, u16))`, which starts travel to the map cell (world x, y on the leader's level; the
+cell is the `i16` pair of the menu's `cell`, M4's `u16` coordinates by an `as` cast, masked by M4 to the level), and
+the engine keeps the cell in its record (`Engine::go_here_asked`, `ui::popup::Travel`; M4's accessor of the travel is
+`Engine::travel_progress`). Order in a tick (spec 21's merge contract): the menu's filter first
+(`Popup::input_with`); M4's `travel_press` sees only what passes it, plus `Popup::took_new_input()` as a stop (the
+menu took an event that is not the tail of a gesture it already held; a press off the canvas is new only when it
+closed an open menu); the chosen Go here is applied after `travel_press`, so the new travel's first step is the next
+tick's; M4's own step key is appended after the filter and never fed to it, nor to spec 23's `View::input`, which
+the player's events of the filter's output go through next; then K2's take-back, the rings, the queue. The tail of
+a choice is the menu's and not new: its press's held moves, a double click's press and release, the repeats and
 release of a key taken while open; the press's own release reaches the game as a move with no button, which ends no
-travel (`the_tail_of_a_choice_is_not_new_input`, `a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press`).
-`Travel` is the engine-held state of the stub (`Engine::go_here_asked`; M4's accessor is `Engine::travel_progress`).
-Whether Go here can run: `ui::popup::travel_reason(s: &State, target) -> Option<Refusal>`, `Refusal` mirroring M4's
-reasons; `ui::popup::go_here_reason` maps it onto the menu's: `Here` and `NoLeader` hide the entry, `Aboard`,
-`Unreachable`, `Far`, `Combat` and `Foe` disable it with that reason (en and ko words in `ui/popup.rs`;
-`Reason::ALL` holds them). Until M4 is in integ the two bodies are stubs: every cell is reachable (`None`) and a
-start only records the target (`Travel::asked`); M4 replaces `Travel` and the two bodies.
+travel (`the_tail_of_a_choice_is_not_new_input`, `a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press`,
+and with the real travel `travel_tests.rs`'s three `a_travel_the_menu_started_walks_through_…`). Whether Go here can
+run: M4's `travel::reachable(s, target)`; `ui::popup::go_here_reason` maps its `Reason` onto the menu's: `Here`,
+`NoLeader` and `NoGame` hide the entry, `Aboard`, `Unreachable`, `Far`, `Combat` and `Foe` disable it with that
+reason (en and ko words in `ui/popup.rs`; `Reason::ALL` holds them). The stubs (`travel_reason`, `Refusal`,
+`popup::travel_to`) are gone. Pace: at the prompt a travel steps at most once a `MIN_STEP_MS` of the platform's
+clock (spec 21 S3, `Engine::set_travel_due`, given by the page at every step).
 
 ## Acceptance
 
@@ -347,7 +353,8 @@ start only records the target (`Travel::asked`); M4 replaces `Travel` and the tw
 7. Wide: a non-Look entry on a cell outside the 11 × 11 window is disabled, reason "window".
 8. (M3) The menu is in the frame's pixels, in Original, HD and Wide; the page has no element for it; a left press on
    Look runs Look; the menu's pixels are paper and ink inside its text area and the frame's own outside its box.
-9. (M3) Right press on bare ground → the tile's Look and Go here; choosing Go here calls `travel_to` with the cell.
+9. (M3) Right press on bare ground → the tile's Look and Go here; choosing Go here calls `travel_to` with the cell,
+   and the party walks there (round 4: the real travel, arriving on the cell).
 
 Receipt on the user's data (`ui/tests/popup_real.rs`): each test prints `ran` or `skipped`; the release receipt is
 `U6_REQUIRE_ARCHIVE=1 U6_FRAMES_DIR=<outside the repository> scripts/cargo.sh test -p u6-core --profile gate --lib
@@ -355,7 +362,10 @@ Receipt on the user's data (`ui/tests/popup_real.rs`): each test prints `ran` or
 
 ## Not settled
 
-- The cost of one `State` clone per right press (estimate: a few MB, once per press, not per frame).
+- The cost of one `State` clone per right press (estimate: a few MB, once per press, not per frame), and since
+  round 4 Go here's `travel::reachable` on a map cell (spec 21's search: one more clone and at most two passes of
+  `WINDOW²` expansions, once per press; not measured apart: the whole u6-web lib suite, the every-view-cell query
+  sweep among its 88 tests, took about 2 s in the gate profile).
 - Talk's script-presence test without loading the script: until an index lookup exists, the slot/type part decides
   and a scriptless NPC prints the original's refusal.
 - Wide's page windows lie over the map: the page gives the engine the rects they hide and the menu keeps off them;

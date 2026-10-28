@@ -42,6 +42,15 @@ pub enum Key {
     Escape,
     Space,
     Backspace,
+    /// Port (spec 21): the four diagonal steps, north-east, south-east, south-west, north-west:
+    /// the PC keypad's PgUp, PgDn, End and Home, whose game codes the command loop walks with
+    /// (0x106c6c) and which the Amiga's raw-key table gives for no key
+    /// ([`crate::ui::input::key_code`] gives their codes past it). Only the travel to a pressed
+    /// cell presses them ([`crate::actors::travel`]); no platform maps a key to them.
+    UpRight,
+    DownRight,
+    DownLeft,
+    UpLeft,
     /// A printable character as typed (letters keep their case).
     Char(char),
 }
@@ -64,10 +73,11 @@ pub const MIN_STEP_MS: u32 = 150;
 
 /// Port (spec 19 O1c): whether a held direction key is due its next paced press: down
 /// `down_ms` wall ms since its press, and `since_step_ms` since the command prompt last took a
-/// press ([`Io::prompt_takes`]; None: never), both at least [`MIN_STEP_MS`]. The key's own
+/// press ([`Engine::prompt_takes`]; None: never), both at least [`MIN_STEP_MS`]. The key's own
 /// press is the platform's and comes at once; this paces only the presses added after it, from
-/// the step the prompt last took, so the interval holds between steps however late a frame
-/// delivered the one before.
+/// the step the prompt last took, so the interval holds between a paced press and the step
+/// before it, however late a frame delivered that step (another key's own press is not paced:
+/// it goes at once).
 pub fn paced_press_due(down_ms: f64, since_step_ms: Option<f64>) -> bool {
     let min = f64::from(MIN_STEP_MS);
     down_ms >= min && since_step_ms.is_none_or(|ms| ms >= min)
@@ -105,9 +115,12 @@ pub enum InputEvent {
     /// Port (spec 19 O1b): a press the platform's auto-repeat sent for a key still held, read as
     /// a press ([`Io::next_key`]) unless the key's [`InputEvent::Release`] took it back first.
     /// Port (spec 19 O1c): at the command prompt ([`command_prompt`]) a direction key's repeat
-    /// is taken back, in the input of a tick and in the queue, so the paced press
-    /// ([`InputEvent::Paced`]) is the one step source there; the cross-hair, the more prompt,
-    /// the line editor and every other wait read it.
+    /// is taken back: by a tick that starts with the prompt waiting, from its input and the
+    /// queue ([`Engine::tick`]), and by the prompt's own read, which says it is the prompt
+    /// ([`Io::key_ready_at`], [`Io::take_newest_key_at`], from [`crate::ui::keyread`] and
+    /// [`crate::ui::target`]), so the paced press ([`InputEvent::Paced`]) is the one step
+    /// source there; the cross-hair, the more prompt, the line editor and every other wait read
+    /// it.
     Repeat(Key),
     /// Port (spec 19 O1c): a press of a held direction key the platform added at the command
     /// prompt ([`Engine::held_press`]), paced by [`MIN_STEP_MS`]. Read as a press; the key's
@@ -225,12 +238,10 @@ pub struct Io {
     window_cache: Cell<bool>,
     /// Port-only: [`Io::set_sight_memory`].
     sight_memory: Cell<bool>,
-    /// Port (spec 19 O1c): the state of the game this `Io` serves, set once by the engine that
-    /// made it, so a take reads whether the command prompt waits ([`command_prompt`]) as it is
-    /// at the take.
-    prompt_state: OnceCell<std::rc::Weak<RefCell<State>>>,
     /// Port (spec 19 O1c): [`Io::prompt_takes`].
     prompt_takes: Cell<u64>,
+    /// Port-only (spec 23): [`Io::history_offset`].
+    history_offset: Cell<usize>,
 }
 
 impl Io {
@@ -252,37 +263,33 @@ impl Io {
             back_writes: Cell::new(0),
             window_cache: Cell::new(true),
             sight_memory: Cell::new(false),
-            prompt_state: OnceCell::new(),
             prompt_takes: Cell::new(0),
+            history_offset: Cell::new(0),
         }
     }
 
-    /// Port (spec 19 O1c): the presses the command prompt has taken ([`command_prompt`] at the
-    /// take: a key, a repeat it did not take back, a paced press), ever. A platform stamps the
-    /// step's time when it moves ([`paced_press_due`]).
+    /// Port-only (spec 23 Decision 2): the lines the message history's view is back from the live
+    /// bottom ([`Engine::history_offset`]; 0: the live window), as the engine set it before the
+    /// game's pass of the tick, after the tick's input (the wheel and the publish since included):
+    /// a pass of the game reads it as the player sees the window then, and nothing else reads it.
+    /// Spec 22's clicks read it: while scrolled back the window shows kept lines, and none of its
+    /// keywords is a target ([`crate::ui::talk::pointer`]).
+    pub fn history_offset(&self) -> usize {
+        self.history_offset.get()
+    }
+
+    /// Port (spec 19 O1c): the presses the command prompt has taken ([`command_prompt`] as its
+    /// read saw the state: a key, a paced press; never a repeat of a direction key, which it
+    /// takes back), counted by [`crate::ui::keyread::take_drained`]. Kept here, beside the
+    /// queue, and not in [`State`]: the platform's instrument, which no rule or saved state reads.
     pub fn prompt_takes(&self) -> u64 {
         self.prompt_takes.get()
     }
 
-    /// Whether the command prompt waits now ([`command_prompt`]; false for an `Io` no engine
-    /// serves, and while the state is borrowed mutably, which no take does).
-    fn at_command_prompt(&self) -> bool {
-        let Some(state) = self.prompt_state.get().and_then(std::rc::Weak::upgrade) else {
-            return false;
-        };
-        let at = state.try_borrow().map(|s| command_prompt(&s));
-        debug_assert!(
-            at.is_ok(),
-            "a key taken while the state is borrowed mutably"
-        );
-        at.unwrap_or(false)
-    }
-
-    /// One press taken: counted when the command prompt took it ([`Io::prompt_takes`]).
-    fn took(&self, prompt: bool) {
-        if prompt {
-            self.prompt_takes.set(self.prompt_takes.get() + 1);
-        }
+    /// One press the command prompt took ([`Io::prompt_takes`]).
+    pub(crate) fn count_prompt_take(&self) {
+        self.prompt_takes
+            .set(self.prompt_takes.get().wrapping_add(1));
     }
 
     /// Milliseconds of accumulated tick time (monotonic).
@@ -362,10 +369,17 @@ impl Io {
 
     /// True when the next queued event is a key (a pointer event before it is taken first, by
     /// [`Io::take_pointer`]). Text at the front of the queue is dropped first (a reader of keys
-    /// takes none), so it never holds back the events behind it; so, at the command prompt, is
-    /// a repeat it takes back ([`InputEvent::Repeat`]).
+    /// takes none), so it never holds back the events behind it. For a reader other than the
+    /// command prompt ([`Io::key_ready_at`]).
     pub fn key_ready(&self) -> bool {
-        let prompt = self.at_command_prompt();
+        self.key_ready_at(false)
+    }
+
+    /// Port (spec 19 O1c): [`Io::key_ready`] for a reader that says whether it is the command
+    /// prompt (`prompt`, [`command_prompt`] as the reader sees the state; the poll of
+    /// [`crate::ui::keyread`] and the pointer wait of [`crate::ui::target`] read it): there a
+    /// repeat it takes back ([`InputEvent::Repeat`]) at the front is dropped too, as text is.
+    pub fn key_ready_at(&self, prompt: bool) -> bool {
         let mut events = self.events.borrow_mut();
         while let Some(e) = events.front()
             && (matches!(e, InputEvent::Text(_)) || taken_back(prompt, e))
@@ -385,10 +399,11 @@ impl Io {
     /// [`crate::ui::keyread`]): every key press queued (presses and repeats) is taken and the
     /// newest is the one given. Text goes with them (a reader of keys takes none); pointer
     /// events keep their places (the original's pointer is no code of the ring). None when no
-    /// key press is queued. At the command prompt the repeats it takes back go too, and are not
-    /// given ([`InputEvent::Repeat`]).
-    pub fn take_newest_key(&self) -> Option<Key> {
-        let prompt = self.at_command_prompt();
+    /// key press is queued. With `prompt` (the reader is the command prompt, [`command_prompt`]
+    /// as the reader sees the state) the repeats it takes back go too, and are not given
+    /// ([`InputEvent::Repeat`]); the take is the poll's of [`crate::ui::keyread::take_drained`],
+    /// which counts it.
+    pub fn take_newest_key_at(&self, prompt: bool) -> Option<Key> {
         let mut newest = None;
         self.events.borrow_mut().retain(|e| match *e {
             _ if taken_back(prompt, e) => false,
@@ -399,9 +414,6 @@ impl Io {
             InputEvent::Text(_) | InputEvent::Release(_) => false,
             InputEvent::Pointer { .. } => true,
         });
-        if newest.is_some() {
-            self.took(prompt);
-        }
         newest
     }
 
@@ -412,16 +424,11 @@ impl Io {
     }
 
     /// Port-only (spec 08 Design 4, slice K5a): as [`Io::key_ready`] for the line editor: true
-    /// when the next queued event is a key or a character of text (nothing is dropped but, at
-    /// the command prompt, the repeats it takes back, [`InputEvent::Repeat`]).
+    /// when the next queued event is a key or a character of text (nothing is dropped: the line
+    /// editor is no command prompt and reads every repeat).
     pub fn typed_ready(&self) -> bool {
-        let prompt = self.at_command_prompt();
-        let mut events = self.events.borrow_mut();
-        while events.front().is_some_and(|e| taken_back(prompt, e)) {
-            events.pop_front();
-        }
         matches!(
-            events.front(),
+            self.events.borrow().front(),
             Some(
                 InputEvent::Key(_)
                     | InputEvent::Repeat(_)
@@ -471,6 +478,24 @@ impl Io {
             taken += 1;
         }
         self.pointer.get()
+    }
+
+    /// Port-only (spec 22 Contract 5): whether the next queued event is a pointer event.
+    pub(crate) fn pointer_ready(&self) -> bool {
+        matches!(
+            self.events.borrow().front(),
+            Some(InputEvent::Pointer { .. })
+        )
+    }
+
+    /// Port-only (spec 22 Contract 5): queues `events` ahead of everything queued, in their
+    /// order, so the next reader takes them first: a click on a conversation button or keyword
+    /// types its word as these keys, which the line editor then takes as typed ones.
+    pub(crate) fn push_front(&self, events: &[InputEvent]) {
+        let mut queue = self.events.borrow_mut();
+        for &e in events.iter().rev() {
+            queue.push_front(e);
+        }
     }
 
     /// Resolves once the tick clock reaches now + `ms` (deadline fixed at the call).
@@ -670,13 +695,10 @@ pub struct NextKey<'a> {
 impl Future for NextKey<'_> {
     type Output = Key;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Key> {
-        let prompt = self.io.at_command_prompt();
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(e) if taken_back(prompt, &e) => {}
                 Some(InputEvent::Key(key) | InputEvent::Repeat(key) | InputEvent::Paced(key)) => {
-                    self.io.took(prompt);
                     return Poll::Ready(key);
                 }
                 Some(InputEvent::Pointer { x, y, buttons }) => {
@@ -697,13 +719,10 @@ pub struct NextTyped<'a> {
 impl Future for NextTyped<'_> {
     type Output = Typed;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Typed> {
-        let prompt = self.io.at_command_prompt();
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(e) if taken_back(prompt, &e) => {}
                 Some(InputEvent::Key(key) | InputEvent::Repeat(key) | InputEvent::Paced(key)) => {
-                    self.io.took(prompt);
                     return Poll::Ready(Typed::Key(key));
                 }
                 Some(InputEvent::Text(c)) => return Poll::Ready(Typed::Text(c)),
@@ -805,14 +824,27 @@ pub struct Engine {
     task: Task,
     finished: bool,
     ticks: u64,
+    /// Port (spec 21): the party's travel to a pressed cell, while it walks
+    /// ([`crate::actors::travel`]); engine state, never saved.
+    travel: Option<crate::actors::travel::Travel>,
+    /// Port (spec 21): why the last travel ended.
+    travel_end: Option<crate::actors::travel::End>,
+    /// Port (spec 21): the key the travel pressed last while it still waits in the queue (the
+    /// game reads it at its next prompt); any other waiting key is not the travel's.
+    travel_own: Option<InputEvent>,
+    /// Port (spec 21): the keys the travel pressed, with the tick (from 1) each went in at.
+    #[cfg(test)]
+    travel_log: Vec<(u64, Key)>,
+    /// Port (spec 21 S3): a travel's step is due ([`Engine::set_travel_due`]).
+    travel_due: bool,
     /// The screen's version ([`Io::present`]) the published frame was synced from last.
     published_front: u64,
     /// Bumped each time the published frame is synced again from the screen: its colours and
     /// sources, or its sources alone ([`Engine::published_version`]).
     published_version: u64,
-    /// Port-only (spec 17 Presentation): the published frame with the context menu over it
-    /// ([`Engine::screen_frame`]): synced from the published frame, the one frame `shown` syncs
-    /// from.
+    /// Port-only (spec 17 Presentation, spec 23 Decision 12): the published frame with the message
+    /// history's view and the context menu over it ([`Engine::screen_frame`]): synced from the
+    /// published frame, the one frame `shown` syncs from.
     layer: Framebuffer,
     /// Bumped each time `layer` is synced again for a change ([`Engine::screen_version`]).
     layer_version: u64,
@@ -820,7 +852,7 @@ pub struct Engine {
     popup: crate::ui::popup::Popup,
     /// The [`crate::ui::popup::Popup::version`] drawn into `layer` last.
     drawn_popup: u64,
-    /// Port-only (spec 17, unit M4 seam): the stub's record of what "Go here" asked.
+    /// Port-only (spec 17): the record of the cells "Go here" asked travel to.
     go_here: crate::ui::popup::Travel,
     /// Port-only (spec 17): the button-down edges of the pointer events the menu let through to
     /// the game ([`Engine::game_presses`]), and the buttons of the last of them.
@@ -847,6 +879,12 @@ pub struct Engine {
     src_shows: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
+    /// Port-only (spec 23): the message history the player looks at, drawn over the published
+    /// frame into the screen frame `layer` while scrolled back, under the context menu
+    /// ([`crate::ui::scrollback::View`]).
+    view: crate::ui::scrollback::View,
+    /// The view's stamp `layer` was composed with.
+    view_shown: u64,
 }
 
 impl Engine {
@@ -900,7 +938,6 @@ impl Engine {
     {
         let state = Rc::new(RefCell::new(state));
         let io = Rc::new(Io::new(files));
-        let _ = io.prompt_state.set(Rc::downgrade(&state));
         let task: Task = Box::pin(game(Rc::clone(&state), Rc::clone(&io)));
         Engine {
             state,
@@ -908,6 +945,12 @@ impl Engine {
             task,
             finished: false,
             ticks: 0,
+            travel: None,
+            travel_end: None,
+            travel_own: None,
+            #[cfg(test)]
+            travel_log: Vec::new(),
+            travel_due: true,
             published_front: 0,
             published_version: 0,
             layer: Framebuffer::new(),
@@ -928,6 +971,8 @@ impl Engine {
             src_shows: 0,
             sprite: None,
             stubs,
+            view: crate::ui::scrollback::View::default(),
+            view_shown: 0,
         }
     }
 
@@ -944,6 +989,13 @@ impl Engine {
     /// ([`crate::ui::popup::Popup::input_with`], on the platform's wall clock,
     /// [`Engine::set_wall_clock`]): what it takes never reaches the queue, and a choice's presses
     /// take their place; the menu is drawn over the published frame ([`Engine::screen_frame`]).
+    ///
+    /// Port (spec 21): then the travel's step, a direction key it adds after the events the menu
+    /// passed on at the command prompt ([`Engine::travel_press`], which reads those events and
+    /// ends the travel when the menu took new input); queued as the player's keys are, but neither
+    /// the menu's input nor the player's input to the message history's view (spec 23 Decision 6:
+    /// it leaves the view where it is). "Go here" chosen in this input starts its travel after
+    /// that ([`Engine::travel_to`]), so its first step is the next tick's.
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
         self.tick_dismissing(input, &[], elapsed_ms);
     }
@@ -953,16 +1005,10 @@ impl Engine {
     /// open context menu where it stands (before `input[i]` for index `i`, after them all for
     /// `input.len()`; ascending), as [`Engine::dismiss_context_menu`] does at once.
     pub fn tick_dismissing(&mut self, input: &[InputEvent], dismissals: &[usize], elapsed_ms: u32) {
+        let menu = self.popup.on();
         let through;
-        let input = if self.popup.on() {
-            // Nothing queued for the game but the repeats the prompt takes back (below).
-            let prompt = !self.finished && command_prompt(&self.state.borrow());
-            let quiet = self
-                .io
-                .events
-                .borrow()
-                .iter()
-                .all(|e| taken_back(prompt, e));
+        let (input, took) = if menu {
+            let (_, quiet) = self.menu_gate();
             let now = self.wall_ms.unwrap_or_else(|| self.io.now_ms());
             through = self.popup.input_with(
                 &self.state.borrow(),
@@ -972,33 +1018,17 @@ impl Engine {
                 now,
                 dismissals,
             );
-            for e in &through {
-                match *e {
-                    InputEvent::Pointer { buttons, .. } => {
-                        let b = buttons & 3;
-                        self.game_presses += u64::from(b & !self.passed_buttons != 0);
-                        self.passed_buttons = b;
-                    }
-                    // The prompt takes it back: it never reaches the game.
-                    InputEvent::Repeat(_) if taken_back(prompt, e) => {}
-                    InputEvent::Key(_)
-                    | InputEvent::Repeat(_)
-                    | InputEvent::Paced(_)
-                    | InputEvent::Release(_) => {
-                        self.game_keys += 1;
-                    }
-                    InputEvent::Text(_) => {}
-                }
-            }
-            // Unit M4's seam (spec 21): "Go here" chosen in this input starts travel to its cell
-            // after the menu's filter.
-            if let Some(cell) = self.popup.take_go_here() {
-                crate::ui::popup::travel_to(&mut self.go_here, cell);
-            }
-            through.as_slice()
+            (through.as_slice(), self.popup.took_new_input())
         } else {
-            input
+            (input, false)
         };
+        let step = self.travel_press(input, took);
+        // Spec 21's merge contract: "Go here" chosen in this input starts travel to its cell
+        // after this tick's press of the travel under way; a cell refused now starts none.
+        if let Some(cell) = self.popup.take_go_here() {
+            self.go_here.asked.push(cell);
+            let _ = self.travel_to((cell.0 as u16, cell.1 as u16));
+        }
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -1009,17 +1039,47 @@ impl Engine {
                     .count()
             };
             let (mut keys, mut texts) = (count(false), count(true));
-            let (cancel, prompt) = {
-                let s = self.state.borrow();
-                let cancel = s.main.program == main_loop::Program::Game && s.ui.input.drain;
-                (cancel, !self.finished && command_prompt(&s))
-            };
+            let s = self.state.borrow();
+            let game = s.main.program == main_loop::Program::Game;
+            let cancel = game && s.ui.input.drain;
+            let prompt = !self.finished && command_prompt(&s);
             if prompt {
                 let before = events.len();
                 events.retain(|q| !taken_back(true, q));
                 keys -= before - events.len();
             }
-            for &e in input {
+            let events_in = input
+                .iter()
+                .map(|&e| (e, true))
+                .chain(step.map(|e| (e, false)));
+            for (e, player) in events_in {
+                // Spec 23: the player's input leaves the message history; a press on its bar is
+                // the bar's. The travel's step is not the player's.
+                let e = if player {
+                    self.view.input(&s.ui, game, e)
+                } else {
+                    e
+                };
+                // Spec 17: what of the player's input the menu let through reaches the game, as
+                // the view passes it on (a press the history takes comes with no button).
+                if menu && player {
+                    match e {
+                        InputEvent::Pointer { buttons, .. } => {
+                            let b = buttons & 3;
+                            self.game_presses += u64::from(b & !self.passed_buttons != 0);
+                            self.passed_buttons = b;
+                        }
+                        // The prompt takes it back: it never reaches the game.
+                        InputEvent::Repeat(_) if taken_back(prompt, &e) => {}
+                        InputEvent::Key(_)
+                        | InputEvent::Repeat(_)
+                        | InputEvent::Paced(_)
+                        | InputEvent::Release(_) => {
+                            self.game_keys += 1;
+                        }
+                        InputEvent::Text(_) => {}
+                    }
+                }
                 let (held, room) = match e {
                     _ if taken_back(prompt, &e) => continue,
                     InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Paced(_) => {
@@ -1048,6 +1108,10 @@ impl Engine {
                 events.push_back(e);
             }
         }
+        // The view's offset as the player sees the window at the game's pass (the one time the game
+        // reads it: talk's pointer, in the read loop): the last publish's anchor, the wheel since
+        // and this input in it.
+        self.io.history_offset.set(self.view.offset());
         self.io.now_ms.set(self.io.now_ms() + u64::from(elapsed_ms));
         if !self.finished {
             let mut cx = Context::from_waker(Waker::noop());
@@ -1077,6 +1141,7 @@ impl Engine {
                 .sync_from(&mut self.io.front.borrow_mut());
             self.published_front = version;
             self.published_version += 1;
+            self.view.publish(&self.state.borrow().ui.scrollback);
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
@@ -1094,9 +1159,9 @@ impl Engine {
 
     /// The pointer sprite as it is now, its shape as last updated
     /// ([`crate::ui::pointer::update_shape`], the vertical blank's): at the input handler's
-    /// position ([`crate::ui::pointer::sprite`]); spec 17, while the context menu takes the pointer,
-    /// at the menu's instead (the game's sample stays where the game took it), in the arrow over
-    /// the open menu, else (a press it took, held) in the game's own shape.
+    /// position ([`crate::ui::pointer::sprite`]); spec 17, while the context menu takes the
+    /// pointer, at the menu's instead (the game's sample stays where the game took it), in the
+    /// arrow over the open menu, else (a press it took, held) in the game's own shape.
     fn sprite_now(&self) -> Option<crate::ui::pointer::SpriteFrame> {
         let s = self.state.borrow();
         let ptr = &s.ui.pointer;
@@ -1114,13 +1179,14 @@ impl Engine {
     }
 
     /// Composes the frames the platform reads, the one place both are (a tick's, and a change of
-    /// the drawn menu outside one, [`Engine::redraw_menu`]): the screen frame, the published one
-    /// with the context menu over it (spec 17 Presentation), synced again (and the menu drawn
-    /// again over it) when the game `presented` (or its sources alone, `src_only`), the drawn menu
-    /// changed, or at the `first` tick; then the shown frame, the screen frame with `sprite` over
-    /// it, when the screen frame changed, the sprite moved or at the first tick. Unit D2's view
-    /// step (spec 23) goes in the first, after the published sync and before the menu is drawn:
-    /// published, view, menu, sprite.
+    /// the drawn menu or of the message history's view outside one, [`Engine::redraw`],
+    /// [`Engine::wheel`]): the screen frame, the published one with the message history the
+    /// player looks at over it (spec 23, only while scrolled back) and the context menu over that
+    /// (spec 17 Presentation), synced again (the view and the menu drawn again over it) when the
+    /// game `presented` (or its sources alone, `src_only`), the drawn menu or the view changed, or
+    /// at the `first` tick; then the shown frame, the screen frame with `sprite` over it, when the
+    /// screen frame changed, the sprite moved or at the first tick. One composition: published,
+    /// view, menu, sprite (spec 23 Decision 12).
     fn compose(
         &mut self,
         presented: bool,
@@ -1130,9 +1196,11 @@ impl Engine {
     ) {
         let drawn = self.popup.version();
         let menu_moved = drawn != self.drawn_popup;
-        let layered = presented || menu_moved;
+        let view_moved = self.view.stamp() != self.view_shown;
+        let layered = presented || menu_moved || view_moved;
         if layered || src_only || first {
             self.layer.sync_from(&mut self.io.published.borrow_mut());
+            self.draw_view();
             if let Some(open) = self.popup.open() {
                 open.draw(&mut self.layer, &self.state.borrow());
             }
@@ -1173,11 +1241,162 @@ impl Engine {
         }
     }
 
+    /// Spec 23: the view over the screen frame (synced from the published frame just now, the
+    /// menu not drawn yet), nothing at the live bottom.
+    fn draw_view(&mut self) {
+        self.view_shown = self.view.stamp();
+        if self.view.offset() > 0 {
+            let state = self.state.borrow();
+            let live = self.io.published.borrow();
+            crate::ui::scrollback::draw_view(&state.ui, &self.view, &live, &mut self.layer);
+        }
+    }
+
+    /// Port-only (spec 23): the wheel at frame pixel (x, y), `dy` lines (< 0 older, > 0 newer).
+    /// Over the message window while `game` runs it scrolls the message history the frame shows
+    /// (from the next composition on, which this call makes at once) and returns true; elsewhere
+    /// it changes nothing. `dy` 0 moves nothing: whether the wheel is taken there. It is never the
+    /// game's input.
+    pub fn wheel(&mut self, x: i16, y: i16, dy: i32) -> bool {
+        let taken = {
+            let s = self.state.borrow();
+            let game = s.main.program == main_loop::Program::Game;
+            self.view.wheel(&s.ui, game, (x, y), dy)
+        };
+        if taken {
+            self.redraw();
+        }
+        taken
+    }
+
+    /// Port-only (spec 23): lines the view is back from the live bottom (0: the live frame).
+    pub fn history_offset(&self) -> usize {
+        self.view.offset()
+    }
+
+    /// Port-only (spec 23): whether a press is the message history's until every button is up
+    /// ([`crate::ui::scrollback::View::holding`]): the game sees no button, the platforms pace the
+    /// steps as with one held (spec 06).
+    pub fn history_holding(&self) -> bool {
+        self.view.holding()
+    }
+
+    /// Port-only (spec 23 Design 11): the bytes the message history and the view of it hold on the
+    /// heap together ([`crate::ui::scrollback::Scrollback::heap_bytes`] and
+    /// [`crate::ui::scrollback::View::heap_bytes`]): at most two bounds of lines.
+    pub fn history_heap_bytes(&self) -> usize {
+        let sb = &self.state.borrow().ui.scrollback;
+        sb.heap_bytes() + self.view.heap_bytes(sb)
+    }
+
+    /// Port-only (spec 23): moves whenever the published frame was synced again or the message
+    /// history shown over it changed ([`Engine::published_version`] and the view's stamp). The
+    /// screen frame ([`Engine::screen_version`]) moves with both.
+    pub fn view_version(&self) -> (u64, u64) {
+        (self.published_version, self.view.stamp())
+    }
+
+    /// Port (spec 21): starts the party's travel to map cell `target` on its level (masked to the
+    /// level's coordinates): one step a command prompt, entered as its direction key, until it
+    /// arrives or stops ([`crate::actors::travel::End`]). A travel under way is replaced; a key it
+    /// pressed that still waits is not the new travel's own (a key queued before it started).
+    /// Refused with the reason [`crate::actors::travel::reachable`] gives, nothing changed then.
+    pub fn travel_to(&mut self, target: (u16, u16)) -> Result<(), crate::actors::travel::Reason> {
+        let travel = crate::actors::travel::Travel::start(&self.state.borrow(), target)?;
+        self.travel = Some(travel);
+        self.travel_end = None;
+        self.travel_own = None;
+        Ok(())
+    }
+
+    /// Port (spec 21): a travel walks.
+    pub fn travel_active(&self) -> bool {
+        self.travel.is_some()
+    }
+
+    /// Port (spec 21): why the last travel ended (`None` while one walks or before any).
+    pub fn travel_end(&self) -> Option<crate::actors::travel::End> {
+        self.travel_end
+    }
+
+    /// Port (spec 21): the travel under way, if any (its target and receipts).
+    pub fn travel_progress(&self) -> Option<&crate::actors::travel::Travel> {
+        self.travel.as_ref()
+    }
+
+    /// Port (spec 21): the travel's press for this tick, before `input` is queued (the events the
+    /// context menu passed on, spec 21's merge contract): the next step's key at the command
+    /// prompt with no key waiting and a step due ([`Engine::set_travel_due`],
+    /// [`crate::actors::travel::Travel::next`]); none otherwise, and the travel ends at a stop,
+    /// `menu` one: the menu took new input in this tick
+    /// ([`crate::ui::popup::Popup::took_new_input`]).
+    fn travel_press(&mut self, input: &[InputEvent], menu: bool) -> Option<InputEvent> {
+        use crate::actors::travel::{End, Next, Polled};
+        let (waiting, own) = {
+            let events = self.io.events.borrow();
+            let own = self.travel_own.filter(|&k| events.iter().any(|&e| e == k));
+            let keys = events
+                .iter()
+                .filter(|e| !matches!(e, InputEvent::Pointer { .. }))
+                .count();
+            (keys, own.is_some())
+        };
+        if !own {
+            // Read by the game: no longer the travel's.
+            self.travel_own = None;
+        }
+        let travel = self.travel.as_mut()?;
+        let next = if self.finished {
+            Next::Stop(End::Gone)
+        } else {
+            let polled = Polled {
+                input,
+                buttons: self.io.handler_pointer().buttons,
+                queued: waiting > 0,
+                foreign: waiting > usize::from(own),
+                menu,
+                due: self.travel_due,
+            };
+            travel.next(&self.state.borrow(), &polled)
+        };
+        match next {
+            Next::Hold => None,
+            Next::Press(k) => {
+                #[cfg(test)]
+                self.travel_log.push((self.ticks + 1, k));
+                self.travel_own = Some(InputEvent::Key(k));
+                Some(InputEvent::Key(k))
+            }
+            Next::Stop(end) => {
+                self.travel = None;
+                self.travel_end = Some(end);
+                None
+            }
+        }
+    }
+
+    /// Port (spec 21 S3): whether a step of the travel is due at the next ticks, on the
+    /// platform's clock: a platform that steps the game faster than 1× gives it, false until
+    /// [`MIN_STEP_MS`] of its clock passed since the command prompt last took a press
+    /// ([`Engine::prompt_takes`]: the travel's own key is one, as a held key's paced press), so a
+    /// travel walks as a held arrow does. True by default (every prompt; the native window's 1×
+    /// and the headless runs); the stops stay at once either way.
+    pub fn set_travel_due(&mut self, due: bool) {
+        self.travel_due = due;
+    }
+
+    /// Port (spec 21): the keys the travel pressed so far, with the tick (from 1) of each.
+    #[cfg(test)]
+    pub(crate) fn travel_log(&self) -> &[(u64, Key)] {
+        &self.travel_log
+    }
+
     /// The pointer sprite drawn over the shown frame last (the tick's vertical-blank work:
     /// [`crate::ui::pointer::update_shape`], then the sprite at the handler's position; spec 17:
     /// the arrow at the context menu's pointer while the menu takes the pointer), if any: its top
-    /// left in frame pixels and its rows of values 0..=3 (0 clear). Port-only use (spec 11 Design 7): a platform that shows the HD frame,
-    /// composed without it ([`Engine::published_frame`]), draws it over that frame itself.
+    /// left in frame pixels and its rows of values 0..=3 (0 clear). Port-only use (spec 11
+    /// Design 7): a platform that shows the HD frame, composed without it
+    /// ([`Engine::published_frame`]), draws it over that frame itself.
     pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
     }
@@ -1244,7 +1463,7 @@ impl Engine {
     /// engine's clock, which runs as fast as the game is stepped.
     pub fn set_context_menu(&mut self, on: bool) {
         self.popup.set_on(on);
-        self.redraw_menu();
+        self.redraw();
     }
 
     /// Port-only (spec 17 Presentation): the frame rects (x0, y0, x1, y1 inclusive) the platform
@@ -1253,7 +1472,7 @@ impl Engine {
     /// ([`crate::ui::popup::Popup::set_hidden`]).
     pub fn set_context_menu_hidden(&mut self, rects: Vec<crate::ui::popup::Rect>) {
         self.popup.set_hidden(rects, &self.state.borrow());
-        self.redraw_menu();
+        self.redraw();
     }
 
     /// Port-only (spec 17 Presentation): the hidden frame rects the context menu keeps off now
@@ -1267,15 +1486,16 @@ impl Engine {
     /// HD layout's gaps or the letterbox); true when one was open.
     pub fn dismiss_context_menu(&mut self) -> bool {
         let open = self.popup.dismiss();
-        self.redraw_menu();
+        self.redraw();
         open
     }
 
-    /// The screen frame and the shown frame again after a change of the menu outside a tick
-    /// (laid out again, dismissed, turned off), as a tick composes them ([`Engine::compose`]):
-    /// the sprite as it is now ([`Engine::sprite_now`], so a dismissed menu's arrow gives way to
-    /// the game's pointer in the same frame). Nothing before the first tick, which composes both.
-    fn redraw_menu(&mut self) {
+    /// The screen frame and the shown frame again after a change of the menu (laid out again,
+    /// dismissed, turned off) or of the message history's view (the wheel) outside a tick, as a
+    /// tick composes them ([`Engine::compose`]): the sprite as it is now ([`Engine::sprite_now`],
+    /// so a dismissed menu's arrow gives way to the game's pointer in the same frame). Nothing
+    /// before the first tick, which composes both.
+    fn redraw(&mut self) {
         if self.ticks == 0 {
             return;
         }
@@ -1292,14 +1512,16 @@ impl Engine {
     }
 
     /// Port-only (spec 17): the presses the context menu let through to the game (button-down
-    /// edges of the pointer events it gave the queue), counted while it is on.
+    /// edges of the pointer events it gave the queue, as the message history's view passed them
+    /// on: a press the history takes reaches the game with no button, spec 23), counted while it is
+    /// on; the travel's steps are not the player's and are left out.
     pub fn game_presses(&self) -> u64 {
         self.game_presses
     }
 
     /// Port-only (spec 17): the key events (presses, repeats, paced presses and releases) the
-    /// context menu let through to the game, counted while it is on; the keys it takes itself
-    /// and the repeats the command prompt takes back are left out.
+    /// context menu let through to the game, counted while it is on; the keys it takes itself,
+    /// the repeats the command prompt takes back and the travel's steps are left out.
     pub fn game_keys(&self) -> u64 {
         self.game_keys
     }
@@ -1317,22 +1539,34 @@ impl Engine {
             .unwrap_or_else(|| self.io.handler_pointer())
     }
 
+    /// Port-only (spec 17 Input): the gate's two halves as a tick starts, the one helper of the
+    /// tick ([`Engine::tick_dismissing`]) and the query ([`Engine::context_menu_gate`]): the
+    /// command prompt up and the game not finished ([`command_prompt`]), and whether nothing is
+    /// queued for the game but the repeats the prompt takes back (the menu's `quiet`).
+    fn menu_gate(&self) -> (bool, bool) {
+        let prompt = !self.finished && command_prompt(&self.state.borrow());
+        let quiet = self
+            .io
+            .events
+            .borrow()
+            .iter()
+            .all(|e| taken_back(prompt, e));
+        (prompt, quiet)
+    }
+
     /// Port-only (spec 17 Input and its checks): the gate a tick puts before a right press that
     /// would open the context menu, for a press after `pending` (the platform's events not yet
-    /// given to a tick): the command prompt up and the game not finished ([`command_prompt`]),
-    /// nothing queued for the game but the repeats the prompt takes back, and every event of
-    /// `pending` inert (a button-less move, a release, a repeat the prompt takes back). The
-    /// menu's own state (open, a chosen command waiting) is left out: a query for tests.
+    /// given to a tick): the command prompt up and nothing queued for the game but the repeats it
+    /// takes back ([`Engine::menu_gate`], the tick's), and every event of `pending` inert (a
+    /// button-less move, a release, a repeat the prompt takes back). The menu's own state (open, a
+    /// chosen command waiting) is left out: a query for tests. Stricter than a tick for the events
+    /// the menu takes itself, which the tick leaves out of the gate and this counts as pending:
+    /// the repeats of a key it took to that key's release (a held Escape's after it closed the
+    /// menu, a held Enter's after a choice) and the held moves and release of a press it
+    /// swallowed (the press that opened it, a double click's second press).
     pub fn context_menu_gate(&self, pending: &[InputEvent]) -> bool {
-        let prompt = !self.finished && command_prompt(&self.state.borrow());
-        prompt
-            && self
-                .io
-                .events
-                .borrow()
-                .iter()
-                .all(|e| taken_back(prompt, e))
-            && pending.iter().all(|e| crate::ui::popup::inert(prompt, e))
+        let (prompt, quiet) = self.menu_gate();
+        prompt && quiet && pending.iter().all(|e| crate::ui::popup::inert(prompt, e))
     }
 
     /// Port-only (spec 17): the open context menu as drawn (no text), if one is open.
@@ -1346,8 +1580,8 @@ impl Engine {
         &mut self.popup
     }
 
-    /// Port-only (spec 17, unit M4 seam): the cells "Go here" asked travel to (the stub's record
-    /// until unit M4's `travel_to` lands, spec 21).
+    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, each given to
+    /// [`Engine::travel_to`] (spec 21) as it was chosen, refused or not.
     pub fn go_here_asked(&self) -> &crate::ui::popup::Travel {
         &self.go_here
     }
@@ -1462,7 +1696,8 @@ impl Engine {
         (prompt && !waiting).then_some(InputEvent::Paced(held))
     }
 
-    /// Port (spec 19 O1c): [`Io::prompt_takes`].
+    /// Port (spec 19 O1c): the presses the command prompt has taken ([`Io::prompt_takes`]). A
+    /// platform stamps the step's time when it moves ([`paced_press_due`]).
     pub fn prompt_takes(&self) -> u64 {
         self.io.prompt_takes()
     }
@@ -1708,9 +1943,10 @@ mod tests {
     /// repeats of direction keys are taken back, in a tick's input and in the queue, also those
     /// queued while a turn ran and met by a prompt that comes up within a tick (the take reads
     /// the prompt as it is then); a press, a paced press and a letter's repeat are read, and
-    /// counted ([`Io::prompt_takes`]). The cross-hair, the more prompt and every other wait
+    /// counted ([`Engine::prompt_takes`]). The cross-hair, the more prompt and every other wait
     /// (A4-0x7a2c clear) read the repeats. A game that waits 100 ms with A4-0x7a2c clear, then
-    /// sets it with `targeting` and `accept` and reads one key, over and over.
+    /// sets it with `targeting` and `accept` and reads one key as the drained waits take it
+    /// ([`crate::ui::keyread::take_drained`], once a tick), over and over.
     #[test]
     fn the_command_prompt_takes_back_the_platforms_repeats_of_direction_keys() {
         let run = |targeting: u8, accept: bool, input: &[(u32, InputEvent)]| {
@@ -1723,7 +1959,12 @@ mod tests {
                 loop {
                     io.sleep(100).await;
                     st.borrow_mut().main.reading = 1;
-                    let k = io.next_key().await;
+                    let k = loop {
+                        if let Some(k) = crate::ui::keyread::take_drained(&st, &io) {
+                            break k;
+                        }
+                        io.vblank().await;
+                    };
                     st.borrow_mut().main.reading = 0;
                     out.borrow_mut().push(k);
                 }
@@ -1762,7 +2003,10 @@ mod tests {
         assert_eq!(takes, 3, "counted");
         for (targeting, accept, what) in [(1, true, "a cross-hair"), (0, false, "a more prompt")] {
             let (read, takes) = run(targeting, accept, &input);
-            assert_eq!(read.len(), input.len(), "{what} reads them all: {read:?}");
+            assert!(
+                read.len() > 3 && read.iter().filter(|&&k| k == Key::Left).count() > 1,
+                "{what} reads the repeats too: {read:?}"
+            );
             assert_eq!(takes, 0, "{what}: not the command prompt");
         }
         let mut s = State::empty();
@@ -1774,6 +2018,79 @@ mod tests {
         });
         e.tick(&[os, os, os], 20);
         assert!(e.finished(), "another wait (A4-0x7a2c clear) reads them");
+    }
+
+    /// Spec 19 O1c (round 5, review a-1): each key read, said to be the command prompt's or
+    /// not. With `prompt` [`Io::take_newest_key_at`] drops the platform's direction repeats and
+    /// gives the newest press or paced press (none when only repeats wait, the queue then
+    /// empty), and [`Io::key_ready_at`] drops them at the front as it drops text; without, both
+    /// read the repeats. [`Io::typed_ready`], [`Io::next_typed`] and [`Io::next_key`] are never
+    /// the command prompt's and keep them; a letter's repeat is read everywhere.
+    #[test]
+    fn each_key_read_takes_back_direction_repeats_only_for_the_command_prompt() {
+        let queued = |events: &[InputEvent]| {
+            let io = Io::new(Files::default());
+            io.events.borrow_mut().extend(events.iter().copied());
+            io
+        };
+        let left = |io: &Io| io.events.borrow().iter().copied().collect::<Vec<_>>();
+        let (right, up) = (InputEvent::Repeat(Key::Right), InputEvent::Repeat(Key::Up));
+        let (x, paced) = (key('x'), InputEvent::Paced(Key::Down));
+        let letter = InputEvent::Repeat(Key::Char('a'));
+        let pointer = InputEvent::Pointer {
+            x: 1,
+            y: 2,
+            buttons: 0,
+        };
+        let q = [x, right, pointer, up];
+        let io = queued(&q);
+        assert_eq!(
+            io.take_newest_key_at(true),
+            Some(Key::Char('x')),
+            "the prompt"
+        );
+        assert_eq!(
+            left(&io),
+            [pointer],
+            "the repeats taken back, the pointer kept"
+        );
+        assert_eq!(
+            queued(&q).take_newest_key_at(false),
+            Some(Key::Up),
+            "another wait"
+        );
+        let io = queued(&[right, paced, up]);
+        assert_eq!(
+            io.take_newest_key_at(true),
+            Some(Key::Down),
+            "the paced press"
+        );
+        let io = queued(&[right, up]);
+        assert_eq!(io.take_newest_key_at(true), None, "only repeats");
+        assert_eq!(io.pending_events(), 0, "taken back");
+        let io = queued(&[right, letter]);
+        assert_eq!(
+            io.take_newest_key_at(true),
+            Some(Key::Char('a')),
+            "a letter's repeat"
+        );
+        let io = queued(&[right, InputEvent::Text('k'), up, x]);
+        assert!(io.key_ready_at(true), "the press behind them");
+        assert_eq!(left(&io), [x], "repeats and text dropped at the front");
+        let io = queued(&[right, up]);
+        assert!(!io.key_ready_at(true), "only repeats");
+        assert_eq!(io.pending_events(), 0);
+        let io = queued(&[right]);
+        assert!(io.key_ready_at(false) && io.key_ready(), "another wait");
+        assert_eq!(left(&io), [right], "kept");
+        let io = queued(&[right, up]);
+        assert!(io.typed_ready(), "the line editor's");
+        assert_eq!(left(&io), [right, up], "kept");
+        let mut cx = Context::from_waker(Waker::noop());
+        let typed = std::pin::pin!(io.next_typed()).poll(&mut cx);
+        assert_eq!(typed, Poll::Ready(Typed::Key(Key::Right)), "read in order");
+        let next = std::pin::pin!(io.next_key()).poll(&mut cx);
+        assert_eq!(next, Poll::Ready(Key::Up), "next_key reads it");
     }
 
     /// Spec 19 O1c: a paced press waiting in the queue is taken back by its key's release, as a

@@ -1,0 +1,1926 @@
+//! Spec 23: the message window's history, on the synthetic font (glyph `c` = eight rows of `c`)
+//! and tables. The window is the record main sets up, so the tests hold in both builds.
+
+use std::collections::BTreeMap;
+
+use u6_render::{BITMAP_PAPER, Src};
+
+use super::*;
+use crate::engine::{POINTER_LEFT, POINTER_RIGHT};
+use crate::main_loop::Program;
+use crate::ui::scrollback::{self, CellKind, HISTORY, MIN_THUMB};
+use crate::ui::talk::KeySpan;
+use crate::ui::text::Paper;
+use crate::ui::text::WindowId;
+
+/// The message window's first and last frame pixels: x 176..312, y 112..192.
+const X: std::ops::Range<usize> = 176..312;
+const Y: std::ops::Range<usize> = 112..192;
+/// A pixel inside the window, and one on the map.
+const IN: (i16, i16) = (200, 150);
+const MAP: (i16, i16) = (40, 40);
+/// The bar's place: the window's last cell column, x 304..312.
+const BAR_X: i16 = 310;
+
+/// The synthetic state with `game` running.
+fn game_state() -> State {
+    let mut s = state();
+    s.main.program = Program::Game;
+    s
+}
+
+/// A paper all [`PAPER`] but one pixel of colour 7 inside the window's last row (x 200, y 190),
+/// and the bitmap it is drawn from.
+fn speck_paper() -> (Paper, u6_formats::bitmap::Bitmap) {
+    let mut pixels = vec![PAPER; 320 * 200];
+    pixels[190 * 320 + 200] = 7;
+    let bmp = u6_formats::bitmap::Bitmap {
+        width: 320,
+        height: 200,
+        pixels,
+    };
+    let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+    (Paper::drawn(&identity, &bmp), bmp)
+}
+
+/// The game future [`talker`] makes.
+type Talk = std::pin::Pin<Box<dyn Future<Output = ()>>>;
+
+/// A game that draws the paper (when the state has one), prints `l0`, `l1`, … one line per frame
+/// (`n` of them, each presented), then at each key it takes prints `k0`, `k1`, … the same way;
+/// with `tick_ms` > 0 it also prints `t0`, `t1`, … every `tick_ms` while it waits.
+fn talker(n: u16, tick_ms: u32) -> impl FnOnce(Rc<RefCell<State>>, Rc<Io>) -> Talk {
+    move |st, io| {
+        Box::pin(async move {
+            if st.borrow().ui.paper.is_some() {
+                let (_, bmp) = speck_paper();
+                let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+                io.draw(|fb| crate::gfx::blit::blit_bmp(&identity, fb, &bmp, 0, 0, BITMAP_PAPER));
+            }
+            for i in 0..n {
+                printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+                io.present();
+                io.vblank().await;
+            }
+            let (mut k, mut t) = (0u16, 0u16);
+            loop {
+                if tick_ms > 0 {
+                    io.sleep(tick_ms).await;
+                    if !io.key_ready() {
+                        printf(&st, &io, b"t%d\n", &[Arg::Word(t)]).await;
+                        t += 1;
+                        io.present();
+                        continue;
+                    }
+                }
+                let _ = io.next_key().await;
+                printf(&st, &io, b"k%d\n", &[Arg::Word(k)]).await;
+                k += 1;
+                io.present();
+            }
+        })
+    }
+}
+
+/// An engine running [`talker`] on `s`, ticked until its first `n` lines are published.
+fn engine(s: State, n: u16, tick_ms: u32, src: bool) -> Engine {
+    let mut e = Engine::with_game(s, Files::default(), talker(n, tick_ms));
+    if src {
+        e.enable_src_plane();
+    }
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    e
+}
+
+/// The text of screen row `row` of the message window in `fb` (the ink's cells, trimmed), less
+/// its last cell, where the bar is drawn.
+fn text_at(fb: &Framebuffer, row: usize) -> String {
+    row_text(fb, 22..38, row, INK).trim_end().to_string()
+}
+
+/// Whether every pixel row of screen cell (col, row) is `code`'s glyph row (the synthetic font:
+/// each row the code) in ink `fg` over the paper.
+fn whole_glyph(fb: &Framebuffer, (col, row): (usize, usize), code: u8) -> bool {
+    (0..8).all(|dy| {
+        (0..8).all(|dx| {
+            let want = if code & (0x80 >> dx) != 0 { INK } else { PAPER };
+            fb.get(col * 8 + dx, row * 8 + dy) == Some(want)
+        })
+    })
+}
+
+/// The window's rows of `fb` as shown, top first.
+fn shown_rows(fb: &Framebuffer) -> Vec<String> {
+    (14..24).map(|r| text_at(fb, r)).collect()
+}
+
+/// The pixels (colour and source) of screen row `row` of the message window in `fb`.
+fn row_pixels(fb: &Framebuffer, row: usize) -> Vec<(u8, Src)> {
+    let mut out = Vec::new();
+    for y in row * 8..row * 8 + 8 {
+        for x in X {
+            let src = fb.src_at(x, y).unwrap_or(Src::CLASSIC);
+            out.push((fb.get(x, y).unwrap_or(0), src));
+        }
+    }
+    out
+}
+
+/// Pixel (colour and source) equality of the whole frames.
+fn same_frame(a: &Framebuffer, b: &Framebuffer) -> bool {
+    a.pixels() == b.pixels() && a.src() == b.src()
+}
+
+/// The text of a kept line's cells.
+fn line_text(l: &scrollback::Line) -> String {
+    let s: String = l
+        .cells
+        .iter()
+        .map(|c| match c.kind {
+            CellKind::Blank => ' ',
+            _ => char::from(c.code as u8),
+        })
+        .collect();
+    s.trim_end().to_string()
+}
+
+/// The rows (y) of the window where the bar's thumb is drawn: every pixel of x 309..312 the ink.
+fn thumb_rows(fb: &Framebuffer) -> Vec<usize> {
+    Y.filter(|&y| (309..312).all(|x| fb.get(x, y) == Some(INK)))
+        .collect()
+}
+
+/// Whether any pixel of the bar's place (x 309..312) is the ink.
+fn bar_drawn(fb: &Framebuffer) -> bool {
+    Y.clone()
+        .any(|y| (309..312).any(|x| fb.get(x, y) == Some(INK)))
+}
+
+/// The pointer at (x, y) with `buttons`.
+fn at((x, y): (i16, i16), buttons: u8) -> InputEvent {
+    InputEvent::Pointer { x, y, buttons }
+}
+
+/// What a game that reads all its input took, in order: the buttons of each pointer sample
+/// ([`Io::take_pointer`], one change of the buttons at a time), each key (or repeat) and each
+/// character of text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    Buttons(u8),
+    Key(Key),
+    Text(char),
+}
+
+/// A game that prints `l0`, `l1`, … as [`talker`] (`n` lines, each presented), then at every
+/// frame takes every event queued into `log` (a consumer that sees each press and release).
+fn recorder(
+    n: u16,
+    log: Rc<RefCell<Vec<Seen>>>,
+) -> impl FnOnce(Rc<RefCell<State>>, Rc<Io>) -> Talk {
+    move |st, io| {
+        Box::pin(async move {
+            for i in 0..n {
+                printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+                io.present();
+                io.vblank().await;
+            }
+            loop {
+                while io.pending_events() > 0 {
+                    let seen = if io.typed_ready() {
+                        match io.next_typed().await {
+                            crate::engine::Typed::Key(k) => Seen::Key(k),
+                            crate::engine::Typed::Text(c) => Seen::Text(c),
+                        }
+                    } else {
+                        Seen::Buttons(io.take_pointer().buttons)
+                    };
+                    log.borrow_mut().push(seen);
+                }
+                io.vblank().await;
+            }
+        })
+    }
+}
+
+/// An engine running [`recorder`] with 39 lines (30 kept), ticked until they are published, and
+/// its log, empty.
+fn recorded() -> (Engine, Rc<RefCell<Vec<Seen>>>) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut e = Engine::with_game(
+        game_state(),
+        Files::default(),
+        recorder(39, Rc::clone(&log)),
+    );
+    for _ in 0..43 {
+        e.tick(&[], 16);
+    }
+    assert_eq!(e.state().ui.scrollback.lines().len(), 30);
+    log.borrow_mut().clear();
+    (e, log)
+}
+
+/// The buttons the game took, each change once.
+fn presses(log: &[Seen]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for s in log {
+        if let Seen::Buttons(b) = *s
+            && out.last() != Some(&b)
+        {
+            out.push(b);
+        }
+    }
+    out
+}
+
+#[test]
+fn history_keeps_the_scrolled_off_lines_in_order_up_to_the_bound() {
+    let n = (HISTORY + 30) as u16;
+    let e = engine(game_state(), n, 0, false);
+    let s = e.state();
+    let sb = &s.ui.scrollback;
+    // Ten rows: n lines and the cursor's row leave n - 9 lines scrolled off.
+    let off = usize::from(n) - 9;
+    assert_eq!(sb.total(), off as u64, "every line that scrolled off");
+    assert_eq!(sb.lines().len(), HISTORY, "at most HISTORY kept");
+    let want: Vec<String> = (off - HISTORY..off).map(|i| format!("l{i}")).collect();
+    let got: Vec<String> = sb.lines().iter().map(|l| line_text(l)).collect();
+    assert_eq!(got, want, "the newest HISTORY, oldest first");
+    assert!(
+        sb.lines()
+            .iter()
+            .all(|l| l.cells.len() == 17 && l.bg == PAPER && l.patch.is_empty()),
+        "each a row of the window's cells, drawn as shown"
+    );
+    let bytes = sb.heap_bytes();
+    println!("a bound of lines with no patch: {bytes} bytes");
+    assert!(bytes < 110_000, "about 0.1 MB at the bound: {bytes}");
+    // The live rows are the shadow's.
+    let rows: Vec<String> = sb.rows().iter().map(line_text).collect();
+    assert_eq!(rows, shown_rows(e.frame()));
+}
+
+#[test]
+fn a_kept_line_keeps_each_cell_in_its_colours() {
+    let e = run(game_state(), &[], 4, |st, io| async move {
+        printf(&st, &io, b"say @name. ok\n", &[]).await;
+        for _ in 0..10 {
+            printf(&st, &io, b"x\n", &[]).await;
+        }
+        io.present();
+    });
+    let s = e.state();
+    let first = &s.ui.scrollback.lines()[0];
+    assert_eq!(line_text(first), "say name. ok");
+    // The keyword's cells in the alert ink, the rest in the ink, and the keyword's span (spec 22)
+    // kept with the line (spec 23 Design 10): its cells, its ink, a keyword of its own.
+    assert!(first.cells[4..8].iter().all(|c| c.fg == ALERT));
+    assert!(first.cells[..4].iter().all(|c| c.fg == INK));
+    assert!(first.cells[8..12].iter().all(|c| c.fg == INK));
+    let spans: Vec<(u8, u8, Vec<u8>, u8, bool, bool)> = first
+        .spans
+        .iter()
+        .map(|k| {
+            (
+                k.row,
+                k.col,
+                k.word(),
+                k.ink,
+                k.joined.is_some(),
+                k.continued,
+            )
+        })
+        .collect();
+    assert_eq!(spans, [(0, 4, b"name".to_vec(), ALERT, false, false)]);
+    assert!(
+        s.ui.scrollback
+            .lines()
+            .iter()
+            .skip(1)
+            .all(|l| l.spans.is_empty()),
+        "the other lines show no keyword"
+    );
+}
+
+#[test]
+fn a_bound_of_lines_all_patch_keeps_the_stated_size() {
+    // Each line scrolls off over a row the game filled in a colour its cells do not draw (9): the
+    // whole row is patch.
+    let n = (HISTORY + 20) as u16;
+    let e = run(
+        game_state(),
+        &[],
+        usize::from(n) + 4,
+        move |st, io| async move {
+            for i in 0..n {
+                io.draw(|fb| {
+                    for y in Y {
+                        for x in X {
+                            fb.set(x, y, 9);
+                        }
+                    }
+                });
+                printf(&st, &io, b"\n", &[]).await;
+                if i % 50 == 0 {
+                    io.present();
+                }
+            }
+            io.present();
+        },
+    );
+    let s = e.state();
+    let sb = &s.ui.scrollback;
+    assert_eq!(sb.lines().len(), HISTORY);
+    assert!(
+        sb.lines().iter().all(|l| l.patch.len() == 17 * 64),
+        "every pixel of every line patch"
+    );
+    let bytes = sb.heap_bytes();
+    println!("a bound of lines all patch: {bytes} bytes");
+    assert!(
+        (2_200_000..2_400_000).contains(&bytes),
+        "about 2.3 MB (spec 23 Design 11): {bytes}"
+    );
+    // A copy of the state copies a pointer a line.
+    let copy = s.ui.scrollback.clone();
+    assert!(
+        copy.lines()
+            .iter()
+            .zip(sb.lines())
+            .all(|(a, b)| Rc::ptr_eq(a, b))
+    );
+}
+
+/// Fills the message window's rect in colour 9, which no cell draws: a line that scrolls off then
+/// is all patch.
+fn fill_window(io: &Io) {
+    io.draw(|fb| {
+        for y in Y {
+            for x in X {
+                fb.set(x, y, 9);
+            }
+        }
+    });
+}
+
+#[test]
+fn the_history_and_the_view_together_hold_at_most_two_bounds() {
+    // A bound of lines all patch, published; then a bound more, never published: the view keeps
+    // the first bound (on the published frame), the history the second.
+    let n = HISTORY as u16;
+    let e = run(
+        game_state(),
+        &[],
+        usize::from(n) + 8,
+        move |st, io| async move {
+            for _ in 0..n + 20 {
+                fill_window(&io);
+                printf(&st, &io, b"\n", &[]).await;
+            }
+            io.present();
+            io.vblank().await;
+            for _ in 0..n {
+                fill_window(&io);
+                printf(&st, &io, b"\n", &[]).await;
+            }
+        },
+    );
+    let one = e.state().ui.scrollback.heap_bytes();
+    let both = e.history_heap_bytes();
+    println!(
+        "a history and a view of two bounds all patch: {one} + {} bytes",
+        both - one
+    );
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    assert!(
+        (2_200_000..2_400_000).contains(&one),
+        "the history about 2.3 MB: {one}"
+    );
+    assert!(
+        (4_400_000..4_800_000).contains(&both),
+        "the two about 4.5 MB (spec 23 Design 11): {both}"
+    );
+}
+
+#[test]
+fn the_wheel_shows_a_kept_line_as_it_looked_before_it_scrolled_off() {
+    let mut s = game_state();
+    s.ui.paper = Some(speck_paper().0);
+    let n = 40u16;
+    let mut e = Engine::with_game(s, Files::default(), talker(n, 0));
+    e.enable_src_plane();
+    // Each published frame: every row of the window by its text, as it showed there.
+    let mut seen: BTreeMap<(String, usize), Vec<(u8, Src)>> = BTreeMap::new();
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+        let fb = e.published_frame();
+        for row in 14..24 {
+            let t = text_at(&fb, row);
+            if !t.is_empty() {
+                seen.insert((t, row), row_pixels(&fb, row));
+            }
+        }
+    }
+    let kept = e.state().ui.scrollback.lines().len();
+    assert_eq!(kept, usize::from(n) - 9);
+    assert!(
+        e.state()
+            .ui
+            .scrollback
+            .lines()
+            .iter()
+            .any(|l| !l.patch.is_empty()),
+        "the paper's speck went off with a line, as a patch"
+    );
+    let (mut compared, mut lines) = (0, std::collections::BTreeSet::new());
+    for k in 1..=kept {
+        assert!(e.wheel(IN.0, IN.1, -1), "over the window");
+        assert_eq!(e.history_offset(), k);
+        let fb = e.frame();
+        for (r, row) in (14..24).enumerate() {
+            let want = format!("l{}", kept - k + r);
+            let t = text_at(fb, row);
+            assert_eq!(t, want, "offset {k}, row {r}");
+            let Some(was) = seen.get(&(t.clone(), row)) else {
+                continue;
+            };
+            let mut now = row_pixels(fb, row);
+            let mut was = was.clone();
+            // The bar's columns (x 309..312 of each row) are compared apart.
+            for p in [&mut now, &mut was] {
+                for y in 0..8 {
+                    for x in 133..136 {
+                        p[y * 136 + x] = (0, Src::CLASSIC);
+                    }
+                }
+            }
+            assert!(
+                now == was,
+                "offset {k}: {want} at row {r} as it showed there"
+            );
+            compared += 1;
+            lines.insert(want);
+        }
+        // The HD frame's screen frame is the shown frame (no pointer sprite here).
+        assert!(same_frame(e.screen_frame(), e.frame()));
+    }
+    // Every line in view but the newest at the window's last row: the live frames show a line
+    // there only before its newline, which scrolls it first.
+    assert!(
+        lines.len() == kept + 8,
+        "every line compared: {}",
+        lines.len()
+    );
+    assert!(
+        compared == kept * 9,
+        "rows 0..9 at every offset: {compared}"
+    );
+    // Past the oldest the wheel stops there.
+    assert!(e.wheel(IN.0, IN.1, -5));
+    assert_eq!(e.history_offset(), kept);
+}
+
+#[test]
+fn with_no_history_view_the_frame_is_the_frame_without_the_feature() {
+    let mut s = game_state();
+    s.ui.paper = Some(speck_paper().0);
+    let n = 30u16;
+    let mut e = Engine::with_game(s.clone(), Files::default(), talker(n, 0));
+    e.enable_src_plane();
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+        assert!(
+            same_frame(e.frame(), &e.published_frame()),
+            "live: as published"
+        );
+        assert!(same_frame(e.screen_frame(), &e.published_frame()));
+    }
+    // Back and forward again: the live frame once more, the bar gone.
+    assert!(e.wheel(IN.0, IN.1, -3));
+    assert!(
+        !same_frame(e.frame(), &e.published_frame()),
+        "scrolled back"
+    );
+    assert!(bar_drawn(e.frame()));
+    assert!(e.wheel(IN.0, IN.1, 3));
+    assert_eq!(e.history_offset(), 0);
+    assert!(same_frame(e.frame(), &e.published_frame()));
+    assert!(!bar_drawn(e.frame()));
+    e.tick(&[], 16);
+    assert!(same_frame(e.frame(), &e.published_frame()));
+    // The game's frames do not see the feature: the published frame and the state are those of a
+    // run that never scrolled back.
+    let mut plain = Engine::with_game(s, Files::default(), talker(n, 0));
+    plain.enable_src_plane();
+    for _ in 0..usize::from(n) + 5 {
+        plain.tick(&[], 16);
+    }
+    assert!(same_frame(&plain.published_frame(), &e.published_frame()));
+    assert!(*plain.state() == *e.state());
+}
+
+#[test]
+fn the_thumb_size_and_place_are_the_history_fraction() {
+    assert_eq!(scrollback::thumb(80, 10, 0, 0), (0, 80));
+    // 30 kept + 10 shown: a quarter of the track.
+    assert_eq!(
+        scrollback::thumb(80, 10, 30, 30),
+        (0, 20),
+        "at the oldest, the top"
+    );
+    assert_eq!(scrollback::thumb(80, 10, 30, 1), (58, 20));
+    assert_eq!(scrollback::thumb(80, 10, 30, 15), (30, 20));
+    // Long histories keep a cell's height.
+    assert_eq!(scrollback::thumb(80, 10, 490, 245).1, MIN_THUMB);
+    let mut e = engine(game_state(), 39, 0, false);
+    let kept = e.state().ui.scrollback.lines().len();
+    assert_eq!(kept, 30);
+    for k in [1, 7, 15, 30] {
+        let dy = k as i32 - e.history_offset() as i32;
+        assert!(e.wheel(IN.0, IN.1, -dy));
+        let (top, len) = scrollback::thumb(80, 10, kept, k);
+        let want: Vec<usize> = (112 + top..112 + top + len).collect();
+        assert_eq!(thumb_rows(e.frame()), want, "offset {k}");
+    }
+}
+
+#[test]
+fn the_bar_never_covers_a_letter() {
+    let mut e = Engine::with_game(game_state(), Files::default(), |st, io| async move {
+        for i in 0..30u16 {
+            // Every other line fills the window's 17 cells.
+            let line: &[u8] = if i % 2 == 0 {
+                b"aaaaaaaaaaaaaaaaa"
+            } else {
+                b"b\n"
+            };
+            printf(&st, &io, line, &[]).await;
+            io.present();
+            io.vblank().await;
+        }
+        loop {
+            io.vblank().await;
+        }
+    });
+    for _ in 0..40 {
+        e.tick(&[], 16);
+    }
+    assert!(e.wheel(IN.0, IN.1, -4));
+    let fb = e.frame();
+    let (mut letters, mut bars) = (0, 0);
+    for row in 14..24 {
+        let full = cell(fb, 38, row, INK) == b'a';
+        let bar = (row * 8..row * 8 + 8).any(|y| (309..312).any(|x| fb.get(x, y) == Some(INK)))
+            && cell(fb, 38, row, INK) != b'a';
+        if full {
+            letters += 1;
+            assert!(
+                whole_glyph(fb, (38, row), b'a'),
+                "row {row}: the letter whole"
+            );
+            assert_eq!(row_text(fb, 22..39, row, INK), "a".repeat(17));
+        }
+        bars += usize::from(bar);
+    }
+    assert!(
+        letters >= 4 && bars >= 4,
+        "{letters} letter rows, {bars} bar rows"
+    );
+}
+
+#[test]
+fn a_key_returns_the_view_to_the_live_bottom() {
+    let mut e = engine(game_state(), 25, 0, true);
+    let live = shown_rows(e.frame());
+    assert!(e.wheel(IN.0, IN.1, -6));
+    assert_ne!(shown_rows(e.frame()), live);
+    e.tick(&[InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(e.history_offset(), 0, "the key leaves the history");
+    e.tick(&[], 16);
+    assert!(same_frame(e.frame(), &e.published_frame()));
+    assert_eq!(text_at(e.frame(), 22), "k0", "and reached the game");
+    // A release and a move without a button stay in the history.
+    assert!(e.wheel(IN.0, IN.1, -2));
+    e.tick(&[InputEvent::Release(Key::Char('q')), at(MAP, 0)], 16);
+    assert_eq!(e.history_offset(), 2);
+    // Typed text leaves it.
+    e.tick(&[InputEvent::Text('a')], 16);
+    assert_eq!(e.history_offset(), 0);
+}
+
+#[test]
+fn a_press_outside_the_window_returns_and_reaches_the_game() {
+    let (mut e, log) = recorded();
+    assert!(e.wheel(IN.0, IN.1, -3));
+    e.tick(&[at(MAP, POINTER_LEFT)], 16);
+    assert_eq!(e.history_offset(), 0);
+    assert_eq!(
+        e.io().handler_pointer().buttons,
+        POINTER_LEFT,
+        "the game's press"
+    );
+    e.tick(&[at(MAP, 0)], 16);
+    assert_eq!(presses(&log.borrow()), [POINTER_LEFT, 0]);
+}
+
+#[test]
+fn a_press_inside_the_window_while_scrolled_back_returns_to_live_and_is_not_the_games() {
+    let (mut e, log) = recorded();
+    for button in [POINTER_LEFT, POINTER_RIGHT] {
+        assert!(e.wheel(IN.0, IN.1, -3));
+        e.tick(&[at(IN, button)], 16);
+        assert_eq!(e.history_offset(), 0, "button {button}: live");
+        assert_eq!(e.io().handler_pointer().buttons, 0, "button {button}");
+        e.tick(&[at((IN.0 + 20, IN.1), button)], 16);
+        e.tick(&[at(IN, 0)], 16);
+        assert_eq!(e.history_offset(), 0);
+        assert!(same_frame(e.frame(), &e.published_frame()), "the bar gone");
+    }
+    assert!(
+        presses(&log.borrow()).iter().all(|&b| b == 0),
+        "none was the game's"
+    );
+    // At the live bottom the same press is the game's.
+    e.tick(&[at(IN, POINTER_RIGHT)], 16);
+    e.tick(&[at(IN, 0)], 16);
+    assert_eq!(presses(&log.borrow()), [0, POINTER_RIGHT, 0]);
+}
+
+#[test]
+fn the_wheel_over_anything_but_the_window_does_nothing() {
+    let mut e = engine(game_state(), 25, 0, false);
+    let before = e.frame_version();
+    assert!(!e.wheel(MAP.0, MAP.1, -3), "on the map");
+    assert!(!e.wheel(175, 150, -3), "beside the window");
+    assert!(!e.wheel(200, 192, -3), "below it");
+    assert!(!e.wheel(MAP.0, MAP.1, 0), "0 lines: the same answer");
+    assert_eq!(e.history_offset(), 0);
+    assert_eq!(e.frame_version(), before, "nothing composed");
+    // Over the window 0 lines is taken and moves nothing.
+    assert!(e.wheel(IN.0, IN.1, 0));
+    assert!(e.wheel(IN.0, IN.1, -2));
+    let stamp = e.view_version();
+    assert!(e.wheel(IN.0, IN.1, 0));
+    assert_eq!((e.history_offset(), e.view_version()), (2, stamp));
+    assert!(e.wheel(IN.0, IN.1, 2));
+    // Not in `game` (the launcher's `u`): the window is not the game's.
+    let mut s = game_state();
+    s.main.program = Program::U;
+    let mut u = engine(s, 25, 0, false);
+    assert!(!u.wheel(IN.0, IN.1, -3));
+    assert_eq!(u.history_offset(), 0);
+    // No history yet: taken, and nothing to show.
+    let mut fresh = engine(game_state(), 3, 0, false);
+    assert!(fresh.wheel(IN.0, IN.1, -3));
+    assert_eq!(fresh.history_offset(), 0);
+}
+
+#[test]
+fn dragging_the_thumb_and_pressing_the_track_scroll() {
+    let mut e = engine(game_state(), 39, 0, false);
+    let kept = 30;
+    assert!(e.wheel(IN.0, IN.1, -1));
+    let (top, len) = scrollback::thumb(80, 10, kept, 1);
+    // Press on the track above the thumb: a window (10 rows) older.
+    e.tick(&[at((BAR_X, 112 + 2), POINTER_LEFT)], 16);
+    assert_eq!(e.history_offset(), 11);
+    e.tick(&[at((BAR_X, 112 + 2), 0)], 16);
+    // Below it: 10 newer, at most to the live bottom.
+    let (top2, len2) = scrollback::thumb(80, 10, kept, 11);
+    assert!(top2 + len2 < 79);
+    e.tick(&[at((BAR_X, 191), POINTER_LEFT), at((BAR_X, 191), 0)], 16);
+    assert_eq!(e.history_offset(), 1);
+    let _ = (top, len);
+    // Grab the thumb at its middle and drag it to the top: the oldest line.
+    let (top, len) = scrollback::thumb(80, 10, kept, 1);
+    let grab = 112 + (top + len / 2) as i16;
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    assert_eq!(e.history_offset(), 1, "a grab alone moves nothing");
+    e.tick(&[at((BAR_X, 100), POINTER_LEFT)], 16);
+    assert_eq!(e.history_offset(), kept, "the thumb at the top");
+    // Half way down the track.
+    let span = 80 - len;
+    let mid = 112 + (len / 2 + span / 2) as i16;
+    e.tick(&[at((BAR_X, mid), POINTER_LEFT)], 16);
+    let want = kept - (span / 2 * kept + span / 2) / span;
+    assert_eq!(e.history_offset(), want, "half way");
+    // The drag holds off the bar too, and ends with the release.
+    e.tick(&[at((40, 300), POINTER_LEFT), at((40, 300), 0)], 16);
+    assert_eq!(e.history_offset(), 0, "dragged past the bottom: live");
+}
+
+#[test]
+fn a_bar_press_never_reaches_the_game() {
+    let mut e = engine(game_state(), 39, 0, false);
+    assert!(e.wheel(IN.0, IN.1, -5));
+    e.tick(&[at((BAR_X, 120), POINTER_LEFT)], 16);
+    assert_eq!(
+        e.io().handler_pointer().buttons,
+        0,
+        "the press is the bar's"
+    );
+    e.tick(&[at((BAR_X, 140), POINTER_LEFT | POINTER_RIGHT)], 16);
+    assert_eq!(e.io().handler_pointer().buttons, 0);
+    assert_eq!(
+        e.io().handler_pointer().y,
+        140,
+        "the sprite follows the pointer"
+    );
+    e.tick(&[at((BAR_X, 140), 0)], 16);
+    assert!(
+        e.history_offset() > 0,
+        "the release leaves the view as it is"
+    );
+    // The next press is the game's again.
+    e.tick(&[at(MAP, POINTER_LEFT)], 16);
+    assert_eq!(e.io().handler_pointer().buttons, POINTER_LEFT);
+}
+
+#[test]
+fn new_text_while_scrolled_back_keeps_the_view() {
+    let mut e = engine(game_state(), 25, 200, false);
+    assert!(e.wheel(IN.0, IN.1, -4));
+    let rows = shown_rows(e.frame());
+    let total = e.state().ui.scrollback.total();
+    let bar = thumb_rows(e.frame());
+    for _ in 0..60 {
+        e.tick(&[], 16);
+    }
+    let grew = (e.state().ui.scrollback.total() - total) as usize;
+    assert!(grew >= 3, "{grew} lines printed while scrolled back");
+    assert_eq!(shown_rows(e.frame()), rows, "the same lines in view");
+    assert_eq!(e.history_offset(), 4 + grew);
+    assert_ne!(thumb_rows(e.frame()), bar, "the thumb moved");
+    let s = e.state();
+    let live: Vec<String> = s.ui.scrollback.rows().iter().map(line_text).collect();
+    drop(s);
+    assert!(e.wheel(IN.0, IN.1, 100));
+    assert_eq!(shown_rows(e.frame()), live, "the wheel to the bottom: live");
+}
+
+/// Whether two frames show the same colours outside the message window.
+fn same_outside(a: &Framebuffer, b: &Framebuffer) -> bool {
+    (0..u6_render::HEIGHT).all(|y| {
+        (0..u6_render::WIDTH)
+            .all(|x| (X.contains(&x) && Y.contains(&y)) || a.get(x, y) == b.get(x, y))
+    })
+}
+
+#[test]
+fn viewing_changes_no_state() {
+    // `a` scrolls back and uses the bar (a page, a thumb drag, a press inside the window); `b`
+    // gets the same pointer moves with no button. Each game takes every event it is given.
+    let (mut a, la) = recorded();
+    let (mut b, lb) = recorded();
+    assert!(a.wheel(IN.0, IN.1, -8));
+    let (top, len) = scrollback::thumb(80, 10, 30, 8);
+    let grab = 112 + (top + len / 2) as i16;
+    let steps = [
+        ((BAR_X, 114), POINTER_LEFT),
+        ((BAR_X, 114), 0),
+        ((BAR_X, 190), POINTER_RIGHT),
+        ((BAR_X, 190), 0),
+        ((BAR_X, grab), POINTER_LEFT),
+        ((BAR_X, grab + 12), POINTER_LEFT),
+        (MAP, POINTER_LEFT | POINTER_RIGHT),
+        (MAP, 0),
+    ];
+    let mut viewed = 0;
+    for (k, &(p, buttons)) in steps.iter().enumerate() {
+        a.tick(&[at(p, buttons)], 16);
+        b.tick(&[at(p, 0)], 16);
+        viewed += usize::from(a.history_offset() > 0);
+        assert!(*a.state() == *b.state(), "step {k}: the same game state");
+        assert!(
+            *la.borrow() == *lb.borrow(),
+            "step {k}: the same input taken"
+        );
+        assert!(
+            same_frame(&a.published_frame(), &b.published_frame()),
+            "step {k}"
+        );
+        assert!(
+            same_outside(a.frame(), b.frame()),
+            "step {k}: the frame outside the window"
+        );
+    }
+    assert!(viewed >= 6, "scrolled back through the steps: {viewed}");
+    // A press inside the window while scrolled back: live again, the press the view's.
+    assert!(a.wheel(IN.0, IN.1, -4));
+    for (p, buttons) in [(IN, POINTER_LEFT), (IN, 0)] {
+        a.tick(&[at(p, buttons)], 16);
+        b.tick(&[at(p, 0)], 16);
+        assert!(*la.borrow() == *lb.borrow());
+    }
+    for e in [&mut a, &mut b] {
+        e.tick(&[InputEvent::Key(Key::Char('z'))], 16);
+        e.tick(&[], 16);
+    }
+    assert!(*a.state() == *b.state(), "the same game state");
+    assert!(*la.borrow() == *lb.borrow(), "the same input taken");
+    assert!(same_frame(&a.published_frame(), &b.published_frame()));
+    assert!(
+        same_frame(a.frame(), b.frame()),
+        "and live again, the same frame"
+    );
+}
+
+#[test]
+fn a_window_over_the_message_window_scrolling_clears_the_shadow() {
+    // The message window prints and scrolls; then the whole screen's window (over it) prints
+    // until it scrolls, through the game's print path; then the message window prints again.
+    let e = run(game_state(), &[], 6, |st, io| async move {
+        for i in 0..12u16 {
+            printf(&st, &io, b"m%d\n", &[Arg::Word(i)]).await;
+        }
+        io.present();
+        {
+            let mut s = st.borrow_mut();
+            s.ui.text.current = WindowId::Screen;
+            s.ui.text.win_mut().flags |= text::SCROLL;
+        }
+        for _ in 0..26 {
+            printf(&st, &io, b"s\n", &[]).await;
+        }
+        io.present();
+        let shadow = st.borrow().ui.scrollback.rows().len();
+        assert_eq!(shadow, 0, "the screen's scroll cleared the shadow");
+        st.borrow_mut().ui.text.current = WindowId::Messages;
+        for _ in 0..3 {
+            printf(&st, &io, b"n\n", &[]).await;
+        }
+        io.present();
+    });
+    let s = e.state();
+    let sb = &s.ui.scrollback;
+    let kept: Vec<String> = sb.lines().iter().map(|l| line_text(l)).collect();
+    // The message window's 3 lines kept before; its three scrolls after keep the rows as the
+    // shadow has them since (blank where the screen's window drew: what the message window drew
+    // is no longer shown there).
+    assert_eq!(kept[..3], ["m0", "m1", "m2"]);
+    assert_eq!(sb.total(), 6, "the screen's scrolls keep nothing");
+    assert!(kept[3..].iter().all(String::is_empty), "{kept:?}");
+    assert_eq!(sb.rows().len(), 10);
+}
+
+#[test]
+fn the_hd_frame_shows_the_history_rows_as_the_font_draws_them() {
+    use crate::hd::HdView;
+    use u6_render::Framebuffer;
+    use u6_render::hd::Scale;
+    let n = 30u16;
+    let mut e = Engine::with_game(game_state(), Files::default(), talker(n, 0));
+    e.enable_src_plane();
+    // A palette of distinct colours (the synthetic state has none: every index black).
+    e.io().draw(|fb| {
+        for (i, c) in fb.palette.iter_mut().enumerate() {
+            let v = i as u8;
+            *c = u6_render::Rgb::new(v.wrapping_mul(9), 255 - v, 7);
+        }
+    });
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    let kept = e.state().ui.scrollback.lines().len();
+    assert_eq!(kept, 21);
+    let palette = e.published_frame().palette;
+    // The oracle: the words the HD frame shows at a screen row of the window's first 16 cell
+    // columns (the bar's column aside) where the synthetic font drew `text`: glyph `c` is eight
+    // rows of the byte `c`, the ink where a bit is set, the paper elsewhere; past the text the
+    // row's colour then (`rest`: the paper of a row the window cleared, 0 in a row of the
+    // first screen, which nothing cleared); a pixel of a glyph or a fill (no image) is an S × S
+    // block of its colour (u6_render::hd).
+    let word = |c: u8| {
+        let p = palette[usize::from(c)];
+        u32::from_le_bytes([p.r, p.g, p.b, 255])
+    };
+    let expected = |text: &str, rest: u8, s: usize| -> Vec<u32> {
+        let bytes = text.as_bytes();
+        let mut row = Vec::new();
+        for x in 0..128 * s {
+            let (col, dx) = (x / s / 8, x / s % 8);
+            row.push(word(match bytes.get(col) {
+                Some(c) if c & (0x80 >> dx) != 0 => INK,
+                Some(_) => PAPER,
+                None => rest,
+            }));
+        }
+        row.repeat(8 * s)
+    };
+    let shown = |hd: &HdView, row: usize, s: usize| -> Vec<u32> {
+        let w = u6_render::WIDTH * s;
+        let rgba = hd.rgba();
+        (row * 8 * s..(row + 1) * 8 * s)
+            .flat_map(|y| {
+                rgba[y * w + 176 * s..y * w + (176 + 128) * s]
+                    .iter()
+                    .copied()
+            })
+            .collect()
+    };
+    let blank = Framebuffer::new();
+    for (scale, s) in [(Scale::X2, 2), (Scale::X4, 4)] {
+        let mut hd = HdView::new();
+        hd.set(true, scale);
+        hd.present(Some(&e), &blank);
+        // Live: l21..l29, the cursor's row blank.
+        for r in 0..10 {
+            let text = if r < 9 {
+                format!("l{}", kept + r)
+            } else {
+                String::new()
+            };
+            assert!(
+                shown(&hd, 14 + r, s) == expected(&text, PAPER, s),
+                "{s}x live row {r}"
+            );
+        }
+        // Three back: l18..l20 kept, then the live rows l21..l27 below them.
+        assert!(e.wheel(IN.0, IN.1, -3));
+        assert!(hd.present(Some(&e), &blank), "{s}x: composed again");
+        for r in 0..10 {
+            let text = format!("l{}", kept - 3 + r);
+            assert!(
+                shown(&hd, 14 + r, s) == expected(&text, PAPER, s),
+                "{s}x row {r}: {text}"
+            );
+        }
+        // The oldest lines, l0..l9, on the first screen's rows; l10 on a row the window cleared.
+        assert!(e.wheel(IN.0, IN.1, -100));
+        hd.present(Some(&e), &blank);
+        for r in 0..10 {
+            let text = format!("l{r}");
+            assert!(
+                shown(&hd, 14 + r, s) == expected(&text, 0, s),
+                "{s}x: {text}"
+            );
+        }
+        assert!(e.wheel(IN.0, IN.1, 1));
+        hd.present(Some(&e), &blank);
+        assert!(shown(&hd, 23, s) == expected("l10", PAPER, s), "{s}x: l10");
+        assert!(e.wheel(IN.0, IN.1, 100));
+        assert_eq!(e.history_offset(), 0);
+        hd.present(Some(&e), &blank);
+        let live = expected(&format!("l{kept}"), PAPER, s);
+        assert!(shown(&hd, 14, s) == live, "{s}x: live again");
+    }
+}
+
+/// A thumb drag with `interrupt` in the middle: the game takes the interrupt (`delivered`) and no
+/// button, and the drag after it moves nothing (the interrupt left the history).
+fn drag_interrupted(interrupt: InputEvent, delivered: Seen) {
+    let (mut e, log) = recorded();
+    assert!(e.wheel(IN.0, IN.1, -5));
+    let (top, len) = scrollback::thumb(80, 10, 30, 5);
+    let grab = 112 + (top + len / 2) as i16;
+    let steps = [
+        vec![at((BAR_X, grab), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 10), POINTER_LEFT)],
+        vec![interrupt],
+        vec![at((BAR_X, grab - 20), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 30), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 30), 0)],
+    ];
+    let (mut held, mut holding, mut offsets) = (Vec::new(), Vec::new(), Vec::new());
+    for step in &steps {
+        e.tick(step, 16);
+        held.push(e.io().handler_pointer().buttons);
+        holding.push(e.history_holding());
+        offsets.push(e.history_offset());
+    }
+    let seen = log.borrow();
+    // The thumb (top 50 of a span of 60 over 30 lines) 10 pixels up: 10 lines back. The interrupt
+    // returns to the live bottom, and each move after it leaves the view there.
+    assert_eq!(
+        offsets,
+        [5, 10, 0, 0, 0, 0],
+        "the drag moved the view, the interrupt ended it"
+    );
+    assert!(held.iter().all(|&b| b == 0), "handler {held:?}");
+    assert_eq!(
+        holding,
+        [true, true, true, true, true, false],
+        "the press the view's until the release (the platforms pace as held)"
+    );
+    assert!(
+        presses(&seen).iter().all(|&b| b == 0),
+        "the game took {seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|s| **s == delivered).count(),
+        1,
+        "the interrupt reached the game"
+    );
+}
+
+#[test]
+fn a_key_during_a_thumb_drag_never_hands_the_game_the_button() {
+    let q = Key::Char('q');
+    drag_interrupted(InputEvent::Key(q), Seen::Key(q));
+}
+
+#[test]
+fn a_repeat_during_a_thumb_drag_never_hands_the_game_the_button() {
+    let q = Key::Char('q');
+    drag_interrupted(InputEvent::Repeat(q), Seen::Key(q));
+}
+
+#[test]
+fn text_during_a_thumb_drag_never_hands_the_game_the_button() {
+    drag_interrupted(InputEvent::Text('a'), Seen::Text('a'));
+}
+
+#[test]
+fn a_thumb_drag_that_leaves_the_bar_never_hands_the_game_the_button() {
+    let (mut e, log) = recorded();
+    assert!(e.wheel(IN.0, IN.1, -5));
+    let (top, len) = scrollback::thumb(80, 10, 30, 5);
+    let grab = 112 + (top + len / 2) as i16;
+    let steps = [
+        vec![at((BAR_X, grab), POINTER_LEFT)],
+        vec![at((BAR_X, grab - 10), POINTER_LEFT)],
+        vec![at(IN, POINTER_LEFT)],
+        vec![at(MAP, POINTER_LEFT)],
+        vec![at(MAP, POINTER_LEFT | POINTER_RIGHT)],
+        vec![at(MAP, POINTER_RIGHT)],
+        vec![at(MAP, 0)],
+    ];
+    let mut held = Vec::new();
+    for step in &steps {
+        e.tick(step, 16);
+        held.push(e.io().handler_pointer().buttons);
+    }
+    assert!(held.iter().all(|&b| b == 0), "handler {held:?}");
+    assert!(presses(&log.borrow()).iter().all(|&b| b == 0));
+    // The next press is the game's.
+    e.tick(&[at(MAP, POINTER_LEFT)], 16);
+    assert_eq!(presses(&log.borrow()), [0, POINTER_LEFT]);
+}
+
+#[test]
+fn a_press_while_the_game_holds_a_button_is_the_games() {
+    let (mut e, log) = recorded();
+    // Left down on the map, the game's (a walk); the wheel back while it is held.
+    e.tick(&[at(MAP, POINTER_LEFT)], 16);
+    assert!(e.wheel(IN.0, IN.1, -5));
+    e.tick(&[at((BAR_X, 150), POINTER_LEFT)], 16);
+    assert_eq!(
+        e.history_offset(),
+        5,
+        "a move with the game's button keeps the view"
+    );
+    // Right on the bar: the game holds left, so the press is the game's too, and the view live.
+    let mut held = Vec::new();
+    for b in [POINTER_LEFT | POINTER_RIGHT, POINTER_LEFT, 0] {
+        e.tick(&[at((BAR_X, 150), b)], 16);
+        held.push(e.io().handler_pointer().buttons);
+    }
+    assert_eq!(held, [POINTER_LEFT | POINTER_RIGHT, POINTER_LEFT, 0]);
+    assert_eq!(e.history_offset(), 0);
+    assert_eq!(
+        presses(&log.borrow()),
+        [POINTER_LEFT, POINTER_LEFT | POINTER_RIGHT, POINTER_LEFT, 0],
+        "the game took every change the player made, and no other"
+    );
+}
+
+#[test]
+fn new_text_during_a_thumb_drag_at_the_bound_moves_the_view_by_the_new_lines() {
+    // Spec 23 Decision 9: at the bound, a line kept while the thumb is held anchors the view (5)
+    // up to the drag's next move, which sets the offset from the thumb's place again: the view
+    // moves by exactly the line kept (no count frozen for the drag).
+    let n = (HISTORY + 20) as u16;
+    let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+        for i in 0..n {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+        }
+        io.present();
+        io.sleep(500).await;
+        printf(&st, &io, b"x\n", &[]).await;
+        io.present();
+        loop {
+            io.vblank().await;
+        }
+    });
+    e.tick(&[], 16);
+    let before = e.state().ui.scrollback.total();
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    assert!(e.wheel(IN.0, IN.1, -50));
+    let (top, len) = scrollback::thumb(80, 10, HISTORY, 50);
+    let grab = 112 + (top + len / 2) as i16;
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    let dragged = e.history_offset();
+    for _ in 0..100 {
+        if e.state().ui.scrollback.total() != before {
+            break;
+        }
+        e.tick(&[], 16);
+    }
+    let new = e.state().ui.scrollback.total() - before;
+    assert_eq!(new, 1, "one line kept during the drag");
+    assert_eq!(
+        e.state().ui.scrollback.lines().len(),
+        HISTORY,
+        "at the bound"
+    );
+    assert_eq!(e.history_offset(), dragged + 1, "anchored at the publish");
+    e.tick(&[at((BAR_X, grab), POINTER_LEFT)], 16);
+    assert_eq!(
+        e.history_offset(),
+        dragged,
+        "the drag's next move, the thumb where it was: the view moved by the line kept"
+    );
+    e.tick(&[at((BAR_X, grab), 0)], 16);
+    assert!(!e.history_holding());
+}
+
+#[test]
+fn at_the_bound_a_source_only_publish_keeps_the_view() {
+    let mut s = game_state();
+    s.ui.paper = Some(speck_paper().0);
+    let n = (HISTORY + 20) as u16;
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        let (_, bmp) = speck_paper();
+        let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+        io.draw(|fb| crate::gfx::blit::blit_bmp(&identity, fb, &bmp, 0, 0, BITMAP_PAPER));
+        for i in 0..n {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+            io.present();
+            io.vblank().await;
+        }
+        // A line drawn and its sources alone presented: the frame's colours stay, the lines kept
+        // since the last publish are off it.
+        io.sleep(500).await;
+        printf(&st, &io, b"s\n", &[]).await;
+        io.present_sources();
+        loop {
+            io.vblank().await;
+        }
+    });
+    e.enable_src_plane();
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    let total = e.state().ui.scrollback.total();
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    // The view at the oldest line kept.
+    assert!(e.wheel(IN.0, IN.1, -(HISTORY as i32)));
+    assert_eq!(e.history_offset(), HISTORY);
+    let (rows, pixels) = (shown_rows(e.frame()), e.frame().pixels().to_vec());
+    let src_publishes = e.src_publishes();
+    for _ in 0..40 {
+        e.tick(&[], 16);
+        assert_eq!(shown_rows(e.frame()), rows, "the same lines in view");
+        assert!(e.frame().pixels() == pixels.as_slice(), "the same colours");
+        assert_eq!(e.history_offset(), HISTORY);
+    }
+    assert_eq!(e.state().ui.scrollback.total(), total + 1, "the line kept");
+    assert_eq!(
+        e.src_publishes(),
+        src_publishes + 1,
+        "its sources published alone"
+    );
+}
+
+#[test]
+fn another_history_returns_the_view_to_the_live_bottom() {
+    // The game prints 25 lines (16 kept), then after half a second a new process takes its place
+    // (a relaunch's, through `main_loop::take_over`), and its history is the new state's: fewer
+    // lines, as many as the view had (16: the count alone does not tell), or a bound more than the
+    // view's (its newest line out of reach).
+    for again in [5u16, 16, (HISTORY + 40) as u16] {
+        let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+            for i in 0..25u16 {
+                printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+                io.present();
+                io.vblank().await;
+            }
+            io.sleep(500).await;
+            // A relaunch's new process takes the old one's place (`main_loop::take_over`).
+            crate::main_loop::take_over(&mut st.borrow_mut(), game_state(), &io);
+            // As a new game's screen: the window cleared to its paper (its lines then no patch).
+            io.draw(|fb| {
+                for y in Y {
+                    for x in X {
+                        fb.set(x, y, PAPER);
+                    }
+                }
+            });
+            // The new state's window starts at its top row: nine lines before the first scrolls.
+            for i in 0..again + 9 {
+                printf(&st, &io, b"n%d\n", &[Arg::Word(i)]).await;
+            }
+            io.present();
+            loop {
+                io.vblank().await;
+            }
+        });
+        for _ in 0..29 {
+            e.tick(&[], 16);
+        }
+        assert_eq!(e.state().ui.scrollback.total(), 16);
+        assert!(e.wheel(IN.0, IN.1, -4));
+        assert_eq!(e.history_offset(), 4);
+        for _ in 0..40 {
+            e.tick(&[], 16);
+        }
+        let total = e.state().ui.scrollback.total();
+        assert_eq!(total, u64::from(again), "{again}: the other history");
+        assert_eq!(e.history_offset(), 0, "{again}: the live bottom");
+        assert!(same_frame(e.frame(), &e.published_frame()), "{again}");
+        // Its lines are the view's from then on: at the oldest, the window shows its oldest lines
+        // kept, then (fewer than the rows) its live rows.
+        let live = shown_rows(&e.published_frame());
+        assert!(e.wheel(IN.0, IN.1, -(HISTORY as i32) - 100));
+        let want: Vec<String> = {
+            let s = e.state();
+            let lines = s.ui.scrollback.lines();
+            assert_eq!(e.history_offset(), lines.len(), "{again}");
+            let kept = lines.iter().map(|l| line_text(l));
+            kept.chain(live).take(10).collect()
+        };
+        assert_eq!(
+            shown_rows(e.frame()),
+            want,
+            "{again}: the other history's rows"
+        );
+    }
+}
+
+/// The frame pixel at the middle of message-window cell (`row`, `col`).
+fn cell_px(row: u8, col: u8) -> (i16, i16) {
+    let x = (22 + i16::from(col)) * 8 + 4;
+    (x, (14 + i16::from(row)) * 8 + 4)
+}
+
+#[test]
+fn a_keyword_drawn_inverse_under_the_pointer_is_kept_in_its_ink() {
+    // Spec 22 Contract 6 draws the keyword under the pointer inverse; when its row scrolls off
+    // then, the history keeps the keyword as drawn (no patch in its cells), as without the hover.
+    let kept = |hover: bool| {
+        let hot = Rc::new(std::cell::Cell::new(None));
+        let seen = Rc::clone(&hot);
+        let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+            printf(&st, &io, b"say @name. ok\n", &[]).await;
+            io.present();
+            if hover {
+                while !io.pointer_ready() {
+                    io.vblank().await;
+                }
+                crate::ui::talk::pointer(&mut st.borrow_mut(), &io, 0);
+                seen.set(st.borrow().ui.talk.hot);
+            }
+            for _ in 0..10 {
+                printf(&st, &io, b"x\n", &[]).await;
+            }
+            io.present();
+            loop {
+                io.vblank().await;
+            }
+        });
+        for _ in 0..6 {
+            e.tick(&[at(cell_px(0, 5), 0)], 16);
+        }
+        let line = e.state().ui.scrollback.lines()[0].as_ref().clone();
+        (line, hot.get())
+    };
+    let (plain, none) = kept(false);
+    let (hovered, hot) = kept(true);
+    assert_eq!(none, None);
+    assert_eq!(
+        hot,
+        Some(crate::ui::talk::Target::Key { row: 0, col: 4 }),
+        "the keyword drawn inverse before its row scrolled off"
+    );
+    assert_eq!(line_text(&hovered), "say name. ok");
+    assert_eq!(hovered.spans.len(), 1);
+    // The patch pixels' cells (this fixture never paints the window's empty cells: theirs are
+    // patch in both runs).
+    let cells = |l: &scrollback::Line| {
+        let mut v: Vec<usize> = l
+            .patch
+            .iter()
+            .map(|&(i, _)| usize::from(i) % 136 / 8)
+            .collect();
+        v.dedup();
+        v
+    };
+    assert!(
+        !cells(&hovered).iter().any(|c| (4..8).contains(c)),
+        "no patch in the keyword's cells: {:?}",
+        cells(&hovered)
+    );
+    assert_eq!(hovered, plain, "kept as without the hover");
+}
+
+#[test]
+fn a_keyword_drawn_over_is_not_kept_and_its_cells_take_their_patch() {
+    // opus N1 (round 4): a keyword's cells take no patch only while it shows as drawn or inverse
+    // (spec 22 Contract 6, under the pointer); a span drawn over (a window over the message window
+    // draws while the spans are not updated, print.rs) is not kept, and its cells are patched as
+    // any other. A row of eight cells, a keyword of four in the alert ink at column 4, kept with
+    // the frame showing it drawn, drawn inverse, and drawn with one pixel of another colour in it.
+    let keep = |shown: &dyn Fn(&mut Framebuffer, &crate::ui::text::TextWindow)| {
+        let mut ui = game_state().ui;
+        let m = *ui.text.window(WindowId::Messages);
+        let mut fb = Framebuffer::new();
+        fb.clear(m.bg);
+        for k in 0..8u16 {
+            let w = crate::ui::text::TextWindow {
+                fg: if k >= 4 { ALERT } else { m.fg },
+                ..m
+            };
+            let at = (u16::from(m.x) + k, u16::from(m.y));
+            text::draw_char(&mut fb, ui.font.as_ref(), None, &w, 0x61, at.0, at.1);
+            scrollback::note(&mut ui, &w, 0x61, at, CellKind::Char);
+        }
+        shown(&mut fb, &m);
+        scrollback::scrolled(&mut ui, &fb, &m, vec![span(4, 4, ALERT, None, false)]);
+        let line = ui.scrollback.lines().back().unwrap().as_ref().clone();
+        let cells: Vec<usize> = line
+            .patch
+            .iter()
+            .map(|&(i, _)| usize::from(i) % (usize::from(m.width) * CELL) / CELL)
+            .collect();
+        (line.spans.len(), cells)
+    };
+    assert_eq!(keep(&|_, _| {}), (1, vec![]), "as drawn: kept, no patch");
+    let inverse = |fb: &mut Framebuffer, m: &crate::ui::text::TextWindow| {
+        let font = font();
+        let w = crate::ui::text::TextWindow {
+            fg: m.bg,
+            bg: ALERT,
+            ..*m
+        };
+        for k in 4..8u16 {
+            text::draw_char(
+                fb,
+                Some(&font),
+                None,
+                &w,
+                0x61,
+                u16::from(m.x) + k,
+                u16::from(m.y),
+            );
+        }
+    };
+    assert_eq!(keep(&inverse), (1, vec![]), "drawn inverse: kept, no patch");
+    let speck = |fb: &mut Framebuffer, m: &crate::ui::text::TextWindow| {
+        let (x, y) = (
+            usize::from(m.x) * CELL + 5 * CELL + 3,
+            usize::from(m.y) * CELL + 2,
+        );
+        fb.set(x, y, 7);
+    };
+    assert_eq!(
+        keep(&speck),
+        (0, vec![5]),
+        "drawn over: not kept, its pixel patched"
+    );
+}
+
+/// A keyword span (spec 22) of `cells` cells in `ink` at column `col` of a row about to scroll off.
+fn span(col: u8, cells: usize, ink: u8, joined: Option<Vec<u16>>, continued: bool) -> KeySpan {
+    KeySpan {
+        row: 0,
+        col,
+        cells: vec![0x61; cells],
+        ink,
+        joined,
+        continued,
+    }
+}
+
+#[test]
+fn a_kept_rest_is_linked_only_to_a_continued_span_of_its_ink_on_the_line_before() {
+    // Spec 22 links a keyword's rest (`joined`, at column 0) to the continued span of its ink on
+    // the row above (talk.rs `is_first`), not on `joined` alone; the history keeps only such links
+    // (T1 note D2-2): `joined` on a kept line means linked to the line kept before it.
+    let mut ui = game_state().ui;
+    let w = *ui.text.window(WindowId::Messages);
+    let other = *ui.text.window(WindowId::Status);
+    // A frame all the window's paper: each span's (blank) cells show their drawing, so it is kept.
+    let mut fb = Framebuffer::new();
+    fb.clear(w.bg);
+    // The lines the last scroll kept.
+    let kept = std::cell::Cell::new(0);
+    let mut keep_in = |win: &crate::ui::text::TextWindow, spans: Vec<KeySpan>| {
+        let before = ui.scrollback.total();
+        scrollback::scrolled(&mut ui, &fb, win, spans);
+        kept.set(ui.scrollback.total() - before);
+        let l = ui.scrollback.lines().back().unwrap();
+        l.spans.iter().map(|s| s.joined.clone()).collect::<Vec<_>>()
+    };
+    let space = Some(vec![0x20]);
+    assert_eq!(
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
+        [None],
+        "no line before"
+    );
+    keep_in(&w, vec![span(13, 4, ALERT, None, true)]);
+    assert_eq!(
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
+        [Some(vec![0x20])],
+        "after a continued span of its ink: linked"
+    );
+    assert_eq!(
+        keep_in(&w, vec![span(0, 2, ALERT, Some(Vec::new()), false)]),
+        [None],
+        "after a span not continued: a keyword of its own"
+    );
+    keep_in(&w, vec![span(13, 4, INK, None, true)]);
+    assert_eq!(
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
+        [None],
+        "after a continued span of another ink"
+    );
+    keep_in(&w, vec![span(13, 4, ALERT, None, true)]);
+    assert_eq!(
+        keep_in(&w, vec![span(3, 2, ALERT, space.clone(), false)]),
+        [None],
+        "a span past column 0 is no rest"
+    );
+    // gpt b SHOULD 1 (round 4): a window whose rect is not the message window keeps nothing, and
+    // its scroll between a continued span and the rest leaves the link to the line kept before.
+    keep_in(&w, vec![span(13, 4, ALERT, None, true)]);
+    assert_eq!(kept.get(), 1);
+    keep_in(&other, vec![span(0, 2, ALERT, None, false)]);
+    assert_eq!(kept.get(), 0, "another window keeps nothing");
+    assert_eq!(
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
+        [Some(vec![0x20])],
+        "another window's scroll between: still linked"
+    );
+}
+
+#[test]
+fn while_scrolled_back_no_keyword_of_the_message_window_is_a_target() {
+    // Spec 23 Decision 2's exception: spec 22's hover and click read the view's offset (the Io's
+    // copy) and take no keyword of the window while it shows kept lines; the buttons and the live
+    // window's keywords are as before.
+    let mut e = Engine::with_game(game_state(), Files::default(), |st, io| async move {
+        for i in 0..12u16 {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+        }
+        printf(&st, &io, b"say @name. ok\n", &[]).await;
+        io.present();
+        loop {
+            if io.pointer_ready() {
+                crate::ui::talk::pointer(&mut st.borrow_mut(), &io, 0);
+            }
+            io.vblank().await;
+        }
+    });
+    for _ in 0..4 {
+        e.tick(&[], 16);
+    }
+    let (row, col) = {
+        let s = e.state();
+        let k = &s.ui.text.keys.spans;
+        assert_eq!(k.len(), 1, "the keyword live in the window");
+        (k[0].row, k[0].col)
+    };
+    let key = Some(crate::ui::talk::Target::Key { row, col });
+    let hot = |e: &Engine| e.state().ui.talk.hot;
+    let over = at(cell_px(row, col + 1), 0);
+    e.tick(&[over], 16);
+    assert_eq!(hot(&e), key, "live: the keyword under the pointer");
+    assert!(e.wheel(IN.0, IN.1, -1));
+    e.tick(&[over], 16);
+    assert_eq!(
+        hot(&e),
+        None,
+        "scrolled back: no target there (the hover drawn as it was)"
+    );
+    assert!(e.wheel(IN.0, IN.1, 1));
+    e.tick(&[over], 16);
+    assert_eq!(hot(&e), key, "live again");
+    // A key in the same tick as the move leaves the history: the game reads the offset as after
+    // that tick's input (the move, queued before the key, taken with the window live).
+    assert!(e.wheel(IN.0, IN.1, -1));
+    e.tick(&[over], 16);
+    assert_eq!(hot(&e), None);
+    e.tick(&[over, InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(e.history_offset(), 0);
+    assert_eq!(
+        hot(&e),
+        key,
+        "the key left the history before the move was read"
+    );
+}
+
+#[test]
+fn the_game_reads_the_views_offset_as_the_player_sees_the_window_at_its_pass() {
+    // Io's copy of the offset (spec 23 Decision 2's exception) is written once a tick, after its
+    // input and before the game's pass (opus N3, round 4: the game reads it only then): at each
+    // pass the game reads the view's offset as it was right before it, a wheel and new text
+    // anchoring the view at a publish (Design 5) included; and at a key's tick, 0.
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&seen);
+    let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+        for i in 0..25u16 {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+            io.present();
+            io.vblank().await;
+        }
+        for i in 0u16.. {
+            log.borrow_mut().push(io.history_offset());
+            if i % 3 == 0 {
+                printf(&st, &io, b"t%d\n", &[Arg::Word(i)]).await;
+                io.present();
+            }
+            io.vblank().await;
+        }
+    });
+    for _ in 0..30 {
+        e.tick(&[], 16);
+    }
+    assert!(e.wheel(IN.0, IN.1, -3));
+    let mut grew = false;
+    for _ in 0..20 {
+        let (want, from) = (e.history_offset(), seen.borrow().len());
+        e.tick(&[], 16);
+        let read = seen.borrow()[from..].to_vec();
+        assert!(!read.is_empty(), "a pass a tick");
+        assert!(read.iter().all(|&o| o == want), "{read:?} at {want}");
+        grew |= want > 3;
+    }
+    assert!(grew, "new text anchored the view");
+    let from = seen.borrow().len();
+    e.tick(&[InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(seen.borrow()[from..], [0], "a key's tick");
+}
+
+#[test]
+fn a_paced_press_and_a_repeat_taken_back_at_the_command_prompt_return_to_live() {
+    // K2 (spec 19 O1c): a paced press is a key (spec 23 Decision 6). `View::input` runs before
+    // K2's take-back, so an OS repeat of a direction key the command prompt takes back (never
+    // queued) still returns the view to the live bottom.
+    let mut s = game_state();
+    s.main.reading = 1;
+    s.ui.input.targeting = 0;
+    s.ui.input.accept = true;
+    let mut e = engine(s, 25, 0, false);
+    assert!(e.wheel(IN.0, IN.1, -3));
+    e.tick(&[InputEvent::Repeat(Key::Up)], 16);
+    assert_eq!(e.history_offset(), 0, "a repeat taken back");
+    e.tick(&[], 16);
+    assert_eq!(
+        text_at(e.frame(), 22),
+        "l24",
+        "taken back: the game took no key"
+    );
+    assert!(e.wheel(IN.0, IN.1, -3));
+    e.tick(&[InputEvent::Paced(Key::Left)], 16);
+    assert_eq!(e.history_offset(), 0, "a paced press");
+    e.tick(&[], 16);
+    assert_eq!(text_at(e.frame(), 22), "k0", "and the game took it");
+}
+
+/// The keypad's direction keys by walk direction (`walk::DX8`, `walk::DY8`: 0 north, then
+/// clockwise), as the travel presses them.
+const STEPS: [Key; 8] = [
+    Key::Up,
+    Key::UpRight,
+    Key::Right,
+    Key::DownRight,
+    Key::Down,
+    Key::DownLeft,
+    Key::Left,
+    Key::UpLeft,
+];
+
+#[test]
+fn a_travel_step_leaves_the_view_where_it_is_and_a_player_key_returns_it() {
+    // opus S1 (round 4): M4's step (spec 21) is a key the engine adds, not the player's input
+    // (Decisions 5 and 6). An open window with leader 1 alone (as spec 21's crafted maps), a game
+    // that prints 25 lines, then has the command loop's shape: at the prompt it reads a key,
+    // steps the party with a direction key and takes 100 ms for the turn.
+    use crate::actors::walk::tests::{creature_tiles, link_objects};
+    use crate::geom;
+    use u6_formats::position::Position;
+    let mut s = game_state();
+    creature_tiles(&mut s);
+    s.map.world.surface = vec![0; u6_formats::map::SURFACE_CHUNKS.pow(2)];
+    s.map.window_tiles = vec![0; crate::map::WINDOW_CELLS];
+    s.map.window_origin = [0, 0];
+    s.map.window_key = [0, 0, 0];
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    let (x, y) = (geom::LEAD + 1, geom::LEAD + 3);
+    s.map.centre = Position { x, y, z: 0 };
+    s.map.view_offset = [
+        geom::view_offset(x, 0, geom::HALF_W as u16),
+        geom::view_offset(y, 0, geom::HALF_H as u16),
+    ];
+    s.objects.type_frame[1] = 0x17a;
+    s.objects.location[1] = Position { x, y, z: 0 };
+    s.actors.attrs.status[1] = 0x80;
+    s.actors.worktype[1] = 2;
+    s.actors.movement_points[1] = 30;
+    s.ui.input.accept = true;
+    let mut formation = vec![0; 28];
+    formation[12] = 1;
+    formation[13] = 2;
+    s.actors.game = crate::actors::GameTables {
+        formation,
+        ..crate::actors::GameTables::default()
+    };
+    link_objects(&mut s);
+    let taken = Rc::new(RefCell::new(Vec::new()));
+    let log = taken.clone();
+    let game = move |st: Rc<RefCell<State>>, io: Rc<Io>| async move {
+        for i in 0..25u16 {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+            io.present();
+            io.vblank().await;
+        }
+        loop {
+            {
+                let mut s = st.borrow_mut();
+                s.main.reading = 1;
+                s.ui.input.in_wait = true;
+            }
+            let k = io.next_key().await;
+            {
+                let mut s = st.borrow_mut();
+                s.main.reading = 0;
+                s.ui.input.in_wait = false;
+                if let Some(d) = STEPS.iter().position(|&step| step == k) {
+                    crate::actors::party::player_step(&mut s, d as u16);
+                }
+            }
+            log.borrow_mut().push(k);
+            io.sleep(100).await;
+        }
+    };
+    let mut e = Engine::with_game(s, Files::default(), game);
+    for _ in 0..30 {
+        e.tick(&[], 16);
+    }
+    e.travel_to((x + 5, y)).expect("reachable");
+    assert!(e.wheel(IN.0, IN.1, -3));
+    for _ in 0..60 {
+        e.tick(&[], 16);
+        if taken.borrow().len() >= 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        *taken.borrow(),
+        [Key::Right; 2],
+        "the game took the travel's steps"
+    );
+    assert_eq!(e.travel_log().len(), 2, "the travel's keys");
+    assert!(e.travel_active(), "still travelling");
+    assert_eq!(
+        e.history_offset(),
+        3,
+        "the steps leave the view where it is"
+    );
+    assert_eq!(e.io().history_offset(), 3, "and the game's copy");
+    assert!(
+        !same_frame(e.frame(), &e.published_frame()),
+        "still the history"
+    );
+    // The player's key: the view returns to live (and the key stops the travel).
+    e.tick(&[InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(e.history_offset(), 0, "a player key returns to live");
+    assert!(!e.travel_active(), "and stops the travel");
+}
+
+/// The bytes a kept line holds with its shared allocation (as [`scrollback::Scrollback`] counts
+/// it): its two counts and the line, its cells, its patch and its spans.
+fn line_bytes(l: &scrollback::Line) -> usize {
+    assert!(l.spans.is_empty());
+    2 * size_of::<usize>()
+        + size_of::<scrollback::Line>()
+        + l.cells.capacity() * size_of::<scrollback::Cell>()
+        + l.patch.capacity() * size_of::<(u16, u8)>()
+}
+
+#[test]
+fn the_view_adds_only_what_the_history_no_longer_holds() {
+    // gpt a, b (round 3): the history and the view share the lines of a publish, counted once.
+    // 1. A bound and 20 lines more, all patch, one presented a frame: right after each publish
+    //    the view adds its vector alone, made to the lines published (8 bytes a line).
+    // 2. 30 lines more with no publish: the view adds the 30 the history dropped since.
+    // 3. A publish: its vector alone again.
+    // 4. A relaunch's new state (`main_loop::take_over`): before its first publish the view adds
+    //    every line it keeps and its own token; after it, its vector alone, which keeps its size.
+    let n = (HISTORY + 20) as u16;
+    let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+        for _ in 0..n {
+            fill_window(&io);
+            printf(&st, &io, b"\n", &[]).await;
+            io.present();
+            io.vblank().await;
+        }
+        io.sleep(200).await;
+        for _ in 0..30 {
+            fill_window(&io);
+            printf(&st, &io, b"\n", &[]).await;
+        }
+        io.sleep(200).await;
+        io.present();
+        io.sleep(200).await;
+        crate::main_loop::take_over(&mut st.borrow_mut(), game_state(), &io);
+        for _ in 0..15 {
+            fill_window(&io);
+            printf(&st, &io, b"\n", &[]).await;
+        }
+        io.sleep(200).await;
+        io.present();
+        loop {
+            io.vblank().await;
+        }
+    });
+    let view = |e: &Engine| e.history_heap_bytes() - e.state().ui.scrollback.heap_bytes();
+    let rc = size_of::<Rc<scrollback::Line>>();
+    let mut checked = 0;
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+        let kept = e.state().ui.scrollback.lines().len();
+        assert_eq!(
+            view(&e),
+            kept * rc,
+            "1: right after a publish ({kept} lines)"
+        );
+        checked += usize::from(kept > 0);
+    }
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    assert!(checked > 400, "{checked} publishes checked");
+    let full = HISTORY * rc;
+    let total = |e: &Engine| e.state().ui.scrollback.total();
+    let published = |e: &Engine| e.view_version().0;
+    let until = |e: &mut Engine, done: &dyn Fn(&Engine) -> bool| {
+        for _ in 0..60 {
+            if done(e) {
+                return;
+            }
+            e.tick(&[], 16);
+        }
+        panic!("not reached in 60 ticks");
+    };
+    let before = total(&e);
+    until(&mut e, &|e| total(e) == before + 30);
+    let dropped = line_bytes(&e.state().ui.scrollback.lines()[0]);
+    assert_eq!(
+        view(&e),
+        full + 30 * dropped,
+        "2: the 30 the history dropped"
+    );
+    let at = published(&e);
+    until(&mut e, &|e| published(e) > at);
+    assert_eq!(view(&e), full, "3: published");
+    until(&mut e, &|e| total(e) < 100);
+    let fresh = e.state().ui.scrollback.lines().len();
+    assert!(fresh > 0, "the new state's lines, not yet published");
+    let token = 2 * size_of::<usize>();
+    assert_eq!(
+        view(&e),
+        full + token + HISTORY * dropped,
+        "4: before the new history's publish, the view's lines and token its own"
+    );
+    let at = published(&e);
+    until(&mut e, &|e| published(e) > at);
+    assert_eq!(view(&e), full, "4: published, the vector kept");
+    println!("the view's vector: {full} bytes; a dropped line all patch: {dropped} bytes");
+}
+
+/// Spec 23 Decision 12 (done at unit M3's merge round): one composition, the published frame,
+/// the view, the context menu and the sprite. Scrolled back three lines with the menu open over
+/// the map, the screen frame shows the kept lines in the window and the menu's box, and outside
+/// both it is the published frame; the HD frame (2×, no pack: a pixel is a 2 × 2 block of its
+/// colour) shows both, every pixel of the window and of the box; a wheel with the menu open
+/// composes the HD frame again (the view's stamp in its key) with the menu still over it; the
+/// menu closed, the HD frame shows the history alone.
+#[test]
+fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
+    use crate::hd::HdView;
+    use crate::ui::menu::{Entry, Kind, LOOK, Menu, Section};
+    use u6_render::hd::Scale;
+    let n = 30u16;
+    // The command read up (A4-0x7a2c), which an open menu needs to stay open.
+    let mut s = game_state();
+    s.main.reading = 1;
+    let mut e = Engine::with_game(s, Files::default(), talker(n, 0));
+    e.enable_src_plane();
+    e.io().draw(|fb| {
+        for (i, c) in fb.palette.iter_mut().enumerate() {
+            let v = i as u8;
+            *c = u6_render::Rgb::new(v.wrapping_mul(9), 255 - v, 7);
+        }
+    });
+    e.set_context_menu(true);
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    let kept = e.state().ui.scrollback.lines().len();
+    let menu = Menu {
+        kind: Kind::Map,
+        cell: Some((1, 1)),
+        underlined: None,
+        sections: vec![Section {
+            object: -1,
+            kind: None,
+            name: String::new(),
+            entries: vec![Entry {
+                code: LOOK,
+                reason: None,
+                theft: false,
+            }],
+        }],
+        go_here: None,
+    };
+    let open = crate::ui::popup::Open::new(&menu, MAP, &e.state(), &[]);
+    let (x0, y0, x1, y1) = open.rect();
+    assert!(
+        x1 < X.start as i32 || y1 < Y.start as i32,
+        "the fixture: the box off the window"
+    );
+    e.popup_mut().show(open);
+    e.tick(&[], 16);
+    let in_box =
+        |x: usize, y: usize| (x0..=x1).contains(&(x as i32)) && (y0..=y1).contains(&(y as i32));
+    let in_window = |x: usize, y: usize| X.contains(&x) && Y.contains(&y);
+    // The screen frame: the kept lines back `back` in the window, the menu's box drawn, the
+    // published frame elsewhere; the shown frame the same (no sprite).
+    let screen_shows = |e: &Engine, back: usize| {
+        let screen = e.screen_frame();
+        let rows: Vec<String> = (0..10).map(|r| format!("l{}", kept - back + r)).collect();
+        assert_eq!(shown_rows(screen), rows, "{back} back: the kept lines");
+        let (mut boxed, mut differ) = (0, 0);
+        for y in 0..u6_render::HEIGHT {
+            for x in 0..u6_render::WIDTH {
+                let (a, b) = (screen.get(x, y), e.published_frame().get(x, y));
+                if in_box(x, y) {
+                    boxed += 1;
+                    differ += usize::from(a != b);
+                } else if !in_window(x, y) {
+                    assert_eq!(
+                        a, b,
+                        "{back} back: outside the box and the window at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(
+            differ * 2 > boxed,
+            "{back} back: the menu drawn: {differ} of {boxed}"
+        );
+        assert!(same_frame(e.frame(), screen), "no sprite: shown = screen");
+    };
+    // Every pixel of the window and of the box in the HD frame: its 2 × 2 block in the screen
+    // frame's colour.
+    let hd_is_screen = |e: &Engine, hd: &HdView| {
+        let screen = e.screen_frame();
+        let w = u6_render::WIDTH * 2;
+        let rgba = hd.rgba();
+        for y in 0..u6_render::HEIGHT {
+            for x in 0..u6_render::WIDTH {
+                if !in_box(x, y) && !in_window(x, y) {
+                    continue;
+                }
+                let p = screen.palette[usize::from(screen.get(x, y).unwrap_or(0))];
+                let want = u32::from_le_bytes([p.r, p.g, p.b, 255]);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    if rgba[(y * 2 + dy) * w + x * 2 + dx] != want {
+                        return Some((x, y));
+                    }
+                }
+            }
+        }
+        None
+    };
+    assert!(e.wheel(IN.0, IN.1, -3));
+    screen_shows(&e, 3);
+    let mut hd = HdView::new();
+    hd.set(true, Scale::X2);
+    assert!(hd.present(Some(&e), &Framebuffer::new()));
+    assert_eq!(hd_is_screen(&e, &hd), None, "3 back: the HD frame");
+    assert!(e.wheel(IN.0, IN.1, -1));
+    assert!(e.context_menu().is_some(), "the menu still open");
+    assert!(
+        hd.present(Some(&e), &Framebuffer::new()),
+        "the wheel with the menu open: composed again"
+    );
+    screen_shows(&e, 4);
+    assert_eq!(hd_is_screen(&e, &hd), None, "4 back: the HD frame");
+    assert!(e.dismiss_context_menu(), "closed");
+    assert!(hd.present(Some(&e), &Framebuffer::new()), "composed again");
+    let screen = e.screen_frame();
+    assert_eq!(
+        shown_rows(screen)[0],
+        format!("l{}", kept - 4),
+        "the history still shown"
+    );
+    assert!(
+        (0..u6_render::HEIGHT).all(|y| (0..u6_render::WIDTH)
+            .all(|x| !in_box(x, y) || screen.get(x, y) == e.published_frame().get(x, y))),
+        "the box gone"
+    );
+    assert_eq!(hd_is_screen(&e, &hd), None, "closed: the HD frame");
+}

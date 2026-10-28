@@ -245,7 +245,8 @@ async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
         if io.pointer().buttons == buttons {
             held = sample_upto(state, io, left(io));
         }
-        if held != 0 && io.key_ready() && left(io) > 0 {
+        let prompt = crate::engine::command_prompt(&state.borrow());
+        if held != 0 && io.key_ready_at(prompt) && left(io) > 0 {
             return 0;
         }
     }

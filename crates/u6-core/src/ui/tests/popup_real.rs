@@ -3,8 +3,9 @@
 //! bare ground open the menu in the frame (its text area paper, ink and the heading's colour,
 //! the published frame outside its box, the game's button untouched); Use chosen by a left press
 //! opens the door, as the keyboard's Use does from the same start; Go here, chosen by its row,
-//! calls unit M4's seam with the cell; a disabled entry is drawn half-toned; in Wide a menu on an
-//! inventory slot keeps every row whole. Frames of the open menu (the frame, and the HD
+//! starts spec 21's travel to the cell, which walks the party there; a disabled entry is drawn
+//! half-toned; in Wide a menu on an inventory slot keeps every row whole. Frames of the open menu
+//! (the frame, and the HD
 //! compositor's at 4×) go to the directory `U6_FRAMES_DIR` names, which must resolve outside the
 //! repository (they show the user's game); the tests print counts only, and `ran` or `skipped`.
 //! Each skips without the zip, unless `U6_REQUIRE_ARCHIVE=1`, which fails it instead. The release
@@ -462,7 +463,8 @@ fn bare_ground(p: &Play) -> ((i16, i16), (i16, i16)) {
             let at = p.pixel(x as u16, y as u16);
             let m = menu::query(&p.e.state(), p.e.io(), at.0, at.1)?;
             let bare = m.sections.len() == 1 && m.sections[0].object == -1;
-            (bare && m.go_here.is_some() && m.cell == Some((x, y))).then_some(((x, y), at))
+            let go = m.go_here.is_some_and(|e| e.enabled());
+            (bare && go && m.cell == Some((x, y))).then_some(((x, y), at))
         })
         .expect("bare ground near the leader")
 }
@@ -475,9 +477,11 @@ fn close(p: &mut Play) {
 }
 
 /// Spec 17 Input (round 2b, gpt b MUST; K2 merge notes 2, 3 and 6), on the user's game: Go here
-/// chosen by a left click, a right press at once at the same pixel (within the double-click
-/// window) opens a menu and is new input, and reaches no game (a right press is no double click
-/// of a left one); a right press in the same tick after a platform's repeat of a direction key,
+/// chosen by a left press, its release and a right press at the same pixel in the next tick
+/// (within the double-click window) open a menu, which is new input, and the press reaches no
+/// game (a right press is no double click of a left one); the travel Go here started ends there,
+/// before its first step (spec 21's merge contract: the menu's new input is a stop, the release
+/// before it is not); a right press in the same tick after a platform's repeat of a direction key,
 /// or with one left in the game's queue (the prompt takes both back), opens the menu too; after
 /// a paced press (a press) and with the game's cross-hair up (no command prompt) it opens none.
 #[test]
@@ -490,11 +494,28 @@ fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
     let v = p.open_at(at);
     let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
     let t0 = p.ms();
-    p.click(go_at, POINTER_LEFT);
+    p.press(go_at, POINTER_LEFT);
     assert_eq!(p.e.go_here_asked().asked.len(), 1, "Go here chosen");
+    assert!(p.e.travel_active(), "its travel started");
     let presses = p.e.game_presses();
-    p.press(go_at, POINTER_RIGHT);
+    let release = InputEvent::Pointer {
+        x: go_at.0,
+        y: go_at.1,
+        buttons: 0,
+    };
+    let right_here = InputEvent::Pointer {
+        x: go_at.0,
+        y: go_at.1,
+        buttons: POINTER_RIGHT,
+    };
+    p.e.tick(&[release, right_here], STEP_MS);
     println!("the right press {} ms after the choosing one", p.ms() - t0);
+    assert_eq!(
+        p.e.travel_end(),
+        Some(crate::actors::travel::End::Input),
+        "the menu's new input ends the travel"
+    );
+    assert_eq!(p.e.travel_log().len(), 0, "before its first step");
     assert!(p.ms() - t0 <= 500, "within the double-click window");
     assert_eq!(
         p.e.game_presses(),
@@ -546,16 +567,32 @@ fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
     println!("{NAME}: ran");
 }
 
-/// Spec 17 Acceptance 9: a right press on bare ground (a view cell whose menu is the tile's
-/// Look alone, two or more cells from the leader) opens the menu with Look and Go here last, Go
-/// here able to run (unit M4's stub); chosen by a left press on its row it calls `travel_to` with
-/// the cell and nothing else: the leader stays, the prompt stays up, the menu closed.
+/// Spec 17 Acceptance 9 with spec 21 (the merge round): a right press on bare ground (a view
+/// cell whose menu is the tile's Look alone, two or more cells from the leader, Go here able to
+/// run: the travel's own `reachable`) opens the menu with Look and Go here last; chosen by a left
+/// press on its row it starts the real travel to the cell (`Engine::travel_to`): the menu closed,
+/// the party walks there, a key a step, and the travel ends on it (`Arrived`), the prompt up.
+/// The menu in the port's Korean words ("여기로 이동"), as the Korean pack sets the language,
+/// drawn from the site's Hangul table (the game's own text stays the English it is without the
+/// pack). Frames: `r4-menu-ground` (the menu over bare ground), `r4-go-here-walking` (the party on
+/// its way, at the first prompt after its first step).
 #[test]
 fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
     const NAME: &str = "a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to";
     let Some(files) = archive(NAME) else { return };
     let mut p = Play::boot(&files);
     p.beside_a_door();
+    {
+        let table = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../site/fonts/galmuri7-hangul.bin"
+        ));
+        let mut s = p.st.borrow_mut();
+        s.ui.text.language = crate::ui::wide::Language::Korean;
+        s.ui.hangul = Some(Rc::new(
+            u6_formats::font::HangulFont::parse(table).expect("the site's Hangul table"),
+        ));
+    }
     let leader = p.e.state().leader_position().expect("a leader");
     let (lx, ly) = (leader.x as i16, leader.y as i16);
     let (cell, at) = bare_ground(&p);
@@ -575,32 +612,60 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
     let (go, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
     assert!(
         v.rows[go].enabled(),
-        "Go here can run (the stub: every cell)"
+        "Go here can run (the travel's reachable)"
     );
     let text = drawn_in_the_frame(&p, &v);
     println!(
         "ground menu: {} rows, text area {text} pixels",
         v.rows.len()
     );
-    p.frames("menu-ground");
+    p.frames("r4-menu-ground");
+    let steps = (lx - cell.0).abs().max((ly - cell.1).abs());
     p.click(go_at, POINTER_LEFT);
-    for _ in 0..20 {
-        p.e.tick(&[], STEP_MS);
-    }
     assert_eq!(
         p.e.go_here_asked().asked,
         [cell],
         "travel_to with the pressed cell"
     );
+    assert!(p.e.context_menu().is_none(), "chosen: closed");
+    assert!(p.e.travel_active(), "the travel walks");
+    let (mut moved, mut ticks, mut shot) = (0, 0, false);
+    let mut was = (lx, ly);
+    while p.e.travel_active() && ticks < 4000 {
+        p.e.tick(&[], STEP_MS);
+        ticks += 1;
+        let l = p.e.state().leader_position().expect("a leader");
+        let now = (l.x as i16, l.y as i16);
+        if now != was {
+            moved += 1;
+            was = now;
+        }
+        if moved > 0 && !shot && p.e.travel_active() && p.at_prompt() {
+            p.frames("r4-go-here-walking");
+            shot = true;
+        }
+    }
+    let end = p.e.travel_end();
+    println!(
+        "go here: {steps} cells away (Chebyshev), the leader moved {moved} times in {ticks} ticks, \
+         the travel's end {:?}",
+        end.map(crate::actors::travel::End::code)
+    );
+    assert_eq!(
+        end,
+        Some(crate::actors::travel::End::Arrived),
+        "the travel arrived"
+    );
+    assert_eq!(was, cell, "the party on the pressed cell");
+    assert!(
+        moved >= 1 && moved as i16 >= steps,
+        "it walked a step a move"
+    );
+    assert!(shot, "a prompt on the way: the walking frame");
+    p.settle(4000);
     assert!(
         p.e.context_menu().is_none() && p.at_prompt(),
         "closed, the prompt up"
-    );
-    let after = p.e.state().leader_position().expect("a leader");
-    assert_eq!(
-        (after.x as i16, after.y as i16),
-        (lx, ly),
-        "the leader stays (the stub)"
     );
     // The opening is gated on the game accepting input (round 2, opus NIT): with that off at the
     // prompt the same press opens nothing (it is the game's).

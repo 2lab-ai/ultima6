@@ -2050,19 +2050,19 @@ fn at_prompt(e: &Engine, queued: &[InputEvent]) -> bool {
     e.state().main.reading == 1 && e.io().pending_events() == 0 && queued.is_empty()
 }
 
-/// `u6-web`'s quiet queue for a run: nothing in the engine's, and in the page's only moves of a
-/// button-less pointer and key releases.
+/// The quiet the engine's context menu steps a run with (`ui::popup::Popup::input_with`): nothing
+/// queued for the game (the engine's own test lets the repeats the command prompt takes back
+/// through; none is queued here), and every event of the tick's input inert
+/// ([`crate::ui::popup::inert`]: a button-less move, a release, a repeat the prompt takes back).
 fn quiet(e: &Engine, queued: &[InputEvent]) -> bool {
-    let inert = |ev: &InputEvent| match ev {
-        InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
-        InputEvent::Release(_) => true,
-        _ => false,
-    };
-    e.io().pending_events() == 0 && queued.iter().all(inert)
+    let prompt = crate::engine::command_prompt(&e.state());
+    e.io().pending_events() == 0 && queued.iter().all(|ev| crate::ui::popup::inert(prompt, ev))
 }
 
-/// One page step of `u6-web`'s `Game::step` with `run` held: the run's step before the tick,
-/// then the tick (16 ms) with `queued`. True when the target press went in at this step.
+/// One step as the engine's context menu runs a chosen entry with `run` held
+/// (`ui::popup::Popup::input_with`): the run's step before the tick, its target press after the
+/// tick's events, then the tick (16 ms) with `queued`. True when the target press went in at this
+/// step.
 fn page_step(e: &mut Engine, queued: &mut Vec<InputEvent>, run: &mut Option<Run>) -> bool {
     let mut released = false;
     if let Some(r) = *run {

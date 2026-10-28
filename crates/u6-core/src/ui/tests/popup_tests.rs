@@ -941,8 +941,10 @@ fn a_double_click_is_timed_on_the_players_clock() {
 /// platform's off the frame with no menu open is not a press on the game. It is no new input (a
 /// travel under way goes on), and it still ends a double click: after Go here chosen, the second
 /// press at the first's pixel 200 wall ms on reaches the game. So for a mark before a button-less
-/// move, one at `input.len()` after it, and one in a tick with no events; with no mark (the
-/// control) the second press is the menu's.
+/// move, one at `input.len()` after it, one in a tick with no events, and (round 4, opus S1) the
+/// at-once path a platform takes with nothing pending (`Engine::dismiss_context_menu`: false, the
+/// screen and shown frames' versions unchanged); with no mark (the control) the second press is
+/// the menu's. The marked tick lets no press through (round 4, gpt a NIT: counted before it).
 #[test]
 fn a_press_off_the_frame_with_no_menu_open_is_no_new_input_and_ends_a_double_click() {
     let s = prompt();
@@ -950,11 +952,14 @@ fn a_press_off_the_frame_with_no_menu_open_is_no_new_input_and_ends_a_double_cli
     let (gx, gy) = row_point(&o, 3);
     assert_eq!(o.item(3).map(|i| i.code), Some(GO_HERE), "row 3: Go here");
     let hover = ptr(gx + 1, gy, 0);
-    let cases: [(&str, &[InputEvent], &[usize]); 4] = [
-        ("before a move", &[hover], &[0]),
-        ("at input.len(), after a move", &[hover], &[1]),
-        ("in a tick with no events", &[], &[0]),
-        ("none (the control)", &[hover], &[]),
+    // The events and marks of the dismissing tick; `None`: the press dismissed at once.
+    type Case<'a> = (&'a str, &'a [InputEvent], Option<&'a [usize]>);
+    let cases: [Case<'_>; 5] = [
+        ("before a move", &[hover], Some(&[0])),
+        ("at input.len(), after a move", &[hover], Some(&[1])),
+        ("in a tick with no events", &[], Some(&[0])),
+        ("at once, nothing pending", &[], None),
+        ("none (the control)", &[hover], Some(&[])),
     ];
     for (what, events, marks) in cases {
         let mut e = checkered_engine(&s);
@@ -970,16 +975,32 @@ fn a_press_off_the_frame_with_no_menu_open_is_no_new_input_and_ends_a_double_cli
         );
         assert!(e.context_menu().is_none(), "{what}: closed");
         e.set_wall_clock(t0 + 100);
-        e.tick_dismissing(events, marks, 16);
-        assert!(
-            !e.popup_mut().took_new_input(),
-            "{what}: no menu open, so no new input"
-        );
+        let presses = e.game_presses();
+        let ended = match marks {
+            Some(marks) => {
+                e.tick_dismissing(events, marks, 16);
+                assert!(
+                    !e.popup_mut().took_new_input(),
+                    "{what}: no menu open, so no new input"
+                );
+                !marks.is_empty()
+            }
+            None => {
+                let versions = (e.screen_version(), e.frame_version());
+                assert!(!e.dismiss_context_menu(), "{what}: none was open");
+                assert_eq!(
+                    (e.screen_version(), e.frame_version()),
+                    versions,
+                    "{what}: nothing composed"
+                );
+                true
+            }
+        };
+        assert_eq!(e.game_presses(), presses, "{what}: no press let through");
         assert!(e.context_menu().is_none(), "{what}: still closed");
         e.set_wall_clock(t0 + 200);
         let presses = e.game_presses();
         e.tick(&[ptr(gx, gy, POINTER_LEFT)], 16);
-        let ended = !marks.is_empty();
         assert_eq!(
             e.game_presses() - presses,
             u64::from(ended),
@@ -1494,8 +1515,9 @@ fn shown_frame(e: &Engine) -> (Vec<u8>, Vec<u6_render::Rgb>, Option<Vec<u6_rende
 /// Spec 17 Presentation (round 2, opus MUST 2): in the HD font mode the menu's glyphs are listed
 /// for the HD font: the heading's, the enabled entry's, and the disabled entry's flagged
 /// half-toned (the page draws its HD glyph so); with the mode off nothing is listed and the screen
-/// frame (which the HD frame scales then) holds the classic checker. Closed and presented, the HD frame is the one before it opened, byte for byte (gpt f2
-/// MUST 1), and so is the shown frame with its palette and source plane (gpt f2 SHOULD 2).
+/// frame (which the HD frame scales then) holds the classic checker. Closed and presented, the HD
+/// frame is the one before it opened, byte for byte (gpt f2 MUST 1), and so is the shown frame
+/// with its palette and source plane (gpt f2 SHOULD 2).
 #[test]
 fn the_hd_font_lists_the_menus_cells_the_disabled_row_half_toned() {
     let s = prompt();

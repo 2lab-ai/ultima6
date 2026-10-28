@@ -132,6 +132,7 @@ pub fn raw_events(table: &[[u16; 4]], key: Key) -> Vec<u16> {
         Key::Escape => RAW_ESCAPE,
         Key::Space => RAW_SPACE,
         Key::Backspace => RAW_BACKSPACE,
+        Key::UpRight | Key::DownRight | Key::DownLeft | Key::UpLeft => return Vec::new(),
         Key::Char(c) => {
             let code = u32::from(c);
             let find = |col: usize| {
@@ -159,9 +160,28 @@ pub fn raw_events(table: &[[u16; 4]], key: Key) -> Vec<u16> {
 ///
 /// Replaces: 0x151c60 (open input.device, install the handler), 0x151cdc (remove it), 0x14f0ac
 /// (queue a code in the 50-entry ring): the platform queues [`Key`] events in the engine.
+///
+/// Port (spec 21): a diagonal key ([`Key::UpRight`] ..) gives its PC keypad code at once, which
+/// no raw key of the table gives ([`keypad_code`]); the qualifiers stay as they are.
 pub fn key_code(q: &mut Qualifiers, table: &[[u16; 4]], key: Key) -> u16 {
+    if let Some(code) = keypad_code(key) {
+        return code;
+    }
     raw_events(table, key)
         .into_iter()
         .map(|raw| map_raw(q, table, raw))
         .fold(0, |last, code| if code != 0 { code } else { last })
+}
+
+/// Port (spec 21): the game code of a diagonal key, the PC keypad's (PgUp 0x149, PgDn 0x151, End
+/// 0x14f, Home 0x147: the diagonals of the command loop's direction table, 0x106c6c); none for
+/// any other key.
+pub fn keypad_code(key: Key) -> Option<u16> {
+    match key {
+        Key::UpRight => Some(0x149),
+        Key::DownRight => Some(0x151),
+        Key::DownLeft => Some(0x14f),
+        Key::UpLeft => Some(0x147),
+        _ => None,
+    }
 }

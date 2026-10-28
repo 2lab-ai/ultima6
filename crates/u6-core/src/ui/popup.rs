@@ -33,44 +33,19 @@ const NAME_ROWS: i32 = 0x10 - 6;
 /// The inventory view's slot among [`crate::geom::SLOTS`] (roster, stats, inventory).
 const INVENTORY_SLOT: usize = 2;
 
-/// Unit M4's request record (spec 21), the stub's: the map cells "Go here" asked travel to, in
-/// order ([`travel_to`]; the engine holds it, [`crate::engine::Engine::go_here_asked`]).
+/// The engine's record of the map cells "Go here" asked travel to, in order (spec 21: each given
+/// to [`crate::engine::Engine::travel_to`] as it was chosen, [`Popup::take_go_here`]; the engine
+/// holds it, [`crate::engine::Engine::go_here_asked`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Travel {
     pub asked: Vec<(i16, i16)>,
 }
 
-/// Unit M4's refusals (spec 21 `travel::Reason`) as "Go here" reads them ([`go_here_reason`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// The leader stands on the cell.
-    Here,
-    /// A vessel carries the party.
-    Aboard,
-    /// Combat mode.
-    Combat,
-    /// A hostile is in view.
-    Foe,
-    /// The cell lies outside the window the search covers.
-    Far,
-    /// No walk inside the window reaches the cell.
-    Unreachable,
-    /// No leader stands on the map.
-    NoLeader,
-    /// The command loop's program is not running (the opening, the main menu).
-    NoGame,
-}
-
-/// Unit M4's seam (spec 21 `travel::reachable`): why travel to map cell `target` (world x, y on
-/// the leader's level) cannot start now; `None` when it can. Stub until M4 lands in integ: every
-/// cell can.
-pub fn travel_reason(_s: &State, _target: (i16, i16)) -> Option<Refusal> {
-    None
-}
-
-/// How "Go here" shows refusal `r`: `Here`, `NoLeader` and `NoGame` leave the entry out
-/// (`None`); every other refusal disables it with its reason.
-pub fn go_here_reason(r: Refusal) -> Option<Reason> {
+/// How "Go here" shows spec 21's refusal `r` ([`crate::actors::travel::reachable`]): `Here`,
+/// `NoLeader` and `NoGame` leave the entry out (`None`); every other refusal disables it with its
+/// reason.
+pub fn go_here_reason(r: crate::actors::travel::Reason) -> Option<Reason> {
+    use crate::actors::travel::Reason as Refusal;
     match r {
         Refusal::Here | Refusal::NoLeader | Refusal::NoGame => None,
         Refusal::Aboard => Some(Reason::Aboard),
@@ -79,14 +54,6 @@ pub fn go_here_reason(r: Refusal) -> Option<Reason> {
         Refusal::Far => Some(Reason::Far),
         Refusal::Unreachable => Some(Reason::Unreachable),
     }
-}
-
-/// Unit M4's seam (spec 21 `Engine::travel_to`): starts travel to map cell `target` (world x, y
-/// on the leader's level). Stub until M4 lands in integ: the target is only recorded. The engine
-/// calls it with the cell the menu chose ([`Popup::take_go_here`]) right after the menu's input
-/// filter.
-pub fn travel_to(travel: &mut Travel, target: (i16, i16)) {
-    travel.asked.push(target);
 }
 
 /// The longest a press after the press that chose an entry is taken for its double click (the
@@ -783,10 +750,10 @@ fn ring(fb: &mut Framebuffer, (x0, y0, x1, y1): (i32, i32, i32, i32), colour: u8
 }
 
 /// An event that changes nothing the game reads (as the menu's opening, [`menu::Run::step`]'s
-/// quiet ask and [`crate::engine::Engine::context_menu_gate`] take it): a move of a button-less pointer, a key's release (never queued,
-/// [`InputEvent::Release`]), and at the command prompt (`prompt`,
-/// [`crate::engine::command_prompt`]) a platform's repeat of a direction key, which the engine
-/// takes back there (spec 19 O1c). A paced press is a press ([`InputEvent::Paced`]).
+/// quiet ask and [`crate::engine::Engine::context_menu_gate`] take it): a move of a button-less
+/// pointer, a key's release (never queued, [`InputEvent::Release`]), and at the command prompt
+/// (`prompt`, [`crate::engine::command_prompt`]) a platform's repeat of a direction key, which the
+/// engine takes back there (spec 19 O1c). A paced press is a press ([`InputEvent::Paced`]).
 pub(crate) fn inert(prompt: bool, ev: &InputEvent) -> bool {
     match ev {
         InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
@@ -943,7 +910,8 @@ impl Popup {
         self.open.is_some() || self.keys.iter().any(|&(t, _)| t == k)
     }
 
-    /// The map cell "Go here" chose since the last call, once (unit M4's travel starts there).
+    /// The map cell "Go here" chose since the last call, once (the engine starts spec 21's travel
+    /// there, [`crate::engine::Engine::travel_to`]).
     pub fn take_go_here(&mut self) -> Option<(i16, i16)> {
         self.go_here.take()
     }
@@ -1296,7 +1264,7 @@ impl Popup {
         open
     }
 
-    /// Runs row `i`'s entry (spec 17 Running a choice): Go here asks unit M4's travel to the cell
+    /// Runs row `i`'s entry (spec 17 Running a choice): Go here asks spec 21's travel to the cell
     /// ([`Popup::take_go_here`]), a slot's own action is a left click on the slot, Rest and Combat
     /// their icon's press, any other command its icon's press now and the press at the target
     /// once it reads it. The menu closes.

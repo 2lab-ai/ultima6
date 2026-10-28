@@ -50,6 +50,8 @@ mod vars;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_baseline;
+#[cfg(test)]
 mod tests_locale;
 #[cfg(test)]
 mod tests_ops;
@@ -59,6 +61,8 @@ mod tests_real;
 mod tests_speech;
 #[cfg(test)]
 mod tests_strings;
+#[cfg(test)]
+mod tests_talk;
 #[cfg(test)]
 mod tests_typing;
 
