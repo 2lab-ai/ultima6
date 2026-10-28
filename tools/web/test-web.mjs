@@ -12864,10 +12864,12 @@ for (const layout of ['original', 'wide']) {
     await talkTo2();
     if (layout === 'wide') {
       // Wide, the windows view: a touch on the date line's title strip during the read drags that
-      // window and the browser cancels it. The drag ends as any release does (dragWindow): its
-      // place kept at once and no drag left over, so the next move reaches the game at its own
-      // pixel (over Name), not at the rest pixel the drag sent.
-      const date = (await wideShown(page)).windows.find((w) => w.name === 'date');
+      // window and the browser cancels it. The drag ends as any release does (dragWindow): the
+      // cancel queues one pointer event, at the rest pixel, where its press went (the buttons of a
+      // queued event are not read back); its place is kept at once and no drag is left over, so
+      // the next move reaches the game at its own pixel (over Name), not at the rest pixel.
+      const shownLayout = await wideShown(page);
+      const date = shownLayout.windows.find((w) => w.name === 'date');
       const strip = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5, date.bar[1] + date.bar[3] / 2 + 0.5);
       const to = await h.canvasPoint(page, date.bar[0] + date.bar[2] / 2 + 0.5 - 200, date.bar[1] + date.bar[3] / 2 + 0.5 + 100);
       const over = await h.screenPoint(page, ...NAME_BUTTON);
@@ -12878,15 +12880,21 @@ for (const layout of ['original', 'wide']) {
         const reading = g.reading_by_click();
         send('pointerdown', 'touch', 1, sx, sy);
         send('pointermove', 'touch', 1, tx, ty);
+        const before = g.keys_pending();
         send('pointercancel', 'touch', 0, tx, ty);
+        const cancelQueued = g.keys_pending() - before;
+        const r = g.game_pointer();
+        const lastQueued = [r[3], r[4], r[5]];
         const kept = JSON.parse(localStorage.getItem('u6.layout.windows'))?.date ?? null;
         const shown = globalThis.__u6Layout.windows.find((w) => w.name === 'date').outer.slice(0, 2);
         send('pointermove', 'mouse', 0, ox, oy);
         const p = g.game_pointer();
-        return { reading, kept, shown, queued: p[3], at: [p[4], p[5]] };
+        return { reading, cancelQueued, lastQueued, kept, shown, queued: p[3], at: [p[4], p[5]] };
       }, [strip, to, over]);
       assert.equal(drag.reading, true, 'the drag during the read');
       assert.deepEqual(drag.shown, [date.outer[0] - 200, date.outer[1] + 100], 'the date line dragged');
+      assert.equal(drag.cancelQueued, 1, 'the cancel queued one pointer event (Game.keys_pending)');
+      assert.deepEqual(drag.lastQueued, [1, ...shownLayout.rest], 'the pointer event queued last at the rest pixel (Game.game_pointer: queued, x, y)');
       assert.deepEqual(drag.kept, drag.shown, 'the cancelled drag kept its place (u6.layout.windows)');
       assert.deepEqual([drag.queued, drag.at], [1, NAME_BUTTON], 'the next move queued at its own pixel, not the rest pixel');
       await page.mouse.move(...over);
