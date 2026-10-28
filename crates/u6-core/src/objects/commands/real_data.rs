@@ -2081,10 +2081,11 @@ fn page_step(e: &mut Engine, queued: &mut Vec<InputEvent>, run: &mut Option<Run>
     released
 }
 
-/// Runs entry `code` on the target at `at` as `Game::command_at` and `Game::step` do, until the
-/// prompt is up again with no run left (at most 3000 steps); a later prompt of the command (a
-/// direction, the next weapon's target) is answered with Escape. True when the target press
-/// went in.
+/// Runs entry `code` on the target at `at` as the engine's context menu runs a chosen entry
+/// (spec 17 Running a choice, `ui::popup`: the icon's press, then the target press once the game
+/// reads it), until the prompt is up again with no run left (at most 3000 steps); a later prompt
+/// of the command (a direction, the next weapon's target) is answered with Escape. True when the
+/// target press went in.
 fn choose(e: &mut Engine, code: u16, at: (i16, i16)) -> bool {
     choose_then(e, code, at, &[])
 }

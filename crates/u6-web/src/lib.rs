@@ -346,6 +346,9 @@ const SYMBOL: u32 = 0x1_0000;
 /// Spec 11 Design 3 (rev 3), [`Game::hd_glyphs`]: the code of a space the player typed is this |
 /// 0x20.
 const TYPED: u32 = 0x2_0000;
+/// Spec 17 Presentation, [`Game::hd_glyphs`]: the code of a cell drawn half-toned (a disabled
+/// entry of the context menu) is this | its code ([`u6_render::hd::HdGlyph::halftone`]).
+const HALFTONE: u32 = 0x4_0000;
 
 /// A listed cell's code as [`Game::hd_glyphs`] gives it, from the compositor's
 /// ([`u6_render::hd::HdGlyph::code`]): a symbol's and a typed space's in their own ranges
@@ -831,15 +834,26 @@ impl Game {
     }
 
     /// Spec 17 Presentation: the context menu the engine has open and drawn in the frame, `""`
-    /// while none is: JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover, rows: [{kind:
-    /// "head"|"entry"|"note", code: code | null, enabled, reason: code | null, theft, y}]}`, the
-    /// box with its frame and the text area in frame pixels, the highlighted row's index, each
-    /// row's top pixel row; codes only ([`u6_core::Engine::context_menu`]).
+    /// while none is: JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover, colours: [paper,
+    /// ink, heading], rows: [{kind: "head"|"entry"|"note", code: code | null, enabled, reason:
+    /// code | null, theft, y}]}`, the box with its frame and the text area in frame pixels, the
+    /// highlighted row's index, the colours its text area is drawn in (0xRRGGBB, the game's
+    /// palette now: the page's tests compare pixels with them and report counts), each row's
+    /// top pixel row; codes only ([`u6_core::Engine::context_menu`]).
     pub fn menu_view(&self) -> String {
-        self.engine
-            .as_ref()
-            .and_then(Engine::context_menu)
-            .map_or_else(String::new, |v| view_json(&v))
+        let Some(e) = self.engine.as_ref() else {
+            return String::new();
+        };
+        let Some(v) = e.context_menu() else {
+            return String::new();
+        };
+        let c = e.state().ui.tables.colours;
+        let palette = &e.screen_frame().palette;
+        let rgb = |i: u8| {
+            let c = palette[usize::from(i)];
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        };
+        view_json(&v, [rgb(c.paper), rgb(c.text), rgb(c.alert)])
     }
 
     /// Spec 17 Presentation: the frame rects the page shows something else over (in Wide its
@@ -856,6 +870,39 @@ impl Game {
         if let Some(engine) = &mut self.engine {
             engine.set_context_menu_hidden(self.menu_hidden.clone());
         }
+    }
+
+    /// Spec 17 Presentation: a press of the page's that reaches no frame pixel (off the canvas,
+    /// in the HD layout's gaps, on the letterbox) closes an open context menu, as a press outside
+    /// it in the frame does; true when one was open. Nothing reaches the game.
+    pub fn dismiss_menu(&mut self) -> bool {
+        self.engine
+            .as_mut()
+            .is_some_and(Engine::dismiss_context_menu)
+    }
+
+    /// Spec 17 (round 2): the presses the engine let through to the game (button-down edges of
+    /// the pointer events it queued for it, the context menu's own left out), counted from the
+    /// start; 0 before one. With [`Game::game_buttons`] the page's tests see a press and its
+    /// release within one step.
+    pub fn game_presses(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.game_presses() as f64)
+    }
+
+    /// Spec 17 (round 2): the key events (presses, repeats, releases) the engine let through to
+    /// the game, the context menu's own left out, counted from the start; 0 before one.
+    pub fn game_keys(&self) -> f64 {
+        self.engine.as_ref().map_or(0.0, |e| e.game_keys() as f64)
+    }
+
+    /// Spec 17 (round 2): the lines the game's message scroll holds now (a count; a command
+    /// that prints, as Look, adds to it); 0 before a start.
+    pub fn message_lines(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.state().ui.messages.len() as f64)
     }
 
     /// The pointer's buttons as the game's input handler has them (bit 0 left, bit 1 right): the
@@ -1045,7 +1092,10 @@ impl Game {
     /// the player typed (a run goes on across it whatever the spaces beside it); [`SYMBOL`] | its
     /// glyph (a code of the game's font), a symbol the game drew over the paper (the key wait's
     /// cursor, the more prompt's mark), its cell the paper in the HD frame and its pixels in
-    /// [`Game::hd_symbol_rows`]. Empty while HD or the HD font is off. The list changes only
+    /// [`Game::hd_symbol_rows`]; spec 17, [`HALFTONE`] | a letter's or a space's code, the cell
+    /// drawn half-toned (a disabled entry of the context menu: the page draws its HD glyph as a
+    /// checker at the HD pixel grid, half its pixels the paper). Empty while HD or the HD font is
+    /// off. The list changes only
     /// with every block of the cells it adds, drops or changes written, so with
     /// [`Game::frame_version`] moved and those cells in the rect of [`Game::hd_take_dirty`].
     pub fn hd_glyphs(&self) -> Vec<u32> {
@@ -1057,7 +1107,7 @@ impl Game {
                 [
                     u32::from(g.x),
                     u32::from(g.y),
-                    listed_code(g.code),
+                    listed_code(g.code) | if g.halftone { HALFTONE } else { 0 },
                     rgb(g.ink),
                     rgb(g.paper),
                 ]
@@ -1422,6 +1472,18 @@ impl Game {
     /// Current frame as RGBA8, `width * height * 4` bytes (a copy).
     pub fn frame_rgba(&self) -> Vec<u8> {
         self.rgba.clone()
+    }
+
+    /// Spec 17 (round 2, tests): the engine's published frame (the screen as the game drew it:
+    /// no context menu, no pointer sprite) as RGBA8, `width * height * 4` bytes, a copy; empty
+    /// before a start. With [`Game::frame_rgba`] a test tells where the game's own screen changed
+    /// from what the menu left behind.
+    pub fn published_rgba(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.engine {
+            e.published_frame().write_rgba(&mut out);
+        }
+        out
     }
 
     /// Address of the current RGBA8 frame inside wasm memory. Views over it are
@@ -1886,13 +1948,13 @@ fn entry_json(e: &u6_core::ui::menu::Entry) -> String {
 }
 
 /// [`Game::menu_view`]'s JSON for `v`.
-fn view_json(v: &u6_core::ui::popup::View) -> String {
+fn view_json(v: &u6_core::ui::popup::View, [paper, ink, head]: [u32; 3]) -> String {
     use u6_core::ui::popup::RowKind;
     let wh = |(x0, y0, x1, y1): (i32, i32, i32, i32)| {
         format!("[{x0},{y0},{},{}]", x1 - x0 + 1, y1 - y0 + 1)
     };
     let mut out = format!(
-        "{{\"rect\":{},\"text\":{},\"hover\":{},\"rows\":[",
+        "{{\"rect\":{},\"text\":{},\"hover\":{},\"colours\":[{paper},{ink},{head}],\"rows\":[",
         wh(v.rect),
         wh(v.text),
         v.hover
@@ -4744,6 +4806,7 @@ mod tests {
         assert_eq!(game.menu_view(), "");
         assert_eq!(game.game_buttons(), 0);
         assert!(game.pending.is_empty());
+        assert!(game.published_rgba().is_empty(), "no published frame");
     }
 
     /// Spec 17: the context menu's JSON: its kind, cell, underlined command and sections, each
@@ -4814,8 +4877,8 @@ mod tests {
             ],
         };
         assert_eq!(
-            view_json(&v),
-            r#"{"rect":[35,51,66,34],"text":[40,56,56,24],"hover":1,"rows":[{"kind":"head","code":null,"enabled":false,"reason":null,"theft":false,"y":56},{"kind":"entry","code":133,"enabled":true,"reason":null,"theft":true,"y":64},{"kind":"note","code":null,"enabled":false,"reason":null,"theft":false,"y":72}]}"#
+            view_json(&v, [0x10_2030, 0x40_5060, 0xff_0001]),
+            r#"{"rect":[35,51,66,34],"text":[40,56,56,24],"hover":1,"colours":[1056816,4214880,16711681],"rows":[{"kind":"head","code":null,"enabled":false,"reason":null,"theft":false,"y":56},{"kind":"entry","code":133,"enabled":true,"reason":null,"theft":true,"y":64},{"kind":"note","code":null,"enabled":false,"reason":null,"theft":false,"y":72}]}"#
         );
         let off = View {
             rows: vec![row(
@@ -4827,7 +4890,7 @@ mod tests {
             )],
             ..v
         };
-        assert!(view_json(&off).contains(r#""enabled":false,"reason":"far""#));
+        assert!(view_json(&off, [0; 3]).contains(r#""enabled":false,"reason":"far""#));
     }
 
     /// Presses the pointer's `buttons` at (x, y) and lets them go, a step after each.
@@ -4866,15 +4929,36 @@ mod tests {
             return;
         };
         let (hx, hy) = hero_point();
+        let at = game.leader_position();
+        let presses = game.game_presses();
         game.pointer(hx, hy, 2);
         game.step(20);
         let v = drawn(&game).expect("the menu open");
+        let still = |game: &Game, what: &str| {
+            assert_eq!(game.game_buttons(), 0, "{what}: the game holds no button");
+            assert_eq!(
+                game.game_presses(),
+                presses,
+                "{what}: no press reached the game"
+            );
+            assert_eq!(game.leader_position(), at, "{what}: no walk");
+        };
+        still(&game, "the opening step");
+        // Held and moved over the map, the page pacing its steps as it does with a button held
+        // (Game::pace reads it held, spec 06): each step the game holds no button, no walk.
         for (x, y) in [(hx + 20, hy), (hx + 20, hy + 20), (hx - 30, hy)] {
             game.pointer(x, y, 2);
-            game.step(20);
+            assert!(game.pointer_held(), "the page's button held");
+            let k = game.pace(40.0).max(1);
+            for _ in 0..k {
+                game.step(20);
+                still(&game, "a held move");
+            }
+            game.ran(k);
         }
         game.pointer(hx - 30, hy, 0);
         game.step(20);
+        still(&game, "the release");
         assert_eq!(
             game.game_buttons(),
             0,
@@ -4905,6 +4989,23 @@ mod tests {
             assert!(differ * 2 > inside, "the menu drawn in its box");
             assert_eq!(outside, 0, "the frame outside the box as published");
         }
+        game.present();
+        let mut want = Vec::new();
+        game.engine
+            .as_ref()
+            .quiet()
+            .published_frame()
+            .write_rgba(&mut want);
+        assert_eq!(
+            game.published_rgba(),
+            want,
+            "Game::published_rgba: the published frame"
+        );
+        assert_ne!(
+            game.published_rgba(),
+            game.frame_rgba(),
+            "the menu in the frame only"
+        );
         let look = row_of(&v, 0x84).expect("Look offered");
         assert!(v.rows[look].enabled(), "Look can run");
         click(&mut game, row_point(&v, look), 1);
@@ -4922,6 +5023,16 @@ mod tests {
             !game.at_prompt(),
             "Look read its target and waits on the portrait"
         );
+        {
+            let e = game.engine.as_ref().quiet();
+            let input = &e.state().ui.input;
+            assert!(
+                !e.context_menu_waits(),
+                "the target press went in: no run held"
+            );
+            assert_eq!(e.io().pending_events(), 0, "and the game took it: consumed");
+            assert!(input.in_wait, "the portrait's key wait");
+        }
         game.key_down("Space", " ", false);
         assert!(steps_to_prompt(&mut game), "the prompt again");
     }
@@ -5156,12 +5267,20 @@ mod tests {
         game.key_up("KeyC");
         game.step(20);
         assert!(drawn(&game).is_some(), "its letter: still open");
-        while drawn(&game).is_some_and(|v| v.hover != cast) {
+        for _ in 0..v.rows.len() {
+            if drawn(&game).is_none_or(|v| v.hover == cast) {
+                break;
+            }
             assert!(game.key_down("ArrowDown", "ArrowDown", false));
             game.step(20);
             game.key_up("ArrowDown");
             game.step(20);
         }
+        assert_eq!(
+            drawn(&game).map(|v| v.hover),
+            Some(cast),
+            "Cast highlighted"
+        );
         assert!(game.key_down("Enter", "Enter", false));
         game.step(20);
         game.key_up("Enter");
@@ -5181,6 +5300,80 @@ mod tests {
         );
         assert_eq!(lines(&game), before, "no line printed");
         assert_eq!(game.leader_position(), at, "the leader did not move");
+    }
+
+    /// Spec 17 (round 2, gpt f2 SHOULD 1), on the user's zip: a game replaced while its menu is
+    /// open (a restart: a new engine on screen) leaves no menu and no press of the old one: the
+    /// held right button's release reaches the new game as a move, which holds no button, and a
+    /// right press at its prompt opens its own menu.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_game_replaced_while_its_menu_is_open_keeps_nothing_of_it() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        assert!(drawn(&game).is_some(), "open");
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        assert_eq!(game.menu_view(), "", "the new game: no menu");
+        game.pointer(hx, hy, 0);
+        game.step(20);
+        assert_eq!(game.game_buttons(), 0, "the old press's release: no button");
+        assert!(steps_to_prompt(&mut game), "the new game's prompt");
+        click(&mut game, (hx, hy), 2);
+        assert!(drawn(&game).is_some(), "its own menu");
+    }
+
+    /// Spec 17 Presentation in the platform: a cell drawn half-toned (a disabled entry of the
+    /// context menu) is listed as [`HALFTONE`] | its code; one drawn in full as its code.
+    #[test]
+    fn the_hd_glyphs_flag_a_half_toned_cell() {
+        let mut game = Game::new();
+        let engine = Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_, io| async move {
+                use u6_core::ui::text::{self, TextWindow};
+                let font = u6_formats::font::BitFont {
+                    glyphs: (0..=255u8).map(|c| [c; 8]).collect(),
+                };
+                let w = TextWindow::new(0, 0, 39, 24, 3, 4, 0);
+                io.draw(|fb| {
+                    for (i, c) in fb.palette.iter_mut().enumerate() {
+                        let v = i as u8;
+                        *c = u6_core::Rgb::new(v.wrapping_mul(40), 255 - v, v.wrapping_mul(7));
+                    }
+                    for y in 0..u6_render::HEIGHT {
+                        for x in 0..u6_render::WIDTH {
+                            fb.set(x, y, 4);
+                        }
+                    }
+                    text::draw_char(fb, Some(&font), None, &w, 0x41, 2, 2);
+                    text::draw_halftone(fb, (Some(&font), None), &w, 0x55, (3, 2));
+                });
+                io.present();
+                loop {
+                    io.vblank().await;
+                }
+            },
+        );
+        let mut engine = engine;
+        engine.enable_src_plane();
+        game.put_on_screen(engine);
+        game.step(20);
+        game.present();
+        game.set_hd(true, 2);
+        game.set_hd_font(true);
+        let codes: Vec<u32> = game.hd_glyphs().chunks(5).map(|g| g[2]).collect();
+        assert_eq!(
+            codes,
+            [0x41, HALFTONE | 0x55],
+            "the letter, the half-toned letter"
+        );
     }
 
     /// Spec 17 round 2, item 0: a key let go just before a right press on the hero ([`hero_point`])

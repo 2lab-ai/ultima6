@@ -100,11 +100,15 @@ pub enum Reason {
     Locked,
     /// Port-only (spec 17, unit M3): no way to the cell (unit M4's reachability, spec 21).
     Unreachable,
+    /// Port-only (unit M3, spec 21's refusals): combat mode is on.
+    Combat,
+    /// Port-only (unit M3, spec 21's refusals): a hostile is in view.
+    Foe,
 }
 
 impl Reason {
     /// Every reason, for the page's words.
-    pub const ALL: [Reason; 23] = [
+    pub const ALL: [Reason; 25] = [
         Reason::Far,
         Reason::Heavy,
         Reason::Aboard,
@@ -128,6 +132,8 @@ impl Reason {
         Reason::Stays,
         Reason::Locked,
         Reason::Unreachable,
+        Reason::Combat,
+        Reason::Foe,
     ];
 
     /// The code the page words.
@@ -156,6 +162,8 @@ impl Reason {
             Reason::Stays => "stays",
             Reason::Locked => "locked",
             Reason::Unreachable => "unreachable",
+            Reason::Combat => "combat",
+            Reason::Foe => "foe",
         }
     }
 }
@@ -258,15 +266,23 @@ pub fn query(s: &State, io: &Io, x: i16, y: i16) -> Option<Menu> {
 }
 
 /// Port-only (unit M3): the "Go here" entry for map cell `cell` (world x, y on the leader's
-/// level): none on the leader's own cell, else disabled when unit M4's search finds no way
-/// ([`super::popup::travel_reason`]).
+/// level): none on the leader's own cell or when unit M4 refuses it as `Here` or `NoLeader`,
+/// else disabled by its other refusals ([`super::popup::travel_reason`],
+/// [`super::popup::go_here_reason`]).
 fn go_here(s: &State, cell: (i16, i16)) -> Option<Entry> {
     let here = s
         .leader_position()
         .is_some_and(|p| (p.x as i16, p.y as i16) == cell);
-    (!here).then(|| Entry {
+    if here {
+        return None;
+    }
+    let reason = match super::popup::travel_reason(s, cell) {
+        None => None,
+        Some(r) => Some(super::popup::go_here_reason(r)?),
+    };
+    Some(Entry {
         code: GO_HERE,
-        reason: super::popup::travel_reason(s, cell),
+        reason,
         theft: false,
     })
 }

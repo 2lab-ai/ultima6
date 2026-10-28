@@ -270,9 +270,10 @@ export async function forgetLocalePack() {
 // `now_ms()` after the tick that took it). `__buttons` holds [buttons, clock] for each change
 // of the buttons the page queued, at the clock of the step that took it: a press's delivered
 // hold is its release's clock less its own, whatever the wall time between them. `__taken`
-// holds [buttons, clock] for each change of the buttons the game's input handler has after a
-// step (`Game.game_buttons`): what the engine let through to the game, the context menu's own
-// presses left out (spec 17), each step's last. `__presents`
+// holds [buttons, clock, presses] for each step after which the buttons the game's input handler
+// has (`Game.game_buttons`, each step's last) or the presses the engine let through to it
+// (`Game.game_presses`, counted) changed: what reached the game, the context menu's own presses
+// left out (spec 17); a press and its release within one step change the count alone. `__presents`
 // counts the page's presents, `__converted` those that converted a new frame (frame_version
 // moved: spec 06 O1); `__shownGame` is the game that presented last. `__pointerAt` is the last
 // game pixel the page queued for the pointer, `__presentMs` the wall ms the presents took.
@@ -300,6 +301,7 @@ globalThis.__presentMs = 0;
   let queued = [];
   let held = 0;
   let taken = 0;
+  let presses = 0;
   Game.prototype.pointer = function (x, y, buttons) {
     if (this.started()) queued.push(buttons & 3);
     globalThis.__pointerAt = [x, y];
@@ -325,8 +327,10 @@ globalThis.__presentMs = 0;
     }
     queued = [];
     const game = this.game_buttons();
-    if (game !== taken) globalThis.__taken.push([game, globalThis.__clock]);
+    const pressed = this.game_presses?.() ?? 0;
+    if (game !== taken || pressed !== presses) globalThis.__taken.push([game, globalThis.__clock, pressed]);
     taken = game;
+    presses = pressed;
     globalThis.__saveGen = this.save_generation();
     globalThis.__owned = this.keys_owned();
   };

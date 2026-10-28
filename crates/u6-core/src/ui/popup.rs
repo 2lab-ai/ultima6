@@ -33,25 +33,65 @@ const NAME_ROWS: i32 = 0x10 - 6;
 /// The inventory view's slot among [`crate::geom::SLOTS`] (roster, stats, inventory).
 const INVENTORY_SLOT: usize = 2;
 
-/// Unit M4's travel state (spec 21), as the menu holds it. Stub until M4 lands in integ: the
-/// targets asked for.
+/// Unit M4's request record (spec 21), the stub's: the map cells "Go here" asked travel to, in
+/// order ([`travel_to`]; the engine holds it, [`crate::engine::Engine::go_here_asked`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Travel {
-    /// The map cells "Go here" asked for, in order.
     pub asked: Vec<(i16, i16)>,
 }
 
-/// Unit M4's seam (spec 21): why travel to map cell `target` (world x, y on the leader's level)
-/// cannot start now; `None` when it can. Stub until M4 lands in integ: every cell can.
-pub fn travel_reason(_s: &State, _target: (i16, i16)) -> Option<Reason> {
+/// Unit M4's refusals (spec 21 `travel::Reason`) as "Go here" reads them ([`go_here_reason`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The leader stands on the cell.
+    Here,
+    /// A vessel carries the party.
+    Aboard,
+    /// Combat mode.
+    Combat,
+    /// A hostile is in view.
+    Foe,
+    /// The cell lies outside the window the search covers.
+    Far,
+    /// No walk inside the window reaches the cell.
+    Unreachable,
+    /// No leader stands on the map.
+    NoLeader,
+}
+
+/// Unit M4's seam (spec 21 `travel::reachable`): why travel to map cell `target` (world x, y on
+/// the leader's level) cannot start now; `None` when it can. Stub until M4 lands in integ: every
+/// cell can.
+pub fn travel_reason(_s: &State, _target: (i16, i16)) -> Option<Refusal> {
     None
 }
 
-/// Unit M4's seam (spec 21): starts travel to map cell `target` (world x, y on the leader's
-/// level). Stub until M4 lands in integ: the target is only recorded.
+/// How "Go here" shows refusal `r`: `Here` and `NoLeader` leave the entry out (`None`); every
+/// other refusal disables it with its reason.
+pub fn go_here_reason(r: Refusal) -> Option<Reason> {
+    match r {
+        Refusal::Here | Refusal::NoLeader => None,
+        Refusal::Aboard => Some(Reason::Aboard),
+        Refusal::Combat => Some(Reason::Combat),
+        Refusal::Foe => Some(Reason::Foe),
+        Refusal::Far => Some(Reason::Far),
+        Refusal::Unreachable => Some(Reason::Unreachable),
+    }
+}
+
+/// Unit M4's seam (spec 21 `Engine::travel_to`): starts travel to map cell `target` (world x, y
+/// on the leader's level). Stub until M4 lands in integ: the target is only recorded. The engine
+/// calls it with the cell the menu chose ([`Popup::take_go_here`]) right after the menu's input
+/// filter.
 pub fn travel_to(travel: &mut Travel, target: (i16, i16)) {
     travel.asked.push(target);
 }
+
+/// The longest a press after the press that chose an entry is taken for its double click (the
+/// menu's, with its release), on the engine's clock: the common desktop default.
+const DOUBLE_CLICK_MS: u64 = 500;
+/// How far from the choosing press (frame pixels, each way) a press is its double click.
+const DOUBLE_CLICK_PX: i16 = 4;
 
 /// The port's words of the menu, by language (spec 17: one table, the page has none).
 fn command_word(code: u16, korean: bool) -> &'static str {
@@ -89,7 +129,7 @@ fn reason_word(r: Reason, korean: bool) -> &'static str {
         Reason::Level => ("Level too low", "주문에 비해 레벨이 낮음"),
         Reason::Points => ("Not enough magic", "마력이 모자람"),
         Reason::Reagents => ("No reagents", "주문의 시약이 없음"),
-        Reason::Solo => ("Not in solo mode", "단독 행동 중에는 안 됨"),
+        Reason::Solo => ("Not allowed in solo mode", "단독 행동 중에는 안 됨"),
         Reason::Door => ("Something is on it", "무언가 막고 있음"),
         Reason::Hand => ("Held by another", "다른 일행이 들고 있음"),
         Reason::Case => ("Cannot use it now", "지금은 쓸 수 없음"),
@@ -101,6 +141,8 @@ fn reason_word(r: Reason, korean: bool) -> &'static str {
         Reason::Stays => ("Will not come off", "벗겨지지 않음"),
         Reason::Locked => ("Locked", "잠겨 있음"),
         Reason::Unreachable => ("No way there", "갈 수 없는 곳"),
+        Reason::Combat => ("Not during combat", "전투 중에는 안 됨"),
+        Reason::Foe => ("A foe is in view", "적이 보임"),
     };
     if korean { ko } else { en }
 }
@@ -149,13 +191,29 @@ impl Item {
         self.reason.is_none()
     }
 
-    /// What the note row shows for it: its reason, else its theft mark.
+    /// What the note row shows for it: its reason.
     fn note(&self, korean: bool) -> Option<&'static str> {
-        match (self.reason, self.theft) {
-            (Some(r), _) => Some(reason_word(r, korean)),
-            (None, true) => Some(theft_word(korean)),
-            (None, false) => None,
-        }
+        self.reason.map(|r| reason_word(r, korean))
+    }
+
+    /// Its row's cells: the mark's column, its label, and its theft mark after a space.
+    fn width(&self, korean: bool) -> usize {
+        let theft = if self.theft {
+            1 + cells(theft_word(korean)).len()
+        } else {
+            0
+        };
+        1 + cells(command_word(self.code, korean)).len() + theft
+    }
+}
+
+/// Cell codes of the user's game text (a section's name): a debug print shows their count only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Cells(pub Vec<u16>);
+
+impl fmt::Debug for Cells {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} cells", self.0.len())
     }
 }
 
@@ -197,6 +255,13 @@ pub struct Open {
     /// The frame's colours, inner line first ([`frame_rings`]).
     pub rings: Vec<u8>,
     pub korean: bool,
+    /// The name shown beside the first row's entry: the underlined command's section's, when the
+    /// menu has more than one section (its own heading comes later).
+    pub named: Option<Cells>,
+    /// The text area its rows asked for, columns and rows (before the placement cut any).
+    pub want: (i32, i32),
+    /// What it was laid out from ([`Open::relaid`]).
+    menu: Menu,
 }
 
 impl Open {
@@ -208,6 +273,7 @@ impl Open {
         // The underlined command first: Rest and Combat only there, any other as the first entry
         // that has it.
         let mut first = None;
+        let mut named = None;
         if let Some(u) = menu.underlined {
             if u == menu::REST || u == menu::COMBAT {
                 rows.push(Row::Entry(Item {
@@ -223,6 +289,8 @@ impl Open {
             {
                 first = Some((s.object, u));
                 rows.push(Row::Entry(Item::of(e, s.object)));
+                named = Some(Cells(cells(&s.name)))
+                    .filter(|c| menu.sections.len() > 1 && !c.0.is_empty());
             }
         }
         for section in &menu.sections {
@@ -246,29 +314,29 @@ impl Open {
         }
         let noted = rows
             .iter()
-            .any(|r| matches!(r, Row::Entry(i) if i.note(korean).is_some()));
-        let wide = |r: &Row| match r {
-            Row::Head(c) => c.len(),
-            Row::Entry(i) => 1 + cells(command_word(i.code, korean)).len(),
-            Row::Note => 0,
-        };
-        let mut cols = rows.iter().map(wide).max().unwrap_or(1);
+            .any(|r| matches!(r, Row::Entry(i) if i.reason.is_some()));
         if noted {
-            let note = |r: &Row| match r {
-                Row::Entry(i) => i.note(korean).map_or(0, |n| cells(n).len()),
-                _ => 0,
-            };
-            cols = cols.max(rows.iter().map(note).max().unwrap_or(0));
             rows.push(Row::Note);
         }
         let rings = frame_rings(s);
-        let want = (cols as i32, rows.len() as i32);
+        let want = (width(&rows, named.as_ref(), korean), rows.len() as i32);
         let ring = rings.len() as i32;
         let whole = (0, 0, WIDTH as i32 - 1, HEIGHT as i32 - 1);
-        let text = place(at, want, ring, bounds(s, at), hidden)
+        let (x0, y0, x1, y1) = crate::geom::SHOWN;
+        let map = (i32::from(x0), i32::from(y0), i32::from(x1), i32::from(y1));
+        let region = bounds(s, at);
+        // The region pressed; where it cannot hold the widest row (a Wide inventory slot's part),
+        // the map, kept off what the platform hides; then the region as it can, the whole frame.
+        let fits = |t: &(i32, i32, i32, i32)| t.2 >= want.0;
+        let mut text = place(at, want, ring, region, hidden)
+            .filter(fits)
+            .or_else(|| place(at, want, ring, map, hidden).filter(fits))
+            .or_else(|| place(at, want, ring, region, hidden))
             .or_else(|| place(at, want, ring, whole, hidden))
             .unwrap_or((0, 0, 1, 1));
         cut(&mut rows, text.3 as usize, noted);
+        // The note row reserves only the reasons of the entries still shown.
+        text.2 = text.2.min(width(&rows, named.as_ref(), korean)).max(1);
         let hover = rows
             .iter()
             .position(|r| matches!(r, Row::Entry(i) if i.enabled()))
@@ -283,7 +351,22 @@ impl Open {
             text,
             rings,
             korean,
+            named,
+            want,
+            menu: menu.clone(),
         }
+    }
+
+    /// The same menu laid out again for `s` and `hidden` (a change of language or of what the
+    /// platform hides while it is open), the same entry highlighted.
+    pub fn relaid(&self, s: &State, hidden: &[Rect]) -> Open {
+        let mut o = Open::new(&self.menu, self.at, s, hidden);
+        if let Some(item) = self.item(self.hover)
+            && let Some(i) = (0..o.rows.len()).find(|&i| o.item(i) == Some(item))
+        {
+            o.hover = i;
+        }
+        o
     }
 
     /// The box with its frame, in frame pixels (x0, y0, x1, y1 inclusive).
@@ -346,9 +429,11 @@ impl Open {
     /// round it, the rows in the game's font (0x105228, [`super::text::draw_char`]): headings in
     /// the alert colour (A4-0x6576, the `@` keywords' of 0x108376) from column 0, entries in ink
     /// (A4-0x656a) from column 1, glyph 0x1a in column 0 of the highlighted one (0x116218's mark),
-    /// a disabled entry in 0x134044's checker, the note of the highlighted entry in ink. The fill,
-    /// the frame, the mark and the checker are classic pixels; the glyphs drawn in full name their
-    /// glyphs (spec 11), so the HD font draws them.
+    /// a disabled entry half-toned in 0x134044's checker ([`super::text::draw_halftone`]), an
+    /// entry's theft mark and the first entry's section name after it in the alert colour, the
+    /// note of the highlighted entry in ink. The fill, the frame and the mark are classic pixels;
+    /// every glyph drawn names its glyph (spec 11; the half-toned ones flagged so), so the HD
+    /// font draws them.
     pub fn draw(&self, fb: &mut Framebuffer, s: &State) {
         let c = s.ui.tables.colours;
         let fonts = (s.ui.font.as_ref(), s.ui.hangul.as_deref());
@@ -363,12 +448,19 @@ impl Open {
             bg: c.paper,
             ..TextWindow::default()
         };
-        let put = |fb: &mut Framebuffer, fg: u8, at: i32, row: i32, codes: &[u16]| {
+        // Cells `codes` from column `at` of `row`, as far as the text area reaches; the next
+        // column after them.
+        let put = |fb: &mut Framebuffer, fg: u8, half: bool, at: i32, row: i32, codes: &[u16]| {
             let w = window(fg);
             for (k, &code) in codes.iter().enumerate().take((cols - at).max(0) as usize) {
                 let cell = ((col0 + at + k as i32) as u16, row as u16);
-                text::draw_char(fb, fonts.0, fonts.1, &w, code, cell.0, cell.1);
+                if half {
+                    text::draw_halftone(fb, fonts, &w, code, cell);
+                } else {
+                    text::draw_char(fb, fonts.0, fonts.1, &w, code, cell.0, cell.1);
+                }
             }
+            at + codes.len() as i32
         };
         let note = self
             .item(self.hover)
@@ -377,24 +469,33 @@ impl Open {
         for (i, r) in self.rows.iter().enumerate() {
             let row = row0 + i as i32;
             match r {
-                Row::Head(head) => put(fb, c.alert, 0, row, head),
+                Row::Head(head) => {
+                    put(fb, c.alert, false, 0, row, head);
+                }
                 Row::Entry(item) => {
                     let label = cells(command_word(item.code, self.korean));
                     if i == self.hover {
                         let w = window(c.text);
                         text::draw_symbol(fb, fonts, &w, MARKER, (col0 as u16, row as u16), None);
                     }
-                    if item.enabled() {
-                        put(fb, c.text, 1, row, &label);
-                    } else {
-                        let n = label.len().min((cols - 1).max(0) as usize);
-                        for (k, &code) in label[..n].iter().enumerate() {
-                            let x = (col0 + 1 + k as i32) * CELL as i32;
-                            checker(fb, fonts, code, (x, row * CELL as i32), (c.text, c.paper));
-                        }
+                    let mut next = put(fb, c.text, !item.enabled(), 1, row, &label);
+                    if item.theft {
+                        next = put(
+                            fb,
+                            c.alert,
+                            false,
+                            next + 1,
+                            row,
+                            &cells(theft_word(self.korean)),
+                        );
+                    }
+                    if let (0, Some(name)) = (i, &self.named) {
+                        put(fb, c.alert, false, next + 1, row, &name.0);
                     }
                 }
-                Row::Note => put(fb, c.text, 0, row, note.as_deref().unwrap_or(&[])),
+                Row::Note => {
+                    put(fb, c.text, false, 0, row, note.as_deref().unwrap_or(&[]));
+                }
             }
         }
     }
@@ -439,6 +540,28 @@ impl Open {
             rows,
         }
     }
+}
+
+/// The cells the widest of `rows` takes: a heading's name, an entry's mark column, label and
+/// theft mark (the first row's also a space and `named`), the note the longest reason of the
+/// entries among them.
+fn width(rows: &[Row], named: Option<&Cells>, korean: bool) -> i32 {
+    let row = |(i, r): (usize, &Row)| match r {
+        Row::Head(c) => c.len(),
+        Row::Entry(item) => {
+            let name = named.filter(|_| i == 0).map_or(0, |n| 1 + n.0.len());
+            item.width(korean) + name
+        }
+        Row::Note => rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Entry(item) => item.note(korean).map(|n| cells(n).len()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0),
+    };
+    rows.iter().enumerate().map(row).max().unwrap_or(1).max(1) as i32
 }
 
 /// What a row of the drawn menu is.
@@ -656,45 +779,6 @@ fn ring(fb: &mut Framebuffer, (x0, y0, x1, y1): (i32, i32, i32, i32), colour: u8
     }
 }
 
-/// The rows of cell code `c` as 0x105228 draws it ([`super::text::draw_char`]): a glyph of
-/// `u6.ch` below 0x100, a syllable of the Hangul table; `None` without them.
-fn glyph_rows(
-    (font, hangul): (
-        Option<&u6_formats::font::BitFont>,
-        Option<&u6_formats::font::HangulFont>,
-    ),
-    c: u16,
-) -> Option<[u8; 8]> {
-    match u8::try_from(c) {
-        Ok(b) => font.map(|f| f.glyphs[usize::from(b)]),
-        Err(_) => hangul.and_then(|h| h.glyph(u32::from(c))).copied(),
-    }
-}
-
-/// Cell code `c` at frame pixel (x, y) in 0x134044's checker: of its ink pixels only those with
-/// `(x + y) & 1` = 0 in `ink`, every other pixel `paper`; classic pixels.
-fn checker(
-    fb: &mut Framebuffer,
-    fonts: (
-        Option<&u6_formats::font::BitFont>,
-        Option<&u6_formats::font::HangulFont>,
-    ),
-    c: u16,
-    (x, y): (i32, i32),
-    (ink, paper): (u8, u8),
-) {
-    let rows = glyph_rows(fonts, c).unwrap_or([0; 8]);
-    for (dy, &bits) in rows.iter().enumerate() {
-        for dx in 0..CELL {
-            let (px, py) = (x + dx as i32, y + dy as i32);
-            let set = bits & (0x80 >> dx) != 0 && (px + py) & 1 == 0;
-            if px >= 0 && py >= 0 {
-                fb.set(px as usize, py as usize, if set { ink } else { paper });
-            }
-        }
-    }
-}
-
 /// An event that changes nothing the game reads (as [`menu::Run::step`]'s quiet asks): a move of
 /// a button-less pointer, a key's release (never queued, [`InputEvent::Release`]).
 fn inert(ev: &InputEvent) -> bool {
@@ -734,8 +818,13 @@ pub struct Popup {
     buttons: u8,
     /// The pointer's events are the menu's until its buttons are all up.
     swallow: bool,
-    /// The key the menu took last: its repeats are the menu's until its release.
-    key: Option<Key>,
+    /// The release that ends [`Popup::swallow`] is the menu's too (a press while a chosen command
+    /// waits, a double click's second press), not a move given to the game.
+    mute: bool,
+    /// The keys the menu took, each the menu's (its repeats) until its own release, and whether
+    /// it took the key's press too (then the release is the menu's as well; a key pressed for
+    /// the game before the menu opened gets its release).
+    keys: Vec<(Key, bool)>,
     /// The pointer the menu took last, its buttons left out: the sprite's place while the game's
     /// own sample stays where the game took it.
     pointer: Option<Pointer>,
@@ -743,17 +832,32 @@ pub struct Popup {
     version: u64,
     /// Frame rects the platform shows something else over ([`Popup::set_hidden`]).
     hidden: Vec<Rect>,
-    /// Unit M4's travel state (spec 21).
-    pub travel: Travel,
+    /// The press that chose an entry: the engine's clock (ms) and its frame pixel, for its
+    /// double click ([`DOUBLE_CLICK_MS`], [`DOUBLE_CLICK_PX`]).
+    chose: Option<(u64, i16, i16)>,
+    /// The map cell "Go here" chose, for the engine ([`Popup::take_go_here`]).
+    go_here: Option<(i16, i16)>,
+    /// The last [`Popup::input`] took an event that is not the tail of a gesture the menu already
+    /// held ([`Popup::took_new_input`]).
+    new_input: bool,
 }
 
 impl Popup {
-    /// On or off (off closes it and drops a run).
+    /// On or off. Off closes it, drops a run and forgets what of the input was the menu's (the
+    /// pointer it took, a press or keys it held), so turned on again it takes nothing it did not
+    /// see.
     pub fn set_on(&mut self, on: bool) {
         self.on = on;
         if !on {
             self.run = None;
             self.close();
+            self.pointer = None;
+            self.swallow = false;
+            self.mute = false;
+            self.keys.clear();
+            self.buttons = 0;
+            self.chose = None;
+            self.go_here = None;
         }
     }
 
@@ -762,10 +866,27 @@ impl Popup {
     }
 
     /// The frame rects the platform shows something else over (Wide's page windows over the
-    /// map, the map's parts off its canvas): a menu opened after this keeps off them where it
-    /// can ([`Open::new`]). None by default.
-    pub fn set_hidden(&mut self, rects: Vec<Rect>) {
+    /// map, the parts of the frame off the canvas or the viewport): a menu keeps off them where
+    /// it can ([`Open::new`]); one open when they change is laid out again for them (`s`). None
+    /// by default.
+    pub fn set_hidden(&mut self, rects: Vec<Rect>, s: &State) {
+        if rects == self.hidden {
+            return;
+        }
         self.hidden = rects;
+        self.relay(s);
+    }
+
+    /// The open menu laid out again for `s` and the hidden rects, drawn again if it moved.
+    fn relay(&mut self, s: &State) {
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let again = open.relaid(s, &self.hidden);
+        if &again != open {
+            self.open = Some(again);
+            self.version += 1;
+        }
     }
 
     /// The open menu.
@@ -788,6 +909,21 @@ impl Popup {
         self.pointer
     }
 
+    /// The map cell "Go here" chose since the last call, once (unit M4's travel starts there).
+    pub fn take_go_here(&mut self) -> Option<(i16, i16)> {
+        self.go_here.take()
+    }
+
+    /// Whether the last [`Popup::input`] took an event that is not the tail of a gesture the
+    /// menu already held: an event while it is open, the press that opens it, a press while a
+    /// chosen command waits. The tail of a choice is not: its press's held moves, a double click's
+    /// press and release, the repeats and release of a key taken while open (the press's own
+    /// release reaches the game as a move with no button). Spec 21's merge contract: a travel
+    /// under way ends on it, so the travel Go here starts survives its own gesture.
+    pub fn took_new_input(&self) -> bool {
+        self.new_input
+    }
+
     /// Opens `open` as a right press would (tests: a menu without a query).
     #[cfg(test)]
     pub(crate) fn show(&mut self, open: Open) {
@@ -803,7 +939,8 @@ impl Popup {
 
     /// The input of one tick as the game is to get it: the run stepped first (its target press
     /// after this tick's events, [`Run::step`]), then each event either the menu's or the game's,
-    /// with the presses of a choice in its place. `quiet`: nothing is queued for the game.
+    /// with the presses of a choice in its place. `quiet`: nothing is queued for the game. While
+    /// a run was held at the tick's start, every press of its events is the menu's.
     pub fn input(
         &mut self,
         s: &State,
@@ -812,6 +949,8 @@ impl Popup {
         quiet: bool,
     ) -> Vec<InputEvent> {
         let mut tail = Vec::new();
+        self.new_input = false;
+        let held = self.run.is_some();
         if let Some(run) = self.run {
             match run.step(s, quiet && input.iter().all(inert)) {
                 Step::Hold => {}
@@ -825,7 +964,7 @@ impl Popup {
         let mut out = Vec::with_capacity(input.len() + tail.len());
         let mut calm = quiet;
         for &ev in input {
-            if !self.take(s, io, ev, calm, &mut out) {
+            if !self.take(s, io, ev, (calm, held), &mut out) {
                 calm &= inert(&ev);
                 out.push(ev);
             }
@@ -834,44 +973,66 @@ impl Popup {
         out
     }
 
-    /// After the game's poll: a menu whose prompt went (A4-0x7a2c no longer 1) closes.
+    /// After the game's poll: a menu whose prompt went (A4-0x7a2c no longer 1) closes; one whose
+    /// language changed is laid out again.
     pub fn after_poll(&mut self, s: &State) {
         if self.open.is_some() && s.main.reading != 1 {
             self.close();
             self.pointer = None;
+        } else if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.korean != (s.ui.text.language == Language::Korean))
+        {
+            self.relay(s);
         }
     }
 
     /// Takes `ev` when it is the menu's (true), else leaves it to the game; the presses of a
-    /// choice go to `out`. `calm`: nothing queued for the game, nothing but inert events before.
+    /// choice go to `out`. `calm`: nothing queued for the game, nothing but inert events before;
+    /// `held`: a run was held at the tick's start.
     fn take(
         &mut self,
         s: &State,
         io: &Io,
         ev: InputEvent,
-        calm: bool,
+        (calm, held): (bool, bool),
         out: &mut Vec<InputEvent>,
     ) -> bool {
         match ev {
             InputEvent::Pointer { x, y, buttons } => {
-                self.pointer_event(s, io, (x, y), buttons, calm, out)
+                self.pointer_event(s, io, (x, y), buttons, (calm, held), out)
             }
             InputEvent::Key(k) | InputEvent::Repeat(k) => {
                 let repeat = matches!(ev, InputEvent::Repeat(_));
+                let taken = self.keys.iter().position(|&(t, _)| t == k);
                 if self.open.is_none() {
-                    return repeat && self.key == Some(k);
+                    // A press with the menu closed is the game's, and so is the key from then on.
+                    if !repeat && let Some(i) = taken {
+                        self.keys.remove(i);
+                    }
+                    return repeat && taken.is_some();
                 }
-                self.key = Some(k);
+                match taken {
+                    Some(i) => self.keys[i].1 |= !repeat,
+                    None => self.keys.push((k, !repeat)),
+                }
+                self.new_input = true;
                 self.key_event(s, k, repeat, out);
                 true
             }
             InputEvent::Release(k) => {
-                if self.key == Some(k) {
-                    self.key = None;
-                }
-                false
+                let Some(i) = self.keys.iter().position(|&(t, _)| t == k) else {
+                    return false;
+                };
+                let took = self.keys.remove(i).1;
+                self.new_input |= took && self.open.is_some();
+                took
             }
-            InputEvent::Text(_) => self.open.is_some(),
+            InputEvent::Text(_) => {
+                self.new_input |= self.open.is_some();
+                self.open.is_some()
+            }
         }
     }
 
@@ -881,7 +1042,7 @@ impl Popup {
         io: &Io,
         (x, y): (i16, i16),
         buttons: u8,
-        calm: bool,
+        (calm, held): (bool, bool),
         out: &mut Vec<InputEvent>,
     ) -> bool {
         let b = buttons & (POINTER_LEFT | POINTER_RIGHT);
@@ -891,21 +1052,40 @@ impl Popup {
         if self.swallow {
             self.swallow = b != 0;
             if !self.swallow && self.open.is_none() {
+                if std::mem::take(&mut self.mute) {
+                    // A muted press's release: the menu's too; the sprite stays here until the
+                    // next event goes to the game.
+                    self.pointer = Some(at);
+                    return true;
+                }
                 // The release of a press that closed the menu: the game's pointer comes here, a
                 // button-less move.
                 self.pointer = None;
                 return false;
             }
+            self.new_input |= self.open.is_some();
             self.pointer = Some(at);
             self.hover_at(x, y);
             return true;
         }
         if self.open.is_none() {
+            if down != 0 && (held || self.run.is_some() || self.double_click(io, x, y)) {
+                // A press while a chosen command waits for its target, or the second press of a
+                // double click on the entry: the menu's, with its release. The double click is
+                // the choice's tail; a press while the command waits is new.
+                self.new_input |= !self.double_click(io, x, y);
+                self.chose = None;
+                self.swallow = true;
+                self.mute = true;
+                self.pointer = Some(at);
+                return true;
+            }
             let press = b == POINTER_RIGHT && before == 0;
-            if press && calm && self.run.is_none() && s.main.reading == 1 {
+            if press && calm && self.run.is_none() && s.main.reading == 1 && s.ui.input.accept {
                 let open = menu::query(s, io, x, y).map(|m| Open::new(&m, (x, y), s, &self.hidden));
                 if let Some(open) = open.filter(|o| !o.entries().is_empty()) {
                     self.open = Some(open);
+                    self.new_input = true;
                     self.version += 1;
                     self.swallow = true;
                     self.pointer = Some(at);
@@ -915,6 +1095,7 @@ impl Popup {
             self.pointer = None;
             return false;
         }
+        self.new_input = true;
         self.pointer = Some(at);
         if down & POINTER_RIGHT != 0 {
             self.swallow = true;
@@ -927,6 +1108,7 @@ impl Popup {
             match open.row_at(x, y) {
                 Some(i) => {
                     if open.item(i).is_some_and(|item| item.enabled()) {
+                        self.chose = Some((io.now_ms(), x, y));
                         self.choose(s, i, out);
                     }
                 }
@@ -937,6 +1119,16 @@ impl Popup {
         }
         self.hover_at(x, y);
         true
+    }
+
+    /// A press at frame pixel (x, y) now is the second press of a double click on the entry
+    /// chosen last.
+    fn double_click(&self, io: &Io, x: i16, y: i16) -> bool {
+        self.chose.is_some_and(|(t, cx, cy)| {
+            io.now_ms().saturating_sub(t) <= DOUBLE_CLICK_MS
+                && (x - cx).abs() <= DOUBLE_CLICK_PX
+                && (y - cy).abs() <= DOUBLE_CLICK_PX
+        })
     }
 
     fn key_event(&mut self, s: &State, k: Key, repeat: bool, out: &mut Vec<InputEvent>) {
@@ -1001,9 +1193,19 @@ impl Popup {
         }
     }
 
-    /// Runs row `i`'s entry (spec 17 Running a choice): Go here starts unit M4's travel, a slot's
-    /// own action is a left click on the slot, Rest and Combat their icon's press, any other
-    /// command its icon's press now and the press at the target once it reads it. The menu closes.
+    /// Closes an open menu as a press outside it would (the platform's press that reaches no
+    /// frame pixel: off the canvas, in a gap or the letterbox); true when one was open.
+    pub fn dismiss(&mut self) -> bool {
+        let open = self.open.is_some();
+        self.close();
+        self.pointer = None;
+        open
+    }
+
+    /// Runs row `i`'s entry (spec 17 Running a choice): Go here asks unit M4's travel to the cell
+    /// ([`Popup::take_go_here`]), a slot's own action is a left click on the slot, Rest and Combat
+    /// their icon's press, any other command its icon's press now and the press at the target
+    /// once it reads it. The menu closes.
     fn choose(&mut self, s: &State, i: usize, out: &mut Vec<InputEvent>) {
         let Some(open) = self.open.as_ref() else {
             return;
@@ -1014,11 +1216,7 @@ impl Popup {
         let (at, cell) = (open.at, open.cell);
         self.close_here(out);
         match item.code {
-            menu::GO_HERE => {
-                if let Some(cell) = cell {
-                    travel_to(&mut self.travel, cell);
-                }
-            }
+            menu::GO_HERE => self.go_here = cell,
             menu::OPEN | menu::READY | menu::UNREADY => out.extend(menu::left_press(at.0, at.1)),
             code => match Run::start(s, code, at) {
                 Some((icon, run)) => {

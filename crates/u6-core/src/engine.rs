@@ -688,6 +688,15 @@ pub struct Engine {
     popup: crate::ui::popup::Popup,
     /// The [`crate::ui::popup::Popup::version`] drawn into `layer` last.
     drawn_popup: u64,
+    /// Port-only (spec 17, unit M4 seam): the stub's record of what "Go here" asked.
+    go_here: crate::ui::popup::Travel,
+    /// Port-only (spec 17): the button-down edges of the pointer events the menu let through to
+    /// the game ([`Engine::game_presses`]), and the buttons of the last of them.
+    game_presses: u64,
+    passed_buttons: u8,
+    /// Port-only (spec 17): the key events (presses, repeats, releases) the menu let through to
+    /// the game ([`Engine::game_keys`]).
+    game_keys: u64,
     /// The screen frame with the pointer sprite over it (the frame the platform shows).
     shown: Framebuffer,
     /// Bumped each time `shown` is composed again ([`Engine::frame_version`]).
@@ -768,6 +777,10 @@ impl Engine {
             layer_version: 0,
             popup: crate::ui::popup::Popup::default(),
             drawn_popup: 0,
+            go_here: crate::ui::popup::Travel::default(),
+            game_presses: 0,
+            passed_buttons: 0,
+            game_keys: 0,
             shown: Framebuffer::new(),
             shown_version: 0,
             src_version: 0,
@@ -798,6 +811,24 @@ impl Engine {
             through = self
                 .popup
                 .input(&self.state.borrow(), &self.io, input, quiet);
+            for e in &through {
+                match *e {
+                    InputEvent::Pointer { buttons, .. } => {
+                        let b = buttons & 3;
+                        self.game_presses += u64::from(b & !self.passed_buttons != 0);
+                        self.passed_buttons = b;
+                    }
+                    InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Release(_) => {
+                        self.game_keys += 1;
+                    }
+                    _ => {}
+                }
+            }
+            // Unit M4's seam (spec 21): "Go here" chosen in this input starts travel to its cell
+            // after the menu's filter.
+            if let Some(cell) = self.popup.take_go_here() {
+                crate::ui::popup::travel_to(&mut self.go_here, cell);
+            }
             through.as_slice()
         } else {
             input
@@ -894,8 +925,15 @@ impl Engine {
         let at = self.io.handler_pointer();
         let mut sprite = crate::ui::pointer::vblank(&mut self.state.borrow_mut(), at);
         if let Some(p) = self.popup.pointer() {
-            // The menu's pointer, in the arrow: the game's sample stays where the game took it.
-            sprite = crate::ui::pointer::sprite_as(&self.state.borrow().ui.pointer, 0, p);
+            // The menu's pointer: the game's sample stays where the game took it. In the arrow
+            // over the open menu, else (a press it took, held) in the game's own shape.
+            let ptr = &self.state.borrow().ui.pointer;
+            let shape = if self.popup.open().is_some() {
+                0
+            } else {
+                ptr.shape
+            };
+            sprite = crate::ui::pointer::sprite_as(ptr, shape, p);
         }
         if layered || sprite != self.sprite || self.ticks == 1 {
             self.shown.sync_from(&mut self.layer);
@@ -1000,12 +1038,68 @@ impl Engine {
     /// original's; off closes an open menu and drops a run).
     pub fn set_context_menu(&mut self, on: bool) {
         self.popup.set_on(on);
+        self.redraw_menu();
     }
 
     /// Port-only (spec 17 Presentation): the frame rects (x0, y0, x1, y1 inclusive) the platform
     /// shows something else over: a context menu opened later keeps off them where it can.
     pub fn set_context_menu_hidden(&mut self, rects: Vec<crate::ui::popup::Rect>) {
-        self.popup.set_hidden(rects);
+        self.popup.set_hidden(rects, &self.state.borrow());
+        self.redraw_menu();
+    }
+
+    /// Port-only (spec 17 Presentation): closes an open context menu as a press outside it
+    /// would, for a press of the platform's that reaches no frame pixel (off the canvas, in the
+    /// HD layout's gaps or the letterbox); true when one was open.
+    pub fn dismiss_context_menu(&mut self) -> bool {
+        let open = self.popup.dismiss();
+        self.redraw_menu();
+        open
+    }
+
+    /// The screen frame and the shown frame again when the drawn menu changed outside a tick
+    /// (laid out again, dismissed), as a tick composes them.
+    fn redraw_menu(&mut self) {
+        let drawn = self.popup.version();
+        if drawn == self.drawn_popup {
+            return;
+        }
+        self.layer.sync_from(&mut self.io.published.borrow_mut());
+        if let Some(open) = self.popup.open() {
+            open.draw(&mut self.layer, &self.state.borrow());
+        }
+        self.drawn_popup = drawn;
+        self.layer_version += 1;
+        self.shown.sync_from(&mut self.layer);
+        if let Some(sp) = &self.sprite {
+            sp.draw(&mut self.shown);
+        }
+        self.shown_version += 1;
+    }
+
+    /// Port-only (spec 17): the presses the context menu let through to the game (button-down
+    /// edges of the pointer events it gave the queue), counted while it is on.
+    pub fn game_presses(&self) -> u64 {
+        self.game_presses
+    }
+
+    /// Port-only (spec 17): the key events (presses, repeats and releases) the context menu let
+    /// through to the game, counted while it is on; the keys it takes itself are left out.
+    pub fn game_keys(&self) -> u64 {
+        self.game_keys
+    }
+
+    /// Port-only (spec 17): a chosen command's target press waits for its target read.
+    pub fn context_menu_waits(&self) -> bool {
+        self.popup.run().is_some()
+    }
+
+    /// Port-only (spec 11 Design 7, K3): where the pointer is shown: the menu's while it takes
+    /// the pointer's events, else the input handler's.
+    pub fn pointer_at(&self) -> Pointer {
+        self.popup
+            .pointer()
+            .unwrap_or_else(|| self.io.handler_pointer())
     }
 
     /// Port-only (spec 17): the open context menu as drawn (no text), if one is open.
@@ -1019,9 +1113,10 @@ impl Engine {
         &mut self.popup
     }
 
-    /// Port-only (spec 17, unit M4 seam): the travel state "Go here" starts (spec 21).
-    pub fn travel(&self) -> &crate::ui::popup::Travel {
-        &self.popup.travel
+    /// Port-only (spec 17, unit M4 seam): the cells "Go here" asked travel to (the stub's record
+    /// until unit M4's `travel_to` lands, spec 21).
+    pub fn go_here_asked(&self) -> &crate::ui::popup::Travel {
+        &self.go_here
     }
 
     /// Port-only (spec 07 HD0): every buffer gets a source plane ([`Io::enable_src_plane`], and

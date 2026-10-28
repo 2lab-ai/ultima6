@@ -2,11 +2,19 @@
 //! context menu on, the leader put beside a closed door: a right press on the door and one on
 //! bare ground open the menu in the frame (its text area paper, ink and the heading's colour,
 //! the published frame outside its box, the game's button untouched); Use chosen by a left press
-//! opens the door; Go here, chosen by its row, calls unit M4's seam with the cell. Frames of the
-//! open menu (the frame, and the HD compositor's at 4×) go to the directory
-//! `U6_FRAMES_DIR` names, which must lie outside the repository (they show the user's game); the
-//! test prints counts only. Skips without the zip; the data is read only.
+//! opens the door, as the keyboard's Use does from the same start; Go here, chosen by its row,
+//! calls unit M4's seam with the cell; a disabled entry is drawn half-toned; in Wide a menu on an
+//! inventory slot keeps every row whole. Frames of the open menu (the frame, and the HD
+//! compositor's at 4×) go to the directory `U6_FRAMES_DIR` names, which must resolve outside the
+//! repository (they show the user's game); the tests print counts only, and `ran` or `skipped`.
+//! Each skips without the zip, unless `U6_REQUIRE_ARCHIVE=1`, which fails it instead. The release
+//! receipt is that run, in both builds, writing the frames:
+//! `U6_REQUIRE_ARCHIVE=1 U6_FRAMES_DIR=<a directory outside the repository> scripts/cargo.sh test
+//! -p u6-core --profile gate --lib [--features wide] -- popup_real --nocapture`. The data is read
+//! only.
 #![allow(clippy::disallowed_methods)] // the test reads the zip and writes the PNG receipts
+
+use std::path::{Component, Path, PathBuf};
 
 use super::real_tests::{files, png, png_rgba};
 use super::*;
@@ -26,6 +34,111 @@ const BUILD: &str = if cfg!(feature = "wide") {
 } else {
     "original"
 };
+
+/// The user's zip for test `name`; none (the test skips, saying so) without it, unless
+/// `U6_REQUIRE_ARCHIVE=1` (the release receipt), which fails the test instead.
+fn archive(name: &str) -> Option<Files> {
+    let files = files();
+    if files.is_none() {
+        assert_ne!(
+            std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+            Ok("1"),
+            "{name}: U6_REQUIRE_ARCHIVE=1 and the archive is missing"
+        );
+        println!("{name}: skipped (no archive)");
+    }
+    files
+}
+
+/// The directory `U6_FRAMES_DIR` names, made and resolved (links followed), or none without it.
+/// Fails closed: on a relative path or one with `.` or `..`, on a part of it that exists but does
+/// not resolve (a dangling link), and on a directory inside the worktree or the main checkout a
+/// linked worktree lies in (`<main>/.worktrees/x`), checked on the resolved path before anything
+/// is made and again on the directory made.
+fn frames_dir() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os("U6_FRAMES_DIR")?);
+    assert!(
+        dir.is_absolute()
+            && dir.components().all(|c| matches!(
+                c,
+                Component::RootDir | Component::Prefix(_) | Component::Normal(_)
+            )),
+        "U6_FRAMES_DIR an absolute path without . or .."
+    );
+    let repo = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .expect("the worktree resolves");
+    let main = repo
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == ".worktrees"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let outside = |real: &Path| {
+        for root in std::iter::once(&repo).chain(main.as_ref()) {
+            assert!(
+                !real.starts_with(root),
+                "the frames directory outside the repository"
+            );
+        }
+    };
+    // The part of it that exists (a link counts, dangling or not), resolved; the rest after it.
+    let (mut base, mut rest) = (dir.clone(), Vec::new());
+    while base.symlink_metadata().is_err() {
+        rest.push(base.file_name().expect("a part of the path").to_owned());
+        assert!(base.pop(), "a part of U6_FRAMES_DIR exists");
+    }
+    let mut real = std::fs::canonicalize(&base).expect("the frames directory's base resolves");
+    real.extend(rest.iter().rev());
+    outside(&real);
+    std::fs::create_dir_all(&real).quiet();
+    let made = std::fs::canonicalize(&real).expect("the frames directory resolves");
+    outside(&made);
+    Some(made)
+}
+
+/// The names of `a`'s parts that differ from `b`'s, the UI's and combat's by their own parts
+/// (none printed: they hold the game's text).
+fn differing(a: &State, b: &State) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    macro_rules! parts {
+        ($p:ident . $q:ident : $($g:ident),*) => {
+            $(if a.$p.$q.$g != b.$p.$q.$g {
+                out.push(concat!(stringify!($p), ".", stringify!($q), ".", stringify!($g)));
+            })*
+        };
+        ($p:ident : $($g:ident),*) => {
+            $(if a.$p.$g != b.$p.$g {
+                out.push(concat!(stringify!($p), ".", stringify!($g)));
+            })*
+        };
+    }
+    macro_rules! top {
+        ($($g:ident),*) => {
+            $(if a.$g != b.$g {
+                out.push(stringify!($g));
+            })*
+        };
+    }
+    top!(
+        tables, objects, actors, map, converse, gfx, main, magic, inventory, sound, rng, objcmds,
+        saveload, speech, locale
+    );
+    parts!(ui: messages, font, hangul, paper, tables, text, panel);
+    parts!(
+        ui.input: qualifiers, accept, cursor_glyph, cursor_frame, drain, line_input, upcase,
+        line_cancelled, unpage, repeat, direction, targeting, target_command, target_pending,
+        cursor_by_tab, cursor, range, panel_cursor, pointer, selection, target, target_void,
+        idle_refresh, in_wait, prompt_reads
+    );
+    parts!(
+        ui.pointer: tables, shown, shape, at, left, right, pressed, buttons, press_code,
+        walk_cell, walk_due
+    );
+    parts!(
+        combat: tables, weapons, weapon_count, weapon_index, hit, landing, spread, passed, flash,
+        shooter, dirty, effects, swallow, shown, said, due_ms, paced_at_ms, paced, item_cast
+    );
+    out
+}
 
 /// The booted game with a handle on its state, fed as the hosts feed it: ticks of [`STEP_MS`].
 struct Play {
@@ -106,11 +219,53 @@ impl Play {
     }
 
     /// The pointer's `buttons` pressed at (x, y), then let go, a tick each.
-    fn click(&mut self, (x, y): (i16, i16), buttons: u8) {
+    fn click(&mut self, at: (i16, i16), buttons: u8) {
+        self.press(at, buttons);
+        self.release(at);
+    }
+
+    /// The pointer's `buttons` pressed at (x, y), a tick.
+    fn press(&mut self, (x, y): (i16, i16), buttons: u8) {
         self.e
             .tick(&[InputEvent::Pointer { x, y, buttons }], STEP_MS);
+    }
+
+    /// The pointer's buttons let go at (x, y), a tick.
+    fn release(&mut self, (x, y): (i16, i16)) {
         self.e
             .tick(&[InputEvent::Pointer { x, y, buttons: 0 }], STEP_MS);
+    }
+
+    /// A right press at (x, y) that opens the menu: right after its tick and after its release's
+    /// the game has no button and its pointer events none of the press; the menu's view.
+    fn open_at(&mut self, at: (i16, i16)) -> View {
+        let presses = self.e.game_presses();
+        self.press(at, POINTER_RIGHT);
+        assert_eq!(
+            self.e.io().handler_pointer().buttons,
+            0,
+            "the game took no button at the press"
+        );
+        self.release(at);
+        assert_eq!(
+            self.e.io().handler_pointer().buttons,
+            0,
+            "nor at its release"
+        );
+        assert_eq!(self.e.game_presses(), presses, "no press reached the game");
+        self.e.context_menu().expect("the menu open")
+    }
+
+    /// The game's clock (ms).
+    fn ms(&self) -> u64 {
+        self.e.io().now_ms()
+    }
+
+    /// Ticks until the clock reads `ms` (or past it).
+    fn run_to(&mut self, ms: u64) {
+        while self.ms() < ms {
+            self.e.tick(&[], STEP_MS);
+        }
     }
 
     /// The frame pixel at the middle of the view cell of map tile (x, y).
@@ -126,29 +281,12 @@ impl Play {
 
     /// The frame and the HD compositor's frame (4×; its font drawn by the platform, so here the
     /// glyphs scaled) into `U6_FRAMES_DIR` as `<name>-<build>.png` and `<name>-<build>-x4.png`;
-    /// nothing without it. Panics on a directory inside the repository.
+    /// nothing without it ([`frames_dir`]: fails closed on a directory that does not resolve
+    /// outside the repository).
     fn frames(&self, name: &str) {
-        let Some(dir) = std::env::var_os("U6_FRAMES_DIR") else {
+        let Some(dir) = frames_dir() else {
             return;
         };
-        let dir = std::path::PathBuf::from(dir);
-        // The worktree, and the main checkout a linked worktree lies in (`<main>/.worktrees/x`).
-        let repo =
-            std::fs::canonicalize(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-                .quiet();
-        let main = repo
-            .parent()
-            .filter(|p| p.file_name().is_some_and(|n| n == ".worktrees"))
-            .and_then(std::path::Path::parent)
-            .map(std::path::Path::to_path_buf);
-        let real = std::fs::canonicalize(&dir).unwrap_or(dir.clone());
-        for root in std::iter::once(repo).chain(main) {
-            assert!(
-                !real.starts_with(&root),
-                "the frames directory outside the repository"
-            );
-        }
-        std::fs::create_dir_all(&dir).quiet();
         std::fs::write(dir.join(format!("{name}-{BUILD}.png")), png(self.e.frame())).quiet();
         let mut hd = HdView::new();
         hd.set(true, Scale::X4);
@@ -209,11 +347,16 @@ fn row_of(v: &View, code: u16) -> Option<(usize, (i16, i16))> {
 
 /// Spec 17 Acceptances 1 and 8: a right press on a closed door beside the leader opens the
 /// menu in the frame with the door's section (a heading), Look and Use able to run; the game
-/// took no button; Use chosen by a left press on its row opens the door (its frame loses bit 2)
-/// through the target read, and the prompt comes back with the menu closed.
+/// took no button, right after the press's tick and after its release's; Use chosen by a left
+/// press on its row opens the door (its frame loses bit 2) through the target read, and the
+/// prompt comes back with the menu closed. The control run (round 2): from the same start the
+/// keyboard's Use (its letter on the tick the menu's left press chose Use, then a left press on
+/// the door once the game reads its target) opens it too, and with both runs ticked on to the
+/// same clock the game's state is the same but for the keyboard's own target cursor.
 #[test]
 fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
-    let Some(files) = files() else { return };
+    const NAME: &str = "a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door";
+    let Some(files) = archive(NAME) else { return };
     let mut p = Play::boot(&files);
     let door = p.beside_a_door();
     let (dx, dy) = {
@@ -222,13 +365,7 @@ fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
     };
     let at = p.pixel(dx, dy);
     let closed = p.e.state().objects.tf(door) >> 10;
-    p.click(at, POINTER_RIGHT);
-    assert_eq!(
-        p.e.io().handler_pointer().buttons,
-        0,
-        "the game took no button"
-    );
-    let v = p.e.context_menu().expect("the menu open");
+    let v = p.open_at(at);
     let heads = v.rows.iter().filter(|r| r.kind == RowKind::Head).count();
     let (use_row, use_at) = row_of(&v, menu::USE).expect("Use offered");
     let (look_row, _) = row_of(&v, menu::LOOK).expect("Look offered");
@@ -253,6 +390,52 @@ fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
         p.e.screen_frame().pixels() == p.e.published_frame().pixels(),
         "no menu left"
     );
+
+    // The keyboard's Use from the same start.
+    let mut k = Play::boot(&files);
+    assert_eq!(k.beside_a_door(), door, "the same door");
+    // The letter on the tick the menu's left press chose Use (after the right press's two).
+    k.e.tick(&[], STEP_MS);
+    k.e.tick(&[], STEP_MS);
+    k.e.tick(&[InputEvent::Key(Key::Char('u'))], STEP_MS);
+    k.e.tick(&[InputEvent::Release(Key::Char('u'))], STEP_MS);
+    let mut read = false;
+    for _ in 0..400 {
+        let s = k.e.state();
+        if s.ui.input.in_wait && s.main.reading == 0 {
+            read = true;
+            break;
+        }
+        drop(s);
+        k.e.tick(&[], STEP_MS);
+    }
+    assert!(read, "Use reads its target");
+    k.click(at, POINTER_LEFT);
+    k.settle(4000);
+    assert_eq!(
+        k.e.state().objects.tf(door) >> 10,
+        closed ^ 4,
+        "the keyboard's Use opened it too"
+    );
+    let end = p.ms().max(k.ms());
+    p.run_to(end);
+    k.run_to(end);
+    assert_eq!(p.ms(), k.ms(), "the same clock");
+    let differ = differing(&p.st.borrow(), &k.st.borrow());
+    println!(
+        "control run: clock {} ms; parts of the state that differ: {}",
+        p.ms(),
+        differ.len()
+    );
+    // The keyboard's target read puts its own cursor on the map (its cell and range); a command
+    // started by the pointer, as the menu's, reads the pointer and leaves that cursor as it was.
+    assert_eq!(
+        differ,
+        ["ui.input.cursor", "ui.input.range"],
+        "the menu's Use and the keyboard's leave the same state (the RNG, the world, the turn's \
+         pacing), but for the keyboard's target cursor"
+    );
+    println!("{NAME}: ran");
 }
 
 /// Spec 17 Acceptance 9: a right press on bare ground (a view cell whose menu is the tile's
@@ -261,7 +444,8 @@ fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
 /// the cell and nothing else: the leader stays, the prompt stays up, the menu closed.
 #[test]
 fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
-    let Some(files) = files() else { return };
+    const NAME: &str = "a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to";
+    let Some(files) = archive(NAME) else { return };
     let mut p = Play::boot(&files);
     p.beside_a_door();
     let leader = p.e.state().leader_position().expect("a leader");
@@ -277,8 +461,7 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
             (bare && m.go_here.is_some() && m.cell == Some((x, y))).then_some(((x, y), at))
         });
     let (cell, at) = ground.expect("bare ground near the leader");
-    p.click(at, POINTER_RIGHT);
-    let v = p.e.context_menu().expect("the menu open");
+    let v = p.open_at(at);
     // The underlined command, when Rest or Combat, comes first (`b` above underlines Combat).
     let codes: Vec<u16> = v.rows.iter().filter_map(|r| r.code).collect();
     let rest: Vec<u16> = codes
@@ -307,7 +490,7 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
         p.e.tick(&[], STEP_MS);
     }
     assert_eq!(
-        p.e.travel().asked,
+        p.e.go_here_asked().asked,
         [cell],
         "travel_to with the pressed cell"
     );
@@ -321,4 +504,138 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
         (lx, ly),
         "the leader stays (the stub)"
     );
+    // The opening is gated on the game accepting input (round 2, opus NIT): with that off at the
+    // prompt the same press opens nothing (it is the game's).
+    p.st.borrow_mut().ui.input.accept = false;
+    p.press(at, POINTER_RIGHT);
+    assert!(
+        p.e.context_menu().is_none(),
+        "no menu while the game accepts no input"
+    );
+    println!("{NAME}: ran");
+}
+
+/// Spec 17 Presentation (round 2, item 2): a disabled entry (the leader starts without a readied
+/// spellbook, so Cast is disabled on a cell near him) is drawn half-toned in the frame: its row's
+/// label cells hold ink, never two ink pixels side by side (the original's checker), the rest the
+/// paper; an entry that can run holds ink side by side. Escape closes the menu and the frame is
+/// the published one again. Frames: `r2-disabled`.
+#[test]
+fn a_disabled_entry_is_drawn_half_toned_in_the_frame() {
+    const NAME: &str = "a_disabled_entry_is_drawn_half_toned_in_the_frame";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    let leader = p.e.state().leader_position().expect("a leader");
+    let (lx, ly) = (leader.x as i16, leader.y as i16);
+    let at = (-4..=4i16)
+        .flat_map(|dy| (-4..=4i16).map(move |dx| (dx, dy)))
+        .map(|(dx, dy)| p.pixel((lx + dx) as u16, (ly + dy) as u16))
+        .find(|&(x, y)| {
+            menu::query(&p.e.state(), p.e.io(), x, y).is_some_and(|m| {
+                m.sections
+                    .iter()
+                    .any(|s| s.entries.iter().any(|e| e.reason.is_some()))
+            })
+        })
+        .expect("a cell near the leader whose menu has a disabled entry");
+    let v = p.open_at(at);
+    let disabled = (1..v.rows.len())
+        .find(|&i| v.rows[i].kind == RowKind::Entry && !v.rows[i].enabled() && !v.rows[i].theft)
+        .expect("a disabled entry drawn, past the first row");
+    let enabled = (0..v.rows.len())
+        .find(|&i| v.rows[i].enabled() && !v.rows[i].theft)
+        .expect("an entry that can run");
+    let c = p.e.state().ui.tables.colours;
+    // A row's label cells (from the text area's second column): ink pixels, and ink pixels with
+    // ink right beside them; any other colour than the paper and the ink is counted too.
+    let band = |row: usize| {
+        let frame = p.e.screen_frame();
+        let (x0, x1, y) = (v.text.0 + 8, v.text.2, v.rows[row].y);
+        let (mut ink, mut pairs, mut other) = (0, 0, 0);
+        for yy in y..y + 8 {
+            for xx in x0..=x1 {
+                let at = |x: i32| frame.get(x as usize, yy as usize).quiet();
+                let colour = at(xx);
+                ink += usize::from(colour == c.text);
+                other += usize::from(colour != c.text && colour != c.paper);
+                pairs += usize::from(xx < x1 && colour == c.text && at(xx + 1) == c.text);
+            }
+        }
+        (ink, pairs, other)
+    };
+    let (ink, pairs, other) = band(disabled);
+    let (on_ink, on_pairs, _) = band(enabled);
+    println!(
+        "disabled row: {ink} ink pixels, {pairs} side by side, {other} of other colours; an \
+         entry that runs: {on_ink} ink, {on_pairs} side by side"
+    );
+    assert!(
+        ink > 0 && pairs == 0 && other == 0,
+        "the disabled label half-toned"
+    );
+    assert!(on_pairs > 0, "an entry that runs drawn whole");
+    p.frames("r2-disabled");
+    p.key(Key::Escape);
+    assert!(p.e.context_menu().is_none(), "closed");
+    assert!(
+        p.e.screen_frame().pixels() == p.e.published_frame().pixels(),
+        "no menu left"
+    );
+    println!("{NAME}: ran");
+}
+
+/// Spec 17 Presentation (round 2, item 11), the Wide build: a right press on an item in the
+/// inventory slot's backpack list (its part too narrow for the menu's widest row) opens the menu
+/// with every row whole (no row cut, the text area as wide as its rows ask), placed where it
+/// fits (the shown map, when the slot's part cannot hold it). Frames: `r2-wide-inventory`.
+#[cfg(feature = "wide")]
+#[test]
+fn a_wide_inventory_slot_menu_keeps_its_rows_whole() {
+    const NAME: &str = "a_wide_inventory_slot_menu_keeps_its_rows_whole";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    let slot = crate::ui::pointer::SLOT_REGIONS.start + 2;
+    let [x0, y0, x1, y1] = crate::ui::pointer::region(&p.e.state().ui.pointer.tables, slot)
+        .expect("the inventory slot's region");
+    let mid = x0 + (x1 - x0) / 2;
+    let at = (y0..=y1)
+        .step_by(4)
+        .flat_map(|y| (mid..=x1).step_by(4).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            menu::query(&p.e.state(), p.e.io(), x, y)
+                .is_some_and(|m| m.kind == menu::Kind::Panel && !m.sections.is_empty())
+        })
+        .expect("an item in the inventory slot's list");
+    let v = p.open_at(at);
+    let open = p.e.popup_mut().open().expect("open").clone();
+    let (sx0, sy0, sx1, sy1) = crate::geom::SHOWN;
+    let in_map = v.rect.0 >= i32::from(sx0)
+        && v.rect.1 >= i32::from(sy0)
+        && v.rect.2 <= i32::from(sx1)
+        && v.rect.3 <= i32::from(sy1);
+    println!(
+        "inventory menu: {} rows, text area {} x {} cells (asked {} x {}), in the shown map: {}",
+        v.rows.len(),
+        open.text.2,
+        open.text.3,
+        open.want.0,
+        open.want.1,
+        u8::from(in_map)
+    );
+    assert_eq!(
+        (open.text.2, open.text.3),
+        open.want,
+        "no row cut, no label or reason cut short"
+    );
+    assert!(
+        v.rect.0 >= 0
+            && v.rect.1 >= 0
+            && v.rect.2 < u6_render::WIDTH as i32
+            && v.rect.3 < u6_render::HEIGHT as i32,
+        "inside the frame"
+    );
+    p.frames("r2-wide-inventory");
+    p.key(Key::Escape);
+    assert!(p.e.context_menu().is_none(), "closed");
+    println!("{NAME}: ran");
 }

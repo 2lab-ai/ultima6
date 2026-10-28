@@ -1953,6 +1953,14 @@ globalThis.__u6Layout = {
   get rest() {
     return [...(WIDE ? WIDE_REST : LAYOUT_REST)];
   },
+  // Spec 17: the frame rects the canvas does not show now (`hiddenFrameRects`), and the canvas's
+  // parts outside the viewport (`offViewport`).
+  get hidden() {
+    return hiddenFrameRects();
+  },
+  get offViewport() {
+    return offViewport();
+  },
   get size() {
     return WIDE ? [WIDE_W, WIDE_H] : [LAYOUT_W, LAYOUT_H];
   },
@@ -2519,30 +2527,73 @@ function wideToCanvas(gx, gy) {
   return before.some(({ outer }) => inRect(cx, cy, outer)) ? null : [cx, cy];
 }
 
-// Spec 17 Presentation: the frame rects of the map the canvas does not show in Wide's game view,
-// as [x, y, w, h] in frame pixels: under each window shown (its frame and title strip included,
-// mapped back through the map's region) and the map's parts off the canvas (it covers the canvas,
-// so it can overflow two sides). The engine keeps its context menu off them where it can
-// (`Game.set_menu_hidden`); none in any other view.
-function hiddenMapRects() {
-  if (!WIDE || shownView === FRAME || shownView === WHOLE_VIEW || !wideMap) return [];
-  const [fx, fy, fw, fh] = wideMap.from;
-  const [mx, my, mw, mh] = wideMap.to;
-  const toFrame = ([x, y, w, h]) => {
+// Spec 17 Presentation: the frame rects the canvas does not show the player now, as [x, y, w, h]
+// in frame pixels, in every view: the canvas's parts outside the viewport (a phone held sideways
+// scrolls the page past the canvas's bottom; none while it fits, as in fullscreen) through each
+// region of the frame the canvas shows (`shownRegions`); in Wide's game view also the map under
+// each window shown (its frame and title strip included, mapped back through the map's region)
+// and the map's parts off the canvas (it covers the canvas, so it can overflow two sides). The
+// engine keeps its context menu off them where it can (`Game.set_menu_hidden`), and lays an open
+// one out again when they change.
+function hiddenFrameRects() {
+  const toFrame = ({ from: [fx, fy, fw, fh], to: [mx, my, mw, mh] }, [x, y, w, h]) => {
     const x0 = Math.max(fx, Math.floor(fx + ((x - mx) * fw) / mw));
     const y0 = Math.max(fy, Math.floor(fy + ((y - my) * fh) / mh));
     const x1 = Math.min(fx + fw, Math.ceil(fx + ((x + w - mx) * fw) / mw));
     const y1 = Math.min(fy + fh, Math.ceil(fy + ((y + h - my) * fh) / mh));
     return [x0, y0, x1 - x0, y1 - y0];
   };
-  const off = [[mx, my, -mx, mh], [WIDE_W, my, mx + mw - WIDE_W, mh], [mx, my, mw, -my], [mx, WIDE_H, mw, my + mh - WIDE_H]]
+  const hidden = [];
+  const off = offViewport();
+  for (const region of shownRegions()) {
+    for (const rect of off) {
+      const cut = intersect(rect, region.to);
+      if (cut) hidden.push(toFrame(region, cut));
+    }
+  }
+  if (WIDE && shownView === REGIONS_VIEW && wideMap) {
+    const [mx, my, mw, mh] = wideMap.to;
+    const past = [[mx, my, -mx, mh], [WIDE_W, my, mx + mw - WIDE_W, mh], [mx, my, mw, -my], [mx, WIDE_H, mw, my + mh - WIDE_H]]
+      .filter(([, , w, h]) => w > 0 && h > 0);
+    hidden.push(...[...shownWindows().map(({ outer }) => outer), ...past].map((r) => toFrame(wideMap, r)));
+  }
+  return hidden.filter(([, , w, h]) => w > 0 && h > 0);
+}
+// The regions of the frame the canvas shows now, each { from, to } (the frame rect, the canvas
+// rect it is drawn on): the frame whole (FRAME), the screen letterboxed (WHOLE_VIEW), the HD
+// layout's regions, or Wide's map and windows shown.
+function shownRegions() {
+  if (shownView === FRAME) return [{ from: [0, 0, game.width(), game.height()], to: [0, 0, canvas.width, canvas.height] }];
+  if (shownView === WHOLE_VIEW) return [{ from: [0, 0, SCREEN_W, SCREEN_H], to: WIDE ? WIDE_WHOLE : LAYOUT_WHOLE }];
+  if (!WIDE) return LAYOUT_REGIONS;
+  return [...(wideMap ? [wideMap] : []), ...shownWindows()];
+}
+// The canvas's parts outside the viewport (the document's client box, without its scroll bars),
+// as [x, y, w, h] in canvas pixels: at most one each left, right, above and below the part it
+// shows; none for a canvas with no box.
+function offViewport() {
+  const box = canvas.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return [];
+  const view = document.documentElement;
+  const [sx, sy] = [canvas.width / box.width, canvas.height / box.height];
+  const [cw, ch] = [canvas.width, canvas.height];
+  const x0 = clamp(Math.floor(-box.left * sx), 0, cw);
+  const x1 = clamp(Math.ceil((view.clientWidth - box.left) * sx), x0, cw);
+  const y0 = clamp(Math.floor(-box.top * sy), 0, ch);
+  const y1 = clamp(Math.ceil((view.clientHeight - box.top) * sy), y0, ch);
+  return [[0, 0, x0, ch], [x1, 0, cw - x1, ch], [x0, 0, x1 - x0, y0], [x0, y1, x1 - x0, ch - y1]]
     .filter(([, , w, h]) => w > 0 && h > 0);
-  return [...shownWindows().map(({ outer }) => outer), ...off].map(toFrame).filter(([, , w, h]) => w > 0 && h > 0);
+}
+// The common part of two rects ([x, y, w, h]), or null for none.
+function intersect([ax, ay, aw, ah], [bx, by, bw, bh]) {
+  const [x0, y0] = [Math.max(ax, bx), Math.max(ay, by)];
+  const [x1, y1] = [Math.min(ax + aw, bx + bw), Math.min(ay + ah, by + bh)];
+  return x1 > x0 && y1 > y0 ? [x0, y0, x1 - x0, y1 - y0] : null;
 }
 // The hidden rects last given to the game (a JSON key), so a frame gives them only when they moved.
 let hiddenGiven = null;
 function giveHiddenRects() {
-  const rects = hiddenMapRects();
+  const rects = hiddenFrameRects();
   const key = JSON.stringify(rects);
   if (key === hiddenGiven) return;
   hiddenGiven = key;
@@ -2557,6 +2608,9 @@ const GLYPH_CELL = 8; // a character's cell, in game pixels
 const GLYPH_SPACE = 0x20; // a listed space: no ink, it joins the words beside it (Design 3)
 const GLYPH_SYMBOL = 0x10000; // | its glyph: a listed symbol, drawn from its rows (Design 2 rev 3)
 const GLYPH_TYPED = 0x20000; // | 0x20: a listed space the player typed, never ending a run (rev 3)
+// | a letter's or a space's code: the cell drawn half-toned (spec 17: a disabled entry of the
+// context menu), its glyph painted as a checker at the canvas's pixel grid (`paintHalftone`).
+const GLYPH_HALFTONE = 0x40000;
 const FONT_EM = 0.85; // the font's size: of the height the cell has on the canvas
 // A run's ink keeps this far inside its cells at either end, in canvas pixels (it starts this far
 // in, and a run is narrowed to its cells less this either side): the rasteriser's anti-aliased
@@ -2639,8 +2693,9 @@ function listedGlyphs() {
 // one's left neighbour, of one paper; one listed space joins the cells either side of it, two or
 // more end the run (a space the player typed, GLYPH_TYPED, joins them whatever the spaces beside
 // it: rev 3), and so does a cell not listed; a run's spaces at either end are left out. Each run:
-// its row `y` and its cells [x, code, ink] left to right (a space's ink null: it goes with the
-// text it stands in). A listed symbol (GLYPH_SYMBOL: Design 2 rev 3) ends the cells before it:
+// its row `y`, its `paper` and its cells [x, code, ink, half] left to right (a space's ink null:
+// it goes with the text it stands in; `half`: drawn half-toned, GLYPH_HALFTONE, the code without
+// it). A listed symbol (GLYPH_SYMBOL: Design 2 rev 3) ends the cells before it:
 // after a run of them (directly, or after the spaces that follow it) it is that run's `caret`,
 // else one of the returned list's `symbols`; each { x, y, ink, rows (its 8 rows from
 // `symbolRows`, bit 7 leftmost), spaces (those between it and the run) }.
@@ -2657,7 +2712,9 @@ function glyphRuns(glyphs, from) {
     if (chain) chain.run = null;
   };
   for (let i = 0; i < glyphs.length; i += 5) {
-    const [x, y, code, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
+    const [x, y, listed, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
+    const half = (listed & GLYPH_HALFTONE) !== 0;
+    const code = listed & ~GLYPH_HALFTONE;
     const symbol = code >= GLYPH_SYMBOL && code < GLYPH_TYPED;
     const at = symbol ? 8 * symbols : 0;
     if (symbol) symbols += 1;
@@ -2683,14 +2740,14 @@ function glyphRuns(glyphs, from) {
       continue;
     }
     if (!chain.run) {
-      chain.run = { y, cells: [], caret: null };
+      chain.run = { y, paper, cells: [], caret: null };
       chain.last = chain.run;
     } else {
-      for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push([x - k * GLYPH_CELL, GLYPH_SPACE, null]);
+      for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push([x - k * GLYPH_CELL, GLYPH_SPACE, null, half]);
     }
     chain.spaces = 0;
     chain.gap = 0;
-    chain.run.cells.push([x, code, ink]);
+    chain.run.cells.push([x, code, ink, half]);
   }
   end();
   return runs;
@@ -2713,6 +2770,36 @@ function paintSymbol(ctx, { rows, ink }, x, y, sx, sy) {
   ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
   ctx.fill();
 }
+
+// The half-toned cells of a run (`cells` as `glyphRuns` gives them, `half` set), their text drawn
+// already: every second canvas pixel of their places, in a checker at the canvas's pixel grid
+// (each place's pixels whose x + y is even), the run's `paper` again, as the game draws a
+// disabled entry with every second pixel of its letters left out. A place is its cell's rect on
+// the canvas (`x0`: where game pixel column 0 would lie, `top` the run's top, `sx` canvas pixels
+// per game pixel across, `h` the cell's height), its edges on whole pixels outward; the clip
+// keeps the checker on the pixels copied again.
+function paintHalftone(ctx, cells, paper, [x0, top], sx, h) {
+  checkerTile ??= document.createElement('canvas');
+  if (checkerTile.width !== 2) {
+    checkerTile.width = 2;
+    checkerTile.height = 2;
+  }
+  const t = checkerTile.getContext('2d');
+  t.clearRect(0, 0, 2, 2);
+  t.fillStyle = `#${paper.toString(16).padStart(6, '0')}`;
+  t.fillRect(0, 0, 1, 1);
+  t.fillRect(1, 1, 1, 1);
+  ctx.fillStyle = ctx.createPattern(checkerTile, 'repeat');
+  ctx.beginPath();
+  for (const [x, , , half] of cells) {
+    if (!half) continue;
+    const left = Math.floor(x0 + x * sx);
+    const right = Math.ceil(x0 + (x + GLYPH_CELL) * sx);
+    ctx.rect(left, Math.floor(top), right - left, Math.ceil(top + h) - Math.floor(top));
+  }
+  ctx.fill();
+}
+let checkerTile = null; // the 2 × 2 tile `paintHalftone` repeats
 
 // The runs of `glyphs` (`glyphRuns`) in the classic rect `from` that the canvas rect `to` shows,
 // drawn there over the canvas rect `copied` alone (the part just copied from the ×4 frame, where
@@ -2746,7 +2833,7 @@ function paintGlyphs(ctx, glyphs, from, to, copied) {
     ready = true;
   };
   const runs = glyphRuns(glyphs, from);
-  for (const { y, cells, caret } of runs) {
+  for (const { y, paper, cells, caret } of runs) {
     const left = to[0] + (cells[0][0] - from[0]) * sx;
     const top = to[1] + (y - from[1]) * sy;
     const span = (cells.at(-1)[0] + GLYPH_CELL - cells[0][0]) * sx;
@@ -2773,6 +2860,10 @@ function paintGlyphs(ctx, glyphs, from, to, copied) {
       ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
       ctx.fillText(text.slice(a, b), a === 0 ? 0 : ctx.measureText(text.slice(0, a)).width, 0);
       a = b;
+    }
+    if (cells.some(([, , , half]) => half)) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      paintHalftone(ctx, cells, paper, [to[0] - from[0] * sx, top], sx, h);
     }
     if (caret) {
       const at = pen + ctx.measureText(text + ' '.repeat(caret.spaces)).width * k;
@@ -2981,6 +3072,9 @@ function frame(now) {
   last = now;
   if (dt > 0 && dt <= LONG_FRAME_MS) interval += (dt - interval) / 8;
   try {
+    // The rects the canvas hides now, before the steps (a right press among their events opens
+    // the menu where the player sees it).
+    giveHiddenRects();
     const due = game.pace(dt);
     const budget = budget_ms(interval);
     const start = performance.now();
@@ -2992,7 +3086,6 @@ function frame(now) {
       done = game.finished();
     }
     game.ran(k);
-    giveHiddenRects();
     const log = game.take_log();
     if (log) console.info(log);
     if (voice.ready) hearSpeech();
@@ -3926,10 +4019,15 @@ faster.addEventListener('click', () => changeSpeed(1));
 // down in the event sent last: a press, a release, a move with a button held); in Wide a press
 // on a title strip also drags its window (`dragWindow`). The canvas captures a press so the
 // release reaches
-// the game even off the canvas; the context menu stays off it while a game runs. A press is, in
-// this order, the focus, the game's pointer event (queued for the next step, exactly once) and
-// the gesture that starts the sound (the AudioContext is created before its first await, inside
-// the press's user activation); the sound starting never delays or drops the event.
+// the game even off the canvas; the browser's context menu stays off it while a game runs. A
+// press is, in this order, the focus, the game's pointer event (queued for the next step, exactly
+// once) and the gesture that starts the sound (the AudioContext is created before its first
+// await, inside the press's user activation); the sound starting never delays or drops the
+// event. A press that reaches no frame pixel (the canvas with no box) or lies off the canvas (on
+// the page round it, on fullscreen's black sides) closes the game's context menu, as a press
+// outside it in the frame does (`Game.dismiss_menu`), and gives the game nothing; a press in the
+// HD layout's gaps or on a Wide window's frame reaches the rest of the screen (LAYOUT_REST,
+// WIDE_REST), outside the menu, which closes it in the engine.
 // The game pixel of pointer event `e` (null on a canvas with no box), as `sendPointer` sends it.
 function pointerPixel(e) {
   const box = canvas.getBoundingClientRect();
@@ -3947,7 +4045,10 @@ function pointerPixel(e) {
 function sendPointer(e) {
   if (!game || crashed) return;
   const at = pointerPixel(e);
-  if (!at) return;
+  if (!at) {
+    if (e.type === 'pointerdown') closeMenu();
+    return;
+  }
   const buttons = e.buttons & 3;
   sentButtons = buttons;
   game.pointer(at[0], at[1], buttons);
@@ -3966,6 +4067,18 @@ canvas.addEventListener('pointercancel', (e) =>
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
+// A press anywhere off the canvas (capture: before the page's own controls take it).
+document.addEventListener('pointerdown', (e) => {
+  if (e.target === canvas || !game || crashed) return;
+  closeMenu();
+}, true);
+// The game's context menu closed by a press of the page's (`Game.dismiss_menu`), the frame
+// without it shown at once.
+function closeMenu() {
+  if (!game.dismiss_menu()) return;
+  game.present();
+  draw();
+}
 
 // The context menu (spec 17) is the game's: a right press goes to the engine like any other
 // press, and the engine opens, draws and runs the menu in the frame (`Engine::tick`,

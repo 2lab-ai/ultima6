@@ -1526,6 +1526,7 @@ fn the_pointer_over_a_line_of_text_leaves_every_cell_listed_and_out_of_the_hd_fr
             code: u16::from(b'A' + k as u8),
             ink,
             paper,
+            halftone: false,
         })
         .collect();
     assert_eq!(line.len(), 8, "the test's line: eight letters");

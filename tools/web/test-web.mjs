@@ -1453,41 +1453,251 @@ async function menuPage(env, viewport = null) {
 
 // Spec 17 Presentation (unit M3): the menu is the engine's, drawn in the frame; the page keeps
 // no element for it. The canvas as it is now, kept in the page (its pixels are the user's game:
-// never returned), for `canvasChanged`.
+// never returned), for `menuPixels`; with it the engine's frame and its published frame (the
+// game's screen without the menu or the sprite, `Game.published_rgba`).
 const keepCanvas = (page) => page.evaluate(() => {
   const c = document.getElementById('screen');
-  globalThis.__kept = c.getContext('2d').getImageData(0, 0, c.width, c.height).data.slice();
-});
-// Of the game pixels inside `rect` ([x, y, w, h], its two outer pixels left out, one in every
-// `step` each way), how many the canvas shows in another colour than when kept, and how many it
-// does not show at all (`hidden`: under a Wide window or off the canvas): through the page's own
-// map of the frame onto the canvas with the HD or the Wide layout (`__u6Layout.toCanvas`, null
-// for a pixel it does not show), else the canvas's scale. Counts only.
-const canvasChanged = (page, rect, step = 3) => page.evaluate(([[x, y, w, h], step]) => {
-  const c = document.getElementById('screen');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const kept = globalThis.__kept;
   const g = globalThis.__shownGame;
-  const mapped = ['hd', 'wide'].includes(document.body.dataset.layout);
-  let samples = 0;
-  let changed = 0;
-  let hidden = 0;
-  for (let gy = y + 2; gy < y + h - 2; gy += step) {
-    for (let gx = x + 2; gx < x + w - 2; gx += step) {
-      const p = mapped
-        ? globalThis.__u6Layout.toCanvas(gx, gy)
-        : [((gx + 0.5) * c.width) / g.width(), ((gy + 0.5) * c.height) / g.height()];
-      if (!p) {
-        hidden += 1;
+  globalThis.__kept = c.getContext('2d').getImageData(0, 0, c.width, c.height).data.slice();
+  globalThis.__keptFrame = g.frame_rgba();
+  globalThis.__keptPublished = g.published_rgba();
+});
+// The page-side helpers of `menuPixels`, `boxShown` and `visibleMenu`, defined in the page
+// (`__menuHelpers()`, the page's CSP allows no eval): `at(gx, gy)` the canvas point showing game
+// pixel (gx, gy) (the page's own map of the frame onto the canvas with the HD or the Wide layout,
+// `__u6Layout.toCanvas`, null for a pixel it does not show; else the canvas's scale),
+// `onCanvas([x, y, w, h])` the canvas rect [x0, y0, x1, y1) that shows a game rect (its corner
+// pixels' centres out by half a pixel each way, whole pixels; null when a corner does not show).
+const menuHelpers = (page) => page.evaluate(() => {
+  globalThis.__menuHelpers = () => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const mapped = ['hd', 'wide'].includes(document.body.dataset.layout);
+    const at = (gx, gy) => (mapped
+      ? globalThis.__u6Layout.toCanvas(gx, gy)
+      : [((gx + 0.5) * c.width) / g.width(), ((gy + 0.5) * c.height) / g.height()]);
+    const onCanvas = ([x, y, w, h]) => {
+      const [a, a1, b] = [at(x, y), at(x + 1, y + 1), at(x + w - 1, y + h - 1)];
+      if (!a || !a1 || !b) return null;
+      const [hx, hy] = [(a1[0] - a[0]) / 2, (a1[1] - a[1]) / 2];
+      return [Math.round(a[0] - hx), Math.round(a[1] - hy), Math.round(b[0] + hx), Math.round(b[1] + hy)];
+    };
+    return { c, mapped, at, onCanvas };
+  };
+});
+// Spec 17 Presentation (round 2): what the canvas shows of the open menu `view` (Game.menu_view),
+// counts only. For each row, the canvas pixels of its band of the text area (8 game pixels tall,
+// from the area's second column: the labels and what follows them, not the highlight's mark):
+// how many are exactly the paper, the ink and the heading's colour (`view.colours`), how many
+// something else (the HD font's anti-aliasing), and how many side-by-side pairs are both not the
+// paper (`pairs`: a half-toned label has none, at the canvas's pixel grid). Of the whole box, how
+// many canvas pixels differ from the canvas kept before (`keepCanvas`) and how many it has. The
+// game's own screen may change meanwhile (a step moves a passer-by): `world` counts the game
+// pixels where the published frame changed since it was kept, and those canvas pixels of the box
+// that show one of them or a game pixel within 2 of one (the HD filter's reach) are left out of
+// `differ` (`excluded`); `engine` counts the game pixels where the engine's frame changed while
+// its published frame did not (what the menu left in the engine's frame, once it is closed).
+const menuPixels = async (page, view) => (await menuHelpers(page), page.evaluate((v) => {
+  const { c, mapped, at, onCanvas } = globalThis.__menuHelpers();
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const colour = (x, y) => {
+    const i = (y * c.width + x) * 4;
+    return (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+  };
+  const [paper, ink, head] = v.colours;
+  const rows = v.rows.map((r, i) => {
+    const n = { i, kind: r.kind, enabled: r.enabled, theft: r.theft, paper: 0, ink: 0, head: 0, other: 0, pairs: 0, cells: 0 };
+    // At the game's pixel grid (the colour at each game pixel's centre): side-by-side pairs.
+    for (let gy = r.y; gy < r.y + 8; gy += 1) {
+      let left = paper;
+      for (let gx = v.text[0] + 8; gx < v.text[0] + v.text[2]; gx += 1) {
+        const p = at(gx, gy);
+        const k = colour(Math.floor(p[0]), Math.floor(p[1]));
+        if (gx > v.text[0] + 8 && k !== paper && left !== paper) n.cells += 1;
+        left = k;
+      }
+    }
+    const [x0, y0, x1, y1] = onCanvas([v.text[0] + 8, r.y, v.text[2] - 8, 8]);
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
+        const k = colour(x, y);
+        if (k === paper) n.paper += 1;
+        else if (k === ink) n.ink += 1;
+        else if (k === head) n.head += 1;
+        else n.other += 1;
+        if (x > x0 && k !== paper && colour(x - 1, y) !== paper) n.pairs += 1;
+      }
+    }
+    return n;
+  });
+  const kept = globalThis.__kept;
+  const moving = globalThis.__moving ?? null;
+  const [bx0, by0, bx1, by1] = onCanvas(v.rect);
+  const g = globalThis.__shownGame;
+  const [gw, gh] = [g.width(), g.height()];
+  const [f0, p0, f1, p1] = [globalThis.__keptFrame, globalThis.__keptPublished, g.frame_rgba(), g.published_rgba()];
+  const same = (a, b, j) => a[j] === b[j] && a[j + 1] === b[j + 1] && a[j + 2] === b[j + 2];
+  const off = new Uint8Array(c.width * c.height);
+  let [world, engine] = [0, 0];
+  for (let gy = 0; gy < gh; gy += 1) {
+    for (let gx = 0; gx < gw; gx += 1) {
+      const j = (gy * gw + gx) * 4;
+      if (same(p0, p1, j)) {
+        if (!same(f0, f1, j)) engine += 1;
         continue;
       }
-      const i = (Math.floor(p[1]) * c.width + Math.floor(p[0])) * 4;
-      samples += 1;
-      if (d[i] !== kept[i] || d[i + 1] !== kept[i + 1] || d[i + 2] !== kept[i + 2]) changed += 1;
+      world += 1;
+      const [x0, y0] = [Math.max(0, gx - 2), Math.max(0, gy - 2)];
+      const r = onCanvas([x0, y0, Math.min(gw, gx + 3) - x0, Math.min(gh, gy + 3) - y0]);
+      if (!r) continue;
+      for (let y = Math.max(r[1], by0); y < Math.min(r[3], by1); y += 1) {
+        for (let x = Math.max(r[0], bx0); x < Math.min(r[2], bx1); x += 1) off[y * c.width + x] = 1;
+      }
     }
   }
-  return { samples, changed, hidden };
-}, [rect, step]);
+  let [differ, boxed, moved, excluded] = [0, 0, 0, 0];
+  for (let y = by0; y < by1; y += 1) {
+    for (let x = bx0; x < bx1; x += 1) {
+      const i = (y * c.width + x) * 4;
+      boxed += 1;
+      if (moving?.[i / 4]) {
+        moved += 1;
+        continue;
+      }
+      if (off[i / 4]) {
+        excluded += 1;
+        continue;
+      }
+      if (d[i] !== kept[i] || d[i + 1] !== kept[i + 1] || d[i + 2] !== kept[i + 2]) differ += 1;
+    }
+  }
+  const scale = mapped ? 0 : c.width / globalThis.__shownGame.width();
+  return { rows, differ, boxed, moved, excluded, world, engine, mapped, scale, layout: document.body.dataset.layout, font: document.body.dataset.font };
+}, view));
+// The pixels of the canvas that change on their own over `ticks` of the game (its animated tiles:
+// water, fire; a passer-by), seen every 4 ticks against the first, marked (`__moving`); then the
+// game's steps held (`holdSteps`, so no step falls between the canvas kept and the hold) and the
+// canvas kept (`keepCanvas`) as the held world shows it; `menuPixels` compares the rest only. The
+// pointer stays still meanwhile.
+async function keepStill(page, ticks = 60) {
+  await keepCanvas(page);
+  await page.evaluate(() => {
+    globalThis.__moving = new Uint8Array(globalThis.__kept.length / 4);
+  });
+  for (let t = 0; t < ticks; t += 4) {
+    await h.waitTicks(page, 4);
+    await h.waitFrames(page, 1);
+    await page.evaluate(() => {
+      const c = document.getElementById('screen');
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const [k, m] = [globalThis.__kept, globalThis.__moving];
+      for (let i = 0; i < m.length; i += 1) {
+        const j = 4 * i;
+        if (d[j] !== k[j] || d[j + 1] !== k[j + 1] || d[j + 2] !== k[j + 2]) m[i] = 1;
+      }
+    });
+  }
+  await holdSteps(page);
+  await h.waitFrames(page, 2);
+  await keepCanvas(page);
+}
+// The game's steps held off (the page's loop calls them, they do nothing: the world stands
+// still, the page still presents and draws) until `releaseSteps`; `stepGame(page, n)` runs n
+// steps of 20 ms meanwhile (through the harness's hook, so its counts go on).
+const holdSteps = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  if (!Object.hasOwn(g, 'step')) {
+    const step = Object.getPrototypeOf(g).step;
+    g.step = function (ms) {
+      if (!globalThis.__stepsHeld) step.call(this, ms);
+    };
+    g.stepHeld = (n) => {
+      for (let i = 0; i < n; i += 1) step.call(g, 20);
+    };
+  }
+  globalThis.__stepsHeld = true;
+});
+const stepGame = async (page, n) => {
+  await page.evaluate((k) => globalThis.__shownGame.stepHeld(k), n);
+  await h.waitFrames(page, 2);
+};
+const releaseSteps = (page) => page.evaluate(() => {
+  globalThis.__stepsHeld = false;
+});
+// Spec 17 Presentation (round 2, gpt e MUST 1): the content `menuPixels` counted on the open menu
+// `px` in the layout `name`: every heading has pixels of the heading's colour, every entry that
+// can run ink pixels; a disabled entry (past the first row, without the theft mark) has pixels
+// other than the paper, and where the canvas shows the half-tone at its own pixel grid (the HD
+// font, or the frame one to one) never two side by side, while an entry that runs has. Logs the
+// counts; returns the disabled rows checked.
+function checkMenuContent(name, px) {
+  const heads = px.rows.filter((r) => r.kind === 'head');
+  const on = px.rows.filter((r) => r.kind === 'entry' && r.enabled);
+  const off = px.rows.filter((r) => r.kind === 'entry' && !r.enabled && !r.theft && r.i > 0);
+  // The half-tone at the canvas's own pixel grid: the HD font's (the page's checker), or the frame
+  // shown one to one; else (the frame scaled, its checker scaled with it) at the game's grid, the
+  // colour at each game pixel's centre (`cells`).
+  const grid = px.font === 'hd' || px.scale === 1;
+  const key = grid ? 'pairs' : 'cells';
+  const sum = (rows, key) => rows.reduce((k, r) => k + r[key], 0);
+  console.log(`  receipt: ${name} (layout ${px.layout}, font ${px.font}, ${grid ? 'canvas' : 'game'} pixel grid): ${heads.length} heading(s), ${sum(heads, 'head')} heading-colour pixels; ${on.length} entries that run, ${sum(on, 'ink')} ink pixels, ${sum(on, key)} side by side; ${off.length} disabled, ${sum(off, 'ink') + sum(off, 'other')} not paper, ${sum(off, key)} side by side; box ${px.boxed} canvas pixels, ${px.differ} differ from before it opened`);
+  assert.ok(heads.length > 0 && heads.every((r) => r.head > 0), `${name}: every heading in the heading's colour`);
+  assert.ok(on.length > 0 && on.every((r) => r.ink > 0), `${name}: every entry that runs in ink`);
+  assert.ok(off.every((r) => r.ink + r.other > 0), `${name}: a disabled entry drawn`);
+  assert.ok(off.every((r) => r[key] === 0), `${name}: a disabled entry half-toned`);
+  assert.ok(on.some((r) => r[key] > 0), `${name}: an entry that runs drawn whole`);
+  return off.length;
+}
+// Of the open menu `view`'s box: how many game pixels the canvas does not show (`hidden`: under a
+// Wide window or off the canvas; every pixel of it), its canvas rect, the canvas's size, and the
+// windows' frames on the canvas it meets (Wide: `__u6Layout.windows`' `outer`).
+const boxShown = async (page, view) => (await menuHelpers(page), page.evaluate((v) => {
+  const { c, at, onCanvas } = globalThis.__menuHelpers();
+  const [x, y, w, h] = v.rect;
+  let hidden = 0;
+  for (let gy = y; gy < y + h; gy += 1) {
+    for (let gx = x; gx < x + w; gx += 1) if (!at(gx, gy)) hidden += 1;
+  }
+  const rect = onCanvas(v.rect);
+  const meets = (globalThis.__u6Layout.wide ? globalThis.__u6Layout.windows : [])
+    .filter(({ outer: [ox, oy, ow, oh] }) => rect && rect[0] < ox + ow && ox < rect[2] && rect[1] < oy + oh && oy < rect[3])
+    .length;
+  return { hidden, rect, size: [c.width, c.height], meets };
+}, view));
+// The visible part of the canvas (its box within the viewport, the document's client box) and the
+// open menu `view`'s box, in CSS pixels as [x, y, w, h], rounded; with the frame rects the page
+// gives the engine as hidden (`__u6Layout.hidden`) and the viewport.
+const visibleMenu = async (page, view) => (await menuHelpers(page), page.evaluate((v) => {
+  const { c, onCanvas } = globalThis.__menuHelpers();
+  const box = c.getBoundingClientRect();
+  const doc = document.documentElement;
+  const [sx, sy] = [box.width / c.width, box.height / c.height];
+  const [x0, y0, x1, y1] = onCanvas(v.rect);
+  const left = Math.max(box.left, 0);
+  const top = Math.max(box.top, 0);
+  const right = Math.min(box.right, doc.clientWidth);
+  const bottom = Math.min(box.bottom, doc.clientHeight);
+  const r = (a) => a.map((n) => Math.round(n));
+  return {
+    menu: r([box.left + x0 * sx, box.top + y0 * sy, (x1 - x0) * sx, (y1 - y0) * sy]),
+    visible: r([left, top, right - left, bottom - top]),
+    hidden: globalThis.__u6Layout.hidden,
+    viewport: [doc.clientWidth, doc.clientHeight],
+  };
+}, view));
+const inside = ({ menu: [x, y, w, h], visible: [vx, vy, vw, vh] }) => x >= vx && y >= vy && x + w <= vx + vw && y + h <= vy + vh;
+// The game pixel of a view cell near `around` (game pixels; ± `reach` cells) whose context menu
+// has an entry disabled (the leader starts without a readied spellbook: Cast), `around` first;
+// null for none.
+async function disabledCell(page, around, reach = 4) {
+  const points = [around];
+  for (let dy = -reach; dy <= reach; dy += 1) {
+    for (let dx = -reach; dx <= reach; dx += 1) if (dx || dy) points.push([around[0] + 16 * dx, around[1] + 16 * dy]);
+  }
+  const menus = await h.contextMenus(page, points);
+  const i = menus.findIndex((m) => m && m.sections.some((s) => s.entries.some((e) => !e.enabled && !e.theft)));
+  return i >= 0 ? points[i] : null;
+}
 // No element of the page is a menu (the deploy-30 `#context-menu` is gone).
 const pageMenus = (page) => page.evaluate(() => document.querySelectorAll('#context-menu, [role="menu"], [role="menuitem"]').length);
 // The row of the drawn menu `view` with entry `code`, or -1.
@@ -1497,7 +1707,7 @@ const rowOf = (view, code) => view.rows.findIndex((r) => r.code === code);
 const HERO = [88, 88];
 const WIDE_HERO = [320 + 18 * 16 + 8, 10 * 16 + 8];
 
-test('the context menu (spec 17, unit M3): a right press at the prompt opens the engine\'s menu in the frame: no page element for it, the canvas changes inside its box, the game takes no button, also with the right button held and moved over the map; a left press on Look runs Look; Escape, held, and a left press outside close it and give the game no button and no walk; on a closed door beside the leader Use chosen by a left press opens the door (screenshot)', async (env) => {
+test('the context menu (spec 17, unit M3): a right press at the prompt opens the engine\'s menu in the frame: no page element for it, the game takes no button, also with the right button held and moved over the map; a left press on Look runs Look (it prints, and waits on what it shows); its pixels are its content (headings in the heading\'s colour, entries in ink, a disabled one half-toned) and Escape, held, closes it, gives the game no key and no button and no walk and leaves the canvas as before it opened; a left press outside closes it too; on a closed door beside the leader Use chosen by a left press opens the door (screenshot)', async (env) => {
   const { page } = await menuPage(env);
   const taken = () => page.evaluate(() => globalThis.__taken.length);
   const leader = async () => (await h.state(page)).leader;
@@ -1516,32 +1726,60 @@ test('the context menu (spec 17, unit M3): a right press at the prompt opens the
   assert.equal(await taken(), t0, 'the held right button gave the game no button');
   assert.equal(await leader(), at0, 'no walk');
   assert.equal(await pageMenus(page), 0, 'still no page element');
-  const seen = await canvasChanged(page, view.text);
-  console.log(`  receipt: the menu box ${view.rect}, ${view.rows.length} rows; canvas samples in its text area ${seen.samples}, changed ${seen.changed}`);
-  assert.ok(seen.changed * 2 > seen.samples, 'the canvas shows the menu in its box');
+  console.log(`  receipt: the menu box ${view.rect}, ${view.rows.length} rows`);
 
   const look = rowOf(view, LOOK);
   assert.ok(look >= 0 && view.rows[look].enabled, 'Look offered, able to run');
+  const lines = () => page.evaluate(() => globalThis.__shownGame.message_lines());
+  const lines0 = await lines();
   await page.mouse.click(...(await h.screenPoint(page, ...h.rowPoint(view, look))));
   await h.menuClosed(page);
   await page.waitForFunction(() => document.getElementById('screen').dataset.prompt !== '1', null, { timeout: 10_000, polling: 'raf' });
   await h.waitTicks(page, 20);
   assert.notEqual(await page.evaluate(() => document.getElementById('screen').dataset.prompt), '1', 'Look runs: it waits on what it shows');
+  const lines1 = await lines();
+  console.log(`  receipt: Look: message lines ${lines0} -> ${lines1}`);
+  assert.ok(lines1 > lines0, 'Look printed what it sees');
   await page.keyboard.press('Space');
   await h.waitPrompt(page);
 
+  // Its content, on a cell whose menu has a disabled entry, the pointer kept still at the press
+  // point; then Escape (pressed, repeated, let go) closes it.
+  const cell = await disabledCell(page, HERO);
+  assert.ok(cell, 'a cell near the hero whose menu has a disabled entry');
+  await page.mouse.move(...(await h.screenPoint(page, ...cell)));
+  await h.waitTicks(page, 5);
+  await h.waitFrames(page, 2);
+  // The world held still from here to the check after the close (a few steps of the game's).
+  await keepStill(page);
   const t1 = await taken();
-  await h.rightPress(page, ...HERO);
+  const keys = () => page.evaluate(() => globalThis.__shownGame.game_keys());
+  await page.mouse.down({ button: 'right' });
+  await stepGame(page, 2);
   await page.mouse.up({ button: 'right' });
+  await stepGame(page, 2);
+  const shown = await h.menuView(page);
+  assert.ok(shown, 'open');
+  checkMenuContent('Original', await menuPixels(page, shown));
+  assert.ok((await menuPixels(page, shown)).differ > 0, 'the open menu differs from the canvas before it');
+  await keepFrame(page.locator('#screen'), 'r2-original-disabled-page.png');
+  const k0 = await keys();
   await page.keyboard.down('Escape');
-  await h.waitTicks(page, 2);
+  await stepGame(page, 2);
   await page.keyboard.down('Escape'); // a repeat
-  await h.waitTicks(page, 2);
+  await stepGame(page, 2);
   await page.keyboard.up('Escape');
+  await stepGame(page, 2);
   await h.menuClosed(page);
+  const restored = await menuPixels(page, shown);
+  await releaseSteps(page);
   await h.waitTicks(page, 30);
+  console.log(`  receipt: Escape: the game's keys ${k0} -> ${await keys()}; the box after it closed: ${restored.differ} of ${restored.boxed} canvas pixels differ from before it opened (${restored.moved} that move on their own left out; the game's screen changed at ${restored.world} game pixels meanwhile, ${restored.excluded} canvas pixels of the box showing them left out); the engine's frame changed at ${restored.engine} game pixels where its published frame did not`);
+  assert.equal(await keys(), k0, 'Escape: its press, its repeat and its release reach the game as no key');
   assert.equal(await taken(), t1, 'Escape: no button');
   assert.equal(await leader(), at0, 'the hero where he was');
+  assert.equal(restored.engine, 0, 'closed: nothing of the menu left in the engine\'s frame');
+  assert.equal(restored.differ, 0, 'closed: the canvas as before it opened');
   await h.waitPrompt(page);
 
   await h.rightPress(page, ...HERO);
@@ -1594,6 +1832,30 @@ test('the context menu (spec 17, unit M3): after a left press outside closes it,
   const added = (await changes()).slice(before.length);
   assert.deepEqual(added.map(([b]) => b), [1, 0], 'the press, then its release, and nothing else');
   assert.ok(added[1][1] >= added[0][1], 'the release after the press');
+}, { needs: h.haveHfes });
+
+test('the context menu (spec 17, round 2): a press and release off the canvas (on the status line, as a touch gives them, with no move between) closes it and gives the game nothing; the next left press on the canvas, with no move before it, reaches the game (its press and its release, in that order, and nothing before them)', async (env) => {
+  const { page } = await menuPage(env);
+  const changes = () => page.evaluate(() => globalThis.__taken.map(([b, at]) => [b, at]));
+  const before = await changes();
+  await h.rightPress(page, ...HERO);
+  await page.mouse.up({ button: 'right' });
+  await page.evaluate(() => {
+    const at = document.getElementById('status');
+    const ev = (type, b) => new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, buttons: b, button: 0 });
+    at.dispatchEvent(ev('pointerdown', 1));
+    at.dispatchEvent(ev('pointerup', 0));
+  });
+  await h.menuClosed(page);
+  await h.waitTicks(page, 10);
+  assert.deepEqual(await changes(), before, 'the right press and the press off the canvas: no button change');
+  await page.mouse.down();
+  await h.waitTicks(page, 3);
+  await page.mouse.up();
+  await h.waitTaken(page);
+  await h.waitTicks(page, 3);
+  const added = (await changes()).slice(before.length);
+  assert.deepEqual(added.map(([b]) => b), [1, 0], 'the press, then its release, and nothing else');
 }, { needs: h.haveHfes });
 
 test('the context menu (spec 17): a key let go just before a right press, with no step of the game between (the release queued), still gives the menu, an entry of it able to run', async (env) => {
@@ -1655,37 +1917,193 @@ test('the context menu (spec 17): the underlined command is its first entry: Loo
   }
 }, { needs: h.haveHfes });
 
-// The menu on the hero at `hero` in the layout `page` shows: open, the canvas changed inside its
-// text area, every pixel of it shown (none under a Wide window or off the canvas: the page gives
-// the engine what it hides, `Game.set_menu_hidden`), closed again by Escape; its frame kept as
-// `name`.
-async function menuInLayout(page, hero, name) {
+// The menu in the layout `page` shows, on a cell near `hero` whose menu has a disabled entry (the
+// hero's own cell when none has): open with the pointer kept still at the press point, no page
+// element for it while it is open, every game pixel of its box shown (none under a Wide window or
+// off the canvas: the page gives the engine what it hides, `Game.set_menu_hidden`), its box on the
+// canvas whole and clear of every Wide window's frame, its content (`checkMenuContent`); closed
+// again by Escape, the canvas as before it opened. Its frame kept as `name` (and `frame`, the
+// round's name, when given). The game took no button. Returns the view.
+async function menuInLayout(page, hero, name, frame = null) {
+  const taken = () => page.evaluate(() => globalThis.__taken.length);
   assert.equal(await pageMenus(page), 0, 'no page element for a menu');
-  await keepCanvas(page);
-  await h.rightPress(page, ...hero);
-  await page.mouse.up({ button: 'right' });
+  const cell = (await disabledCell(page, hero)) ?? hero;
+  await page.mouse.move(...(await h.screenPoint(page, ...cell)));
   await h.waitTicks(page, 5);
-  await h.waitFrames(page, 3);
+  await h.waitFrames(page, 2);
+  // The world held still from here to the check after the close (a few steps of the game's).
+  await keepStill(page);
+  const t0 = await taken();
+  await page.mouse.down({ button: 'right' });
+  await stepGame(page, 2);
+  await page.mouse.up({ button: 'right' });
+  await stepGame(page, 2);
   const view = await h.menuView(page);
-  const seen = await canvasChanged(page, view.text);
-  console.log(`  receipt: ${name}: box ${view.rect}, ${view.rows.length} rows; canvas samples in its text area ${seen.samples}, changed ${seen.changed}, not shown ${seen.hidden}`);
-  assert.equal(seen.hidden, 0, `${name}: no part of it under a window or off the canvas`);
-  assert.ok(seen.samples > 0 && seen.changed * 2 > seen.samples, `${name}: the canvas shows the menu`);
+  assert.ok(view, `${name}: open`);
+  assert.equal(await pageMenus(page), 0, `${name}: no page element while it is open`);
+  const shown = await boxShown(page, view);
+  console.log(`  receipt: ${name}: box ${view.rect}, ${view.rows.length} rows; on the canvas ${shown.rect} of ${shown.size}; game pixels not shown ${shown.hidden}; windows it meets ${shown.meets}`);
+  assert.equal(shown.hidden, 0, `${name}: every pixel of its box shown`);
+  const [x0, y0, x1, y1] = shown.rect;
+  assert.ok(x0 >= 0 && y0 >= 0 && x1 <= shown.size[0] && y1 <= shown.size[1], `${name}: its box inside the canvas`);
+  assert.equal(shown.meets, 0, `${name}: clear of every window's frame`);
+  const px = await menuPixels(page, view);
+  checkMenuContent(name, px);
+  assert.ok(px.differ > 0, `${name}: the open menu differs from the canvas before it`);
   await keepFrame(page.locator('#screen'), `${name}.png`);
+  if (frame) await keepFrame(page.locator('#screen'), frame);
   await page.keyboard.press('Escape');
+  await stepGame(page, 2);
   await h.menuClosed(page);
+  const after = await menuPixels(page, view);
+  await releaseSteps(page);
+  await h.waitTicks(page, 5);
+  console.log(`  receipt: ${name}: closed, ${after.differ} of ${after.boxed} canvas pixels of the box differ from before it opened (${after.moved} that move on their own left out; the game's screen changed at ${after.world} game pixels meanwhile, ${after.excluded} canvas pixels of the box showing them left out); the engine's frame changed at ${after.engine} game pixels where its published frame did not`);
+  assert.equal(after.engine, 0, `${name}: closed, nothing of the menu left in the engine's frame`);
+  assert.equal(after.differ, 0, `${name}: closed, the canvas as before it opened`);
+  assert.equal(await taken(), t0, `${name}: the game took no button`);
+  return view;
 }
 
-test('the context menu (spec 17, unit M3) in the HD layout with the HD font: a right press on the hero opens the engine\'s menu, which the canvas shows in its box (through the layout), and Escape closes it (screenshot)', async (env) => {
+test('the context menu (spec 17, unit M3) in the HD layout with the HD font: a right press opens the engine\'s menu, which the canvas shows in its box (through the layout) with its content, a disabled entry half-toned at the canvas\'s pixel grid, and Escape closes it, the canvas as before; a press in a gap between the layout\'s regions closes it too and gives the game nothing (screenshot)', async (env) => {
   const { page } = await bootLayout(env, { font: 'hd' });
-  await menuInLayout(page, HERO, 'menu-hero-hd');
+  await h.waitFrames(page, 3);
+  assert.equal(await page.evaluate(() => document.body.dataset.font), 'hd', 'the HD font drawn');
+  await menuInLayout(page, HERO, 'menu-hero-hd', 'r2-hd-disabled.png');
+  const taken = () => page.evaluate(() => globalThis.__taken.length);
+  const t0 = await taken();
+  await h.rightPress(page, ...HERO);
+  await page.mouse.up({ button: 'right' });
+  // A canvas point between the map window and the right column (x 644..696), mid-height.
+  const gap = await page.evaluate(() => {
+    const c = document.getElementById('screen');
+    const b = c.getBoundingClientRect();
+    return [b.left + (670 * b.width) / c.width, b.top + (300 * b.height) / c.height];
+  });
+  assert.equal(await page.evaluate(([x, y]) => globalThis.__u6Layout.regions.some(({ to: [rx, ry, rw, rh] }) => x >= rx && x < rx + rw && y >= ry && y < ry + rh), [670, 300]), false, 'the point in no region');
+  await page.mouse.click(...gap);
+  await h.menuClosed(page);
+  await h.waitTicks(page, 10);
+  assert.equal(await taken(), t0, 'the gap press gave the game nothing');
 }, { needs: h.haveHfes });
 
-test('the context menu (spec 17, unit M3) in Wide: a right press on the hero opens the engine\'s menu inside the map, clear of the page\'s windows (the page gives the engine what they hide), which the canvas shows in its box, and Escape closes it (screenshot)', async (env) => {
+test('the context menu (spec 17, unit M3) in Wide: a right press opens the engine\'s menu inside the map, every pixel of its box shown and clear of the page\'s windows (the page gives the engine what they hide), which the canvas shows with its content, and Escape closes it, the canvas as before (screenshot)', async (env) => {
   const { page } = await bootWide(env);
   const view = await h.contextMenuAt(page, ...WIDE_HERO);
   assert.ok(view && view.kind === 'map', 'a map menu on the hero');
-  await menuInLayout(page, WIDE_HERO, 'menu-hero-wide');
+  await menuInLayout(page, WIDE_HERO, 'menu-hero-wide', 'r2-wide-disabled-page.png');
+}, { needs: h.haveHfes });
+
+// Spec 17 Presentation (round 2, item 7): the open menu `view` on `page`, its box in CSS pixels
+// inside the visible part of the canvas (logged with the hidden rects the page gave), and its
+// last entry that can run chosen by a left press on it inside that part (the menu closes).
+async function menuVisibleAndChosen(page, view, where) {
+  const rects = await visibleMenu(page, view);
+  console.log(`  receipt: ${where}: menu ${rects.menu} in the visible canvas ${rects.visible} (viewport ${rects.viewport}); hidden frame rects given ${JSON.stringify(rects.hidden)}`);
+  assert.ok(inside(rects), `${where}: the whole box inside the visible canvas`);
+  const last = view.rows.findLastIndex((r) => r.kind === 'entry' && r.enabled);
+  assert.ok(last >= 0, `${where}: an entry that can run`);
+  const [px, py] = await h.screenPoint(page, ...h.rowPoint(view, last));
+  const [vx, vy, vw, vh] = rects.visible;
+  assert.ok(px >= vx && py >= vy && px < vx + vw && py < vy + vh, `${where}: its last entry that can run inside it`);
+  await page.mouse.click(px, py);
+  await h.menuClosed(page);
+  return rects;
+}
+
+// Of the view cells whose screen point lies inside the viewport, the one whose menu has the most
+// rows, of those the lowest (where the menu must go up), and its game pixel; null for none.
+async function lowestLargestCell(page) {
+  const [width, height] = await page.evaluate(() => [document.documentElement.clientWidth, document.documentElement.clientHeight]);
+  const points = VIEW.map(([c, r]) => viewCell(c, r));
+  const menus = await h.contextMenus(page, points);
+  let best = null;
+  for (let i = 0; i < points.length; i += 1) {
+    const m = menus[i];
+    if (!m) continue;
+    const [sx, sy] = await h.screenPoint(page, ...points[i]);
+    if (sx < 4 || sy < 4 || sx >= width - 4 || sy >= height - 4) continue;
+    const n = m.sections.reduce((k, x) => k + 1 + x.entries.length, 0) + (m.go_here ? 1 : 0);
+    const row = VIEW[i][1];
+    if (!best || n > best.n || (n === best.n && row > best.row)) best = { n, row, at: points[i] };
+  }
+  return best;
+}
+
+test('the context menu (spec 17, round 2): on a phone held sideways (844 x 390, the canvas taller than the viewport) the page gives the engine the frame\'s parts below the viewport as hidden, and the menu of the largest, lowest cell in view lies whole inside the visible canvas, its last entry able to run chosen there; at 844 x 260 the hero\'s menu, which would reach below the visible part, goes above him; in fullscreen likewise, and a press on its black sides (off the canvas) closes the menu and gives the game nothing (receipt: the rects) (screenshot)', async (env) => {
+  const { page } = await bootLayout(env, { width: 844, height: 390, font: 'hd' });
+  // The canvas's top at the viewport's, where focusing it scrolls it anyway (a fixed start).
+  await page.evaluate(() => document.getElementById('screen').scrollIntoView({ block: 'start' }));
+  await h.waitFrames(page, 5);
+  const off = await page.evaluate(() => globalThis.__u6Layout.offViewport);
+  assert.ok(off.length > 0, 'part of the canvas below the viewport');
+  const big = await lowestLargestCell(page);
+  assert.ok(big, 'a menu in view');
+  await h.waitTicks(page, 3);
+  assert.ok((await page.evaluate(() => globalThis.__u6Layout.hidden)).length > 0, 'hidden rects given');
+  await h.rightPress(page, ...big.at);
+  await page.mouse.up({ button: 'right' });
+  await h.waitTicks(page, 3);
+  await h.waitFrames(page, 2);
+  const view = await h.menuView(page);
+  await keepFrame(page.locator('#screen-box'), 'r2-small-viewport.png');
+  const sideways = await menuVisibleAndChosen(page, view, 'phone sideways');
+  assert.ok(sideways.hidden.length > 0, 'phone sideways: the hidden rects named the part below');
+  for (let i = 0; i < 4; i += 1) {
+    await page.keyboard.press('Escape');
+    await h.waitTicks(page, 5);
+  }
+  await h.waitPrompt(page);
+
+  // Shorter still (the browser's bars taking their part), the canvas's top at the viewport's: the
+  // map shows down to about its frame row 110, so the hero's menu, below him, would reach past
+  // it (it fits the map there): it goes above him instead.
+  await page.setViewportSize({ width: 844, height: 260 });
+  await page.evaluate(() => document.getElementById('screen').scrollIntoView({ block: 'start' }));
+  await h.waitFrames(page, 3);
+  await h.waitTicks(page, 3);
+  await h.rightPress(page, ...HERO);
+  await page.mouse.up({ button: 'right' });
+  await h.waitTicks(page, 3);
+  const short = await h.menuView(page);
+  console.log(`  receipt: short viewport: the hero's menu text area ${short.text}, the press at ${HERO}`);
+  assert.ok(short.text[1] + short.text[3] <= HERO[1], 'short: the hero\'s menu (its text area) above him');
+  await menuVisibleAndChosen(page, short, 'short viewport');
+  for (let i = 0; i < 4; i += 1) {
+    await page.keyboard.press('Escape');
+    await h.waitTicks(page, 5);
+  }
+  await h.waitPrompt(page);
+
+  await page.setViewportSize({ width: 1024, height: 700 });
+  await page.click('#fullscreen');
+  await page.waitForFunction(() => document.fullscreenElement !== null || document.getElementById('screen-box').classList.contains('full'));
+  await h.waitFrames(page, 5);
+  await page.focus('#screen');
+  const full = await lowestLargestCell(page);
+  assert.ok(full, 'fullscreen: a menu in view');
+  await h.rightPress(page, ...full.at);
+  await page.mouse.up({ button: 'right' });
+  await h.waitTicks(page, 3);
+  const fview = await h.menuView(page);
+  await menuVisibleAndChosen(page, fview, 'fullscreen');
+  for (let i = 0; i < 4; i += 1) {
+    await page.keyboard.press('Escape');
+    await h.waitTicks(page, 5);
+  }
+  await h.waitPrompt(page);
+  const taken = () => page.evaluate(() => globalThis.__taken.length);
+  const t0 = await taken();
+  await h.rightPress(page, ...HERO);
+  await page.mouse.up({ button: 'right' });
+  const side = await page.evaluate(() => {
+    const b = document.getElementById('screen').getBoundingClientRect();
+    return b.top > 8 ? [b.left + b.width / 2, b.top / 2] : [b.left / 2, b.top + b.height / 2];
+  });
+  await page.mouse.click(...side);
+  await h.menuClosed(page);
+  await h.waitTicks(page, 10);
+  assert.equal(await taken(), t0, 'fullscreen: the press on the black side gave the game nothing');
 }, { needs: h.haveHfes });
 
 // Spec 19 O1b at the page: `key` held from the prompt on the focused canvas as a keyboard sends

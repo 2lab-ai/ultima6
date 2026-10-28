@@ -45,6 +45,7 @@ fn menu() -> Menu {
 fn prompt() -> State {
     let mut s = state();
     s.main.reading = 1;
+    s.ui.input.accept = true;
     s
 }
 
@@ -371,7 +372,10 @@ fn escape_a_right_press_a_press_outside_a_letter_and_go_here() {
         "its repeat too"
     );
     let up = InputEvent::Release(esc);
-    assert_eq!(p.input(&s, &io, &[up], true), [up], "its release goes on");
+    assert!(
+        p.input(&s, &io, &[up], true).is_empty(),
+        "its release too (round 2: no key of Escape's reaches the game)"
+    );
     let again = InputEvent::Key(esc);
     assert_eq!(
         p.input(&s, &io, &[again], true),
@@ -419,10 +423,11 @@ fn escape_a_right_press_a_press_outside_a_letter_and_go_here() {
         [ptr(gx, gy, 0)]
     );
     assert_eq!(
-        p.travel.asked,
-        [CELL_PRESSED],
+        p.take_go_here(),
+        Some(CELL_PRESSED),
         "Go here: travel to the cell"
     );
+    assert_eq!(p.take_go_here(), None, "handed out once");
     assert!(p.run().is_none() && p.open().is_none());
 }
 
@@ -635,4 +640,578 @@ fn the_menu_keeps_off_what_the_platform_hides() {
     let meets = a0 <= near[0].2 && a1 >= near[0].0 && b0 <= near[0].3 && b1 >= near[0].1;
     assert!(!meets, "off the hidden rect: {:?}", o.rect());
     assert!(a0 >= 0 && b0 >= 0 && a1 < u6_render::WIDTH as i32 && b1 < u6_render::HEIGHT as i32);
+}
+
+/// A map menu of `entries` (all can run), Go here last.
+fn menu_of(entries: &[u16]) -> Menu {
+    Menu {
+        kind: Kind::Map,
+        cell: Some(CELL_PRESSED),
+        underlined: None,
+        sections: vec![Section {
+            object: 300,
+            kind: None,
+            name: "ab".into(),
+            entries: entries.iter().map(|&c| entry(c, None)).collect(),
+        }],
+        go_here: Some(entry(GO_HERE, None)),
+    }
+}
+
+/// Whether `out` gives the game a button (a press, or a release after one).
+fn presses(out: &[InputEvent]) -> usize {
+    out.iter()
+        .filter(|e| matches!(e, InputEvent::Pointer { buttons, .. } if buttons & 3 != 0))
+        .count()
+}
+
+/// Spec 17 Presentation, Input (round 2, opus MUST 1, gpt e MUST 2): every key the menu took is
+/// the menu's to its own release, so a held Down whose highlight move the menu took passes no
+/// turn when Escape (or Enter, choosing) closes the menu while it is held: its repeats and its
+/// release, and Escape's own, reach no game. A key whose press was the game's gets its release.
+#[test]
+fn every_key_the_menu_took_keeps_its_repeats_to_its_own_release() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    for close in [Key::Escape, Key::Enter] {
+        let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+        let mut p = popup_with(&o);
+        let feed = |p: &mut Popup, ev: InputEvent| p.input(&s, &io, &[ev], true);
+        assert!(
+            feed(&mut p, InputEvent::Key(Key::Down)).is_empty(),
+            "{close:?}: Down"
+        );
+        assert!(
+            feed(&mut p, InputEvent::Key(close)).is_empty(),
+            "{close:?}: taken"
+        );
+        assert!(p.open().is_none(), "{close:?}: closed");
+        if close == Key::Enter {
+            assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+        }
+        for _ in 0..3 {
+            assert!(
+                feed(&mut p, InputEvent::Repeat(Key::Down)).is_empty(),
+                "{close:?}: the held Down's repeat reaches no game"
+            );
+        }
+        assert!(
+            feed(&mut p, InputEvent::Repeat(close)).is_empty(),
+            "{close:?}: its own repeat"
+        );
+        for k in [Key::Down, close] {
+            let up = InputEvent::Release(k);
+            assert!(
+                feed(&mut p, up).is_empty(),
+                "{close:?}: {k:?} let go: the menu's too"
+            );
+        }
+        let after = InputEvent::Repeat(Key::Down);
+        assert_eq!(
+            feed(&mut p, after),
+            [after],
+            "{close:?}: then the game's again"
+        );
+    }
+    // A key pressed for the game before the menu opened: its repeats while open are the menu's,
+    // its release the game's (its press was).
+    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let mut p = popup_with(&o);
+    let feed = |p: &mut Popup, ev: InputEvent| p.input(&s, &io, &[ev], true);
+    assert!(
+        feed(&mut p, InputEvent::Repeat(Key::Left)).is_empty(),
+        "the held Left's repeat"
+    );
+    assert!(
+        feed(&mut p, InputEvent::Key(Key::Escape)).is_empty(),
+        "closed"
+    );
+    assert!(
+        feed(&mut p, InputEvent::Repeat(Key::Left)).is_empty(),
+        "still the menu's"
+    );
+    let up = InputEvent::Release(Key::Left);
+    assert_eq!(feed(&mut p, up), [up], "its release: the game's");
+    // A key the menu took, pressed again after the release was missed: the game's from that press.
+    let press = InputEvent::Key(Key::Escape);
+    assert_eq!(
+        feed(&mut p, press),
+        [press],
+        "a new press of Escape: the game's"
+    );
+    let rep = InputEvent::Repeat(Key::Escape);
+    assert_eq!(feed(&mut p, rep), [rep], "and its repeats");
+}
+
+/// Spec 17 Presentation, Input (round 2, gpt a2 MUST 1): a double click on an entry chooses it
+/// once and gives the game no press, in one batch and across ticks.
+#[test]
+fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let go = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == GO_HERE))
+        .expect("Go here");
+    let (gx, gy) = row_point(&o, go);
+    let clicks = [
+        ptr(gx, gy, 1),
+        ptr(gx, gy, 0),
+        ptr(gx, gy, 1),
+        ptr(gx, gy, 0),
+    ];
+    let mut p = popup_with(&o);
+    let out = p.input(&s, &io, &clicks, true);
+    assert_eq!(presses(&out), 0, "one batch: {out:?}");
+    assert_eq!(
+        (p.take_go_here(), p.take_go_here()),
+        (Some(CELL_PRESSED), None),
+        "one batch: chosen once"
+    );
+    let mut p = popup_with(&o);
+    let mut all = Vec::new();
+    for ev in clicks {
+        all.extend(p.input(&s, &io, &[ev], true));
+    }
+    assert_eq!(presses(&all), 0, "across ticks: {all:?}");
+    assert_eq!(
+        (p.take_go_here(), p.take_go_here()),
+        (Some(CELL_PRESSED), None),
+        "across ticks: chosen once"
+    );
+    // Unit M4's merge contract (spec 21): a travel ends on an event that sets a button the
+    // engine's handler lacks, so the choosing press's held moves are the menu's and its release
+    // reaches the game as a move with no button.
+    let mut p = popup_with(&o);
+    let buttoned = |out: &[InputEvent]| {
+        out.iter()
+            .filter(|e| matches!(e, InputEvent::Pointer { buttons, .. } if buttons & 3 != 0))
+            .count()
+    };
+    let out = p.input(&s, &io, &[ptr(gx, gy, 1)], true);
+    assert_eq!(buttoned(&out), 0, "the choosing press: {out:?}");
+    for (dx, dy) in [(3, 0), (9, 2), (40, -20)] {
+        let out = p.input(&s, &io, &[ptr(gx + dx, gy + dy, 1)], true);
+        assert!(
+            out.is_empty(),
+            "a held move ({dx}, {dy}) is the menu's: {out:?}"
+        );
+    }
+    let out = p.input(&s, &io, &[ptr(gx + 40, gy - 20, 0)], true);
+    assert_eq!(
+        out,
+        [ptr(gx + 40, gy - 20, 0)],
+        "its release: a move with no button"
+    );
+    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "held: chosen once");
+}
+
+/// Spec 21's merge contract with the menu: a travel ends when the menu took new input, and the
+/// tail of the gesture that chose Go here is not new (its press's held moves and release, a
+/// double click on the entry, the choosing key's repeats and release); a press while a chosen
+/// command waits is.
+#[test]
+fn the_tail_of_a_choice_is_not_new_input() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu_of(&[menu::LOOK]), AT, &s, &[]);
+    let go = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == GO_HERE))
+        .expect("Go here");
+    let (gx, gy) = row_point(&o, go);
+    let fed = |p: &mut Popup, st: &State, ev: InputEvent| {
+        p.input(st, &io, &[ev], true);
+        p.took_new_input()
+    };
+    let mut p = popup_with(&o);
+    assert!(fed(&mut p, &s, ptr(gx, gy, 0)), "a move while open");
+    assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press");
+    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
+    let tail = [
+        ptr(gx + 5, gy, 1),
+        ptr(gx + 5, gy, 0),
+        ptr(gx + 5, gy, 1),
+        ptr(gx + 5, gy, 0),
+    ];
+    for (i, ev) in tail.into_iter().enumerate() {
+        assert!(
+            !fed(&mut p, &s, ev),
+            "tail {i}: a held move, the release, a double click"
+        );
+    }
+    assert!(
+        !fed(&mut p, &s, ptr(gx + 6, gy, 0)),
+        "then a move of the game's"
+    );
+    let mut p = popup_with(&o);
+    assert!(
+        fed(&mut p, &s, InputEvent::Key(Key::Down)),
+        "Down while open"
+    );
+    assert!(
+        fed(&mut p, &s, InputEvent::Key(Key::Enter)),
+        "Enter choosing"
+    );
+    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+    for ev in [
+        InputEvent::Repeat(Key::Enter),
+        InputEvent::Repeat(Key::Down),
+        InputEvent::Release(Key::Down),
+        InputEvent::Release(Key::Enter),
+    ] {
+        assert!(!fed(&mut p, &s, ev), "the keys' tail: {ev:?}");
+    }
+    let o = Open::new(&menu_of(&[menu::ATTACK]), AT, &s, &[]);
+    let row = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == menu::ATTACK))
+        .expect("Attack");
+    let (x, y) = row_point(&o, row);
+    let mut p = popup_with(&o);
+    assert!(fed(&mut p, &s, ptr(x, y, 1)), "choosing Attack");
+    assert!(
+        !fed(&mut p, &s, ptr(x, y, 0)),
+        "its release: the game's move"
+    );
+    let mut reads = s.clone();
+    let i = &mut reads.ui.input;
+    (i.target_pending, i.target_command, i.accept, i.in_wait) = (1, menu::ATTACK, true, true);
+    assert!(p.run().is_some(), "Attack waits for its target");
+    assert!(
+        fed(&mut p, &reads, ptr(200, 150, POINTER_LEFT)),
+        "a press while it waits: new"
+    );
+}
+
+/// Spec 17 Running a choice (round 2, opus SHOULD 1): while the chosen command waits for its
+/// target read, the user's presses (left or right) and their releases are the menu's, so none of
+/// them becomes the command's target; the target press is the menu's own, at the pressed pixel.
+#[test]
+fn a_click_while_a_chosen_command_waits_is_not_its_target() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    for code in [menu::ATTACK, menu::USE] {
+        for buttons in [POINTER_LEFT, POINTER_RIGHT] {
+            let o = Open::new(&menu_of(&[code]), AT, &s, &[]);
+            let row = (0..o.rows.len())
+                .find(|&i| o.item(i).is_some_and(|it| it.code == code))
+                .expect("the command");
+            let (x, y) = row_point(&o, row);
+            let mut p = popup_with(&o);
+            let out = p.input(&s, &io, &[ptr(x, y, 1)], true);
+            assert_eq!(
+                &out[1..],
+                menu::icon_press(code),
+                "{code:#x}: its icon press"
+            );
+            let out = p.input(&s, &io, &[ptr(x, y, 0)], true);
+            assert_eq!(
+                out,
+                [ptr(x, y, 0)],
+                "{code:#x}: the choosing press's release: a move"
+            );
+            assert!(p.run().is_some(), "{code:#x}: held");
+            let mut reads = s.clone();
+            let i = &mut reads.ui.input;
+            (i.target_pending, i.target_command, i.accept, i.in_wait) = (1, code, true, true);
+            let out = p.input(&reads, &io, &[ptr(200, 150, buttons)], true);
+            assert!(
+                out.is_empty(),
+                "{code:#x} {buttons}: the press is the menu's: {out:?}"
+            );
+            assert!(
+                p.run().is_some(),
+                "{code:#x} {buttons}: still held (a press queued)"
+            );
+            let out = p.input(&reads, &io, &[ptr(201, 150, 0)], true);
+            assert_eq!(
+                out,
+                menu::left_press(AT.0, AT.1),
+                "{code:#x} {buttons}: its release is the menu's; the target press is the menu's own"
+            );
+            assert!(p.run().is_none(), "{code:#x} {buttons}: the run over");
+            let next = ptr(202, 150, 0);
+            assert_eq!(
+                p.input(&s, &io, &[next], true),
+                [next],
+                "then the game's again"
+            );
+        }
+    }
+}
+
+/// An engine whose game draws a checkered frame once and waits, its source plane on and the
+/// menu on; ticked twice (published).
+fn checkered_engine(s: &State) -> Engine {
+    let mut e = Engine::with_game(s.clone(), Files::default(), |_st, io| async move {
+        io.draw(|fb| {
+            for (i, c) in fb.palette.iter_mut().enumerate() {
+                *c = u6_render::Rgb::new(i as u8, (i * 7) as u8, (i * 13) as u8);
+            }
+            for y in 0..u6_render::HEIGHT {
+                for x in 0..u6_render::WIDTH {
+                    fb.set(x, y, UNDER + ((x / 16 + y / 16) % 2) as u8);
+                }
+            }
+        });
+        io.present();
+        loop {
+            io.vblank().await;
+        }
+    });
+    e.enable_src_plane();
+    e.set_context_menu(true);
+    e.tick(&[], 16);
+    e.tick(&[], 16);
+    e
+}
+
+/// The shown frame's colours, palette and source plane.
+fn shown_frame(e: &Engine) -> (Vec<u8>, Vec<u6_render::Rgb>, Option<Vec<u6_render::Src>>) {
+    let f = e.frame();
+    (
+        f.pixels().to_vec(),
+        f.palette.to_vec(),
+        f.src().map(<[_]>::to_vec),
+    )
+}
+
+/// Spec 17 Presentation (round 2, opus MUST 2): in the HD font mode the menu's glyphs are listed
+/// for the HD font: the heading's, the enabled entry's, and the disabled entry's flagged
+/// half-toned (the page draws its HD glyph so); with the mode off the HD frame shows the classic
+/// checker. Closed and presented, the HD frame is the one before it opened, byte for byte (gpt f2
+/// MUST 1), and so is the shown frame with its palette and source plane (gpt f2 SHOULD 2).
+#[test]
+fn the_hd_font_lists_the_menus_cells_the_disabled_row_half_toned() {
+    let s = prompt();
+    let mut e = checkered_engine(&s);
+    let blank = Framebuffer::new();
+    let mut hd = HdView::new();
+    hd.set(true, Scale::X2);
+    hd.set_font(true);
+    hd.present(Some(&e), &blank);
+    let (hd_before, shown_before) = (hd.rgba().to_vec(), shown_frame(&e));
+    let o = Open::new(&menu(), AT, &s, &[]);
+    e.popup_mut().show(o.clone());
+    e.tick(&[], 16);
+    assert!(hd.present(Some(&e), &blank), "composed with the menu");
+    assert_ne!(
+        hd.rgba(),
+        hd_before.as_slice(),
+        "the open menu shows in the HD frame"
+    );
+    let (col0, row0, ..) = o.text;
+    let listed = |row: i32, word: &[u8], col: i32| -> Vec<(u16, bool)> {
+        word.iter()
+            .enumerate()
+            .filter_map(|(k, _)| {
+                let (x, y) = (
+                    ((col0 + col + k as i32) * 8) as u16,
+                    ((row0 + row) * 8) as u16,
+                );
+                hd.glyphs()
+                    .iter()
+                    .find(|g| (g.x, g.y) == (x, y))
+                    .map(|g| (g.code, g.halftone))
+            })
+            .collect()
+    };
+    let want = |word: &[u8], half: bool| -> Vec<(u16, bool)> {
+        word.iter().map(|&c| (u16::from(c), half)).collect()
+    };
+    assert_eq!(listed(0, b"ab", 0), want(b"ab", false), "the heading");
+    assert_eq!(listed(1, b"Look", 1), want(b"Look", false), "Look, enabled");
+    assert_eq!(
+        listed(2, b"Use", 1),
+        want(b"Use", true),
+        "Use, disabled: half-toned"
+    );
+    // The tests' font's space has ink (glyph c is rows of c): neither a letter nor a whole space.
+    assert_eq!(listed(3, b"Go here", 1).len(), 6, "Go here's letters");
+    let halftoned = hd.glyphs().iter().filter(|g| g.halftone).count();
+    assert_eq!(halftoned, 3, "only the disabled row's cells");
+    hd.set_font(false);
+    hd.present(Some(&e), &blank);
+    assert!(hd.glyphs().is_empty(), "the pixel font: nothing listed");
+    // The classic checker in the screen frame: of 'U' only the pixels with (x + y) even are ink.
+    let (ux, uy) = ((col0 + 1) * 8, (row0 + 2) * 8);
+    let ink = (0..64)
+        .filter(|k| {
+            let (x, y) = (ux + k % 8, uy + k / 8);
+            let want = b'U' & (0x80 >> (k % 8)) != 0 && (x + y) % 2 == 0;
+            assert_eq!(
+                e.screen_frame().get(x as usize, y as usize) == Some(INK),
+                want
+            );
+            want
+        })
+        .count();
+    assert_eq!(ink, 16, "the classic checker");
+    hd.set_font(true);
+    e.tick(&[InputEvent::Key(Key::Escape)], 16);
+    assert!(e.context_menu().is_none(), "closed");
+    hd.present(Some(&e), &blank);
+    assert_eq!(
+        hd.rgba(),
+        hd_before.as_slice(),
+        "the HD frame as before it opened"
+    );
+    assert!(
+        hd.glyphs().iter().all(|g| !g.halftone),
+        "nothing half-toned left"
+    );
+    assert!(
+        shown_frame(&e) == shown_before,
+        "the shown frame, palette and plane as before"
+    );
+}
+
+/// Spec 11 Design 7 for K3 (round 2, opus SHOULD 6): `pointer_at` is the menu's pointer while the
+/// menu takes the pointer's events, the input handler's otherwise.
+#[test]
+fn pointer_at_is_the_menus_pointer_while_it_takes_it() {
+    let s = prompt();
+    let mut e = checkered_engine(&s);
+    assert_eq!(
+        e.pointer_at(),
+        e.io().handler_pointer(),
+        "no menu: the handler's"
+    );
+    let o = Open::new(&menu(), AT, &s, &[]);
+    e.popup_mut().show(o.clone());
+    let (gx, gy) = row_point(&o, 3);
+    e.tick(&[ptr(gx, gy, 0)], 16);
+    let menus = Pointer {
+        x: gx,
+        y: gy,
+        buttons: 0,
+    };
+    assert_eq!(e.pointer_at(), menus, "the menu's");
+    assert_ne!(
+        e.io().handler_pointer(),
+        menus,
+        "the game's sample not moved"
+    );
+    e.tick(&[InputEvent::Key(Key::Escape)], 16);
+    assert_eq!(
+        e.pointer_at(),
+        e.io().handler_pointer(),
+        "closed: the handler's again"
+    );
+}
+
+/// Spec 17 (round 2, opus SHOULD 2): turned off, the menu forgets the pointer, the press and the
+/// keys it took; turned on again it takes none of their events.
+#[test]
+fn turned_off_it_forgets_what_it_took() {
+    let (s, io) = (prompt(), Io::new(Files::default()));
+    let o = Open::new(&menu(), AT, &s, &[]);
+    let mut p = popup_with(&o);
+    let (x, y) = row_point(&o, 3);
+    assert!(p.input(&s, &io, &[ptr(x, y, POINTER_RIGHT)], true).len() <= 1);
+    let o2 = Open::new(&menu(), AT, &s, &[]);
+    p.show(o2);
+    assert!(
+        p.input(&s, &io, &[InputEvent::Key(Key::Down)], true)
+            .is_empty()
+    );
+    p.set_on(false);
+    assert!(p.pointer().is_none(), "off: no pointer of the menu's");
+    p.set_on(true);
+    let rep = InputEvent::Repeat(Key::Down);
+    assert_eq!(
+        p.input(&s, &io, &[rep], true),
+        [rep],
+        "the held key: the game's again"
+    );
+    let up = ptr(x, y, 0);
+    assert_eq!(
+        p.input(&s, &io, &[up], true),
+        [up],
+        "the held button's release: the game's"
+    );
+    assert!(p.pointer().is_none());
+}
+
+/// Spec 17 Presentation, Where it is placed (round 2, gpt a2 SHOULD, opus NIT): an open menu is
+/// laid out again when what the platform hides changes (here its own box hidden: it moves off
+/// it) and when the language changes, the same entry highlighted; the engine draws it again at
+/// once.
+#[test]
+fn an_open_menu_is_laid_out_again_for_new_hidden_rects_and_language() {
+    let s = prompt();
+    let at = (160, 96);
+    let mut e = checkered_engine(&s);
+    let o = Open::new(&menu(), at, &s, &[]);
+    e.popup_mut().show(o.clone());
+    e.tick(&[InputEvent::Key(Key::Up)], 16);
+    let hover = e.context_menu().map(|v| v.hover).expect("open");
+    let (v, screen) = (e.popup_mut().version(), e.screen_version());
+    e.set_context_menu_hidden(vec![o.rect()]);
+    let moved = e.context_menu().expect("still open");
+    assert_ne!(moved.rect, o.view().rect, "moved off what is hidden");
+    assert_eq!(moved.hover, hover, "the same entry highlighted");
+    assert!(e.popup_mut().version() > v, "drawn again");
+    assert!(e.screen_version() > screen, "at once, no tick");
+    let mut korean = s.clone();
+    korean.ui.text.language = crate::ui::wide::Language::Korean;
+    let mut p = popup_with(&o);
+    p.after_poll(&korean);
+    let k = p.open().expect("open");
+    assert!(k.korean && k.text.2 != o.text.2, "laid out in Korean");
+}
+
+/// Spec 17 Presentation (round 2, opus NITs): with two sections the underlined first entry shows
+/// its section's name after it, in the alert colour; an entry's theft mark is shown on its row
+/// whether it is highlighted or not, and needs no note row.
+#[test]
+fn the_first_entry_names_its_object_and_a_theft_shows_on_its_row() {
+    let s = prompt();
+    let m = Menu {
+        kind: Kind::Map,
+        cell: Some(CELL_PRESSED),
+        underlined: Some(menu::USE),
+        sections: vec![
+            Section {
+                object: 300,
+                kind: None,
+                name: "ab".into(),
+                entries: vec![entry(menu::LOOK, None), entry(menu::USE, None)],
+            },
+            Section {
+                object: 301,
+                kind: None,
+                name: "cd".into(),
+                entries: vec![Entry {
+                    code: menu::GET,
+                    reason: None,
+                    theft: true,
+                }],
+            },
+        ],
+        go_here: None,
+    };
+    let o = Open::new(&m, AT, &s, &[]);
+    assert_eq!(
+        o.named.as_ref().map(|n| n.0.len()),
+        Some(2),
+        "Use's section named"
+    );
+    assert!(
+        !o.rows.iter().any(|r| matches!(r, Row::Note)),
+        "no note row: no reason"
+    );
+    let get = (0..o.rows.len())
+        .find(|&i| o.item(i).is_some_and(|it| it.code == menu::GET))
+        .expect("Get");
+    assert_ne!(o.hover, get, "Get not highlighted");
+    let mut fb = under();
+    o.draw(&mut fb, &s);
+    let (tx0, ty0, ..) = o.text_rect();
+    let alert_in = |row: i32, col: i32| {
+        (0..64).any(|k| {
+            let (x, y) = (tx0 + col * 8 + k % 8, ty0 + row * 8 + k / 8);
+            fb.get(x as usize, y as usize) == Some(ALERT)
+        })
+    };
+    // Row 0: mark, "Use", a space, then the name in the alert colour (column 5).
+    assert!(alert_in(0, 5) && !alert_in(0, 1), "the name after Use");
+    // Get's row: mark, "Get", a space, then the theft mark from column 5.
+    assert!(alert_in(get as i32, 5), "the theft mark, not highlighted");
+    assert_eq!(o.text.2, 13, "the widest row: Get and its theft mark");
 }

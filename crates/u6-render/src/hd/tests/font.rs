@@ -79,6 +79,7 @@ pub(super) fn listed(
         code,
         ink: fb.palette[usize::from(ink)],
         paper: fb.palette[usize::from(paper)],
+        halftone: false,
     }
 }
 
