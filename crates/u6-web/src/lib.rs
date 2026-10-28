@@ -895,6 +895,22 @@ impl Game {
         true
     }
 
+    /// Port (spec 21): the travel of a right press's "move here": the party walks to map cell
+    /// (x, y) on its level, one step a command prompt entered as its direction key, from the next
+    /// [`Game::step`] on ([`u6_core::engine::Engine::travel_to`]). Any key or a button press after
+    /// it stops the walk. False (nothing started) before a start or when the cell is refused
+    /// ([`u6_core::actors::travel::reachable`]).
+    pub fn travel_to(&mut self, x: u16, y: u16) -> bool {
+        self.engine
+            .as_mut()
+            .is_some_and(|e| e.travel_to((x, y)).is_ok())
+    }
+
+    /// Port (spec 21): a travel walks ([`Game::travel_to`]).
+    pub fn travel_active(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| e.travel_active())
+    }
+
     /// The leader's map position (x, y, z), or empty before a start.
     pub fn leader_position(&self) -> Vec<u16> {
         self.engine.as_ref().map_or_else(Vec::new, |e| {
@@ -4991,6 +5007,147 @@ mod tests {
         );
         game.key_down("Space", " ", false, 0.0);
         assert!(prompt(&mut game), "the prompt again");
+    }
+
+    /// Spec 21: `travel_to` starts the engine's travel exactly when
+    /// [`u6_core::actors::travel::reachable`] lets it, and nothing before a start. On the user's
+    /// zip (skipped when absent) at the first prompt, the 49 cells round the leader (the castle's
+    /// fight is on there, so the refusals are what it shows; the walk itself is
+    /// `u6-core`'s real-data receipt, `actors/travel_tests.rs`).
+    #[test]
+    fn travel_to_starts_exactly_what_reachable_allows() {
+        let mut none = Game::new();
+        assert!(!none.travel_to(1, 1) && !none.travel_active(), "no game");
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let p = game.leader_position();
+        let (mut why, mut any) = (std::collections::BTreeMap::new(), false);
+        for dy in -3i16..=3 {
+            for dx in -3i16..=3 {
+                let c = (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy));
+                let reason = {
+                    let e = game.engine.as_ref().quiet();
+                    u6_core::actors::travel::reachable(&e.state(), c)
+                };
+                let started = game.travel_to(c.0, c.1);
+                assert_eq!(started, reason.is_none(), "{dx} {dy}");
+                any |= started;
+                assert_eq!(
+                    game.travel_active(),
+                    any,
+                    "a refusal leaves the travel as it was"
+                );
+                *why.entry(reason.map_or("started", |r| r.code()))
+                    .or_insert(0) += 1;
+            }
+        }
+        eprintln!("travel_to over 49 cells: {why:?}");
+    }
+
+    /// Spec 21 round 2 (review gpt-b MUST 1): past the fight, broken off as spec 21's receipt
+    /// does it ([`castle_game`]), a reachable cell starts a travel; a refused request then (the
+    /// leader's own cell) leaves that travel walking to its target, which it reaches. A held
+    /// key's repeat queued the way the page queues it (into `pending`, before the step) ends a
+    /// second travel in that step.
+    #[test]
+    fn travel_to_starts_a_reachable_cell_and_a_refusal_leaves_it_walking() {
+        use u6_core::actors::travel::{End, reachable};
+        let Some(mut game) = castle_game() else {
+            return;
+        };
+        let p = game.leader_position();
+        let to = [(2i16, 0i16), (-2, 0), (0, 2), (0, -2)]
+            .into_iter()
+            .map(|(dx, dy)| (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy)))
+            .find(|&c| reachable(&game.engine.as_ref().quiet().state(), c).is_none())
+            .quiet();
+        assert!(game.travel_to(to.0, to.1), "a reachable cell starts");
+        assert!(game.travel_active());
+        assert!(
+            !game.travel_to(p[0], p[1]),
+            "the leader's own cell is refused"
+        );
+        assert!(
+            game.travel_active(),
+            "the refusal leaves the travel walking"
+        );
+        let target = game
+            .engine
+            .as_ref()
+            .quiet()
+            .travel_progress()
+            .quiet()
+            .target();
+        assert_eq!(target, to, "to its own target");
+        for _ in 0..3000 {
+            if !game.travel_active() {
+                break;
+            }
+            game.step(20);
+        }
+        assert_eq!(
+            game.engine.as_ref().quiet().travel_end(),
+            Some(End::Arrived)
+        );
+        let at = game.leader_position();
+        assert_eq!((at[0], at[1]), to, "on the target");
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        assert!(game.travel_to(p[0], p[1]), "back");
+        game.step(20);
+        assert!(game.travel_active(), "walking back");
+        game.pending.push(InputEvent::Repeat(Key::Left));
+        game.step(20);
+        assert_eq!(
+            game.engine.as_ref().quiet().travel_end(),
+            Some(End::Input),
+            "a queued repeat ends it"
+        );
+        eprintln!(
+            "travel_to past the fight: started, kept through a refusal, arrived; a repeat stopped the next"
+        );
+    }
+
+    /// The castle start of spec 19's held-key tests in a `Game` (as `u6-core`'s travel receipt):
+    /// `game` at once with seed 0 round the shared state, the actors in the assault worktype 8
+    /// passed over (status bit 0x10), the fight broken off with `b`, at the prompt. Skipped when
+    /// the user's zip is absent.
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn castle_game() -> Option<Game> {
+        if !std::path::Path::new(ZIP).exists() {
+            eprintln!("skipped: {ZIP} not present");
+            return None;
+        }
+        let r = intake(vec![InputFile {
+            name: "ultima-vi.zip".into(),
+            data: std::fs::read(ZIP).quiet(),
+        }]);
+        let files = Files::new(r.files);
+        let mut state = u6_core::State::new_game(&files).quiet();
+        state.rng.seed(0);
+        let keep = Rc::new(std::cell::RefCell::new(None));
+        let k = Rc::clone(&keep);
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(state, files, move |st, io| {
+            *k.borrow_mut() = Some(Rc::clone(&st));
+            u6_core::main_loop::game_first(st, io)
+        }));
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        let st = keep.borrow_mut().take().quiet();
+        {
+            let mut s = st.borrow_mut();
+            for a in 0..0x100 {
+                if s.actors.worktype[a] == 8 {
+                    s.actors.attrs.status[a] |= 0x10;
+                }
+            }
+        }
+        game.pending.push(InputEvent::Key(Key::Char('b')));
+        for _ in 0..25 {
+            game.step(20);
+        }
+        assert!(steps_to_prompt(&mut game), "the prompt past the fight");
+        Some(game)
     }
 
     /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).

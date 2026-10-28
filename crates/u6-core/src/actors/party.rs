@@ -186,6 +186,22 @@ pub(crate) fn has_followers(s: &State) -> bool {
         .any(|m| in_line(s, m, l) && free_to_step(s, m))
 }
 
+/// Port (spec 21): the members [`follow`] would move behind the leader: those past its tests of
+/// the line ([`in_line`]) and of a member free to step ([`free_to_step`]); the swallowed test,
+/// which rolls, is not run (as in [`has_followers`]).
+pub(crate) fn following(s: &State) -> Vec<u16> {
+    let p = &s.actors.party;
+    if p.leader_index == p.size {
+        return Vec::new();
+    }
+    let l = leader(s);
+    p.members[..p.count()]
+        .iter()
+        .map(|&m| u16::from(m))
+        .filter(|&m| in_line(s, m, l) && free_to_step(s, m))
+        .collect()
+}
+
 /// Original: 0x11c910 (party: the followers keep formation behind the leader)
 ///
 /// Not while a vehicle carries the party. Two passes over the members in worktype 1 on the
@@ -303,20 +319,17 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
     }
     let d = (dir as usize) & 7;
     let (cx, cy) = (s.map.centre.x, s.map.centre.y);
-    let mut nx = cx.wrapping_add_signed(DX8[d]) & 0x3ff;
-    let mut ny = cy.wrapping_add_signed(DY8[d]) & 0x3ff;
+    let (mut nx, mut ny) = step_cell((cx, cy), d);
     let diagonal = DX8[d] != 0 && DY8[d] != 0;
-    if !walk::can_move_to(s, l, nx, ny) {
-        s.actors.work.step_blocked = 1;
-        if s.actors.work.mouse_walk != 0 && diagonal {
-            slide(s, l, (cx, cy), (&mut nx, &mut ny));
-        }
-    } else if diagonal {
-        let ox = cx.wrapping_add_signed(DX8[d]) & 0x3ff;
-        let oy = cy.wrapping_add_signed(DY8[d]) & 0x3ff;
-        if !walk::can_move_to(s, l, ox, cy) && !walk::can_move_to(s, l, cx, oy) {
+    match step_test(|x, y| walk::can_move_to(s, l, x, y), (cx, cy), d) {
+        StepTest::Open => {}
+        StepTest::Refused => {
             s.actors.work.step_blocked = 1;
+            if s.actors.work.mouse_walk != 0 && diagonal {
+                slide(s, l, (cx, cy), (&mut nx, &mut ny));
+            }
         }
+        StepTest::Corner => s.actors.work.step_blocked = 1,
     }
     if s.actors.work.step_blocked != 0 {
         // 0x11d800..0x11d856, then 0x11db6e: the centre back on the leader and out; no points
@@ -356,6 +369,47 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
     seams::level_transition(s);
     s.actors.work.hic = 0;
     result
+}
+
+/// The cell a step from (cx, cy) in 8-way direction `d` enters (0x11d4ee masks both axes to 10 bits).
+pub(crate) fn step_cell((cx, cy): (u16, u16), d: usize) -> (u16, u16) {
+    let d = d & 7;
+    (
+        cx.wrapping_add_signed(DX8[d]) & 0x3ff,
+        cy.wrapping_add_signed(DY8[d]) & 0x3ff,
+    )
+}
+
+/// How the player's step from (cx, cy) in direction `d` fares by its cell test ([`step_test`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepTest {
+    /// The step may go.
+    Open,
+    /// The cell it enters is refused (with a clicked target a diagonal then slides, [`slide`]).
+    Refused,
+    /// A diagonal into an open cell with both its orthogonal neighbours refused.
+    Corner,
+}
+
+/// 0x11d4ee's blocking tests of a step from (cx, cy) in direction `d`, `enter` being its test of
+/// one cell (0x11b1c0 for the leader, [`walk::can_move_to`]): the cell entered first, then for a
+/// diagonal the neighbour along x and, only when that is refused, the one along y. Port: one
+/// place for the rule, which [`player_step`] runs and spec 21's travel search asks, so a
+/// travelled step is one a key can take.
+pub(crate) fn step_test(
+    mut enter: impl FnMut(u16, u16) -> bool,
+    (cx, cy): (u16, u16),
+    d: usize,
+) -> StepTest {
+    let (nx, ny) = step_cell((cx, cy), d);
+    let diagonal = DX8[d & 7] != 0 && DY8[d & 7] != 0;
+    if !enter(nx, ny) {
+        StepTest::Refused
+    } else if diagonal && !enter(nx, cy) && !enter(cx, ny) {
+        StepTest::Corner
+    } else {
+        StepTest::Open
+    }
 }
 
 /// 0x11d4ee with a clicked target: a blocked diagonal tries the axis along which the target is
@@ -411,6 +465,9 @@ fn swap_member(s: &mut State, (cx, cy): (u16, u16), (nx, ny): (u16, u16), d: usi
     }
 }
 
+/// The points a diagonal step on foot pays on top of the tile it leaves ([`pay_step`]).
+pub(crate) const DIAGONAL_COST: i16 = 5;
+
 /// 0x11d4ee's movement cost of the leader's step.
 fn pay_step(s: &mut State, l: u16, d: usize, diagonal: bool, (cx, cy): (u16, u16)) {
     let t = walk::obj_type(s, ObjectId(l));
@@ -428,7 +485,7 @@ fn pay_step(s: &mut State, l: u16, d: usize, diagonal: bool, (cx, cy): (u16, u16
         walk::spend_mp(s, l, 5);
     } else if diagonal {
         walk::spend_tile_cost(s, l);
-        walk::spend_mp(s, l, 5);
+        walk::spend_mp(s, l, DIAGONAL_COST);
     } else {
         walk::spend_tile_cost(s, l);
     }

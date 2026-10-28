@@ -102,6 +102,23 @@ fn key_read_upcases_letters_and_maps_arrows_to_walk() {
     assert!(!e.finished());
 }
 
+/// Spec 21: a diagonal key (the PC keypad's, which travel presses) reads as the walk in its
+/// direction, as an arrow does; no raw key of the table gives it.
+#[test]
+fn key_read_maps_the_diagonal_keys_to_walk() {
+    for (key, dir) in [
+        (Key::UpRight, 1),
+        (Key::DownRight, 3),
+        (Key::DownLeft, 5),
+        (Key::UpLeft, 7),
+    ] {
+        let e = read_one(state(), &[key]);
+        assert_eq!(e.state().converse.ints[0], wait::WALK, "{key:?}");
+        assert_eq!(e.state().ui.input.direction, dir, "{key:?}");
+        assert!(raw_events(&tables().keymap, key).is_empty(), "{key:?}");
+    }
+}
+
 #[test]
 fn panel_keys_are_handled_inside_the_key_read() {
     let mut s = state();
