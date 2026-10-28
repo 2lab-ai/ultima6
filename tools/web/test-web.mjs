@@ -12383,7 +12383,8 @@ const motionRing = (page) => page.evaluate(() => {
   // Every draw of a canvas onto another (not takeLayer's shift of a layer over itself), in
   // order, with its destination canvas and place: whether its source is the slide's static layer
   // (its size the static layer's at a whole scale; no other canvas the page draws has its
-  // proportions), its scale then, and whether the context drew it untransformed.
+  // proportions), its scale then, whether the context drew it untransformed, and its arguments,
+  // its source's size and the context's transform (to map it).
   const canvas2d = CanvasRenderingContext2D.prototype;
   if (!canvas2d.__countedStatic) {
     const draw = canvas2d.drawImage;
@@ -12392,10 +12393,12 @@ const motionRing = (page) => page.evaluate(() => {
         const size = globalThis.__shownGame?.slide_layer_size(0) ?? [];
         const isStatic = size.length === 2 && source.width > 0 && source.width % size[0] === 0
           && source.width / size[0] === source.height / size[1];
+        const m = this.getTransform();
         globalThis.__slideDraws.push({
           source, target: this.canvas, x: rest[0], y: rest[1], isStatic,
           scale: isStatic ? source.width / size[0] : 0,
-          plain: this.getTransform().isIdentity && rest.length === 2,
+          plain: m.isIdentity && rest.length === 2,
+          args: rest.slice(0, 8), size: [source.width, source.height], m: [m.a, m.b, m.c, m.d, m.e, m.f],
         });
       }
       return draw.call(this, source, ...rest);
@@ -12411,19 +12414,50 @@ const motionRing = (page) => page.evaluate(() => {
 // `'settled'`: the prompt back for five frames and no slide), at most `max`. Per frame with a slide
 // placed: whether the ring (`motionRing`) differs from `ref`; the frame's draws of the slide's
 // static layer canvas that reach the screen (drawn onto the screen canvas, or onto a canvas drawn
-// onto the screen after it in that frame: Wide's compositing), each of which must lie
-// untransformed at Game.slide's first triple times its scale (else a misplaced draw); and whether
-// that destination moved along `dir` (dx, dy) since the last such draw, which a slide toward -dir
-// does (the camera's offset from rest shrinking toward the new cell). Returns the frames, the
-// frames with a slide placed, those that drew the static layer onto the screen, those that drew it
-// moved along `dir`, the misplaced draws, the ring's differing frames, the newest layers version,
-// whether `until` was met and the leader.
+// onto the screen after it in that frame: the compositing of Wide and of the HD layout), each of
+// which must lie untransformed at Game.slide's first triple times its scale (else a misplaced
+// draw); each draw of such a canvas onto the screen after it that takes the shown map, which must
+// put that map's pixels where the layout puts them (its source and target rects through the
+// context's transform, against the layout's toCanvas at the corners and middle of the part it
+// takes; else a misplaced draw, as is a draw onto a canvas no such draw takes to the screen); and
+// whether the static layer's destination moved along `dir`
+// (dx, dy) since the last such draw, which a slide toward -dir does (the camera's offset from rest
+// shrinking toward the new cell). Returns the frames, the frames with a slide placed, those that
+// drew the static layer onto the screen, those that drew it moved along `dir`, the misplaced
+// draws, the draws onto the screen checked so, the static layer's draws onto another canvas, the
+// ring's differing frames, the newest layers version, whether `until` was met and the leader.
 const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluate(([want, base, limit, [dx, dy]]) => {
   const v = window.__display;
   const g = globalThis.__shownGame;
   const c = document.getElementById('screen');
-  let [frames, sliding, drawn, along, misplaced, ring, run] = [0, 0, 0, 0, 0, 0, 0];
+  let [frames, sliding, drawn, along, misplaced, finals, indirect, ring, run] = [0, 0, 0, 0, 0, 0, 0, 0, 0];
   let place = null;
+  const L = globalThis.__u6Layout;
+  const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+  // Where draw `d` (of a canvas `k` device pixels a game pixel) puts the shown map's game pixels
+  // it takes, against the layout: [checked, off by more than a canvas pixel].
+  const mapped = (d, k) => {
+    const a = d.args;
+    const [w, h] = d.size;
+    const [sx, sy, sw, sh, dx, dy, dw, dh] = a.length >= 8 ? a : a.length >= 4 ? [0, 0, w, h, ...a] : [0, 0, w, h, a[0], a[1], w, h];
+    const [ta, tb, tc, td, te, tf] = d.m;
+    const to = (u, v) => {
+      const [x, y] = [dx + ((u - sx) * dw) / sw, dy + ((v - sy) * dh) / sh];
+      return [ta * x + tc * y + te, tb * x + td * y + tf];
+    };
+    const [gx0, gy0] = [Math.max(mx, Math.ceil(sx / k)), Math.max(my, Math.ceil(sy / k))];
+    const [gx1, gy1] = [Math.min(mx + mw, Math.floor((sx + sw) / k)) - 1, Math.min(my + mh, Math.floor((sy + sh) / k)) - 1];
+    if (gx0 > gx1 || gy0 > gy1) return [false, false];
+    let [checked, off] = [false, false];
+    for (const [gx, gy] of [[gx0, gy0], [gx1, gy1], [gx0, gy1], [gx1, gy0], [(gx0 + gx1) >> 1, (gy0 + gy1) >> 1]]) {
+      const q = L.toCanvas(gx, gy);
+      if (!q) continue;
+      const p = to((gx + 0.5) * k, (gy + 0.5) * k);
+      checked = true;
+      off ||= Math.abs(p[0] - q[0]) > 1 || Math.abs(p[1] - q[1]) > 1;
+    }
+    return [checked, off];
+  };
   const met = () => (want === 'sliding' ? g.sliding() && g.slide().length > 0 : run >= 5 && !g.sliding());
   while (frames < limit && !met()) {
     globalThis.__slideDraws = [];
@@ -12436,9 +12470,22 @@ const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluat
     const shown = draws.map((d, i) => [d, i]).filter(([d, i]) => d.isStatic && onScreen(d, i)).map(([d]) => d);
     if (placed.length > 0) {
       sliding += 1;
+      const taken = new Set();
+      for (const [d, i] of draws.map((e, j) => [e, j]).filter(([e]) => e.target === c)) {
+        const under = draws.find((e, j) => j < i && e.isStatic && e.target === d.source);
+        if (!under) continue;
+        const [checked, off] = mapped(d, under.scale);
+        if (checked) taken.add(d.source);
+        finals += checked ? 1 : 0;
+        misplaced += off ? 1 : 0;
+      }
       if (shown.length > 0) {
         drawn += 1;
         misplaced += shown.filter((d) => !(d.plain && d.x === placed[1] * d.scale && d.y === placed[2] * d.scale)).length;
+        // A draw onto another canvas reaches the screen only through a draw checked above.
+        const via = shown.filter((d) => d.target !== c);
+        indirect += via.length;
+        misplaced += via.filter((d) => !taken.has(d.target)).length;
         const d = shown[0];
         if (place && (d.x - place[0]) * dx + (d.y - place[1]) * dy > 0) along += 1;
         place = [d.x, d.y];
@@ -12447,7 +12494,7 @@ const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluat
     } else place = null;
   }
   globalThis.__slideDraws = null;
-  return { frames, sliding, drawn, along, misplaced, ring, layers: g.slide_layers_version(), met: met(), leader: c.dataset.leader };
+  return { frames, sliding, drawn, along, misplaced, finals, indirect, ring, layers: g.slide_layers_version(), met: met(), leader: c.dataset.leader };
 }, [until, ref, max, dir]);
 
 for (const mode of ['hd', 'wide']) {
@@ -12485,7 +12532,10 @@ for (const mode of ['hd', 'wide']) {
     assert.ok(out.drawn > 0 && out.along > 0, `${mode}: the step's slide drawn moving its way`);
     assert.ok(after.along > 2 && after.layers > out.layers, `${mode}: the return step's own slide drawn, moving back`);
     assert.equal(step.out.ring + out.ring + after.ring, 0, `${mode}: the border's pixels in every frame of the slides`);
-    assert.equal(step.out.misplaced + out.misplaced + after.misplaced, 0, `${mode}: each draw of the static layer where Game.slide places it`);
+    assert.equal(step.out.misplaced + out.misplaced + after.misplaced, 0, `${mode}: each draw of the static layer where Game.slide places it, and each draw of it onto the screen where the layout puts the map`);
+    const [finals, indirect] = [step.out.finals + out.finals + after.finals, step.out.indirect + out.indirect + after.indirect];
+    assert.ok(indirect === 0 || finals > 0, `${mode}: draws onto the screen of the canvas the static layer went onto, checked`);
+    if (mode === 'wide') assert.ok(indirect > 0, `${mode}: the static layer goes onto Wide's frame canvas first`);
     const settled = await page.evaluate(() => {
       const g = globalThis.__shownGame;
       globalThis.__slideCalls = 0;
@@ -12494,7 +12544,7 @@ for (const mode of ['hd', 'wide']) {
       return [globalThis.__slideCalls, g.slide_version() === version, g.sliding()];
     });
     assert.deepEqual(settled, [0, true, false], `${mode}: no slide drawn once settled`);
-    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + out.sliding + after.sliding} frames with a slide placed, ${step.out.drawn + out.drawn + after.drawn} of them drawing the static layer canvas, ${after.along} of the return step's drawing it moved back; the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
+    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + out.sliding + after.sliding} frames with a slide placed, ${step.out.drawn + out.drawn + after.drawn} of them drawing the static layer canvas, ${indirect} of those onto another canvas, ${finals} draws of that canvas onto the screen where the layout puts the map, ${after.along} of the return step's drawing it moved back; the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
     await context.close();
   }, { needs: h.haveHfes });
 }

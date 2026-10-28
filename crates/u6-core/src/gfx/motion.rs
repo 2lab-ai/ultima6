@@ -143,10 +143,10 @@ pub(crate) fn shown_hash(fb: &Framebuffer) -> u64 {
 
 /// Keeps the shot of the framed render just presented, with its remembered layers, cursor and
 /// clock tile (what 0x102c90 took before it drew); `snap` when it was presented dissolving or drew
-/// XOR plots (the sparkle) its scene does not hold, or a load is not yet followed by a published
-/// scene ([`Io::break_motion`]). A render of the window cache that drew no box
-/// (`same`: every box's draws those of the last render) keeps the last shot again. Nothing with the
-/// switch off.
+/// XOR plots (the sparkle) its scene does not hold, or while a load's break is pending: the engine
+/// queued no publication with a scene since (an early picture is one, [`Io::break_motion`]). A
+/// render of the window cache that drew no box (`same`: every box's draws those of the last
+/// render) keeps the last shot again. Nothing with the switch off.
 pub(super) fn record(
     state: &State,
     io: &Io,
@@ -201,9 +201,10 @@ pub fn keep_scene(io: &Io, scene: Scene) {
 /// render of the copy would draw it ([`super::cache::SightMemory::shown_in`] of the state's
 /// memory, unchanged: the cells in sight are drawn live, so what this render would remember
 /// changes nothing it shows); its shot kept for the engine to hand over ([`Io::keep_preview`]),
-/// snapping while a load is not yet followed by a published scene ([`Io::break_motion`]). The
-/// copy is dropped; nothing with the switch off, nor in combat mode, where a fight's frames (a
-/// missile's flight, a flash) can show the party where it was before the turn's picture does.
+/// snapping while a load's break is pending: the engine queued no publication with a scene since
+/// (an early picture is one, [`Io::break_motion`]). The copy is dropped; nothing with the switch
+/// off, nor in combat mode, where a fight's frames (a missile's flight, a flash) can show the
+/// party where it was before the turn's picture does.
 pub(crate) fn preview(state: &State, io: &Io) {
     if !io.motion() || state.actors.combat_mode() {
         return;
@@ -651,4 +652,86 @@ pub fn slide_placements(slide: &Slide, view: &View) -> Vec<(usize, i32, i32)> {
         out.push((k, p.x, p.y));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cache::Layer;
+    use super::*;
+    use std::mem::size_of;
+    use u6_render::motion::{Cell, Node, Placed, Rank};
+
+    /// Spec 20 Bounds: [`Shot::heap_bytes`] of a shot built with known capacities is the figure
+    /// worked by hand from this build's layouts (a 64-bit target): the `Rc`'s box 152 + 2 · 8,
+    /// four cells' room 4 · 32, seven nodes' 7 · 8, three placed objects' 3 · 12, two remembered
+    /// cells' 2 · 32 and five remembered layers' 5 · 8: 168 + 128 + 56 + 36 + 64 + 40 = 492.
+    #[test]
+    fn a_shots_heap_bytes_are_its_capacities_worked_by_hand() {
+        assert_eq!(
+            [
+                size_of::<Shot>(),
+                size_of::<Cell>(),
+                size_of::<Node>(),
+                size_of::<Placed>(),
+                size_of::<SightShown>(),
+                size_of::<Layer>(),
+            ],
+            [152, 32, 8, 12, 32, 8],
+            "the layouts the figure is worked from"
+        );
+        let node = Node {
+            word: 1,
+            slot: None,
+            rank: Rank::Own,
+        };
+        let cell = |room: usize, nodes: usize| {
+            let mut n = Vec::with_capacity(room);
+            n.extend(std::iter::repeat_n(node, nodes));
+            Cell { base: 1, nodes: n }
+        };
+        let mut cells = Vec::with_capacity(4);
+        cells.extend([cell(2, 1), cell(0, 0), cell(5, 5)]);
+        let mut placed = Vec::with_capacity(3);
+        placed.push(Placed {
+            slot: 1,
+            cell: (0, 0),
+            kind: 0,
+        });
+        let layer = Layer {
+            record: 1,
+            masktype: 0,
+            frame: 0,
+            frozen: None,
+        };
+        let shown = |room: usize| {
+            let mut layers = Vec::with_capacity(room);
+            layers.push(layer);
+            SightShown { fade: 0, layers }
+        };
+        let mut memory = Vec::with_capacity(2);
+        memory.extend([shown(1), shown(4)]);
+        let rooms = (
+            cells.capacity(),
+            (cells.iter()).map(|c| c.nodes.capacity()).sum::<usize>(),
+            placed.capacity(),
+            memory.capacity(),
+            (memory.iter()).map(|m| m.layers.capacity()).sum::<usize>(),
+        );
+        assert_eq!(rooms, (4, 7, 3, 2, 5), "the capacities asked for");
+        let shot = Shot {
+            memory,
+            ..Shot::of_scene(Scene {
+                leader: None,
+                centre: (0, 0, 0),
+                origin: (0, 0),
+                cols: 3,
+                rows: 1,
+                corner: (0, 0),
+                cells,
+                placed,
+                snap: false,
+            })
+        };
+        assert_eq!(shot.heap_bytes(), 492);
+    }
 }

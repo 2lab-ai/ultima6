@@ -5737,8 +5737,10 @@ mod tests {
     /// distinct colours presented once; then at each `w` the walk's next scene ([`walk_scene`]
     /// 1, 2, …) presented as a framed render keeps its scene (a pixel of the shown map set for
     /// it, so its picture is its own; [`u6_core::gfx::motion::keep_scene`]), at each `s` the same
-    /// with a scene that snaps (as a load's first picture), and at each `p` the
-    /// palette's colours changed and presented (the shown map's colour indices as they were).
+    /// with a scene that snaps (as a load's first picture), at each `p` the palette's colours
+    /// changed and presented (the shown map's colour indices as they were), and at each `f` the
+    /// picture changed in place: another pixel of the shown map set and presented, kept with the
+    /// scene of the same places (as a fade step's refresh).
     fn walk_engine() -> Engine {
         let mut state = u6_core::State::empty();
         for r in 1..=3u32 {
@@ -5758,7 +5760,7 @@ mod tests {
             io.draw(|fb| palette(fb, 0));
             io.present();
             let (x0, y0, _, _) = u6_core::geom::SHOWN;
-            let (mut n, mut k) = (0, 0);
+            let (mut n, mut k, mut m) = (0, 0, 0);
             loop {
                 while io.key_ready() {
                     match io.next_key().await {
@@ -5776,6 +5778,12 @@ mod tests {
                             k += 0x55;
                             io.draw(|fb| palette(fb, k));
                             io.present();
+                        }
+                        Key::Char('f') => {
+                            m += 1;
+                            io.draw(|fb| fb.set(usize::from(x0) + m, usize::from(y0) + 1, 9));
+                            io.present();
+                            u6_core::gfx::motion::keep_scene(&io, walk_scene(n));
                         }
                         _ => {}
                     }
@@ -6348,14 +6356,86 @@ mod tests {
         );
     }
 
+    /// Spec 20 Design 5, the page's side at a slide's end (the product code; no game files, HD
+    /// on at 2×): halfway through a step's slide the engine's picture changes in place (`f`, as a
+    /// fade step's refresh), and the slide runs on with its layers, made from the step's picture
+    /// (B). At the first present whose presentation clock reaches the step's publication plus
+    /// [`u6_render::motion::SLIDE_MS`], no layer is placed ([`Game::slide`] empty: the page shows
+    /// its HD frame alone), and the HD frame is the engine's picture now (B'), not B.
+    #[test]
+    fn at_a_slides_end_the_page_shows_the_engines_hd_frame() {
+        let mut game = walk_game();
+        let frame = |game: &mut Game| {
+            game.step(pacer::STEP_MS);
+            game.present();
+        };
+        for _ in 0..60 {
+            frame(&mut game);
+        }
+        assert!(!game.sliding(), "the first scene settled");
+        publish_walk(&mut game);
+        frame(&mut game);
+        let published = game.presentation_ms();
+        assert!(!game.slide().is_empty(), "the step slides");
+        let b = game.hd_frame_rgba();
+        let made = game.slide_layers_version();
+        while game.presentation_ms() < published + u6_render::motion::SLIDE_MS / 2.0 {
+            frame(&mut game);
+        }
+        game.key_down("KeyF", "f", false);
+        frame(&mut game);
+        let b2 = game.hd_frame_rgba();
+        assert!(
+            !game.slide().is_empty() && game.slide_layers_version() == made,
+            "in place: the slide runs on with B's layers"
+        );
+        assert!(
+            b2 != b && b2 == expected_hd(&game, Scale::X2),
+            "the HD frame composed again: B'"
+        );
+        let end = published + u6_render::motion::SLIDE_MS;
+        let mut frames = 0;
+        loop {
+            game.step(pacer::STEP_MS);
+            let at_end = game.presentation_ms() >= end;
+            game.present();
+            frames += 1;
+            if at_end {
+                break;
+            }
+            assert!(!game.slide().is_empty(), "before its end the slide placed");
+        }
+        assert!(
+            game.slide().is_empty(),
+            "at the slide's end no layer placed: the page shows its HD frame"
+        );
+        let now = game.hd_frame_rgba();
+        assert!(
+            now == expected_hd(&game, Scale::X2) && now == b2 && now != b,
+            "the HD frame the engine's picture now: B', not B"
+        );
+        println!(
+            "a step's slide with an in-place change half way: no layer placed at the slide's end \
+             (the {frames}th present after the change, the first at it); the HD frame B'"
+        );
+    }
+
     /// Spec 20 Bounds, on the user's zip, in this build's layout: the bytes of the slide's layers
-    /// at the page's largest scale (HD 4×), the most over the frames drawn on four steps east: the wasm
-    /// side's layers (colour indices, sources and drawn marks; each layer the slide and the kept
-    /// ones share once) and their composed words and changes, and the page's canvases ([`Page`]).
+    /// at the page's largest scale (HD 4×) over four steps east, each a move of the party: the
+    /// wasm side's layers (colour indices, sources and drawn marks; each layer the slide and the
+    /// kept ones share once), their composed words and changes, and the canvases of the test's
+    /// stand-in for the page ([`Page`]: the layers' canvases only, not the page's screen canvas
+    /// nor Wide's compositing canvas). Each the most over the frames that drew a slide while it
+    /// ran, and the most of their sum on one frame.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn the_slide_layer_buffers_at_hd_4x() {
         if !std::path::Path::new(ZIP).exists() {
+            assert_ne!(
+                std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+                Ok("1"),
+                "U6_REQUIRE_ARCHIVE=1 and {ZIP} is not present"
+            );
             eprintln!("skipped: {ZIP} not present");
             return;
         }
@@ -6368,19 +6448,29 @@ mod tests {
         assert_eq!(game.hd_scale(), 4, "the largest scale");
         let mut page = Page::new();
         let dt = 1000.0 / 60.0;
-        let (mut keys, mut frames) = (0, 0);
-        let (mut pixels, mut words, mut canvases) = (0usize, 0usize, 0usize);
+        let centre = |game: &Game| {
+            let e = game.engine.as_ref().quiet();
+            (e.state().map.centre.x, e.state().map.centre.y)
+        };
+        let (mut moves, mut frames, mut at) = (0, 0, centre(&game));
+        let (mut pixels, mut words, mut canvases, mut together) = (0usize, 0usize, 0usize, 0usize);
         let bytes = |l: &u6_render::motion::LayerPixels| {
             l.pixels.capacity()
                 + l.src.capacity() * std::mem::size_of::<u6_render::Src>()
                 + l.drawn.capacity() * std::mem::size_of::<bool>()
         };
         for i in 0..30_000 {
-            if keys < 4 && game.at_prompt() && i > 3000 {
-                game.key_down("ArrowRight", "ArrowRight", false);
-                keys += 1;
-            } else if keys == 4 && game.at_prompt() && !game.sliding() {
+            // The party's moves after the start (a cell east each).
+            if centre(&game) != at {
+                moves += usize::from(i > 3000);
+                at = centre(&game);
+            }
+            let settled = game.at_prompt() && !game.sliding();
+            if moves == 4 && settled {
                 break;
+            }
+            if i > 3000 && settled && game.pending.is_empty() {
+                game.key_down("ArrowRight", "ArrowRight", false);
             }
             let k = game.pace(dt);
             for _ in 0..k {
@@ -6391,7 +6481,8 @@ mod tests {
                 continue;
             }
             game.present();
-            if !page.take(&mut game) {
+            let running = game.motion.presenter.active(game.presentation_ms());
+            if !page.take(&mut game) || !running || game.layers.slide.is_none() {
                 continue;
             }
             frames += 1;
@@ -6409,21 +6500,32 @@ mod tests {
                     once.push(p);
                 }
             }
-            pixels = pixels.max(once.iter().map(|p| bytes(p)).sum());
-            let composed = (l.images.iter()).map(|im| {
-                let patch = im.patch.as_ref().map_or(0, |p| {
-                    (p.rects.iter()).map(|r| r.1.capacity()).sum::<usize>()
-                });
-                4 * (im.rgba.capacity() + patch)
-            });
-            words = words.max(composed.sum());
-            let held = page.held.as_ref();
-            canvases = canvases.max(held.map_or(0, |h| h.2.iter().map(|c| 4 * c.2.len()).sum()));
+            let these = [
+                once.iter().map(|p| bytes(p)).sum::<usize>(),
+                (l.images.iter())
+                    .map(|im| {
+                        let patch = im.patch.as_ref().map_or(0, |p| {
+                            (p.rects.iter()).map(|r| r.1.capacity()).sum::<usize>()
+                        });
+                        4 * (im.rgba.capacity() + patch)
+                    })
+                    .sum(),
+                (page.held.as_ref()).map_or(0, |h| h.2.iter().map(|c| 4 * c.2.len()).sum()),
+            ];
+            pixels = pixels.max(these[0]);
+            words = words.max(these[1]);
+            canvases = canvases.max(these[2]);
+            together = together.max(these.iter().sum());
         }
-        assert!(keys == 4 && frames > 0, "slides drawn on the steps");
+        assert!(
+            moves == 4 && frames > 0,
+            "four moves, and frames drawn while a slide ran: {moves} moves, {frames} frames"
+        );
         println!(
-            "the slide's layers at HD 4x, the most over {frames} frames drawn: {pixels} bytes of layers, \
-             {words} of composed words and changes, {canvases} of the page's canvases; {} in all",
+            "the slide's layers at HD 4x over {moves} moves, the most over the {frames} frames \
+             drawn while a slide ran: {pixels} bytes of layers, {words} of composed words and \
+             changes, {canvases} of the stand-in page's layer canvases; the sum of these peaks \
+             {}, the most on one frame {together}",
             pixels + words + canvases
         );
     }

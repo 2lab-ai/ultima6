@@ -770,9 +770,10 @@ const TEXT_RING: usize = KEY_RING;
 pub(crate) const SHOTS: usize = 64;
 
 /// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most, the oldest
-/// dropped past it. A tick queues at most two (its early picture and its own), and a page takes
-/// them at each present, after at most [`crate::pacer::MAX_STEPS`] ticks: none it would take is
-/// dropped, a snapping one that ends an [`Io::break_motion`] included.
+/// dropped past it, which breaks the game shown as a load does ([`Engine::queue_motion`]). A tick
+/// queues at most two (its early picture and its own), and a page takes them at each present,
+/// after at most [`crate::pacer::MAX_STEPS`] ticks, so a page never meets it; a host that ticks
+/// longer without taking them does.
 pub(crate) const PUBLISHED: usize = 256;
 const _: () = assert!(2 * crate::pacer::MAX_STEPS as usize <= PUBLISHED);
 
@@ -959,13 +960,14 @@ impl Engine {
         }
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
-        if let Some(shot) = self.io.preview.borrow_mut().take() {
-            self.motion.push(Published {
+        let preview = self.io.preview.borrow_mut().take();
+        if let Some(shot) = preview {
+            self.io.set_motion_break(false);
+            self.queue_motion(Published {
                 time_ms: self.io.now_ms(),
                 shot: Some(shot),
                 preview: true,
             });
-            self.io.set_motion_break(false);
         }
         let version = self.io.front_version.get();
         let presented = version != self.published_front;
@@ -1032,7 +1034,7 @@ impl Engine {
     }
 
     /// Port-only (spec 20): the publication just made, when its shown map changed (or after an
-    /// [`Io::break_motion`] until a scene went out): with the shot whose picture it is
+    /// [`Io::break_motion`] until one with a scene is queued): with the shot whose picture it is
     /// ([`Io::take_shot`]), or foreign.
     fn match_motion(&mut self) {
         let hash = crate::gfx::motion::shown_hash(&self.io.published.borrow());
@@ -1044,13 +1046,23 @@ impl Engine {
         if shot.is_some() {
             self.io.set_motion_break(false);
         }
-        self.motion.push(Published {
+        self.queue_motion(Published {
             time_ms: self.io.now_ms(),
             shot,
             preview: false,
         });
+    }
+
+    /// Port-only (spec 20): queues `publication` for the platform ([`Engine::take_motion`]). Past
+    /// [`PUBLISHED`] the oldest are dropped, and the platform never sees them: the game shown
+    /// breaks there as at a load ([`Io::break_motion`]), so the scenes kept after it snap until
+    /// one is queued, and a publication dropped (one that ended a break included) is not slid
+    /// across.
+    fn queue_motion(&mut self, publication: Published) {
+        self.motion.push(publication);
         if self.motion.len() > PUBLISHED {
             self.motion.drain(..self.motion.len() - PUBLISHED);
+            self.io.break_motion();
         }
     }
 
@@ -1856,6 +1868,71 @@ mod tests {
             e.take_motion().is_empty(),
             "then an unchanged picture: nothing"
         );
+    }
+
+    /// Spec 20: an early picture queued ends the break, as a published scene does (a platform's
+    /// presenter starts again from one that snaps, u6-render `Presenter::preview`): with the
+    /// picture unchanged that tick publishes the early picture alone, and the next nothing.
+    #[test]
+    fn a_queued_early_picture_ends_the_break() {
+        let (mut e, _mode) = broken_scene_game();
+        let mut shot = crate::gfx::motion::Shot::for_test(1);
+        Rc::get_mut(&mut shot).expect("one owner").scene.snap = true;
+        e.io().keep_preview(shot);
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert!(
+            p.len() == 1 && p[0].preview,
+            "the early picture alone published"
+        );
+        assert!(!e.io().motion_break(), "the break ended");
+        e.tick(&[], 20);
+        assert!(
+            e.take_motion().is_empty(),
+            "then an unchanged picture: nothing"
+        );
+    }
+
+    /// Spec 20: with [`PUBLISHED`] publications not taken, one more (a scene's, or an early
+    /// picture's) drops the oldest and breaks the game shown as a load does: the queue holds
+    /// [`PUBLISHED`], the break is pending (so the unchanged picture after an early picture is
+    /// published again), and the next scene snaps and ends it.
+    #[test]
+    fn a_full_queue_drops_the_oldest_and_breaks_the_game_shown() {
+        for early in [false, true] {
+            let mode = Rc::new(Cell::new(1u8));
+            let mut e = scene_game(Rc::clone(&mode));
+            e.set_motion(true);
+            for _ in 0..PUBLISHED {
+                e.tick(&[], 20);
+            }
+            assert!(!e.io().motion_break(), "early {early}: full, no break");
+            if early {
+                mode.set(0);
+                e.io().keep_preview(crate::gfx::motion::Shot::for_test(1));
+            }
+            e.tick(&[], 20);
+            assert!(e.io().motion_break(), "early {early}: past it, the break");
+            let p = e.take_motion();
+            assert_eq!(p.len(), PUBLISHED, "early {early}: the newest kept");
+            let last = &p[PUBLISHED - 1];
+            if early {
+                assert!(
+                    p[PUBLISHED - 2].preview && !last.preview && last.shot.is_none(),
+                    "the early picture, then the unchanged picture published again (foreign)"
+                );
+            } else {
+                assert!(last.shot.is_some(), "the scene that went past it kept");
+            }
+            mode.set(1);
+            e.tick(&[], 20);
+            let p = e.take_motion();
+            assert!(
+                p.len() == 1 && p[0].shot.as_ref().is_some_and(|s| s.scene.snap),
+                "early {early}: the next scene snaps"
+            );
+            assert!(!e.io().motion_break(), "early {early}: and ends the break");
+        }
     }
 
     /// Spec 20: the switch off drops what the engine held for the platform: the publications

@@ -23,12 +23,22 @@ use crate::pacer::STEP_MS;
 use crate::state::State;
 use u6_render::hd::Scale;
 
+/// The user's zip, or none: the test skips, saying so, unless `U6_REQUIRE_ARCHIVE=1` (the release
+/// receipt), which fails it instead. With it the test says it ran.
 fn files() -> Option<Files> {
-    let zip = PathBuf::from(std::env::var_os("HOME")?).join("Games/ultima6/original/ultima-vi.zip");
-    if !zip.exists() {
+    let zip = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Games/ultima6/original/ultima-vi.zip"))
+        .filter(|zip| zip.exists());
+    let Some(zip) = zip else {
+        assert_ne!(
+            std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+            Ok("1"),
+            "U6_REQUIRE_ARCHIVE=1 and the user's zip is not present"
+        );
         println!("skipped: no game files (the user's zip is not present)");
         return None;
-    }
+    };
+    println!("ran: on the user's zip");
     let data = std::fs::read(&zip).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
@@ -1024,17 +1034,19 @@ fn pictures(e: &mut Engine, hd: &mut HdView, out: &mut Vec<Picture>) {
 /// sight in the shown map (faded d); the calendar moved on to d + 1 days since the sight,
 /// the prompt's refresh draws the cells faded d + 1, the same places (picture B'). A presenter
 /// slides from the picture before the step into B, and B' comes half way. At the slide's start,
-/// its middle (B' just in), near its end and at its end, the remembered cells drawn (the plan
-/// while the presenter is active, else the engine's frames, as the page draws) are the engine's
-/// own pictures shifted by the camera: classic, of the newest scene (B, then B': an in-place
-/// change shows at the next present); HD, of B until the slide's end, the scene its layers were
-/// made from, then of B' (the page shows the engine's HD frame again). After the midpoint, B
-/// and B' differ on the pixels compared, classic and HD, so each sample tells them apart.
+/// its middle (B' just in), near its end and at its end, the remembered cells drawn are the
+/// engine's own pictures shifted by the camera. Classic: the plan, of the newest scene (B, then
+/// B': an in-place change shows at the next present), at the end B' at rest. HD: the layers
+/// made from B over the HD frame then, of B while the slide runs; at its end (the presenter no
+/// longer active) they still show B and differ from B', so the page must show its HD frame then
+/// (u6-web's page test of that switch). From the midpoint B and B' differ on the pixels compared,
+/// classic and HD (but at the midpoint at 4 days in Original: why at the check), so the samples
+/// tell them apart.
 #[test]
 fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
     let Some(files) = files() else { return };
     let s = 2;
-    let mut totals = [0usize; 6];
+    let mut totals = [0usize; 7];
     for days in 0..=4u64 {
         let mut hd = HdView::new();
         hd.set(true, Scale::X2);
@@ -1110,6 +1122,9 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
             .collect();
         let mut bad = Vec::new();
         let end = t0 + SLIDE_MS;
+        // B against B' at the midpoint (classic, HD), and what the held HD layers draw of B at the
+        // slide's end against B'.
+        let (mut midpoint, mut held_at_end) = ([0usize; 2], 0);
         for (k, dt) in [0.0, 90.0, 180.0, 270.0, 350.0, SLIDE_MS]
             .into_iter()
             .enumerate()
@@ -1119,7 +1134,8 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
                 p.publish(Rc::clone(&b2.0), t, true);
                 assert_eq!(p.generation(), g, "{days} days: in place, the layers kept");
             }
-            // The page draws the plan while the presenter is active, else the engine's frames.
+            // The presenter is active until the slide's end; then the page shows the engine's
+            // frames (u6-web's side).
             let sliding = p.active(t);
             assert_eq!(sliding, t < end, "{days} days: the slide runs to its end");
             let view = p.view(t).quiet();
@@ -1151,16 +1167,11 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
                 movers.iter().any(mover)
                     || (frame.as_ref()).is_some_and(|f| f.index((x, y)).is_some_and(|i| f.drawn[i]))
             };
-            // Classic: drawn from the newest scene.
-            let drawn: Vec<u32> = if sliding {
-                let mut fb = poisoned(&e);
-                paint(&e.state(), &p, &view, &mut fb);
-                fb.pixels().iter().map(|&c| u32::from(c)).collect()
-            } else {
-                (e.published_frame().pixels().iter())
-                    .map(|&c| u32::from(c))
-                    .collect()
-            };
+            // Classic: the plan, drawn from the newest scene (at the end, at rest: B', the engine's
+            // picture the page then shows, drawn apart from it).
+            let mut fb = poisoned(&e);
+            paint(&e.state(), &p, &view, &mut fb);
+            let drawn: Vec<u32> = fb.pixels().iter().map(|&c| u32::from(c)).collect();
             let sampled = remembered_pixels(1, &newest.0.scene, view.camera, &skip);
             let (n, d) =
                 remembered_against(&drawn, &newest.1, 1, &newest.0.scene, view.camera, &skip);
@@ -1168,62 +1179,71 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
             if n == 0 || d > 0 {
                 bad.push(("classic", k, n, d));
             }
-            // B against B' on these pixels: after the midpoint the sample tells the two apart.
+            // B against B' on these pixels: from the midpoint the sample tells the two apart, but
+            // at the midpoint at 4 days in Original (Wide's sample there holds some). There
+            // the few pixels B' changes (the last grey ones going black) lie off the shown map at
+            // the camera's half cell, or under the frame layer's words (the cursor and the
+            // border), which the sample leaves out.
             let faded = |pixels: &[(usize, usize)], (b, b2): (&[u32], &[u32])| {
                 (pixels.iter())
                     .filter(|&&(_, rest)| b[rest] != b2[rest])
                     .count()
             };
-            if dt > 180.0 {
+            let tells = dt > 180.0 || dt == 180.0 && (days < 4 || cfg!(feature = "wide"));
+            if dt >= 180.0 {
                 let f = faded(&sampled, (&b.1, &b2.1));
                 totals[4] += f;
-                if f == 0 {
+                midpoint[0] += if dt == 180.0 { f } else { 0 };
+                if tells && f == 0 {
                     bad.push(("classic, B against B'", k, sampled.len(), f));
                 }
             }
-            // HD: until the slide's end the layers made from B over its HD frame, then the
-            // engine's HD frame (B').
+            // HD: the layers made from B over the HD frame now (the newest picture's, as the page
+            // draws them). While the slide runs they show B. At its end they still show B, which
+            // differs from B' there: the page shows its HD frame (B') instead, the switch u6-web's
+            // `at_a_slides_end_the_page_shows_the_engines_hd_frame` exercises.
             let ow = u6_render::WIDTH * s;
-            let out = if sliding {
-                let mut out = b.2.clone();
-                for (i, x, y) in slide_placements(&slide, &view) {
-                    let (px, w) = (&slide.parts[i].pixels, &words[i]);
-                    let lw = px.width * s;
-                    for (j, &word) in w.iter().enumerate() {
-                        let (dx, dy) = (
-                            x * s as i32 + (j % lw) as i32,
-                            y * s as i32 + (j / lw) as i32,
-                        );
-                        if word >> 24 != 0
-                            && dx >= 0
-                            && dy >= 0
-                            && in_shown(dx as usize / s, dy as usize / s)
-                        {
-                            out[dy as usize * ow + dx as usize] = word;
-                        }
+            let mut out = newest.2.clone();
+            for (i, x, y) in slide_placements(&slide, &view) {
+                let (px, w) = (&slide.parts[i].pixels, &words[i]);
+                let lw = px.width * s;
+                for (j, &word) in w.iter().enumerate() {
+                    let (dx, dy) = (
+                        x * s as i32 + (j % lw) as i32,
+                        y * s as i32 + (j / lw) as i32,
+                    );
+                    if word >> 24 != 0
+                        && dx >= 0
+                        && dy >= 0
+                        && in_shown(dx as usize / s, dy as usize / s)
+                    {
+                        out[dy as usize * ow + dx as usize] = word;
                     }
                 }
-                out
-            } else {
-                hd.present(Some(&e), &Framebuffer::new());
-                hd.rgba().to_vec()
-            };
-            let held = if t < end { &b } else { &b2 };
-            let sampled = remembered_pixels(s, &held.0.scene, view.camera, &skip);
-            let (n, d) = remembered_against(&out, &held.2, s, &held.0.scene, view.camera, &skip);
-            totals[1] += n;
-            if n == 0 || d > 0 {
-                bad.push(("HD", k, n, d));
             }
-            if dt > 180.0 {
+            let sampled = remembered_pixels(s, &b.0.scene, view.camera, &skip);
+            if sliding {
+                let (n, d) = remembered_against(&out, &b.2, s, &b.0.scene, view.camera, &skip);
+                totals[1] += n;
+                if n == 0 || d > 0 {
+                    bad.push(("HD", k, n, d));
+                }
+            } else {
+                let (n, d) = remembered_against(&out, &b2.2, s, &b2.0.scene, view.camera, &skip);
+                held_at_end += d;
+                if n == 0 || d == 0 {
+                    bad.push(("HD layers at the end, against B'", k, n, d));
+                }
+            }
+            if dt >= 180.0 {
                 let f = faded(&sampled, (&b.2, &b2.2));
                 totals[5] += f;
-                if f == 0 {
+                midpoint[1] += if dt == 180.0 { f } else { 0 };
+                if tells && f == 0 {
                     bad.push(("HD, B against B'", k, sampled.len(), f));
                 }
             }
         }
-        // The end: no slide, the page shows the engine's frame (B').
         assert!(!p.active(end), "{days} days: the slide over");
         let (x0, y0, x1, y1) = SHOWN;
         let grey = |f: &[u32]| {
@@ -1244,29 +1264,37 @@ fn a_fade_step_during_a_slide_shows_in_classic_at_once_and_in_hd_at_its_end() {
         );
         totals[2] += grey(&b.1);
         totals[3] += grey(&b2.1);
+        totals[6] += held_at_end;
         println!(
-            "{days} to {} days: grey pixels of the shown map {} then {}",
+            "{days} to {} days: grey pixels of the shown map {} then {}; at the midpoint {} \
+             classic and {} HD pixels sampled differ between B and B'; at the end the held HD \
+             layers differ from B' on {held_at_end}",
             days + 1,
             grey(&b.1),
-            grey(&b2.1)
+            grey(&b2.1),
+            midpoint[0],
+            midpoint[1]
         );
     }
     println!(
-        "a fade step during a slide, 0 to 4 days: {} classic and {} HD remembered pixels drawn as \
-         the engine's pictures at the slide's start, middle, near its end and at its end; after the \
-         midpoint, {} classic and {} HD of them differ between B and B'",
-        totals[0], totals[1], totals[4], totals[5]
+        "a fade step during a slide, 0 to 4 days: {} classic pixels of the plan (the newest scene, \
+         to the end) and {} HD pixels of the held layers (B, during the slide) drawn as the \
+         engine's pictures; from the midpoint {} classic and {} HD of the pixels sampled differ \
+         between B and B'; at the end the held HD layers differ from B' on {}",
+        totals[0], totals[1], totals[4], totals[5], totals[6]
     );
 }
 
 /// Spec 20 Bounds, on the user's zip, in this build's layout: the heap bytes of a shot
-/// ([`Shot::heap_bytes`]) of each scene published in the start fight, on the town's walk, and on
-/// the town's walk with every cell within 12 of the party remembered a day ago (each cell out of
-/// sight then draws remembered layers); and the most motion holds of them at once, at the largest:
-/// the engine's [`crate::engine::SHOTS`] kept, the one kept last and the early picture made in the
-/// poll, [`crate::engine::PUBLISHED`] queued for the platform (a page takes them at each present,
-/// after at most two a tick for [`crate::pacer::MAX_STEPS`] ticks), and the presenter's
-/// [`u6_render::motion::HISTORY`] (an early picture held is one of them).
+/// ([`Shot::heap_bytes`], its accounting checked by hand in `gfx::motion`'s tests) of each scene
+/// published in the start fight, on the town's walk, and on the town's walk with every cell within
+/// 12 of the party remembered a day ago (each cell out of sight then draws remembered layers). The
+/// most of them is a measured figure of these runs, not a bound: a scene with more nodes or more
+/// remembered layers holds more. The totals are estimates from it: the most shots motion holds at
+/// once (the engine's [`crate::engine::SHOTS`] kept, the one kept last and the early picture made
+/// in the poll, [`crate::engine::PUBLISHED`] queued for the platform, or two a tick for
+/// [`crate::pacer::MAX_STEPS`] ticks with a page's presents, and the presenter's
+/// [`u6_render::motion::HISTORY`], an early picture held one of them), each that size.
 #[test]
 fn the_heap_bytes_of_a_shot() {
     let Some(files) = files() else { return };
@@ -1309,9 +1337,10 @@ fn the_heap_bytes_of_a_shot() {
     let paced = 2 * crate::pacer::MAX_STEPS as usize;
     let history = u6_render::motion::HISTORY;
     println!(
-        "the most a shot holds: {most} bytes; at most {} shots at once ({engine} in the engine, \
-         {queued} queued, {history} in the presenter): {} bytes; with a page's presents ({paced} \
-         queued at most): {} shots, {} bytes",
+        "the most a shot held in these runs (measured): {most} bytes; at most {} shots at once \
+         ({engine} in the engine, {queued} queued, {history} in the presenter): about {} bytes \
+         (an estimate, each at that size); with a page's presents ({paced} queued at most): {} \
+         shots, about {} bytes",
         engine + queued + history,
         (engine + queued + history) * most,
         engine + paced + history,

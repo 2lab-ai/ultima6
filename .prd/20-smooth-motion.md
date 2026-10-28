@@ -160,23 +160,31 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
    these. Sizes are this build's layouts on the native build, from capacities, as `SightMemory::heap_bytes` counts.
    - The engine keeps at most `SHOTS` = 64 framed renders until a publication shows one (`engine.rs:770`), with the
      one kept last and the early picture made in the poll. It queues at most `PUBLISHED` = 256 publications for the
-     platform and drops the oldest past it (`engine.rs:776`, `:1053`); the page takes them all at each present.
-   - None the page would take is dropped, so a snapping one that ends a load's break is never lost before the page
-     sees it. A tick queues at most two (its early picture, `engine.rs:963`, and its own, `:1047`). The page runs at
+     platform (`engine.rs:777`). Past it the oldest are dropped, and the game shown breaks as at a load
+     (`Engine::queue_motion`, `engine.rs:1061-1067`): the platform never sees those publications, so the scenes kept
+     after them snap until one is queued (`a_full_queue_drops_the_oldest_and_breaks_the_game_shown`).
+   - The page never meets that cap, so a snapping publication that ends a load's break is never lost before the page
+     sees it. A tick queues at most two (its early picture, `engine.rs:966`, and its own, `:1049`). The page runs at
      most `MAX_STEPS` = 64 ticks a display frame (`pacer.rs:96-112`, `site/app.js:3082`) and presents after any
      frame that ran one (`site/app.js:3091-3092`). Each present takes the queue whole (`u6-web lib.rs:993`, `:1903`,
-     `:2213`). 2 × 64 ≤ 256 is asserted at compile time beside `PUBLISHED` (`engine.rs:777`).
+     `:2213`). 2 × 64 ≤ 256 is asserted at compile time beside `PUBLISHED` (`engine.rs:778`). A host that ticks
+     longer without taking the queue meets the cap, and the break above.
    - The presenter keeps `HISTORY` = 3 scenes (`u6-render motion.rs:57`); an early picture it holds, for at most
      `PREVIEW_MS`, is one of them.
-   - A shot holds at most 12 264 bytes in Original and 69 864 in Wide (`Shot::heap_bytes`; the start fight, the
-     town's walk, and the walk with the cells round the party remembered: `the_heap_bytes_of_a_shot`, 2026-10-28).
-     At most 325 are held at once: 3.99 MB in Original, 22.7 MB in Wide. With the page's presents (at most 128
-     queued) it is 197: 2.42 MB and 13.8 MB.
-   - The slide's layers at the page's largest scale, HD 4×, the most over four steps east
-     (`the_slide_layer_buffers_at_hd_4x`, 2026-10-28): in Original 1.05 MB of layers (colour indices, sources and
-     drawn marks, in the wasm), 4.77 MB of composed words and changes (in the wasm) and 4.78 MB of the page's
-     canvases, 10.6 MB in all; in Wide 6.00, 27.4 and 27.4 MB, 60.9 MB in all. The words and canvases take 4 · s²
-     bytes a layer pixel at scale s, so at 2× a quarter of these.
+   - The most a shot held in the receipt's runs is 12 264 bytes in Original and 69 864 in Wide (`Shot::heap_bytes`,
+     its accounting checked on a shot built by hand: `a_shots_heap_bytes_are_its_capacities_worked_by_hand`; the runs
+     are the start fight, the town's walk, and the walk with the cells round the party remembered:
+     `the_heap_bytes_of_a_shot`, 2026-10-28). These are measured figures, not a bound: a scene with more nodes or more
+     remembered layers holds more. Estimated from them, at most 325 shots held at once take about 3.99 MB in
+     Original and 22.7 MB in Wide; with the page's presents (at most 128 queued), 197 shots take about 2.42 MB and
+     13.8 MB.
+   - The slide's layers at the page's largest scale, HD 4×, over four moves east, the most over the frames drawn
+     while a slide ran (`the_slide_layer_buffers_at_hd_4x`, 2026-10-28). In Original: 1.05 MB of layers (colour
+     indices, sources and drawn marks, in the wasm), 4.77 MB of composed words and changes (in the wasm), and
+     4.78 MB of canvases in the test's stand-in for the page (`Page`: the layers' canvases only; the page's screen
+     canvas and Wide's compositing canvas are not counted). The sum of these peaks is 10.6 MB, and the most on one
+     frame 10.58 MB. In Wide: 6.00, 27.4 and 27.4 MB; 60.9 MB both summed and on one frame. The words and canvases
+     take 4 · s² bytes a layer pixel at scale s, so at 2× a quarter of these.
 
 ## Receipts
 
