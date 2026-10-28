@@ -270,10 +270,11 @@ impl Io {
     }
 
     /// Port-only (spec 23 Decision 2): the lines the message history's view is back from the live
-    /// bottom ([`Engine::history_offset`]; 0: the live window), as the engine last set it: after a
-    /// tick's input, after its publish and at a wheel, so a pass of the game reads it as the
-    /// player sees the window. Spec 22's clicks read it: while scrolled back the window shows kept
-    /// lines, and none of its keywords is a target ([`crate::ui::talk::pointer`]).
+    /// bottom ([`Engine::history_offset`]; 0: the live window), as the engine set it before the
+    /// game's pass of the tick, after the tick's input (the wheel and the publish since included):
+    /// a pass of the game reads it as the player sees the window then, and nothing else reads it.
+    /// Spec 22's clicks read it: while scrolled back the window shows kept lines, and none of its
+    /// keywords is a target ([`crate::ui::talk::pointer`]).
     pub fn history_offset(&self) -> usize {
         self.history_offset.get()
     }
@@ -968,17 +969,12 @@ impl Engine {
     /// sprite, at the handler's position, over the published frame,
     /// [`crate::ui::pointer::vblank`]).
     ///
-    /// Port (spec 21): first the travel's step, a direction key it adds to `input` at the command
-    /// prompt ([`Engine::travel_press`]).
+    /// Port (spec 21): first the travel's step, a direction key it adds after `input` at the
+    /// command prompt ([`Engine::travel_press`]); queued as the player's keys are, but not the
+    /// player's input to the message history's view (spec 23 Decision 6: it leaves the view where
+    /// it is).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
-        let with_step;
-        let input = match self.travel_press(input) {
-            Some(step) => {
-                with_step = [input, &[step]].concat();
-                &with_step[..]
-            }
-            None => input,
-        };
+        let step = self.travel_press(input);
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -998,10 +994,18 @@ impl Engine {
                 events.retain(|q| !taken_back(true, q));
                 keys -= before - events.len();
             }
-            for &e in input {
+            let events_in = input
+                .iter()
+                .map(|&e| (e, true))
+                .chain(step.map(|e| (e, false)));
+            for (e, player) in events_in {
                 // Spec 23: the player's input leaves the message history; a press on its bar is
-                // the bar's.
-                let e = self.view.input(&s.ui, game, e);
+                // the bar's. The travel's step is not the player's.
+                let e = if player {
+                    self.view.input(&s.ui, game, e)
+                } else {
+                    e
+                };
                 let (held, room) = match e {
                     _ if taken_back(prompt, &e) => continue,
                     InputEvent::Key(_) | InputEvent::Repeat(_) | InputEvent::Paced(_) => {
@@ -1030,6 +1034,9 @@ impl Engine {
                 events.push_back(e);
             }
         }
+        // The view's offset as the player sees the window at the game's pass (the one time the game
+        // reads it: talk's pointer, in the read loop): the last publish's anchor, the wheel since
+        // and this input in it.
         self.io.history_offset.set(self.view.offset());
         self.io.now_ms.set(self.io.now_ms() + u64::from(elapsed_ms));
         if !self.finished {
@@ -1060,7 +1067,6 @@ impl Engine {
             self.published_front = version;
             self.published_version += 1;
             self.view.publish(&self.state.borrow().ui.scrollback);
-            self.io.history_offset.set(self.view.offset());
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
@@ -1137,7 +1143,6 @@ impl Engine {
             let game = s.main.program == main_loop::Program::Game;
             self.view.wheel(&s.ui, game, (x, y), dy)
         };
-        self.io.history_offset.set(self.view.offset());
         if taken && self.view.stamp() != self.view_shown {
             self.compose_shown();
         }

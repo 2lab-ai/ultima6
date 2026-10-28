@@ -12850,6 +12850,55 @@ test('the message history (spec 23): a press on the scrollbar whose pointer capt
   console.log('  receipt: spec 23 lost pointer capture: the press released for the game, the held button kept up: pass');
 }, { needs: h.haveHfes });
 
+test('the message history (spec 23): after a press whose pointer capture is lost, a second button pressed with the first still held is the game\'s, and the first stays up for it until it is up', async (env) => {
+  // opus N2 (round 4): the page keeps up for the game the buttons it released (`releasedHeld`, a
+  // mask), not every button held after: a chorded press arrives as a move, never a pointerdown.
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  const at = await h.screenPoint(page, 40, 40);
+  // A: the left press on the map, its capture lost (the event as the browser fires it, pointer id
+  // 1), the right button down with the left held, the left up, the left down again, both up.
+  // B: the left press, its capture lost, the right down with the left held, then a cancel with
+  // both held (the second release keeps the first's button up too), the right up, the left up, a
+  // new press and its release. One evaluation, the buttons of each Game.pointer call recorded.
+  const calls = await page.evaluate(([x, y]) => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const pointer = g.pointer;
+    const seen = [];
+    g.pointer = (...args) => {
+      seen.push(args[2]);
+      return pointer.apply(g, args);
+    };
+    const send = (kind, buttons) => c.dispatchEvent(new PointerEvent(kind, { pointerType: 'mouse', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+    const reading = g.reading_by_click();
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 3);
+    send('pointermove', 2);
+    send('pointermove', 3);
+    send('pointerup', 0);
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 3);
+    send('pointercancel', 3);
+    send('pointermove', 3);
+    send('pointermove', 1);
+    send('pointermove', 0);
+    send('pointerdown', 1);
+    send('pointerup', 0);
+    g.pointer = pointer;
+    return { reading, seen };
+  }, at);
+  assert.equal(calls.reading, false, 'not a read by click');
+  assert.deepEqual(calls.seen.slice(0, 6), [1, 0, 2, 2, 3, 0], 'A: the press, its release, the right press alone, the left up, a new left press, every button up');
+  assert.deepEqual(calls.seen.slice(6), [1, 0, 2, 0, 0, 0, 0, 1, 0], 'B: the press, its release, the right alone, the cancel, both held, the right up, the left up: none, a new press');
+  console.log('  receipt: spec 23 lost pointer capture: a button pressed after is the game\'s, the released one kept up while held: pass');
+}, { needs: h.haveHfes });
+
 // Spec 22 (conversation by click): koFixture's archive with the player's words after the
 // greeting (`f7`), a keyword block `name` whose answer ends the conversation, and a line for no
 // match. All of it the test's own.

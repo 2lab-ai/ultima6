@@ -258,7 +258,16 @@ fn message_rows(fb: &u6_render::Framebuffer, m: &crate::ui::text::TextWindow) ->
 fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
     use crate::ui::text::WindowId;
     use std::collections::HashMap;
-    let Some(files) = files() else { return };
+    let Some(files) = files() else {
+        // As the baselines (opus S2, round 4): skipped without the zip, unless it is required.
+        let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+        assert!(
+            !required,
+            "U6_REQUIRE_ARCHIVE=1: the user's zip is required"
+        );
+        println!("scrollback receipt: skipped (no game files)");
+        return;
+    };
     let mut base = with_text(&files);
     base.main.program = crate::main_loop::Program::Game;
     let m = *base.ui.text.window(WindowId::Messages);
@@ -367,10 +376,10 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
         }
     }
     println!(
-        "scrollback receipt: {talks} conversations scrolled; {kept} lines kept and wheeled to; \
-         {compared} compared with their published rows, {equal} equal ({barred} under the bar, \
-         {agree} rows seen on two frames agreed); {patched} with patched pixels; at most {heap} \
-         bytes kept"
+        "scrollback receipt: ran; {talks} conversations scrolled; {kept} lines kept and \
+         wheeled to; {compared} compared with their published rows, {equal} equal ({barred} \
+         under the bar, {agree} rows seen on two frames agreed); {patched} with patched pixels; \
+         at most {heap} bytes kept"
     );
     assert!(talks >= 3, "three conversations scrolled the window");
     // Every line wheeled to was on a published frame above the cursor before it scrolled off.

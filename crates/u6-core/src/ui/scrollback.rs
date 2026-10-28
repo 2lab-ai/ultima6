@@ -26,8 +26,8 @@ use crate::engine::{InputEvent, POINTER_LEFT};
 /// the state, and the view's lines as of a publish, copy a pointer a line. A line of the window's
 /// 17 cells as drawn holds 102 bytes of cells and its shared header; with no patch, about 0.1 MB
 /// at the bound. The patch adds 4 bytes a pixel: at most every pixel of the row (1088), so a bound
-/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11). A keyword's
-/// cells take no patch ([`scrolled`]), so its span never adds to that. The view keeps the lines as
+/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11). A kept
+/// keyword's cells take no patch ([`scrolled`]), so its span never adds to that. The view keeps the lines as
 /// of the last publish, those dropped since included, so the two together hold at most two bounds
 /// ([`View::heap_bytes`]).
 pub const HISTORY: usize = 500;
@@ -257,10 +257,11 @@ pub fn note(ui: &mut UiState, w: &TextWindow, c: u16, at: (u16, u16), kind: Cell
 /// row is kept with `spans`, the keywords it showed ([`super::talk::KeySpans::scroll`]), and the
 /// pixels of `fb` its cells do not draw outside them, the oldest line dropped past [`HISTORY`],
 /// and the shadow moves up one row, the new last row blank in `w`'s paper. Another window over
-/// part of it clears the shadow. A keyword's cells take no patch: the one under the pointer is
-/// drawn inverse (spec 22 Contract 6), and the history keeps it as drawn, in its ink. A rest keeps
-/// its link ([`KeySpan::joined`]) only to a continued span of its ink on the line kept before it
-/// ([`linked`]).
+/// part of it clears the shadow. A keyword is kept only while each of its cells shows its drawing
+/// or that drawing inverse, and its cells take no patch: the one under the pointer is drawn inverse
+/// (spec 22 Contract 6), and the history keeps it as drawn, in its ink; a keyword drawn over is not
+/// kept, and its cells take their patch as any other. A rest keeps its link ([`KeySpan::joined`])
+/// only to a continued span of its ink on the line kept before it ([`linked`]).
 pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow, spans: Vec<KeySpan>) {
     let m = messages(ui);
     let (a, b) = (rect(&m), rect(w));
@@ -276,6 +277,15 @@ pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow, spans: Vec<K
     }
     ui.scrollback.fit(&m);
     let mut line = ui.scrollback.rows.remove(0);
+    // opus N1 (round 4): a span drawn over (a cell that shows neither its drawing nor that drawing
+    // inverse, as a window over the message window may draw while the spans are not updated) is
+    // not kept, and its cells take their patch.
+    let cells = line.cells.len();
+    let shown = |s: &KeySpan| {
+        let end = usize::from(s.col) + s.cells.len();
+        end <= cells && (usize::from(s.col)..end).all(|k| as_drawn(&*ui, fb, &line, &m, m.y, k))
+    };
+    let spans = spans.into_iter().filter(shown).collect();
     line.spans = linked(ui.scrollback.lines.back().map(Rc::as_ref), spans);
     line.patch = patch(ui, fb, &line, &m, m.y);
     let sb = &mut ui.scrollback;
@@ -334,8 +344,43 @@ fn drawn(rows: &[u8; 8], cell: &Cell, bg: u8, (dx, dy): (usize, usize)) -> Optio
     }
 }
 
+/// The colour a keyword's cell shows at pixel (dx, dy) drawn inverse, as spec 22 Contract 6 draws
+/// the keyword under the pointer (`talk::draw_target`: [`text::draw_char`] with its ink and paper
+/// swapped); `None` for a blank cell, which no keyword draws.
+fn inverse(rows: &[u8; 8], cell: &Cell, (dx, dy): (usize, usize)) -> Option<u8> {
+    match cell.kind {
+        CellKind::Blank => None,
+        _ if rows[dy] & (0x80 >> dx) != 0 => Some(cell.bg & 0x0f),
+        _ => Some(cell.fg & 0x0f),
+    }
+}
+
+/// Whether `fb` shows cell `k` of `line` (at screen row `row` of window `m`) as its drawing or that
+/// drawing inverse ([`inverse`]), every pixel of it.
+fn as_drawn(
+    ui: &UiState,
+    fb: &Framebuffer,
+    line: &Line,
+    m: &TextWindow,
+    row: u8,
+    k: usize,
+) -> bool {
+    let (x0, y0) = (usize::from(m.x) * CELL + k * CELL, usize::from(row) * CELL);
+    let cell = &line.cells[k];
+    let rows = glyph(ui, cell.code);
+    let all = |draw: &dyn Fn((usize, usize)) -> Option<u8>| {
+        (0..CELL * CELL).all(|i| {
+            let at = (i % CELL, i / CELL);
+            fb.get(x0 + at.0, y0 + at.1)
+                .is_none_or(|c| draw(at) == Some(c))
+        })
+    };
+    all(&|at| drawn(&rows, cell, line.bg, at)) || all(&|at| inverse(&rows, cell, at))
+}
+
 /// The pixels of screen row `row` of `fb` (the line's cells across window `m`) that the cells do
-/// not draw as `fb` shows them, a keyword's cells ([`Line::spans`]) aside.
+/// not draw as `fb` shows them, a kept keyword's cells ([`Line::spans`]) aside: each of them shows
+/// its drawing or its drawing inverse ([`scrolled`] keeps no other span).
 fn patch(ui: &UiState, fb: &Framebuffer, line: &Line, m: &TextWindow, row: u8) -> Vec<(u16, u8)> {
     let (x0, y0) = (usize::from(m.x) * CELL, usize::from(row) * CELL);
     let width = line.cells.len() * CELL;
@@ -578,8 +623,9 @@ impl View {
     /// At a publish: the lines kept now are those on the frame; scrolled back, the offset grows
     /// by those kept since the last publish, so the same lines stay in view. Another history
     /// (another token: a new game's state, whatever its lines) returns the view to the live
-    /// bottom. The vector of lines grows only to the lines published (`reserve_exact`), so its
-    /// capacity is the most lines one publish took, at most [`HISTORY`].
+    /// bottom. The vector of lines requests storage only for the lines published (`reserve_exact`):
+    /// the most lines one publish took, at most [`HISTORY`]; the allocator may give more than
+    /// asked (gpt a, round 4), and the tests measure what it gave on the host.
     pub fn publish(&mut self, sb: &Scrollback) {
         let same = Rc::ptr_eq(&self.generation, &sb.generation.0);
         if same && sb.total == self.published {

@@ -1315,6 +1315,72 @@ fn a_keyword_drawn_inverse_under_the_pointer_is_kept_in_its_ink() {
     assert_eq!(hovered, plain, "kept as without the hover");
 }
 
+#[test]
+fn a_keyword_drawn_over_is_not_kept_and_its_cells_take_their_patch() {
+    // opus N1 (round 4): a keyword's cells take no patch only while it shows as drawn or inverse
+    // (spec 22 Contract 6, under the pointer); a span drawn over (a window over the message window
+    // draws while the spans are not updated, print.rs) is not kept, and its cells are patched as
+    // any other. A row of eight cells, a keyword of four in the alert ink at column 4, kept with
+    // the frame showing it drawn, drawn inverse, and drawn with one pixel of another colour in it.
+    let keep = |shown: &dyn Fn(&mut Framebuffer, &crate::ui::text::TextWindow)| {
+        let mut ui = game_state().ui;
+        let m = *ui.text.window(WindowId::Messages);
+        let mut fb = Framebuffer::new();
+        fb.clear(m.bg);
+        for k in 0..8u16 {
+            let w = crate::ui::text::TextWindow {
+                fg: if k >= 4 { ALERT } else { m.fg },
+                ..m
+            };
+            let at = (u16::from(m.x) + k, u16::from(m.y));
+            text::draw_char(&mut fb, ui.font.as_ref(), None, &w, 0x61, at.0, at.1);
+            scrollback::note(&mut ui, &w, 0x61, at, CellKind::Char);
+        }
+        shown(&mut fb, &m);
+        scrollback::scrolled(&mut ui, &fb, &m, vec![span(4, 4, ALERT, None, false)]);
+        let line = ui.scrollback.lines().back().unwrap().as_ref().clone();
+        let cells: Vec<usize> = line
+            .patch
+            .iter()
+            .map(|&(i, _)| usize::from(i) % (usize::from(m.width) * CELL) / CELL)
+            .collect();
+        (line.spans.len(), cells)
+    };
+    assert_eq!(keep(&|_, _| {}), (1, vec![]), "as drawn: kept, no patch");
+    let inverse = |fb: &mut Framebuffer, m: &crate::ui::text::TextWindow| {
+        let font = font();
+        let w = crate::ui::text::TextWindow {
+            fg: m.bg,
+            bg: ALERT,
+            ..*m
+        };
+        for k in 4..8u16 {
+            text::draw_char(
+                fb,
+                Some(&font),
+                None,
+                &w,
+                0x61,
+                u16::from(m.x) + k,
+                u16::from(m.y),
+            );
+        }
+    };
+    assert_eq!(keep(&inverse), (1, vec![]), "drawn inverse: kept, no patch");
+    let speck = |fb: &mut Framebuffer, m: &crate::ui::text::TextWindow| {
+        let (x, y) = (
+            usize::from(m.x) * CELL + 5 * CELL + 3,
+            usize::from(m.y) * CELL + 2,
+        );
+        fb.set(x, y, 7);
+    };
+    assert_eq!(
+        keep(&speck),
+        (0, vec![5]),
+        "drawn over: not kept, its pixel patched"
+    );
+}
+
 /// A keyword span (spec 22) of `cells` cells in `ink` at column `col` of a row about to scroll off.
 fn span(col: u8, cells: usize, ink: u8, joined: Option<Vec<u16>>, continued: bool) -> KeySpan {
     KeySpan {
@@ -1333,47 +1399,60 @@ fn a_kept_rest_is_linked_only_to_a_continued_span_of_its_ink_on_the_line_before(
     // the row above (talk.rs `is_first`), not on `joined` alone; the history keeps only such links
     // (T1 note D2-2): `joined` on a kept line means linked to the line kept before it.
     let mut ui = game_state().ui;
-    let fb = Framebuffer::new();
     let w = *ui.text.window(WindowId::Messages);
-    let mut keep = |spans: Vec<KeySpan>| {
-        scrollback::scrolled(&mut ui, &fb, &w, spans);
+    let other = *ui.text.window(WindowId::Status);
+    // A frame all the window's paper: each span's (blank) cells show their drawing, so it is kept.
+    let mut fb = Framebuffer::new();
+    fb.clear(w.bg);
+    // The lines the last scroll kept.
+    let kept = std::cell::Cell::new(0);
+    let mut keep_in = |win: &crate::ui::text::TextWindow, spans: Vec<KeySpan>| {
+        let before = ui.scrollback.total();
+        scrollback::scrolled(&mut ui, &fb, win, spans);
+        kept.set(ui.scrollback.total() - before);
         let l = ui.scrollback.lines().back().unwrap();
         l.spans.iter().map(|s| s.joined.clone()).collect::<Vec<_>>()
     };
     let space = Some(vec![0x20]);
     assert_eq!(
-        keep(vec![span(0, 2, ALERT, space.clone(), false)]),
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
         [None],
         "no line before"
     );
-    keep(vec![span(13, 4, ALERT, None, true)]);
+    keep_in(&w, vec![span(13, 4, ALERT, None, true)]);
     assert_eq!(
-        keep(vec![span(0, 2, ALERT, space.clone(), false)]),
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
         [Some(vec![0x20])],
         "after a continued span of its ink: linked"
     );
     assert_eq!(
-        keep(vec![span(0, 2, ALERT, Some(Vec::new()), false)]),
+        keep_in(&w, vec![span(0, 2, ALERT, Some(Vec::new()), false)]),
         [None],
         "after a span not continued: a keyword of its own"
     );
-    keep(vec![span(13, 4, INK, None, true)]);
+    keep_in(&w, vec![span(13, 4, INK, None, true)]);
     assert_eq!(
-        keep(vec![span(0, 2, ALERT, space.clone(), false)]),
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
         [None],
         "after a continued span of another ink"
     );
-    keep(vec![span(13, 4, ALERT, None, true)]);
+    keep_in(&w, vec![span(13, 4, ALERT, None, true)]);
     assert_eq!(
-        keep(vec![span(3, 2, ALERT, space.clone(), false)]),
+        keep_in(&w, vec![span(3, 2, ALERT, space.clone(), false)]),
         [None],
         "a span past column 0 is no rest"
     );
-    // A window whose rect is not the message window keeps nothing.
-    let lines = ui.scrollback.lines().len();
-    let other = *ui.text.window(WindowId::Status);
-    scrollback::scrolled(&mut ui, &fb, &other, vec![span(0, 2, ALERT, None, false)]);
-    assert_eq!(ui.scrollback.lines().len(), lines);
+    // gpt b SHOULD 1 (round 4): a window whose rect is not the message window keeps nothing, and
+    // its scroll between a continued span and the rest leaves the link to the line kept before.
+    keep_in(&w, vec![span(13, 4, ALERT, None, true)]);
+    assert_eq!(kept.get(), 1);
+    keep_in(&other, vec![span(0, 2, ALERT, None, false)]);
+    assert_eq!(kept.get(), 0, "another window keeps nothing");
+    assert_eq!(
+        keep_in(&w, vec![span(0, 2, ALERT, space.clone(), false)]),
+        [Some(vec![0x20])],
+        "another window's scroll between: still linked"
+    );
 }
 
 #[test]
@@ -1433,23 +1512,45 @@ fn while_scrolled_back_no_keyword_of_the_message_window_is_a_target() {
 }
 
 #[test]
-fn the_game_reads_the_views_offset_as_the_engine_last_set_it() {
-    // Io's copy of the offset (spec 23 Decision 2's exception) equals the view's after each
-    // change: a wheel, new text anchoring the view at a publish (Design 5), a key.
-    let mut e = engine(game_state(), 25, 50, false);
-    let both = |e: &Engine| (e.io().history_offset(), e.history_offset());
+fn the_game_reads_the_views_offset_as_the_player_sees_the_window_at_its_pass() {
+    // Io's copy of the offset (spec 23 Decision 2's exception) is written once a tick, after its
+    // input and before the game's pass (opus N3, round 4: the game reads it only then): at each
+    // pass the game reads the view's offset as it was right before it, a wheel and new text
+    // anchoring the view at a publish (Design 5) included; and at a key's tick, 0.
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&seen);
+    let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+        for i in 0..25u16 {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+            io.present();
+            io.vblank().await;
+        }
+        for i in 0u16.. {
+            log.borrow_mut().push(io.history_offset());
+            if i % 3 == 0 {
+                printf(&st, &io, b"t%d\n", &[Arg::Word(i)]).await;
+                io.present();
+            }
+            io.vblank().await;
+        }
+    });
+    for _ in 0..30 {
+        e.tick(&[], 16);
+    }
     assert!(e.wheel(IN.0, IN.1, -3));
-    assert_eq!(both(&e), (3, 3), "the wheel");
     let mut grew = false;
     for _ in 0..20 {
+        let (want, from) = (e.history_offset(), seen.borrow().len());
         e.tick(&[], 16);
-        let (io, view) = both(&e);
-        assert_eq!(io, view, "after a tick");
-        grew |= view > 3;
+        let read = seen.borrow()[from..].to_vec();
+        assert!(!read.is_empty(), "a pass a tick");
+        assert!(read.iter().all(|&o| o == want), "{read:?} at {want}");
+        grew |= want > 3;
     }
     assert!(grew, "new text anchored the view");
+    let from = seen.borrow().len();
     e.tick(&[InputEvent::Key(Key::Char('q'))], 16);
-    assert_eq!(both(&e), (0, 0), "a key");
+    assert_eq!(seen.borrow()[from..], [0], "a key's tick");
 }
 
 #[test]
@@ -1476,6 +1577,118 @@ fn a_paced_press_and_a_repeat_taken_back_at_the_command_prompt_return_to_live() 
     assert_eq!(e.history_offset(), 0, "a paced press");
     e.tick(&[], 16);
     assert_eq!(text_at(e.frame(), 22), "k0", "and the game took it");
+}
+
+/// The keypad's direction keys by walk direction (`walk::DX8`, `walk::DY8`: 0 north, then
+/// clockwise), as the travel presses them.
+const STEPS: [Key; 8] = [
+    Key::Up,
+    Key::UpRight,
+    Key::Right,
+    Key::DownRight,
+    Key::Down,
+    Key::DownLeft,
+    Key::Left,
+    Key::UpLeft,
+];
+
+#[test]
+fn a_travel_step_leaves_the_view_where_it_is_and_a_player_key_returns_it() {
+    // opus S1 (round 4): M4's step (spec 21) is a key the engine adds, not the player's input
+    // (Decisions 5 and 6). An open window with leader 1 alone (as spec 21's crafted maps), a game
+    // that prints 25 lines, then has the command loop's shape: at the prompt it reads a key,
+    // steps the party with a direction key and takes 100 ms for the turn.
+    use crate::actors::walk::tests::{creature_tiles, link_objects};
+    use crate::geom;
+    use u6_formats::position::Position;
+    let mut s = game_state();
+    creature_tiles(&mut s);
+    s.map.world.surface = vec![0; u6_formats::map::SURFACE_CHUNKS.pow(2)];
+    s.map.window_tiles = vec![0; crate::map::WINDOW_CELLS];
+    s.map.window_origin = [0, 0];
+    s.map.window_key = [0, 0, 0];
+    s.actors.party.members[0] = 1;
+    s.actors.party.size = 1;
+    let (x, y) = (geom::LEAD + 1, geom::LEAD + 3);
+    s.map.centre = Position { x, y, z: 0 };
+    s.map.view_offset = [
+        geom::view_offset(x, 0, geom::HALF_W as u16),
+        geom::view_offset(y, 0, geom::HALF_H as u16),
+    ];
+    s.objects.type_frame[1] = 0x17a;
+    s.objects.location[1] = Position { x, y, z: 0 };
+    s.actors.attrs.status[1] = 0x80;
+    s.actors.worktype[1] = 2;
+    s.actors.movement_points[1] = 30;
+    s.ui.input.accept = true;
+    let mut formation = vec![0; 28];
+    formation[12] = 1;
+    formation[13] = 2;
+    s.actors.game = crate::actors::GameTables {
+        formation,
+        ..crate::actors::GameTables::default()
+    };
+    link_objects(&mut s);
+    let taken = Rc::new(RefCell::new(Vec::new()));
+    let log = taken.clone();
+    let game = move |st: Rc<RefCell<State>>, io: Rc<Io>| async move {
+        for i in 0..25u16 {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+            io.present();
+            io.vblank().await;
+        }
+        loop {
+            {
+                let mut s = st.borrow_mut();
+                s.main.reading = 1;
+                s.ui.input.in_wait = true;
+            }
+            let k = io.next_key().await;
+            {
+                let mut s = st.borrow_mut();
+                s.main.reading = 0;
+                s.ui.input.in_wait = false;
+                if let Some(d) = STEPS.iter().position(|&step| step == k) {
+                    crate::actors::party::player_step(&mut s, d as u16);
+                }
+            }
+            log.borrow_mut().push(k);
+            io.sleep(100).await;
+        }
+    };
+    let mut e = Engine::with_game(s, Files::default(), game);
+    for _ in 0..30 {
+        e.tick(&[], 16);
+    }
+    e.travel_to((x + 5, y)).expect("reachable");
+    assert!(e.wheel(IN.0, IN.1, -3));
+    for _ in 0..60 {
+        e.tick(&[], 16);
+        if taken.borrow().len() >= 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        *taken.borrow(),
+        [Key::Right; 2],
+        "the game took the travel's steps"
+    );
+    assert_eq!(e.travel_log().len(), 2, "the travel's keys");
+    assert!(e.travel_active(), "still travelling");
+    assert_eq!(
+        e.history_offset(),
+        3,
+        "the steps leave the view where it is"
+    );
+    assert_eq!(e.io().history_offset(), 3, "and the game's copy");
+    assert!(
+        !same_frame(e.frame(), &e.published_frame()),
+        "still the history"
+    );
+    // The player's key: the view returns to live (and the key stops the travel).
+    e.tick(&[InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(e.history_offset(), 0, "a player key returns to live");
+    assert!(!e.travel_active(), "and stops the travel");
 }
 
 /// The bytes a kept line holds with its shared allocation (as [`scrollback::Scrollback`] counts
