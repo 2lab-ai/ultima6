@@ -5553,14 +5553,19 @@ mod tests {
 
     /// Spec 19 O1c on the user's zip: the castle start state of u6-core's held-key tests
     /// (`ui/tests/held_key.rs`: `game` at once with seed 0, the actors in the assault worktype 8
-    /// passed over with status bit 0x10, the fight broken off with `b`), at the prompt.
+    /// passed over with status bit 0x10, the fight broken off with `b`), at the prompt. Without
+    /// the zip the test that asked is skipped (None), and says so; with `U6_REQUIRE_ARCHIVE=1`
+    /// it fails instead (round 5, review b-1). Each use prints whether it ran.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn in_the_castle() -> Option<Game> {
         use std::cell::RefCell;
         if !std::path::Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
+            let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+            assert!(!required, "U6_REQUIRE_ARCHIVE=1 and {ZIP} not present");
+            eprintln!("castle fixture: skipped ({ZIP} not present)");
             return None;
         }
+        eprintln!("castle fixture: ran");
         let r = intake(vec![InputFile {
             name: "ultima-vi.zip".into(),
             data: std::fs::read(ZIP).quiet(),
@@ -6152,18 +6157,30 @@ mod tests {
         assert!(cells > paused, "walks on once it is up");
     }
 
-    /// A game that stands for the waits: it reads one key (with `prompt`, A4-0x7a2c and
-    /// A4-0x7a42 set: the command prompt, [`u6_core::engine::command_prompt`]; without, another
-    /// wait such as the line editor's), then waits 100 ms, over and over; the keys it read go to
-    /// `out`. It reads in order, as the line editor does (the command prompt's drain would take
-    /// the newest press queued).
+    /// A game that stands for the waits: it reads one key, then waits 100 ms, over and over;
+    /// the keys it read go to `out`. With `prompt` it is the command prompt (A4-0x7a2c and
+    /// A4-0x7a42 set, [`u6_core::engine::command_prompt`]) and reads as the prompt does, the
+    /// newest press queued by the drained take once a frame
+    /// ([`u6_core::ui::keyread::take_drained`]: the platform's direction repeats taken back, the
+    /// take counted); without, another wait such as the line editor's, reading in order with
+    /// every repeat.
     fn reader(prompt: bool, out: Rc<std::cell::RefCell<Vec<u6_core::engine::Typed>>>) -> Engine {
+        use u6_core::engine::Typed;
         let mut state = u6_core::State::empty();
         state.ui.input.accept = true;
         Engine::with_game(state, Files::default(), move |st, io| async move {
             loop {
-                st.borrow_mut().main.reading = u16::from(prompt);
-                let t = io.next_typed().await;
+                let t = if prompt {
+                    st.borrow_mut().main.reading = 1;
+                    loop {
+                        if let Some(k) = u6_core::ui::keyread::take_drained(&st, &io) {
+                            break Typed::Key(k);
+                        }
+                        io.vblank().await;
+                    }
+                } else {
+                    io.next_typed().await
+                };
                 st.borrow_mut().main.reading = 0;
                 out.borrow_mut().push(t);
                 io.sleep(100).await;
@@ -6227,12 +6244,14 @@ mod tests {
     /// (`key_down`, `key_repeat`, `key_up`) on [`reader`] at the command prompt, every read
     /// checked against the oracle: a paced press is always the newest walking direction, and a
     /// read of an older direction only consumes a physical press queued before the newest press
-    /// was made, at most once per direction change. Phase A: the down arrow held alone reads
-    /// only Down. Phase B: Down let go and pressed again, then Left pressed, in one frame: one
-    /// Down (that press, queued before Left; the reader reads in order, where the real prompt's
-    /// drain would take the newest, Left, and drop it), then only Left. Phase C: the browser's
-    /// repeat of Down is taken back at the prompt, so only Left (a repeat does not make the older
-    /// newer). Phase D: Left let go, only Down. Each phase lasts 400 ms at 1×.
+    /// was made, at most once per direction change; the command prompt's drain (round 5: the
+    /// reader reads as the prompt does) takes the newest of those, so here none is. Phase A:
+    /// the down arrow held alone reads only Down. Phase B: Down let go and pressed again, then
+    /// Left pressed, in one frame, both presses queued: the drain takes Left and drops that Down
+    /// press, so only Left.
+    /// Phase C: the browser's repeat of Down is taken back at the prompt, so only Left (a repeat
+    /// does not make the older newer). Phase D: Left let go, only Down. Each phase lasts 400 ms
+    /// at 1×.
     #[test]
     fn the_newest_held_arrow_walks_and_the_older_comes_back_at_its_release() {
         use u6_core::engine::Typed;
@@ -6257,15 +6276,23 @@ mod tests {
         assert!(game.key_up("ArrowDown"));
         assert!(down(&mut game, "ArrowDown"));
         assert!(down(&mut game, "ArrowLeft"));
-        let b = phase(&mut game);
+        // Round 6 (review opus N3): the page queued both presses (after Down's release), so the
+        // drain below has the Down press to drop.
+        let presses: Vec<InputEvent> = game
+            .pending
+            .iter()
+            .copied()
+            .filter(|e| matches!(e, InputEvent::Key(_)))
+            .collect();
         assert_eq!(
-            b.first(),
-            Some(&south),
-            "the Down press queued before Left's, once: {b:?}"
+            presses,
+            [InputEvent::Key(Key::Down), InputEvent::Key(Key::Left)],
+            "both presses queued"
         );
+        let b = phase(&mut game);
         assert!(
-            b.len() >= 3 && b[1..].iter().all(|&t| t == west),
-            "then only the newest: {b:?}"
+            b.len() >= 2 && b.iter().all(|&t| t == west),
+            "the Down press queued before Left's drained, only the newest: {b:?}"
         );
         assert!(repeat(&mut game, "ArrowDown"));
         let c = phase(&mut game);

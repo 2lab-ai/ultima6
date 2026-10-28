@@ -73,10 +73,11 @@ pub const MIN_STEP_MS: u32 = 150;
 
 /// Port (spec 19 O1c): whether a held direction key is due its next paced press: down
 /// `down_ms` wall ms since its press, and `since_step_ms` since the command prompt last took a
-/// press ([`Io::prompt_takes`]; None: never), both at least [`MIN_STEP_MS`]. The key's own
+/// press ([`Engine::prompt_takes`]; None: never), both at least [`MIN_STEP_MS`]. The key's own
 /// press is the platform's and comes at once; this paces only the presses added after it, from
-/// the step the prompt last took, so the interval holds between steps however late a frame
-/// delivered the one before.
+/// the step the prompt last took, so the interval holds between a paced press and the step
+/// before it, however late a frame delivered that step (another key's own press is not paced:
+/// it goes at once).
 pub fn paced_press_due(down_ms: f64, since_step_ms: Option<f64>) -> bool {
     let min = f64::from(MIN_STEP_MS);
     down_ms >= min && since_step_ms.is_none_or(|ms| ms >= min)
@@ -114,9 +115,12 @@ pub enum InputEvent {
     /// Port (spec 19 O1b): a press the platform's auto-repeat sent for a key still held, read as
     /// a press ([`Io::next_key`]) unless the key's [`InputEvent::Release`] took it back first.
     /// Port (spec 19 O1c): at the command prompt ([`command_prompt`]) a direction key's repeat
-    /// is taken back, in the input of a tick and in the queue, so the paced press
-    /// ([`InputEvent::Paced`]) is the one step source there; the cross-hair, the more prompt,
-    /// the line editor and every other wait read it.
+    /// is taken back: by a tick that starts with the prompt waiting, from its input and the
+    /// queue ([`Engine::tick`]), and by the prompt's own read, which says it is the prompt
+    /// ([`Io::key_ready_at`], [`Io::take_newest_key_at`], from [`crate::ui::keyread`] and
+    /// [`crate::ui::target`]), so the paced press ([`InputEvent::Paced`]) is the one step
+    /// source there; the cross-hair, the more prompt, the line editor and every other wait read
+    /// it.
     Repeat(Key),
     /// Port (spec 19 O1c): a press of a held direction key the platform added at the command
     /// prompt ([`Engine::held_press`]), paced by [`MIN_STEP_MS`]. Read as a press; the key's
@@ -234,10 +238,6 @@ pub struct Io {
     window_cache: Cell<bool>,
     /// Port-only: [`Io::set_sight_memory`].
     sight_memory: Cell<bool>,
-    /// Port (spec 19 O1c): the state of the game this `Io` serves, set once by the engine that
-    /// made it, so a take reads whether the command prompt waits ([`command_prompt`]) as it is
-    /// at the take.
-    prompt_state: OnceCell<std::rc::Weak<RefCell<State>>>,
     /// Port (spec 19 O1c): [`Io::prompt_takes`].
     prompt_takes: Cell<u64>,
 }
@@ -261,37 +261,22 @@ impl Io {
             back_writes: Cell::new(0),
             window_cache: Cell::new(true),
             sight_memory: Cell::new(false),
-            prompt_state: OnceCell::new(),
             prompt_takes: Cell::new(0),
         }
     }
 
-    /// Port (spec 19 O1c): the presses the command prompt has taken ([`command_prompt`] at the
-    /// take: a key, a repeat it did not take back, a paced press), ever. A platform stamps the
-    /// step's time when it moves ([`paced_press_due`]).
+    /// Port (spec 19 O1c): the presses the command prompt has taken ([`command_prompt`] as its
+    /// read saw the state: a key, a paced press; never a repeat of a direction key, which it
+    /// takes back), counted by [`crate::ui::keyread::take_drained`]. Kept here, beside the
+    /// queue, and not in [`State`]: the platform's instrument, which no rule or saved state reads.
     pub fn prompt_takes(&self) -> u64 {
         self.prompt_takes.get()
     }
 
-    /// Whether the command prompt waits now ([`command_prompt`]; false for an `Io` no engine
-    /// serves, and while the state is borrowed mutably, which no take does).
-    fn at_command_prompt(&self) -> bool {
-        let Some(state) = self.prompt_state.get().and_then(std::rc::Weak::upgrade) else {
-            return false;
-        };
-        let at = state.try_borrow().map(|s| command_prompt(&s));
-        debug_assert!(
-            at.is_ok(),
-            "a key taken while the state is borrowed mutably"
-        );
-        at.unwrap_or(false)
-    }
-
-    /// One press taken: counted when the command prompt took it ([`Io::prompt_takes`]).
-    fn took(&self, prompt: bool) {
-        if prompt {
-            self.prompt_takes.set(self.prompt_takes.get() + 1);
-        }
+    /// One press the command prompt took ([`Io::prompt_takes`]).
+    pub(crate) fn count_prompt_take(&self) {
+        self.prompt_takes
+            .set(self.prompt_takes.get().wrapping_add(1));
     }
 
     /// Milliseconds of accumulated tick time (monotonic).
@@ -364,10 +349,17 @@ impl Io {
 
     /// True when the next queued event is a key (a pointer event before it is taken first, by
     /// [`Io::take_pointer`]). Text at the front of the queue is dropped first (a reader of keys
-    /// takes none), so it never holds back the events behind it; so, at the command prompt, is
-    /// a repeat it takes back ([`InputEvent::Repeat`]).
+    /// takes none), so it never holds back the events behind it. For a reader other than the
+    /// command prompt ([`Io::key_ready_at`]).
     pub fn key_ready(&self) -> bool {
-        let prompt = self.at_command_prompt();
+        self.key_ready_at(false)
+    }
+
+    /// Port (spec 19 O1c): [`Io::key_ready`] for a reader that says whether it is the command
+    /// prompt (`prompt`, [`command_prompt`] as the reader sees the state; the poll of
+    /// [`crate::ui::keyread`] and the pointer wait of [`crate::ui::target`] read it): there a
+    /// repeat it takes back ([`InputEvent::Repeat`]) at the front is dropped too, as text is.
+    pub fn key_ready_at(&self, prompt: bool) -> bool {
         let mut events = self.events.borrow_mut();
         while let Some(e) = events.front()
             && (matches!(e, InputEvent::Text(_)) || taken_back(prompt, e))
@@ -387,10 +379,11 @@ impl Io {
     /// [`crate::ui::keyread`]): every key press queued (presses and repeats) is taken and the
     /// newest is the one given. Text goes with them (a reader of keys takes none); pointer
     /// events keep their places (the original's pointer is no code of the ring). None when no
-    /// key press is queued. At the command prompt the repeats it takes back go too, and are not
-    /// given ([`InputEvent::Repeat`]).
-    pub fn take_newest_key(&self) -> Option<Key> {
-        let prompt = self.at_command_prompt();
+    /// key press is queued. With `prompt` (the reader is the command prompt, [`command_prompt`]
+    /// as the reader sees the state) the repeats it takes back go too, and are not given
+    /// ([`InputEvent::Repeat`]); the take is the poll's of [`crate::ui::keyread::take_drained`],
+    /// which counts it.
+    pub fn take_newest_key_at(&self, prompt: bool) -> Option<Key> {
         let mut newest = None;
         self.events.borrow_mut().retain(|e| match *e {
             _ if taken_back(prompt, e) => false,
@@ -401,9 +394,6 @@ impl Io {
             InputEvent::Text(_) | InputEvent::Release(_) => false,
             InputEvent::Pointer { .. } => true,
         });
-        if newest.is_some() {
-            self.took(prompt);
-        }
         newest
     }
 
@@ -414,16 +404,11 @@ impl Io {
     }
 
     /// Port-only (spec 08 Design 4, slice K5a): as [`Io::key_ready`] for the line editor: true
-    /// when the next queued event is a key or a character of text (nothing is dropped but, at
-    /// the command prompt, the repeats it takes back, [`InputEvent::Repeat`]).
+    /// when the next queued event is a key or a character of text (nothing is dropped: the line
+    /// editor is no command prompt and reads every repeat).
     pub fn typed_ready(&self) -> bool {
-        let prompt = self.at_command_prompt();
-        let mut events = self.events.borrow_mut();
-        while events.front().is_some_and(|e| taken_back(prompt, e)) {
-            events.pop_front();
-        }
         matches!(
-            events.front(),
+            self.events.borrow().front(),
             Some(
                 InputEvent::Key(_)
                     | InputEvent::Repeat(_)
@@ -690,13 +675,10 @@ pub struct NextKey<'a> {
 impl Future for NextKey<'_> {
     type Output = Key;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Key> {
-        let prompt = self.io.at_command_prompt();
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(e) if taken_back(prompt, &e) => {}
                 Some(InputEvent::Key(key) | InputEvent::Repeat(key) | InputEvent::Paced(key)) => {
-                    self.io.took(prompt);
                     return Poll::Ready(key);
                 }
                 Some(InputEvent::Pointer { x, y, buttons }) => {
@@ -717,13 +699,10 @@ pub struct NextTyped<'a> {
 impl Future for NextTyped<'_> {
     type Output = Typed;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Typed> {
-        let prompt = self.io.at_command_prompt();
         let mut events = self.io.events.borrow_mut();
         loop {
             match events.pop_front() {
-                Some(e) if taken_back(prompt, &e) => {}
                 Some(InputEvent::Key(key) | InputEvent::Repeat(key) | InputEvent::Paced(key)) => {
-                    self.io.took(prompt);
                     return Poll::Ready(Typed::Key(key));
                 }
                 Some(InputEvent::Text(c)) => return Poll::Ready(Typed::Text(c)),
@@ -908,7 +887,6 @@ impl Engine {
     {
         let state = Rc::new(RefCell::new(state));
         let io = Rc::new(Io::new(files));
-        let _ = io.prompt_state.set(Rc::downgrade(&state));
         let task: Task = Box::pin(game(Rc::clone(&state), Rc::clone(&io)));
         Engine {
             state,
@@ -1312,7 +1290,8 @@ impl Engine {
         (prompt && !waiting).then_some(InputEvent::Paced(held))
     }
 
-    /// Port (spec 19 O1c): [`Io::prompt_takes`].
+    /// Port (spec 19 O1c): the presses the command prompt has taken ([`Io::prompt_takes`]). A
+    /// platform stamps the step's time when it moves ([`paced_press_due`]).
     pub fn prompt_takes(&self) -> u64 {
         self.io.prompt_takes()
     }
@@ -1558,9 +1537,10 @@ mod tests {
     /// repeats of direction keys are taken back, in a tick's input and in the queue, also those
     /// queued while a turn ran and met by a prompt that comes up within a tick (the take reads
     /// the prompt as it is then); a press, a paced press and a letter's repeat are read, and
-    /// counted ([`Io::prompt_takes`]). The cross-hair, the more prompt and every other wait
+    /// counted ([`Engine::prompt_takes`]). The cross-hair, the more prompt and every other wait
     /// (A4-0x7a2c clear) read the repeats. A game that waits 100 ms with A4-0x7a2c clear, then
-    /// sets it with `targeting` and `accept` and reads one key, over and over.
+    /// sets it with `targeting` and `accept` and reads one key as the drained waits take it
+    /// ([`crate::ui::keyread::take_drained`], once a tick), over and over.
     #[test]
     fn the_command_prompt_takes_back_the_platforms_repeats_of_direction_keys() {
         let run = |targeting: u8, accept: bool, input: &[(u32, InputEvent)]| {
@@ -1573,7 +1553,12 @@ mod tests {
                 loop {
                     io.sleep(100).await;
                     st.borrow_mut().main.reading = 1;
-                    let k = io.next_key().await;
+                    let k = loop {
+                        if let Some(k) = crate::ui::keyread::take_drained(&st, &io) {
+                            break k;
+                        }
+                        io.vblank().await;
+                    };
                     st.borrow_mut().main.reading = 0;
                     out.borrow_mut().push(k);
                 }
@@ -1612,7 +1597,10 @@ mod tests {
         assert_eq!(takes, 3, "counted");
         for (targeting, accept, what) in [(1, true, "a cross-hair"), (0, false, "a more prompt")] {
             let (read, takes) = run(targeting, accept, &input);
-            assert_eq!(read.len(), input.len(), "{what} reads them all: {read:?}");
+            assert!(
+                read.len() > 3 && read.iter().filter(|&&k| k == Key::Left).count() > 1,
+                "{what} reads the repeats too: {read:?}"
+            );
             assert_eq!(takes, 0, "{what}: not the command prompt");
         }
         let mut s = State::empty();
@@ -1624,6 +1612,79 @@ mod tests {
         });
         e.tick(&[os, os, os], 20);
         assert!(e.finished(), "another wait (A4-0x7a2c clear) reads them");
+    }
+
+    /// Spec 19 O1c (round 5, review a-1): each key read, said to be the command prompt's or
+    /// not. With `prompt` [`Io::take_newest_key_at`] drops the platform's direction repeats and
+    /// gives the newest press or paced press (none when only repeats wait, the queue then
+    /// empty), and [`Io::key_ready_at`] drops them at the front as it drops text; without, both
+    /// read the repeats. [`Io::typed_ready`], [`Io::next_typed`] and [`Io::next_key`] are never
+    /// the command prompt's and keep them; a letter's repeat is read everywhere.
+    #[test]
+    fn each_key_read_takes_back_direction_repeats_only_for_the_command_prompt() {
+        let queued = |events: &[InputEvent]| {
+            let io = Io::new(Files::default());
+            io.events.borrow_mut().extend(events.iter().copied());
+            io
+        };
+        let left = |io: &Io| io.events.borrow().iter().copied().collect::<Vec<_>>();
+        let (right, up) = (InputEvent::Repeat(Key::Right), InputEvent::Repeat(Key::Up));
+        let (x, paced) = (key('x'), InputEvent::Paced(Key::Down));
+        let letter = InputEvent::Repeat(Key::Char('a'));
+        let pointer = InputEvent::Pointer {
+            x: 1,
+            y: 2,
+            buttons: 0,
+        };
+        let q = [x, right, pointer, up];
+        let io = queued(&q);
+        assert_eq!(
+            io.take_newest_key_at(true),
+            Some(Key::Char('x')),
+            "the prompt"
+        );
+        assert_eq!(
+            left(&io),
+            [pointer],
+            "the repeats taken back, the pointer kept"
+        );
+        assert_eq!(
+            queued(&q).take_newest_key_at(false),
+            Some(Key::Up),
+            "another wait"
+        );
+        let io = queued(&[right, paced, up]);
+        assert_eq!(
+            io.take_newest_key_at(true),
+            Some(Key::Down),
+            "the paced press"
+        );
+        let io = queued(&[right, up]);
+        assert_eq!(io.take_newest_key_at(true), None, "only repeats");
+        assert_eq!(io.pending_events(), 0, "taken back");
+        let io = queued(&[right, letter]);
+        assert_eq!(
+            io.take_newest_key_at(true),
+            Some(Key::Char('a')),
+            "a letter's repeat"
+        );
+        let io = queued(&[right, InputEvent::Text('k'), up, x]);
+        assert!(io.key_ready_at(true), "the press behind them");
+        assert_eq!(left(&io), [x], "repeats and text dropped at the front");
+        let io = queued(&[right, up]);
+        assert!(!io.key_ready_at(true), "only repeats");
+        assert_eq!(io.pending_events(), 0);
+        let io = queued(&[right]);
+        assert!(io.key_ready_at(false) && io.key_ready(), "another wait");
+        assert_eq!(left(&io), [right], "kept");
+        let io = queued(&[right, up]);
+        assert!(io.typed_ready(), "the line editor's");
+        assert_eq!(left(&io), [right, up], "kept");
+        let mut cx = Context::from_waker(Waker::noop());
+        let typed = std::pin::pin!(io.next_typed()).poll(&mut cx);
+        assert_eq!(typed, Poll::Ready(Typed::Key(Key::Right)), "read in order");
+        let next = std::pin::pin!(io.next_key()).poll(&mut cx);
+        assert_eq!(next, Poll::Ready(Key::Up), "next_key reads it");
     }
 
     /// Spec 19 O1c: a paced press waiting in the queue is taken back by its key's release, as a

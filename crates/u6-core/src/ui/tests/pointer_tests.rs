@@ -1025,6 +1025,67 @@ fn a_key_in_the_tick_that_passes_a_due_time_comes_after_its_step() {
     assert_eq!(seqs[1], seqs[0], "8 ms ticks");
 }
 
+/// Spec 19 O1c (round 6, review opus N1): a held mouse walk at the command prompt (A4-0x7a2c and
+/// A4-0x7a42 set) with the right arrow's repeats coming every tick (the arrow held too, from its
+/// first repeat on): the walk's codes, the clock of each, and the events left after every tick
+/// are those of the same walk without the repeats, and no direction code is read. The repeats
+/// are taken back where the readers say they are the command prompt's: by the tick (its input
+/// and the queue, `Engine::tick`) and by the pointer wait's key check before a due sample
+/// (`ui/target.rs` `pointer_click`, `Io::key_ready_at`). With the tick's drop gone the repeats
+/// wait in the queue, the due sample counts them among the events before it (review opus N5)
+/// and the release is seen a pace late (one step more); with both gone the check takes a repeat
+/// for a key and the walk stops at its first step. The check alone is covered by the drop: it
+/// reads the prompt as the tick that began it did, so with the drop it meets no repeat.
+#[test]
+fn a_held_mouse_walk_at_the_prompt_is_not_stopped_by_a_direction_keys_repeats() {
+    let walk = |repeats: bool| {
+        let mut s = st();
+        s.main.reading = 1;
+        assert!(crate::engine::command_prompt(&s), "the command prompt");
+        let codes = Rc::new(RefCell::new(Vec::new()));
+        let out = Rc::clone(&codes);
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            for _ in 0..4 {
+                let k = wait::read_key(&st, &io).await;
+                out.borrow_mut().push((io.now_ms(), k));
+            }
+        });
+        let ev = |b| InputEvent::Pointer {
+            x: SOUTH.0,
+            y: SOUTH.1,
+            buttons: b,
+        };
+        e.tick(&[ev(1)], 16);
+        let press = e.io().now_ms();
+        let release = press + u64::from(HELD_WALK_MS_TEST * 5 / 2);
+        let (mut left, mut released) = (Vec::new(), false);
+        while !e.finished() && e.io().now_ms() < press + 3000 {
+            let mut input = Vec::new();
+            if repeats {
+                input.push(InputEvent::Repeat(Key::Right));
+            }
+            if !released && e.io().now_ms() + 16 >= release {
+                input.push(ev(0));
+                released = true;
+            }
+            e.tick(&input, 16);
+            left.push(e.io().pending_events());
+        }
+        let c = codes.borrow().clone();
+        (c, left)
+    };
+    let (with, left) = walk(true);
+    let (without, left_without) = walk(false);
+    println!("a held walk with an arrow's repeats: codes {with:?}");
+    assert!(with.len() >= 2, "a walk: {with:?}");
+    assert!(
+        with.iter().all(|&(_, k)| k == 0x80),
+        "walk codes only: {with:?}"
+    );
+    assert_eq!(with, without, "the same walk, at the same times");
+    assert_eq!(left, left_without, "the same events left after each tick");
+}
+
 #[test]
 fn a_held_walk_samples_whole_paces_after_the_press() {
     // The n-th repeat is due n paces after the press, on the engine clock: a host tick only

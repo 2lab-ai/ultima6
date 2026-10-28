@@ -520,7 +520,8 @@ fn dir_of(k: Key) -> Option<u8> {
 type After = Box<dyn Fn(&mut State, u32)>;
 
 /// An engine whose game has the command loop's shape: at the prompt (A4-0x7a2c and A4-0x7a42 set,
-/// in the event wait) it reads one key, steps the party with a direction key's direction (the
+/// in the event wait) it reads one key as the prompt does (the drained take,
+/// [`crate::ui::keyread::take_drained`]), steps the party with a direction key's direction (the
 /// player's step) and runs `after`, then takes 100 ms for the turn.
 fn stand_in(s: State, after: After) -> Engine {
     stand_in_with(s, nothing(), 0, after)
@@ -544,7 +545,14 @@ fn stand_in_with(s: State, prompt: After, lag: u32, after: After) -> Engine {
                 if lag > 0 {
                     io.sleep(lag).await;
                 }
-                let k = io.next_key().await;
+                // The read as the command prompt's (spec 19 O1c): the drained take, counted,
+                // once a frame (`ui/keyread.rs` `poll`).
+                let k = loop {
+                    if let Some(k) = crate::ui::keyread::take_drained(&st, &io) {
+                        break k;
+                    }
+                    io.vblank().await;
+                };
                 {
                     let mut s = st.borrow_mut();
                     s.main.reading = 0;
@@ -842,6 +850,47 @@ fn a_more_prompt_stops_it() {
         east_set_at_read_2(|s| s.ui.input.accept = false),
         (Some(End::Prompt), 2)
     );
+}
+
+/// Spec 19 round 6 (the merge): the travel's own command-prompt predicate (A4-0x7a2c, A4-0x7a42,
+/// no line editor A4-0x7a57, no cursor A4-0x7a60) is gone for the one in `engine`
+/// ([`crate::engine::command_prompt`], without the line editor's flag); over every combination
+/// of the five flags (A4-0x7a60 at 0, 1 and 2) the travel decides as before: the other-prompt
+/// stop is the old one, and where it does not stop the command-prompt test is the old one too.
+#[test]
+fn the_one_command_prompt_predicate_decides_the_travel_as_before() {
+    let old_prompt = |s: &State| {
+        s.main.reading == 1
+            && s.ui.input.accept
+            && !s.ui.input.line_input
+            && s.ui.input.targeting == 0
+    };
+    let old_other = |s: &State| !old_prompt(s) && (s.ui.input.in_wait || s.ui.input.line_input);
+    let mut seen = 0;
+    for bits in 0..16u8 {
+        for targeting in 0..3u8 {
+            let mut s = State::empty();
+            s.main.reading = u16::from(bits & 1);
+            s.ui.input.accept = bits & 2 != 0;
+            s.ui.input.line_input = bits & 4 != 0;
+            s.ui.input.in_wait = bits & 8 != 0;
+            s.ui.input.targeting = targeting;
+            assert_eq!(
+                other_prompt(&s),
+                old_other(&s),
+                "the stop, {bits:#x} {targeting}"
+            );
+            if !other_prompt(&s) {
+                assert_eq!(
+                    command_prompt(&s),
+                    old_prompt(&s),
+                    "the press, {bits:#x} {targeting}"
+                );
+            }
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 48);
 }
 
 /// Review opus MUST-2: the line editor up (A4-0x7a57) ends it there.
