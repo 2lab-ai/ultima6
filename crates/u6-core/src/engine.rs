@@ -923,12 +923,14 @@ impl Engine {
 
     /// Port (spec 21): starts the party's travel to map cell `target` on its level (masked to the
     /// level's coordinates): one step a command prompt, entered as its direction key, until it
-    /// arrives or stops ([`crate::actors::travel::End`]). A travel under way is replaced. Refused
-    /// with the reason [`crate::actors::travel::reachable`] gives, nothing changed then.
+    /// arrives or stops ([`crate::actors::travel::End`]). A travel under way is replaced; a key it
+    /// pressed that still waits is not the new travel's own (a key queued before it started).
+    /// Refused with the reason [`crate::actors::travel::reachable`] gives, nothing changed then.
     pub fn travel_to(&mut self, target: (u16, u16)) -> Result<(), crate::actors::travel::Reason> {
         let travel = crate::actors::travel::Travel::start(&self.state.borrow(), target)?;
         self.travel = Some(travel);
         self.travel_end = None;
+        self.travel_own = None;
         Ok(())
     }
 
@@ -942,8 +944,7 @@ impl Engine {
         self.travel_end
     }
 
-    /// Port (spec 21): the travel under way, if any (its target and receipts). Named apart from
-    /// spec 17's menu state (unit M3).
+    /// Port (spec 21): the travel under way, if any (its target and receipts).
     pub fn travel_progress(&self) -> Option<&crate::actors::travel::Travel> {
         self.travel.as_ref()
     }

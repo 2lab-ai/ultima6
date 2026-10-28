@@ -102,15 +102,16 @@ travel are unrelated: `map::travel` (level moves), `usecmd::travel` (vessels), `
 - Bound: the window, `geom::WINDOW` cells a side round its origin (40 × 40 in Original, 60 × 60 in Wide), the tiles
   and objects the step rule reads there being loaded; each cell is expanded at most once a pass, so at most `WINDOW²`
   expansions a pass and twice that a plan. A target outside the window is `Far`; no path inside it is `Unreachable`.
-- Reads the state only: the real `State` is unchanged (compared `==` in a test); the plan's copy (`plan` clones, then
-  `plan_on`) draws no RNG and queues no line (its `rng`, `pending_print` and A4-0x7afd compared, with a barrier 0x1a0,
-  whose refusal prints while the hiccup flag is set, on the search's way); nothing is saved. Each plan and each
+- Reads the state only, as observed: `reachable` leaves the caller's `State` unchanged (compared `==`, its RNG
+  included), and `plan_on`, which `plan` and `reachable` run on a clone, draws no RNG and queues no line (its `rng`,
+  `pending_print` and A4-0x7afd compared, with a barrier 0x1a0, whose refusal prints while the hiccup flag is set, on
+  the search's way); the clone inside `reachable` is not observed itself. Nothing is saved. Each plan and each
   prompt's step check clone the state once.
 
 **Refusals** (`travel::reachable(&State, (x, y)) -> Option<Reason>`, also what `travel_to` returns):
 `Here` (the leader stands there), `Aboard` (a vessel carries the party: its moves follow the wind and current, not
 the key), `Combat` (combat mode), `Foe` (a hostile in view, below), `Far`, `Unreachable`, `NoLeader` (no leader on
-the map).
+the map), `NoGame` (the command loop's program is not running: the opening, the main menu).
 
 **The walk.** One step per command prompt, entered as a direction key.
 - The command prompt = the command loop reads a command key with keys going through command processing: A4-0x7a2c
@@ -144,8 +145,12 @@ the map).
    out of sight and lost hit points are not read; those reach the travel as combat (3), a prompt (6) or not at all.
 5. `Input`: any key, repeat or text in a tick's input (K2's held repeat included, which the page queues into the
    tick's input), a pointer button pressed (a bit set that the handler's buttons before the tick did not have), or a
-   key in the queue the travel did not press (given before it started). A release, a pointer move, or a button held
-   down since before (1 then 1) is not a stop.
+   key in the queue the travel did not press (given before it started, or pressed by a travel it replaced and not
+   read yet: `travel_to` clears the travel's own key). A release, a pointer move, or a button held down since before
+   (1 then 1) is not a stop. Chosen: a direction key held when a travel starts stops it at its first tick, by the
+   repeats it queues (those K2 would take back included: `travel_press` counts them before the take-back, below);
+   the player walking by hand keeps the walk. The match on the event's kind has no wildcard arm
+   (`travel.rs:489-497`), so a kind added later is decided there.
 6. `Prompt`: a key wait other than the command prompt: the event wait 0x106bbc (`ui.input.in_wait`) or the line
    editor (`ui.input.line_input`) while the command prompt is not up (a more prompt, a question, a conversation, a
    cursor up).
@@ -168,22 +173,46 @@ by stop 8. The search and the checks draw no RNG.
 - `u6_core::actors::travel::reachable(s: &State, target: (u16, u16)) -> Option<Reason>`;
 - `Engine::travel_to(&mut self, target: (u16, u16)) -> Result<(), Reason>`, `Engine::travel_active(&self) -> bool`,
   `Engine::travel_end(&self) -> Option<End>`, `Engine::travel_progress(&self) -> Option<&Travel>` (its target and
-  receipts; named apart from spec 17's `Engine::travel()`);
+  receipts);
 - u6-web `Game::travel_to(x, y) -> bool` (map cell, the party's level), `Game::travel_active() -> bool`.
 - `Reason::code()` and `End::code()` give stable ASCII codes for the page's words.
 
-**Merge contract with unit M3** (the menu; wired in a later round, not in this unit):
-- Order in a tick: `travel_press` runs on the raw platform input, ahead of the menu's input filter (`popup.input`),
-  so the press that opens or chooses in the menu first stops a travel under way. The menu filters after it, and a
-  chosen "여기로 이동" calls `Engine::travel_to` after that tick's `travel_press` ran.
-- The menu consumes its own choosing press: neither the game's queue nor the new travel sees it. A pointer event stops
-  the travel when it sets a button that the engine's handler buttons before the tick (`Io::handler_pointer`) lack; a
-  menu that keeps the press from the engine also keeps from the travel that press's held moves and its release, or
-  the first held move reads as a new press. The wiring round tests both: the travel survives its choosing press's
-  held moves and release; a later press ends it.
-- Names and types: M3 keeps `Engine::travel()`; this unit's accessor is `Engine::travel_progress()`. M3's cells are
-  `i16`; `travel_to` takes them `as u16` and masks them with the level's mask, so a cell left of x 0 wraps as the
-  map does.
+**Merge contract with unit M3** (the menu; wired in a later round, not in this unit). M3's filter swallows three
+things the raw input still holds (as the review read M3, `popup.rs:992-1007`, `:1051-1058`, `:1080-1093`,
+`:1160-1169`; not read here): the choosing press's held moves (after the choice it queues a move with no button, so
+the handler's buttons read 0 and a held move reads as a new press), a second click on the entry within 500 ms, and a
+held Enter's or Space's repeats. Fed the raw input, a travel the menu just started would end `Input` on each. So:
+- `popup.input` runs first. It returns `through`, the events it passes on, and a stop flag: it took an event that is
+  not the tail of its last choice's gesture. Tails: the choosing press's held moves and release, the double click's
+  press and release, the choosing key's repeats and release. Not tails: the press that opens the menu, a key or a
+  press inside it.
+- `travel_press` runs on `through`, the flag a stop when set (a travel under way ends when the menu opens).
+- A chosen "여기로 이동" (`go_here`) calls `Engine::travel_to` after that tick's `travel_press`; the new travel's
+  first press is the next tick's.
+- The travel's step is appended to `through` after the filter and never fed to `popup.input`: an open menu takes Up
+  and Down, and M3 counts the game's keys there (M3 `engine.rs:821-822`, per the review).
+- The wiring round's tests, each a travel the menu just started that keeps walking until a later press ends it: a
+  swallowed choosing press with its held moves and its release; a double click on the entry; Enter held past its
+  repeat delay. `travel_tests.rs:739-765` models a press the game saw, not one the menu swallowed.
+- Names and types: M3 has no `Engine::travel()` (it asks with `go_here_asked`); this unit's accessor is
+  `Engine::travel_progress()`. M3's cells are `i16`; `travel_to` takes them `as u16` and masks them with the level's
+  mask, so a cell left of x 0 wraps as the map does.
+
+**Merge rules with unit K2** (held keys, spec 19 O1c; `Paced` and the pacing are not on this branch):
+- S1: `InputEvent::Paced(_)` is a stop: it joins the key arm of `Polled::stops` (`travel.rs:489-497`; no wildcard arm,
+  so the merge must decide it), and the web test gets a `Paced` row beside its `Repeat` one.
+- S2: `travel_press` runs before K2's take-back, its tick-input filter and its queue retain (K2 `engine.rs:919-926`,
+  per the review). Taken back first, a direction held since before the start would lose its repeats at the prompt
+  and the travel would press until a `Paced` came. A tick's order: `popup.input`, `travel_press`, K2's take-back, the
+  queue.
+- S3: one step in 150 ms at the prompt (K2's `MIN_STEP_MS`). Due-ness comes from the platform's clock through a
+  setter (e.g. `Polled.due`, true by default, so native, headless and this unit's tests are unchanged). `next` tests
+  it in the Hold branch after the stops (`travel.rs:624`, after `:612-623`), never after `pressed.take()` (`:639`):
+  there it would take `pressed` and pop the path with no press (a false blockage, or `Displaced`). `travel_press`
+  still runs every tick while a step is not due, so the stops stay immediate. The travel's key is a prompt take, so
+  it already moves K2's `last_step`: the held walk and the travel share one step time; keep it so.
+- N2: K2's own command-prompt test (K2 `engine.rs:81`) lacks `!line_input` beside `travel::command_prompt`
+  (`travel.rs:450`); the merge keeps one predicate for both.
 
 ## Trace (STV, before code)
 
@@ -230,7 +259,8 @@ Scenario: the owner right-presses an open cell beyond a door and chooses "여기
    key holds it); a held button (1 then 1) does not stop it, a second button does; an input stops it in its own tick
    with no press, at the prompt and mid-turn; the first press checks the plan's start; each of two blockages gets its
    own plan; distances wrap at the level's mask (both masks, both axes, both ways; a stagger across the seam plans
-   again, a member across it is beside the leader).
+   again, a member across it is beside the leader); a stopped travel's unread key is not the next one's own; no
+   travel starts outside the game (`NoGame`).
 4. The four diagonal keys read as the walk command in their direction, past the raw keymap
    (`ui/tests/input_tests.rs`); a diagonal into a shut corner is refused by `player_step` with no points spent, no
    move and no line printed or queued. The keys' oracle is a table of its own (key → step on the map), not
@@ -241,7 +271,8 @@ Scenario: the owner right-presses an open cell beyond a door and chooses "여기
    start show an equal frame at every tick and leave an equal `State` (no shortcut); steps, turns (prompts), clock
    minutes and engine ms printed as counts, with `real receipt: ran` or `skipped`. Also real: a cursor up (Tab once,
    twice) ends a travel as `Prompt` with no key and the cursor where it was; a Restore at the first turn's end ends
-   it as `Displaced` on the start cell.
+   it as `Displaced` on the start cell; the real Restore of a save made on the leader's own cell, at the prompt after
+   the first step, leaves the leader put and ends the travel by the Restore counter alone.
 6. The page's `Game::travel_to` starts exactly what `reachable` allows (`crates/u6-web/src/lib.rs` test
    `travel_to_starts_exactly_what_reachable_allows`, in the castle fight: refusals only); past the fight a reachable
    cell starts, a refused request leaves that travel walking to its target, which it reaches, and a repeat queued as
@@ -253,6 +284,3 @@ Scenario: the owner right-presses an open cell beyond a door and chooses "여기
 - A step whose cell an NPC just entered replans at once; Exult waits and retries first. If replans feel jumpy in towns,
   a one-turn retry (a Pass) is the alternative, at the cost of a command the player did not enter.
 - No travel across a level change (ladders, stairs, gates): the walk ends `Displaced` there.
-- Cadence: one step a command prompt is as fast as the game turns. Above about 4.3× game speed (review estimate,
-  `[추정]`) that is faster than K2's held key, which paces its repeats at `MIN_STEP_MS` 150 (unit K2, not on this
-  branch). Follow-up once K2 merges: the travel shares K2's pacing.

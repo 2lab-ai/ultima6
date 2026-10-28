@@ -399,6 +399,15 @@ fn the_refusals() {
     assert_eq!(reachable(&none, (R + 5, R + 3)), Some(Reason::NoLeader));
 }
 
+/// Review opus N3: no travel starts while the command loop's program is not running.
+#[test]
+fn no_travel_starts_outside_the_game() {
+    let mut s = room((R + 1, R + 3));
+    assert_eq!(reachable(&s, (R + 5, R + 3)), None);
+    s.main.program = Program::U;
+    assert_eq!(reachable(&s, (R + 5, R + 3)), Some(Reason::NoGame));
+}
+
 /// Actor 9 two cells west of the leader with status alignment bits `align`, its view cell seen.
 fn in_view_foe(s: &mut State, align: u8) {
     let (x, y) = leader_at(s);
@@ -432,6 +441,9 @@ fn a_foe_is_evil_or_chaotic_seen_and_alive() {
     assert!(!foe_in_view(&hidden, 1), "invisible (0x1224ea)");
 }
 
+/// Spec 21 (review gpt b1-3, the claim as observed): `reachable` leaves the caller's state as it
+/// was, its RNG included, and the copy a plan searches (`plan_on`, which `plan` and `reachable`
+/// run on a clone) draws no RNG and queues no line. The clone inside `reachable` is not observed.
 #[test]
 fn the_search_reads_the_state_only_and_draws_no_rng() {
     let mut s = room((R + 1, R + 3));
@@ -687,6 +699,10 @@ fn a_key_or_press_stops_it_in_its_tick_at_the_prompt_and_mid_turn() {
                 e.tick(&[], 20);
             }
             assert!(e.travel_active(), "{name} {phase}: still walking");
+            assert!(
+                e.travel_log().len() >= 2 && command_prompt(&e.state()) == at_prompt,
+                "{name} {phase}: reached"
+            );
             let (n, t) = (e.travel_log().len(), e.ticks() + 1);
             e.tick(&[ev], 20);
             assert_eq!(e.travel_end(), Some(End::Input), "{name} {phase}");
@@ -772,6 +788,35 @@ fn its_own_key_waiting_for_a_late_read_holds_it() {
         (Some(End::Arrived), 5),
         "its own key, read late"
     );
+}
+
+/// Review opus N4: a new travel does not take the last travel's pressed key, still waiting for the
+/// game's read, as its own: a key queued before it started stops it at once.
+#[test]
+fn a_stopped_travels_waiting_key_is_not_the_next_ones_own() {
+    let mut e = east(|_| {}, nothing(), 60, nothing());
+    for _ in 0..400 {
+        if !e.travel_log().is_empty() {
+            break;
+        }
+        e.tick(&[], 20);
+    }
+    assert_eq!(e.io().pending_events(), 1, "its key waits for the read");
+    let press = InputEvent::Pointer {
+        x: 9,
+        y: 9,
+        buttons: 1,
+    };
+    e.tick(&[press], 20);
+    assert_eq!(e.travel_end(), Some(End::Input), "stopped, its key unread");
+    e.travel_to((R + 6, R + 3)).expect("reachable");
+    e.tick(&[], 20);
+    assert_eq!(
+        e.travel_end(),
+        Some(End::Input),
+        "the old key is not the new travel's own"
+    );
+    assert_eq!(e.travel_log().len(), 1, "no press of its own");
 }
 
 /// A stand-in prompt hook that runs `set` at the read after step 2 (the read up: A4-0x7a2c 1, in
@@ -1701,6 +1746,61 @@ mod real {
             "and it stays over"
         );
         println!("real receipt: ran; a Restore during the travel ends it");
+    }
+
+    /// Review gpt b1-2 and b2-1: the real Restore (`saveload::restore`) of a save made on the cell
+    /// the leader stands on, at the prompt after the travel's first step landed there: the leader
+    /// stays put, and the travel ends (Displaced) with no key after it, by the Restore counter
+    /// alone (without it the leader on the aimed cell reads as the next step).
+    #[test]
+    fn a_restore_on_the_leaders_own_cell_ends_the_travel() {
+        let Some(files) = files() else { return };
+        let (mut e, st) = castle_with(&files);
+        let start = e.state().leader_position().quiet();
+        let to = reachable_near(&e.state()).expect("a reachable cell");
+        let steps = {
+            let s = e.state();
+            let l = s.actors.party.leader().quiet().0;
+            plan(&s, l, (start.x, start.y), to).path.quiet().len()
+        };
+        assert!(steps >= 2, "a walk of {steps} steps");
+        e.travel_to(to).expect("starts");
+        for _ in 0..2000 {
+            if e.travel_log().len() == 1 && at_prompt(&e) {
+                break;
+            }
+            e.tick(&[], STEP_MS);
+        }
+        assert!(
+            e.travel_active() && e.travel_log().len() == 1 && at_prompt(&e),
+            "the first step taken, at the prompt"
+        );
+        let at = e.state().leader_position().quiet();
+        assert_ne!(at, start, "the first step landed");
+        let restores = e.state().saveload.restores;
+        {
+            let mut s = st.borrow_mut();
+            crate::saveload::save(&mut s);
+            crate::saveload::restore(&mut s, e.io()).quiet();
+        }
+        assert_eq!(
+            e.state().leader_position().quiet(),
+            at,
+            "the leader stays put"
+        );
+        e.tick(&[], STEP_MS);
+        assert_eq!(e.travel_end(), Some(End::Displaced), "the Restore ends it");
+        assert_eq!(
+            e.state().saveload.restores,
+            restores + 1,
+            "one Restore counted"
+        );
+        for _ in 0..50 {
+            e.tick(&[], STEP_MS);
+        }
+        assert_eq!(e.travel_log().len(), 1, "no key after it");
+        assert_eq!(e.state().leader_position().quiet(), at, "nor a step");
+        println!("real receipt: ran; a Restore on the leader's own cell ends the travel");
     }
 
     /// Review opus SHOULD-4 (spec 21 Research): the Amiga raw-key table gives none of the four

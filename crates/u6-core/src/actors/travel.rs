@@ -38,11 +38,13 @@ pub enum Reason {
     Unreachable,
     /// No leader stands on the map.
     NoLeader,
+    /// The command loop's program is not running (the opening, the main menu).
+    NoGame,
 }
 
 impl Reason {
     /// Every reason, for the page's words.
-    pub const ALL: [Reason; 7] = [
+    pub const ALL: [Reason; 8] = [
         Reason::Here,
         Reason::Aboard,
         Reason::Combat,
@@ -50,6 +52,7 @@ impl Reason {
         Reason::Far,
         Reason::Unreachable,
         Reason::NoLeader,
+        Reason::NoGame,
     ];
 
     /// A stable ASCII code for the page's words.
@@ -62,6 +65,7 @@ impl Reason {
             Reason::Far => "far",
             Reason::Unreachable => "unreachable",
             Reason::NoLeader => "no-leader",
+            Reason::NoGame => "no-game",
         }
     }
 }
@@ -475,7 +479,8 @@ pub struct Polled<'a> {
 
 impl Polled<'_> {
     /// A key, a repeat or text, a pointer button that was up before going down, or a key in the
-    /// queue the travel did not press.
+    /// queue the travel did not press. No wildcard arm: an event kind added later (K2's `Paced`)
+    /// is decided here (spec 21 Stops 5).
     fn stops(&self) -> bool {
         if self.foreign {
             return true;
@@ -532,6 +537,9 @@ impl Travel {
     /// A travel of the leader to map cell `target` (masked to the level's coordinates) on `s`, or
     /// why there is none.
     pub fn start(s: &State, target: (u16, u16)) -> Result<Travel, Reason> {
+        if s.main.program != Program::Game {
+            return Err(Reason::NoGame);
+        }
         let leader = s.actors.party.leader().ok_or(Reason::NoLeader)?.0;
         let p = s.objects.location[usize::from(leader)];
         if s.objects.type_frame[usize::from(leader)] == 0 || u16::from(p.z) != walk::party_z(s) {
