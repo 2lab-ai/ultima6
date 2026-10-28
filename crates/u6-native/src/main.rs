@@ -421,17 +421,46 @@ fn map_key(key: minifb::Key, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// One key held ([`HeldKeys`]): the window key, the game key its presses and repeats were
+/// queued as, and (spec 19 O1c) whether it walks (its first event was its press, made with no
+/// Ctrl, Alt or system key down) and when that first event came.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    key: minifb::Key,
+    game: Key,
+    walking: bool,
+    at: Instant,
+}
+
 /// Spec 19 O1b: per window key held, each game key its presses and repeats were queued as, so
 /// its release takes back those whatever the modifiers are then (Ctrl let go before S still
-/// releases Ctrl-S).
+/// releases Ctrl-S). Spec 19 O1c: and the frame's time of the step whose tick the command prompt
+/// last took a press in ([`u6_core::Engine::prompt_takes`]), from which the walk's interval runs.
 #[derive(Debug, Default)]
-struct HeldKeys(Vec<(minifb::Key, Key)>);
+struct HeldKeys {
+    keys: Vec<Held>,
+    last_step: Option<Instant>,
+}
 
 impl HeldKeys {
-    /// The event of a press of `key` routed to the game as `k` (`repeat`: minifb's own repeat).
-    fn press(&mut self, key: minifb::Key, k: Key, repeat: bool) -> InputEvent {
-        if !self.0.contains(&(key, k)) {
-            self.0.push((key, k));
+    /// The event of a press of `key` routed to the game as `k` (`repeat`: minifb's own repeat),
+    /// at `at` with a modifier down or not (`modified`); a key already held keeps its first, and
+    /// one first seen by a repeat or with a modifier down does not walk.
+    fn press(
+        &mut self,
+        key: minifb::Key,
+        k: Key,
+        repeat: bool,
+        modified: bool,
+        at: Instant,
+    ) -> InputEvent {
+        if !self.keys.iter().any(|h| h.key == key && h.game == k) {
+            self.keys.push(Held {
+                key,
+                game: k,
+                walking: !repeat && !modified,
+                at,
+            });
         }
         if repeat {
             InputEvent::Repeat(k)
@@ -443,23 +472,102 @@ impl HeldKeys {
     /// The releases of the game keys window key `key` gave.
     fn release(&mut self, key: minifb::Key) -> Vec<InputEvent> {
         let mut out = Vec::new();
-        self.0.retain(|&(held, k)| {
-            if held != key {
+        self.keys.retain(|h| {
+            if h.key != key {
                 return true;
             }
-            out.push(InputEvent::Release(k));
+            out.push(InputEvent::Release(h.game));
             false
         });
         out
     }
 
+    /// Spec 19 O1c: the newest walking direction key held
+    /// ([`u6_core::engine::newest_direction`]), as its place, when its paced press is due at
+    /// `now` ([`u6_core::engine::paced_press_due`]: down, and the last step the command prompt
+    /// took, [`u6_core::engine::MIN_STEP_MS`] ago) and no modifier is down now (`modifier`: one
+    /// pauses the walk): the key the game presses again at the command prompt
+    /// ([`Engine::held_press`]).
+    fn due(&self, now: Instant, modifier: bool) -> Option<usize> {
+        if modifier {
+            return None;
+        }
+        let walking = self.keys.iter().enumerate().filter(|(_, h)| h.walking);
+        let (_, i) = u6_core::engine::newest_direction(walking.map(|(i, h)| (h.game, i)))?;
+        let ms = |t: Instant| now.saturating_duration_since(t).as_secs_f64() * 1000.0;
+        let since = self.last_step.map(ms);
+        u6_core::engine::paced_press_due(ms(self.keys[i].at), since).then_some(i)
+    }
+
     /// The releases of every key held (the window lost the focus: their releases may not come).
     fn release_all(&mut self) -> Vec<InputEvent> {
-        self.0
+        self.keys
             .drain(..)
-            .map(|(_, k)| InputEvent::Release(k))
+            .map(|h| InputEvent::Release(h.game))
             .collect()
     }
+}
+
+/// One frame's keys from the window ([`window_keys`]): each press routed to the game, as the
+/// window key, the game key and whether minifb's own repeat sent it; the keys let go; whether
+/// a modifier is down ([`modifier_down`]) and the window is active (minifb's `is_active`); the
+/// time of the poll that read them.
+struct WindowFrame<'a> {
+    presses: &'a [(minifb::Key, Key, bool)],
+    releases: &'a [minifb::Key],
+    modifier: bool,
+    active: bool,
+    at: Instant,
+}
+
+/// Spec 19 O1b, O1c: a frame's keys into `pending`: each press (a repeat of a direction key
+/// skipped while a modifier is down: with one an arrow is no direction key), then each key let
+/// go, then, the window having lost the focus since the frame before (`was_active`,
+/// [`focus_lost`]), every key held let go.
+fn window_keys(
+    keys: &mut HeldKeys,
+    pending: &mut Vec<InputEvent>,
+    frame: &WindowFrame<'_>,
+    was_active: &mut bool,
+) {
+    for &(key, k, repeat) in frame.presses {
+        if repeat && frame.modifier && k.is_direction() {
+            continue;
+        }
+        pending.push(keys.press(key, k, repeat, frame.modifier, frame.at));
+    }
+    for &key in frame.releases {
+        pending.extend(keys.release(key));
+    }
+    if focus_lost(was_active, frame.active) {
+        pending.extend(keys.release_all());
+    }
+}
+
+/// Spec 19 O1c: whether Ctrl, Alt or the system key is down by `is_down` (the window's key
+/// state): an arrow pressed with one is no direction key, and one down pauses a held walk.
+fn modifier_down(is_down: impl Fn(minifb::Key) -> bool) -> bool {
+    use minifb::Key as K;
+    [
+        K::LeftCtrl,
+        K::RightCtrl,
+        K::LeftAlt,
+        K::RightAlt,
+        K::LeftSuper,
+        K::RightSuper,
+    ]
+    .into_iter()
+    .any(is_down)
+}
+
+/// Spec 19 O1b: whether the window lost the focus since the frame before (`was`, then kept as
+/// `active` for the next): an edge, not the state. minifb 0.29's macOS `is_active` reads true
+/// until the window first becomes or resigns main and false ever after (spec 19's native
+/// limitation), so releasing on the state would let go of every key held every frame there.
+fn focus_lost(was: &mut bool, active: bool) -> bool {
+    let lost = *was && !active;
+    *was = active;
+    lost
 }
 
 /// What a window key does.
@@ -487,18 +595,46 @@ fn route(key: minifb::Key, ctrl: bool) -> Option<Route> {
     }
 }
 
+/// Spec 19 O1c: what a frame's window steps press again: the keys held, the frame's time and
+/// whether a modifier is down now.
+struct Walk<'a> {
+    keys: &'a mut HeldKeys,
+    now: Instant,
+    modifier: bool,
+}
+
+impl Walk<'_> {
+    /// The paced press of the held direction key the engine takes before its next tick: when it
+    /// is due ([`HeldKeys::due`]) and the command prompt is up ([`Engine::held_press`]).
+    fn press(&self, engine: &Engine, pending: &[InputEvent]) -> Option<InputEvent> {
+        let i = self.keys.due(self.now, self.modifier)?;
+        engine.held_press(pending, Some(self.keys.keys[i].game))
+    }
+}
+
 /// One step of the window: the engine ticks [`STEP_MS`] with the input not yet delivered (a
 /// frame's input goes to its first step, as the page queues keys for its next step; a frame
-/// that runs none keeps it for the next), the store writes what a Save in the step committed,
-/// and the sound machine replays the step's calls (after every step: the call log holds one
-/// step's). False once the game ended.
+/// that runs none keeps it for the next), and the direction key held down pressed again when
+/// its paced press is due and the command prompt is up (spec 19 O1c, [`Walk::press`]), the
+/// frame's time kept as the last step's when the prompt took a press in the tick (so a frame of
+/// several steps adds at most one); the store writes what a Save in the step committed, and the
+/// sound machine replays the step's calls (after every step: the call log holds one step's).
+/// False once the game ended.
 fn window_step(
     engine: &mut Engine,
     pending: &mut Vec<InputEvent>,
+    walk: &mut Walk<'_>,
     saves: Option<&mut Saves>,
     audio: Option<&mut Audio>,
 ) -> Result<bool, String> {
+    if let Some(press) = walk.press(engine, pending) {
+        pending.push(press);
+    }
+    let takes = engine.prompt_takes();
     engine.tick(pending, STEP_MS);
+    if engine.prompt_takes() != takes {
+        walk.keys.last_step = Some(walk.now);
+    }
     pending.clear();
     if let Some(saves) = saves {
         saves.flush(engine)?;
@@ -550,28 +686,35 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
     let mut last = Instant::now();
     let mut mouse = None;
     let mut pending: Vec<InputEvent> = Vec::new();
-    let mut held = HeldKeys::default();
+    let mut keys = HeldKeys::default();
+    let mut active = window.is_active();
     while window.is_open() {
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
+        let modifier = modifier_down(|k| window.is_key_down(k));
+        let pressed_at = Instant::now();
         let mut speed = pacer.speed();
+        let mut presses = Vec::new();
         for key in window.get_keys_pressed(KeyRepeat::Yes) {
             // Spec 19 O1b: a press minifb's own repeat sent (the key held past its delay) goes
             // as a repeat, which the key's release takes back.
             let repeat = !window.is_key_pressed(key, KeyRepeat::No);
             match route(key, ctrl) {
-                Some(Route::Game(k)) => pending.push(held.press(key, k, repeat)),
+                Some(Route::Game(k)) => presses.push((key, k, repeat)),
                 Some(Route::Faster) => speed = pace::faster(speed),
                 Some(Route::Slower) => speed = pace::slower(speed),
                 None => {}
             }
         }
-        for key in window.get_keys_released() {
-            pending.extend(held.release(key));
-        }
-        if !window.is_active() {
-            pending.extend(held.release_all());
-        }
+        let releases = window.get_keys_released();
+        let frame = WindowFrame {
+            presses: &presses,
+            releases: &releases,
+            modifier,
+            active: window.is_active(),
+            at: pressed_at,
+        };
+        window_keys(&mut keys, &mut pending, &frame, &mut active);
         if speed != pacer.speed() {
             pacer.set_speed(speed);
             window.set_title(&pace::title(speed));
@@ -596,6 +739,12 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         // pending or taken).
         let held = mouse.is_some_and(|(_, _, buttons)| buttons != 0);
         let frame_at = Instant::now();
+        // Spec 19 O1c: the held walk at the frame's time, paused while a modifier is down.
+        let mut walk = Walk {
+            keys: &mut keys,
+            now: frame_at,
+            modifier,
+        };
         let wall_dt_ms = frame_at.duration_since(last).as_secs_f64() * 1000.0;
         last = frame_at;
         let steps = pace::run_frame(
@@ -607,6 +756,7 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
                 window_step(
                     &mut engine,
                     &mut pending,
+                    &mut walk,
                     saves.as_mut(),
                     sound.as_mut().map(|(audio, _)| audio),
                 )
@@ -729,6 +879,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args(list.iter().map(|s| s.to_string()))
@@ -746,11 +897,12 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(route_game(K::S, true), ctrl_s);
+        let t = Instant::now();
         let presses = [
-            held.press(K::S, route_game(K::S, true), false),
-            held.press(K::S, route_game(K::S, true), true),
-            held.press(K::S, route_game(K::S, false), true),
-            held.press(K::Up, route_game(K::Up, false), false),
+            held.press(K::S, route_game(K::S, true), false, true, t),
+            held.press(K::S, route_game(K::S, true), true, true, t),
+            held.press(K::S, route_game(K::S, false), true, false, t),
+            held.press(K::Up, route_game(K::Up, false), false, false, t),
         ];
         assert_eq!(
             presses,
@@ -768,6 +920,128 @@ mod tests {
         assert!(held.release(K::S).is_empty(), "released once");
         assert_eq!(held.release_all(), [InputEvent::Release(Key::Up)]);
         assert!(held.release_all().is_empty());
+    }
+
+    /// The held key `due` names at `now`.
+    fn due_key(held: &HeldKeys, now: Instant, modifier: bool) -> Option<Key> {
+        held.due(now, modifier).map(|i| held.keys[i].game)
+    }
+
+    /// Spec 19 O1c: the modifiers are the two Ctrl, the two Alt and the two system keys, each
+    /// alone; Shift, Caps Lock, an arrow, a letter or nothing down is none.
+    #[test]
+    fn the_modifiers_are_ctrl_alt_and_the_system_key() {
+        use minifb::Key as K;
+        let six = [
+            K::LeftCtrl,
+            K::RightCtrl,
+            K::LeftAlt,
+            K::RightAlt,
+            K::LeftSuper,
+            K::RightSuper,
+        ];
+        for m in six {
+            assert!(modifier_down(|k| k == m), "{m:?}");
+        }
+        for k in [K::LeftShift, K::RightShift, K::CapsLock, K::Left, K::A] {
+            assert!(!modifier_down(|down| down == k), "{k:?}");
+        }
+        assert!(!modifier_down(|_| false), "none down");
+    }
+
+    /// Spec 19 O1c (the review's sequence), for each modifier as the window reports it: an arrow
+    /// pressed with it down, the modifier let go and the arrow still down, is never the held
+    /// direction; the same arrow pressed without one is, once it has been down `MIN_STEP_MS`
+    /// and not before, and not while the modifier is down again (the walk pauses).
+    #[test]
+    fn a_direction_held_from_a_press_with_a_modifier_is_not_pressed_again() {
+        use minifb::Key as K;
+        let t = Instant::now();
+        let min = u64::from(u6_core::engine::MIN_STEP_MS);
+        let later = t + Duration::from_millis(min);
+        let just = t + Duration::from_millis(min - 1);
+        for m in [
+            K::LeftCtrl,
+            K::RightCtrl,
+            K::LeftAlt,
+            K::RightAlt,
+            K::LeftSuper,
+            K::RightSuper,
+        ] {
+            let down = |k| k == m;
+            let ctrl = down(K::LeftCtrl) || down(K::RightCtrl);
+            let k = match route(K::Left, ctrl) {
+                Some(Route::Game(k)) => k,
+                other => panic!("{other:?}"),
+            };
+            let mut held = HeldKeys::default();
+            held.press(K::Left, k, false, modifier_down(down), t);
+            assert_eq!(due_key(&held, later, false), None, "{m:?} at the press");
+            held.release(K::Left);
+            held.press(K::Left, k, false, modifier_down(|_| false), t);
+            assert_eq!(
+                due_key(&held, just, false),
+                None,
+                "{m:?}: a tap is not held yet"
+            );
+            assert_eq!(
+                due_key(&held, later, false),
+                Some(Key::Left),
+                "{m:?}: alone"
+            );
+            let now = modifier_down(down);
+            assert_eq!(due_key(&held, later, now), None, "{m:?} down now pauses it");
+        }
+    }
+
+    /// Spec 19 O1c through HeldKeys: of two held arrows the newest press walks; a repeat of the
+    /// older does not make it newer; the newer let go, the older walks again.
+    #[test]
+    fn the_newest_held_arrow_walks_and_the_older_comes_back_at_its_release() {
+        use minifb::Key as K;
+        let t = Instant::now();
+        let later = t + Duration::from_secs(1);
+        let mut held = HeldKeys::default();
+        held.press(K::Down, Key::Down, false, false, t);
+        held.press(K::Left, Key::Left, false, false, t);
+        assert_eq!(due_key(&held, later, false), Some(Key::Left), "the newest");
+        held.press(K::Down, Key::Down, true, false, later);
+        assert_eq!(
+            due_key(&held, later, false),
+            Some(Key::Left),
+            "a repeat does not reorder"
+        );
+        held.release(K::Left);
+        assert_eq!(
+            due_key(&held, later, false),
+            Some(Key::Down),
+            "the older again"
+        );
+    }
+
+    /// Spec 19 O1b: the window releases its held keys when it loses the focus, once: on minifb's
+    /// macOS states (true at first, false from the first main-window change on, whatever the
+    /// focus) once at that change and never again; on a platform whose state follows the focus
+    /// at each loss.
+    #[test]
+    fn the_keys_are_released_once_at_each_loss_of_focus() {
+        let lost = |states: &[bool]| -> Vec<usize> {
+            let mut was = states[0];
+            (1..states.len())
+                .filter(|&i| focus_lost(&mut was, states[i]))
+                .collect()
+        };
+        assert_eq!(
+            lost(&[true, true, false, false, false, false]),
+            [2],
+            "macOS"
+        );
+        assert_eq!(lost(&[true, false, false, true, true, false]), [1, 5]);
+        assert_eq!(
+            lost(&[false, false, true]),
+            [] as [usize; 0],
+            "never had it"
+        );
     }
 
     #[test]
@@ -911,6 +1185,232 @@ mod tests {
         assert_eq!(route(K::F1, false), None);
     }
 
+    /// A game that stands for the command prompt: it reads one key with A4-0x7a2c and A4-0x7a42
+    /// set ([`u6_core::engine::command_prompt`]), then waits 100 ms (so its prompt is up again
+    /// sooner than the interval), over and over, counting the keys it read in `count`.
+    fn prompt_reader(count: std::rc::Rc<std::cell::Cell<usize>>) -> Engine {
+        let mut state = u6_core::State::default();
+        state.ui.input.accept = true;
+        Engine::with_game(state, Files::default(), move |st, io| async move {
+            loop {
+                st.borrow_mut().main.reading = 1;
+                io.next_key().await;
+                st.borrow_mut().main.reading = 0;
+                count.set(count.get() + 1);
+                io.sleep(100).await;
+            }
+        })
+    }
+
+    /// One window frame `f` (20 ms from `t0`) as the loop runs it, the window active: its keys
+    /// ([`window_keys`]: `presses`, `modifier` down or not), then `steps` window steps; whether
+    /// the game read a key in it (one at most).
+    #[allow(clippy::too_many_arguments)]
+    fn run_frame(
+        engine: &mut Engine,
+        keys: &mut HeldKeys,
+        pending: &mut Vec<InputEvent>,
+        count: &std::cell::Cell<usize>,
+        (t0, f): (Instant, u64),
+        presses: &[(minifb::Key, Key, bool)],
+        modifier: bool,
+        steps: usize,
+    ) -> bool {
+        let now = t0 + Duration::from_millis(f * 20);
+        let frame = WindowFrame {
+            presses,
+            releases: &[],
+            modifier,
+            active: true,
+            at: now,
+        };
+        let mut was_active = true;
+        window_keys(keys, pending, &frame, &mut was_active);
+        let mut walk = Walk {
+            keys,
+            now,
+            modifier,
+        };
+        let before = count.get();
+        for _ in 0..steps {
+            window_step(engine, pending, &mut walk, None, None).unwrap();
+        }
+        assert!(count.get() - before <= 1, "frame {f}: one press at most");
+        count.get() > before
+    }
+
+    /// Spec 19 O1c (D1', round 4 item 1): the window steps press the held direction key again
+    /// when its paced press is due and the command prompt is up ([`prompt_reader`]): after the
+    /// press, every [`u6_core::engine::MIN_STEP_MS`] rounded up to a frame, at 1× (one step a
+    /// 20 ms frame) and at Max (64 steps a frame, at most one press a frame), with minifb's own
+    /// repeats (the first 250 ms after the press, then one every 50 ms) or without: the prompt
+    /// takes the repeats back, so every gap is 150 ms within a frame. None while a modifier is
+    /// down (its repeats skipped), and none for a letter. The wall ms of each frame a key was
+    /// read in.
+    #[test]
+    fn the_window_step_presses_a_held_direction_key_at_the_prompt() {
+        use minifb::Key as K;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let reads = |key: minifb::Key, k: Key, modifier: bool, steps: usize, repeats: bool| {
+            let count = Rc::new(Cell::new(0));
+            let mut engine = prompt_reader(Rc::clone(&count));
+            let t0 = Instant::now();
+            let (mut keys, mut pending) = (HeldKeys::default(), Vec::new());
+            let (mut at, mut sent) = (Vec::new(), 0);
+            for f in 0..60u64 {
+                let ms = f * 20;
+                let mut presses = Vec::new();
+                if f == 0 {
+                    presses.push((key, k, false));
+                } else if repeats && (ms..ms + 20).any(|t| t >= 250 && (t - 250) % 50 == 0) {
+                    presses.push((key, k, true));
+                    sent += 1;
+                }
+                let read = run_frame(
+                    &mut engine,
+                    &mut keys,
+                    &mut pending,
+                    &count,
+                    (t0, f),
+                    &presses,
+                    modifier,
+                    steps,
+                );
+                if read {
+                    at.push(ms);
+                }
+            }
+            assert_eq!(sent, if repeats { 19 } else { 0 }, "minifb's repeats sent");
+            at
+        };
+        let walk: Vec<u64> = (0..60).step_by(8).map(|f| f * 20).collect();
+        assert_eq!(walk.len(), 8);
+        for repeats in [false, true] {
+            let with = if repeats {
+                "with repeats"
+            } else {
+                "no repeats"
+            };
+            assert_eq!(
+                reads(K::Left, Key::Left, false, 1, repeats),
+                walk,
+                "1×, {with}"
+            );
+            assert_eq!(
+                reads(K::Left, Key::Left, false, 64, repeats),
+                walk,
+                "Max, {with}"
+            );
+            let gaps: Vec<u64> = walk.windows(2).map(|w| w[1] - w[0]).collect();
+            assert!(gaps.iter().all(|&g| g.abs_diff(150) <= 20), "{gaps:?}");
+            assert_eq!(
+                reads(K::Left, Key::Left, true, 1, repeats),
+                [0],
+                "a modifier down, {with}"
+            );
+        }
+        assert_eq!(
+            reads(K::X, Key::Char('x'), false, 1, false),
+            [0],
+            "a letter"
+        );
+    }
+
+    /// Spec 19 O1c (round 4 item 8): while a modifier is down a direction key's repeat from
+    /// minifb is not queued (with one an arrow is no direction key, and the walk pauses); a
+    /// letter's is, and with no modifier both are.
+    #[test]
+    fn a_direction_keys_repeat_is_skipped_while_a_modifier_is_down() {
+        use minifb::Key as K;
+        let presses = [(K::Left, Key::Left, true), (K::X, Key::Char('x'), true)];
+        for (modifier, want) in [
+            (true, vec![InputEvent::Repeat(Key::Char('x'))]),
+            (
+                false,
+                vec![
+                    InputEvent::Repeat(Key::Left),
+                    InputEvent::Repeat(Key::Char('x')),
+                ],
+            ),
+        ] {
+            let (mut keys, mut pending, mut active) = (HeldKeys::default(), Vec::new(), true);
+            let frame = WindowFrame {
+                presses: &presses,
+                releases: &[],
+                modifier,
+                active: true,
+                at: Instant::now(),
+            };
+            window_keys(&mut keys, &mut pending, &frame, &mut active);
+            assert_eq!(pending, want, "modifier {modifier}");
+        }
+    }
+
+    /// Spec 19 O1b, O1c (round 4 item 8), the effects of a loss of focus on a held walk at the
+    /// prompt ([`prompt_reader`], 20 ms frames at 1×): the left arrow pressed at frame 0 walks
+    /// (frames 0, 8, 16); the window loses the focus at frame 20: the arrow's release is queued
+    /// and no paced press follows; it regains the focus at 40 with the arrow pressed again
+    /// (40, 48), and loses it again at 50: released again, nothing after. On minifb's macOS
+    /// states (spec 19's native limitation: false from the first main-window change on) the
+    /// second loss is not seen, so the arrow walks on until its release reaches the window.
+    #[test]
+    fn a_held_walk_ends_at_each_loss_of_focus_that_is_seen() {
+        use minifb::Key as K;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let run = |active_at: &dyn Fn(u64) -> bool| {
+            let count = Rc::new(Cell::new(0));
+            let mut engine = prompt_reader(Rc::clone(&count));
+            let t0 = Instant::now();
+            let (mut keys, mut pending, mut was) = (HeldKeys::default(), Vec::new(), true);
+            let (mut reads, mut releases) = (Vec::new(), Vec::new());
+            for f in 0..80u64 {
+                let presses: Vec<_> = if f == 0 || f == 40 {
+                    vec![(K::Left, Key::Left, false)]
+                } else {
+                    Vec::new()
+                };
+                let before = pending.len();
+                let now = t0 + Duration::from_millis(f * 20);
+                let frame = WindowFrame {
+                    presses: &presses,
+                    releases: &[],
+                    modifier: false,
+                    active: active_at(f),
+                    at: now,
+                };
+                window_keys(&mut keys, &mut pending, &frame, &mut was);
+                if pending[before..].contains(&InputEvent::Release(Key::Left)) {
+                    releases.push(f);
+                }
+                let mut walk = Walk {
+                    keys: &mut keys,
+                    now,
+                    modifier: false,
+                };
+                let n = count.get();
+                window_step(&mut engine, &mut pending, &mut walk, None, None).unwrap();
+                if count.get() > n {
+                    reads.push(f);
+                }
+            }
+            (reads, releases)
+        };
+        let follows = |f: u64| !(20..40).contains(&f) && f < 50;
+        let (reads, releases) = run(&follows);
+        assert_eq!(reads, [0, 8, 16, 40, 48], "no paced press after a loss");
+        assert_eq!(releases, [20, 50], "the release at each loss");
+        let macos = |f: u64| f < 20;
+        let (reads, releases) = run(&macos);
+        assert_eq!(releases, [20], "macOS: only the first change is seen");
+        assert_eq!(
+            reads,
+            [0, 8, 16, 40, 48, 56, 64, 72],
+            "macOS: the second loss unseen, the walk goes on"
+        );
+    }
+
     /// A frame's input goes to its first step only, and a frame that runs no step keeps it
     /// for the next: a game that takes every event as it comes records the step (the tick
     /// count, from 1) each one reached it in.
@@ -943,12 +1443,18 @@ mod tests {
         let mut pending = Vec::new();
         let mut frame = |engine: &mut Engine, input: &[InputEvent], dt: f64| {
             pending.extend_from_slice(input);
+            let mut idle = HeldKeys::default();
+            let mut walk = Walk {
+                keys: &mut idle,
+                now: Instant::now(),
+                modifier: false,
+            };
             let k = pace::run_frame(
                 &mut pacer,
                 dt,
                 false,
                 || 0.0,
-                || window_step(engine, &mut pending, None, None),
+                || window_step(engine, &mut pending, &mut walk, None, None),
             )
             .unwrap();
             (k, pending.len())
