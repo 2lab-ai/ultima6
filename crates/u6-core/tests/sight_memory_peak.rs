@@ -1,0 +1,225 @@
+//! Spec 18's peak heap of the remembered sight, measured with a counting allocator over the
+//! system one (as `u6-web`'s `pack_memory`). On the owner's game: the party put (0x1092fc) on the
+//! surface cell after cell of a grid a view apart, the view rebuilt (0x109e74), the animation
+//! ticked (0x10202e: the shore merge rewrites its records, so the copy store fills as in play)
+//! and the window rendered framed with the remembered sight on after each (0x102c90). The cells
+//! come to the cap, the cap acts again and again, and the cells' table grows once from 2^18 to
+//! 2^19 buckets. What the memory retains is under 16 MiB (`the_bounds_hold_the_heap_under_16_mib`);
+//! the growth is the peak: for a moment the old table and the new live together. Prints counts
+//! only; one test, so nothing else allocates while it measures. Runs only where the owner's zip
+//! exists (never in CI: the data is not ours to ship); without it the test skips, unless
+//! `U6_REQUIRE_ARCHIVE=1` (the release receipt), which fails it instead. It prints
+//! `sight_memory_peak: ran` or `sight_memory_peak: skipped`, which a gate log shows when the test
+//! runs with `--nocapture`.
+#![allow(clippy::disallowed_methods)] // reads the owner's zip
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use u6_core::geom::{VIEW_H, VIEW_W};
+use u6_core::{Engine, Files, State};
+use u6_intake::{InputFile, intake};
+use u6_testkit::Quiet;
+
+const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
+
+struct Counting;
+
+static NOW: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+/// The largest single allocation since the last reset.
+static LARGEST: AtomicUsize = AtomicUsize::new(0);
+/// The allocations of a cells' table of 2^19 buckets ([`is_table`]), and of 2^20 or more.
+static TABLES_19: AtomicUsize = AtomicUsize::new(0);
+static TABLES_20: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            let now = NOW.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
+            PEAK.fetch_max(now, Ordering::SeqCst);
+            LARGEST.fetch_max(layout.size(), Ordering::SeqCst);
+            if is_table(layout.size(), 1 << 19) {
+                TABLES_19.fetch_add(1, Ordering::SeqCst);
+            } else if layout.size() >= table(1 << 20) {
+                TABLES_20.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        NOW.fetch_sub(layout.size(), Ordering::SeqCst);
+    }
+}
+
+#[global_allocator]
+static A: Counting = Counting;
+
+fn files() -> Option<Files> {
+    if !Path::new(ZIP).exists() {
+        assert_ne!(
+            std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+            Ok("1"),
+            "sight_memory_peak: U6_REQUIRE_ARCHIVE=1 and the archive is missing"
+        );
+        println!("sight_memory_peak: skipped ({ZIP} not present)");
+        return None;
+    }
+    let data = std::fs::read(ZIP).quiet();
+    let r = intake(vec![InputFile {
+        name: "ultima-vi.zip".into(),
+        data,
+    }]);
+    Some(Files::new(r.files))
+}
+
+/// The bytes of a cells' table of `buckets` buckets in one allocation (std's hashbrown), but the
+/// group's width of control bytes more: an entry of 20 bytes and a control byte per bucket.
+fn table(buckets: usize) -> usize {
+    buckets * 21
+}
+
+/// Whether an allocation of `size` bytes is a cells' table of `buckets` buckets: [`table`] and a
+/// group's width of control bytes (8 with NEON or on wasm32, 16 with SSE2), aligned to it.
+fn is_table(size: usize, buckets: usize) -> bool {
+    (table(buckets) + 8..=table(buckets) + 16).contains(&size)
+}
+
+/// The copy store as in play: its size is a constant of the game data, 255 copies on the owner's
+/// game (`real_the_copies_of_the_merged_records_are_a_constant_of_the_game_data`), each under
+/// 1 KiB with its index.
+const COPIES: usize = 255 * 1024;
+
+/// Whether std's hashbrown groups its control bytes by 8 on this target (NEON on aarch64, the
+/// generic 64-bit word elsewhere, as on wasm32), as `u6_core::gfx::cache`'s tests define it.
+/// The 2^18 → 2^19 growth under the cap rests on deleted entries piling up; with SSE2's 16-byte
+/// groups they form far less often, and the growth, or a cap and 200 renders after it, may not
+/// come within the walk: there the test asserts only that the table never reaches 2^20 buckets.
+/// Not run with 16-byte groups.
+const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
+    target_feature = "sse2",
+    any(target_arch = "x86", target_arch = "x86_64")
+));
+
+/// Spec 18 (the review's peak): the walk above, until the cells' table has grown to 2^19 buckets,
+/// 200 renders more have passed and the cap has acted after the growth (the cells held fell from
+/// one render to the next: in Original a render adds at most 121 new cells, so 200 renders may
+/// hold no cap). Measured over the heap at the first render (the game state, the engine's
+/// buffers): the peak and what is retained at the end.
+///
+/// Only the cap lowers the cells held in this walk:
+/// - the clock stands still (the teleport, 0x1092fc, ticks the clock, 0x10368a, by 0 minutes),
+///   so every sight has one minute, no cell ages and the sweep forgets none: asserted, the
+///   calendar the same after every render;
+/// - every fall in the cells held lands on exactly seven eighths of the cap, 200 704, what the
+///   cap leaves when the sights share one minute (ties go by key): asserted. The cap acts above
+///   229 255 cells in Original (228 599 in Wide), so its drop is far more than a render adds;
+/// - `forget` (a cell's look not kept, the copy store full) never runs, since the store holds 255
+///   copies, a constant of the game data (the test named at [`COPIES`]), far under `MAX_COPIES`
+///   (8 192): a premise, not asserted, because the public API counts no copies; no load state
+///   (which forgets the whole memory) is in the walk.
+///
+/// Then:
+/// - The table grew to 2^19 buckets once (one allocation of that table's size) and never to
+///   2^20; 200 renders or more passed after the growth, a cap among them.
+/// - The high-water was set at the render of that growth, and no later render passed it, the
+///   cap's after the growth included.
+/// - The peak is at least the two tables of the growth (2^18 and 2^19 buckets, 16.5 MB: for a
+///   moment both live) and at most those, the copies and 1 MiB (the renders' own and the cap's
+///   scratch).
+///
+/// With 16-byte groups, where the walk may not reach the growth or 200 renders past it, only
+/// "never to 2^20" is asserted ([`EIGHT_BYTE_GROUPS`]).
+#[test]
+fn the_remembered_sight_peaks_once_as_its_table_grows() {
+    let Some(files) = files() else { return };
+    println!("sight_memory_peak: ran");
+    let mut s = State::new_game(&files).quiet();
+    u6_core::main_loop::load_state_tail(&mut s);
+    let e = Engine::with_game(State::empty(), Files::default(), |_, _| async {});
+    let io = e.io();
+    io.set_sight_memory(true);
+    u6_core::gfx::render_window(&mut s, io, true);
+    let base = NOW.load(Ordering::SeqCst);
+    PEAK.store(base, Ordering::SeqCst);
+    LARGEST.store(0, Ordering::SeqCst);
+    TABLES_19.store(0, Ordering::SeqCst);
+    TABLES_20.store(0, Ordering::SeqCst);
+    let (mut renders, mut grown, mut capped, mut held) = (0usize, None, false, 0);
+    let calendar = s.actors.calendar;
+    let after_cap = u6_core::gfx::cache::MAX_CELLS - u6_core::gfx::cache::MAX_CELLS / 8;
+    let grid = (0..1024u16)
+        .step_by(VIEW_H)
+        .flat_map(|y| (0..1024u16).step_by(VIEW_W).map(move |x| (x, y)));
+    for (x, y) in grid {
+        let (tables, before) = (
+            TABLES_19.load(Ordering::SeqCst),
+            PEAK.load(Ordering::SeqCst),
+        );
+        u6_core::map::travel::teleport(&mut s, x, y, 0, 0);
+        u6_core::map::view::update_view(&mut s);
+        u6_core::gfx::anim::anim_tick(&mut s);
+        u6_core::gfx::render_window(&mut s, io, true);
+        renders += 1;
+        if grown.is_none() && TABLES_19.load(Ordering::SeqCst) > tables {
+            grown = Some((renders, before, PEAK.load(Ordering::SeqCst)));
+        }
+        assert!(s.actors.calendar == calendar, "the clock stands still");
+        let cells = s.gfx.cache.sight_cells();
+        if cells < held {
+            assert_eq!(cells, after_cap, "a fall in the cells held is the cap's");
+        }
+        capped |= grown.is_some_and(|(g, _, _)| renders > g) && cells < held;
+        held = cells;
+        if capped && grown.is_some_and(|(g, _, _)| renders >= g + 200) {
+            break;
+        }
+    }
+    let peak = PEAK.load(Ordering::SeqCst) - base;
+    let retained = NOW.load(Ordering::SeqCst).saturating_sub(base);
+    let largest = LARGEST.load(Ordering::SeqCst);
+    let (tables, larger) = (
+        TABLES_19.load(Ordering::SeqCst),
+        TABLES_20.load(Ordering::SeqCst),
+    );
+    let reached = grown.is_some_and(|(g, _, _)| capped && renders >= g + 200);
+    if !EIGHT_BYTE_GROUPS && !reached {
+        println!(
+            "{renders} renders, the growth to 2^19 buckets with a cap and 200 renders after it \
+             not reached (16-byte groups: not asserted); peak {peak} bytes over the start"
+        );
+        assert_eq!(larger, 0, "never to 2^20 buckets");
+        return;
+    }
+    assert!(grown.is_some(), "the table grew to 2^19 buckets");
+    let (at, before, after) = grown.quiet();
+    println!(
+        "{renders} renders; the 2^19 table allocated {tables} times, first at render {at} (the \
+         high-water {} bytes over the start before it, {} after it); largest allocation \
+         {largest} bytes; peak {peak} bytes over the start, {retained} retained at the end, {} \
+         cells",
+        before - base,
+        after - base,
+        s.gfx.cache.sight_cells()
+    );
+    let low = table(1 << 18) + table(1 << 19);
+    let high = low + COPIES + (1 << 20);
+    assert_eq!(tables, 1, "the table grew to 2^19 buckets once");
+    assert!(capped, "the cap acted after the growth");
+    assert!(renders >= at + 200, "200 renders after the growth");
+    assert_eq!(larger, 0, "never to 2^20 buckets");
+    assert!(after > before, "the growth's render raised the high-water");
+    assert_eq!(after - base, peak, "and no later render passed it");
+    assert!(
+        peak >= low,
+        "the peak: at least the two tables of the growth"
+    );
+    assert!(
+        peak <= high,
+        "the peak: at most the tables, the copies and 1 MiB"
+    );
+}

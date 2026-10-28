@@ -956,7 +956,8 @@ mod sight_memory_tests {
     /// Spec 18 (the owner's follow-up): the window reset (0x133a96, which the full redraw 0x133b0e
     /// dissolves in before the view is rebuilt: the party's darkness, an arrest, the healer)
     /// keeps the remembered sight: the reset window shows the remembered cell's grey look, and so
-    /// does the view rebuilt after it. A restore 0x1052c8 (its load state 0x105350) forgets it.
+    /// does the view rebuilt after it. A restore 0x1052c8 (its load state 0x105350) forgets it,
+    /// and the memoized window with it (its key names copies by slot).
     #[test]
     fn real_the_window_reset_keeps_the_remembered_sight_and_load_state_forgets_it() {
         let Some(files) = files() else { return };
@@ -981,10 +982,16 @@ mod sight_memory_tests {
         render(&mut s, io);
         assert!(s.gfx.cache.memory.holds(h.0, h.1), "still remembered");
         assert_same!(box_of(io, at1), grey, "the view rebuilt: its grey look");
+        super::render_window_cached(&mut s, io);
+        assert!(s.gfx.cache.has_window_memo(), "a window memoized");
         crate::saveload::restore(&mut s, io).quiet();
         assert!(
             s.gfx.cache.memory.len() == 0,
             "a restore (load state): forgotten"
+        );
+        assert!(
+            !s.gfx.cache.has_window_memo(),
+            "a restore: no memoized window"
         );
     }
 
@@ -1771,17 +1778,68 @@ mod sight_memory_tests {
         assert!(from_copy > 0, "pixels drawn from the copy");
     }
 
+    /// Spec 18 (the review's copy-store bound): the copies a remembered layer takes of the shore
+    /// merge's records are a constant of the game data. An animdata frame is the animation
+    /// counter `& and_mask` (a byte) shifted (0x10202e), so the frames repeat every 256 ticks,
+    /// and a merged record is its load content with the masked pixels of the water records its
+    /// sources draw then (0x152dac). A copy of every merged record taken after each of 512 ticks
+    /// (two such cycles), then after each of 512 more: the second half adds none. On the user's
+    /// game (counts only).
+    #[test]
+    fn real_the_copies_of_the_merged_records_are_a_constant_of_the_game_data() {
+        const N: usize = 512;
+        let Some(files) = files() else { return };
+        let mut s = start(&files);
+        let mut m = super::SightMemory::default();
+        let mut counts = Vec::new();
+        for t in 1..=2 * N {
+            crate::gfx::anim::anim_tick(&mut s);
+            for r in merged(&s) {
+                assert!(m.copy_of(&s.gfx, r).is_some(), "a copy taken");
+            }
+            if t % N == 0 {
+                counts.push(m.copies());
+            }
+        }
+        let records = merged(&s).len();
+        println!(
+            "{records} merged records: {} copies after {N} ticks, {} after {}",
+            counts[0],
+            counts[1],
+            2 * N
+        );
+        assert_eq!(counts[0], counts[1], "no new copy after {N} ticks");
+        assert!(
+            counts[0] * 8 <= super::cache::MAX_COPIES,
+            "an eighth of the store at most"
+        );
+    }
+
+    /// Spec 18 (the review's u32 minute): the horizon of a remembered cell's minute, `u32::MAX`
+    /// ([`super::cache`]'s `Remembered`), is thousands of game years after the start of the
+    /// user's game: the game's clock never gets there in play (counts only).
+    #[test]
+    fn real_the_minute_horizon_is_thousands_of_game_years_after_the_start() {
+        let Some(files) = files() else { return };
+        let now = crate::gfx::cache::minutes(&start(&files).actors.calendar);
+        let year = 12 * 28 * 24 * 60;
+        let years = (u64::from(u32::MAX) - now) / year;
+        println!("{years} game years from the start to the horizon");
+        assert!(years > 8000, "thousands of game years away");
+    }
+
     /// Spec 18 (the review's merged-record set): a record rewritten before the cell showing it
     /// was last in sight (its version not 0; here a ground record outside the shore merge's,
     /// rewritten by hand and reported as the merge reports it) is kept as a copy: rewritten again
     /// while the cell is out of sight, the cell keeps the look of its last sight. On the user's
-    /// game, the records the animation rewrites in 64 ticks are counted against the shore set.
+    /// game, the records the animation rewrites in 256 ticks (a whole cycle of its frames: the
+    /// counter's low byte, 0x10202e) are counted against the shore set.
     #[test]
     fn real_a_rewritten_record_outside_the_shore_set_keeps_its_look() {
         let Some(files) = files() else { return };
         let start = start(&files);
         let mut ticked = start.clone();
-        for _ in 0..64 {
+        for _ in 0..256 {
             crate::gfx::anim::anim_tick(&mut ticked);
         }
         let set = merged(&ticked);
@@ -1791,7 +1849,7 @@ mod sight_memory_tests {
             .filter(|&r| !set.contains(&(r as u16)))
             .count();
         println!(
-            "64 ticks: {} records rewritten, {outside} outside the shore set",
+            "256 ticks: {} records rewritten, {outside} outside the shore set",
             rewritten.count()
         );
         assert_eq!(outside, 0, "the animation rewrites only shore records");
@@ -1882,8 +1940,10 @@ mod sight_memory_tests {
     /// its last sight, over a box that held other pixels: each pixel the fade leaves out is the
     /// cell's own black, as the window render draws the cell ([`super::draw_remembered`]) and as
     /// the flights' redraw over the missiles (0x1325e4, [`super::blit_remembered`]) does, and the
-    /// overlay ORs into kept pixels only. On the user's game: the tile drawn with the overlay that
-    /// covers the most pixels, at an out-of-sight cell of a place's view.
+    /// overlay ORs into kept pixels only: each kept pixel under it is the pixel the same draw
+    /// without the overlay leaves, bit 3 set, and some had it clear. On the user's game: the tile
+    /// drawn with the overlay that covers the most pixels, at an out-of-sight cell of a place's
+    /// view.
     #[test]
     fn real_a_faded_overlay_leaves_the_pixels_it_drops_black() {
         use crate::gfx::cache::{keeps, minutes};
@@ -1948,11 +2008,20 @@ mod sight_memory_tests {
             black.iter().all(|&p| p != fill),
             "the cell's own tile covers its box"
         );
-        let (mut dropped, mut ored) = (0, 0);
+        let (mut dropped, mut ored, mut set) = (0, 0, 0);
+        let bit = 1 << ANIM_PLANE;
+        let bare = super::Layer {
+            masktype: layer.masktype & !4,
+            ..layer
+        };
         for day in 1..=4u8 {
             let seen = now - u64::from(day) * 1440;
             let key = (s.map.centre.z, w.0, w.1);
             s.gfx.cache.memory.remember(key, vec![layer], seen);
+            // The same draw without the overlay: the pixels the OR finds.
+            let mut fb = filled();
+            super::draw_remembered(&s.gfx, &mut fb, 0xff, (x0, y0), (day, &[bare]));
+            let before = pixels(&fb);
             let mut drawn = filled();
             super::draw_remembered(&s.gfx, &mut drawn, 0xff, (x0, y0), (day, &[layer]));
             let mut redrawn = filled();
@@ -1970,17 +2039,29 @@ mod sight_memory_tests {
                         dropped += usize::from(under(c, row));
                     } else if under(c, row) {
                         assert!(
-                            p & 1 << ANIM_PLANE != 0,
-                            "{name}, day {day}: the overlay on a kept pixel"
+                            p == before[i] | bit,
+                            "{name}, day {day}: a kept pixel under the overlay, bit 3 ORed in"
                         );
                         ored += 1;
+                        set += usize::from(before[i] & bit == 0);
+                    } else {
+                        assert!(
+                            p == before[i],
+                            "{name}, day {day}: a kept pixel, no overlay"
+                        );
                     }
                 }
             }
         }
-        println!("{dropped} dropped pixels under the overlay, {ored} kept pixels ORed");
+        println!(
+            "{dropped} dropped pixels under the overlay, {ored} kept pixels ORed, {set} of them \
+             with the bit clear before"
+        );
         assert!(dropped > 0, "the overlay covers dropped pixels");
-        assert!(ored > 0, "the overlay ORs kept pixels");
+        assert!(
+            set > 0,
+            "the OR sets the bit on kept pixels that had it clear"
+        );
     }
 
     /// The parity driver (spec 18 review): the same text runs on the renderer before spec 18
@@ -2265,6 +2346,313 @@ mod sight_memory_tests {
                 m.len(),
                 m.heap_bytes()
             );
+        }
+    }
+
+    /// A scripted walk ([`receipt_five_days_of_a_wide_walk_fit_the_remembered_cells`]): the cells
+    /// seen so far, the route to the nearest one not yet seen, the cells a step was refused into,
+    /// the party's hit points at the start, whether a light burns, whether it stays in the town
+    /// round its start, and the next step asked for.
+    #[cfg(feature = "wide")]
+    #[derive(Default)]
+    struct Explorer {
+        seen: std::collections::HashSet<(u8, u16, u16)>,
+        route: std::collections::VecDeque<usize>,
+        refused: std::collections::HashSet<(u16, u16)>,
+        hp: Vec<u8>,
+        light: bool,
+        town: bool,
+        plan: bool,
+        next: Option<usize>,
+        teleports: usize,
+    }
+
+    /// Every actor but the party's members `party` within 26 columns and 18 rows of the leader
+    /// moved 512 cells off on both axes (0x10c9d2): the walk meets no one to fight.
+    #[cfg(feature = "wide")]
+    fn keep_off(s: &mut State, party: &[u8]) {
+        let Some(l) = s.leader_position() else { return };
+        let near = |u: u16, v: u16| {
+            let d = u.wrapping_sub(v) & 0x3ff;
+            d.min(0x400 - d)
+        };
+        for a in 1..0x100u16 {
+            if party.contains(&(a as u8)) || s.objects.type_frame[usize::from(a)] == 0 {
+                continue;
+            }
+            let Some(p) = s.objects.location(crate::objects::ObjectId(a)) else {
+                continue;
+            };
+            if p.z == l.z && near(p.x, l.x) <= 26 && near(p.y, l.y) <= 18 {
+                let (x, y) = ((p.x + 512) & 0x3ff, (p.y + 512) & 0x3ff);
+                crate::objects::move_to(s, a as i16, x, y, u16::from(p.z));
+            }
+        }
+    }
+
+    /// The four steps the arrow keys take: north, east, south, west.
+    #[cfg(feature = "wide")]
+    const STEPS: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+
+    /// The explorer's next step ([`Explorer::next`]): along its route, else the route (by
+    /// breadth-first search over the cells the leader may stand on, [`crate::actors::walk::
+    /// can_move_to`], within 48, 160, then 511 cells; in the town within 48 only) to the nearest
+    /// cell not yet seen; with none in reach, the party put (0x1092fc) on the first cell of a
+    /// 32-cell grid of the surface that is not yet seen and that the leader may stand on, and the
+    /// search again (in the town: none, the walk ends).
+    #[cfg(feature = "wide")]
+    fn explore(s: &mut State, w: &mut Explorer) {
+        use std::collections::VecDeque;
+        let leader = s.actors.party.leader().quiet().0;
+        for _ in 0..3 {
+            let (c, m) = (s.map.centre, s.map.world_mask);
+            let cell = |dx: i32, dy: i32| {
+                let x = c.x.wrapping_add_signed(dx as i16) & m;
+                (x, c.y.wrapping_add_signed(dy as i16) & m)
+            };
+            let radii: &[i32] = if w.town { &[48] } else { &[48, 160, 511] };
+            for &r in radii {
+                if !w.route.is_empty() {
+                    break;
+                }
+                let side = (2 * r + 1) as usize;
+                let at = |dx: i32, dy: i32| (dy + r) as usize * side + (dx + r) as usize;
+                // Per cell the step that reached it, 8 at the start, 9 not to stand on.
+                let mut from = vec![u8::MAX; side * side];
+                from[at(0, 0)] = 8;
+                let mut queue = VecDeque::from([(0i32, 0i32)]);
+                let mut goal = None;
+                while let Some((dx, dy)) = queue.pop_front() {
+                    let (x, y) = cell(dx, dy);
+                    if (dx, dy) != (0, 0) && !w.seen.contains(&(c.z, x, y)) {
+                        goal = Some((dx, dy));
+                        break;
+                    }
+                    for (d, (ox, oy)) in STEPS.iter().enumerate() {
+                        let (nx, ny) = (dx + ox, dy + oy);
+                        if nx.abs() > r || ny.abs() > r || from[at(nx, ny)] != u8::MAX {
+                            continue;
+                        }
+                        let (x, y) = cell(nx, ny);
+                        let free = !w.refused.contains(&(x, y))
+                            && crate::actors::walk::can_move_to(s, leader, x, y);
+                        from[at(nx, ny)] = if free { d as u8 } else { 9 };
+                        if free {
+                            queue.push_back((nx, ny));
+                        }
+                    }
+                }
+                if let Some((mut gx, mut gy)) = goal {
+                    while (gx, gy) != (0, 0) {
+                        let d = usize::from(from[at(gx, gy)]);
+                        w.route.push_front(d);
+                        gx -= STEPS[d].0;
+                        gy -= STEPS[d].1;
+                    }
+                }
+            }
+            if !w.route.is_empty() || w.town {
+                break;
+            }
+            let grid = (0..32u16).flat_map(|k| (0..32u16).map(move |j| (k, j)));
+            let place = grid
+                .map(|(k, j)| ((c.x + 519 + k * 32) & 0x3ff, (c.y + 519 + j * 32) & 0x3ff))
+                .find(|&(x, y)| {
+                    !w.seen.contains(&(0, x, y))
+                        && crate::actors::walk::can_move_to(s, leader, x, y)
+                });
+            let Some((x, y)) = place else { break };
+            crate::map::travel::teleport(s, x, y, 0, 0);
+            crate::map::view::update_view(s);
+            w.refused.clear();
+            w.teleports += 1;
+        }
+        w.next = w.route.pop_front();
+    }
+
+    /// Spec 18 cost receipt (the review's MAX_CELLS, the owner's "계속 기억" with the five-day
+    /// fade; run alone, `--ignored`; Wide; prints counts only): the game from a place on the land
+    /// with the view open, played by its own keys for five game days, the arrow key of each step
+    /// pressed at the prompt, the next step [`explore`]'s: the walk stays over unseen ground. The
+    /// party's hit points are kept at their start, and the other actors kept off ([`keep_off`]):
+    /// the walk is not stopped by a fight. Twice: without a light, then with one burning (the
+    /// light spell's timer, timer 0, kept up: at night the clock's light level is 4, not 0). Then
+    /// a town walk: from the place round the start (the castle and the town by it) whose view
+    /// shows the most cells with still objects, within 48 cells of the party, for a game day or
+    /// until nothing unseen is in reach. Per game hour the cells
+    /// remembered; the minute the old bound 131 072 was passed; at the end the cells, those with
+    /// more than one layer and their share, the most held after a step, the walk's geometric
+    /// bound (the start's view, then at most a new row of [`VIEW_W`] cells a step and a new view
+    /// a teleport) and the heap bytes. The cells held stay within the geometric bound after every
+    /// step, and the cap forgot no cell over any run: five days fit.
+    #[cfg(feature = "wide")]
+    #[test]
+    #[ignore = "a cost receipt, run alone"]
+    fn receipt_five_days_of_a_wide_walk_fit_the_remembered_cells() {
+        use crate::gfx::cache::{MAX_CELLS, minutes};
+        use std::cell::RefCell;
+        use std::future::Future;
+        use std::rc::Rc;
+        let Some(files) = files() else { return };
+        let start = start(&files);
+        let open = |p: &State| cells().filter(|&at| in_sight(p, at)).count();
+        let place = places_at(&start, (16..400).step_by(16))
+            .filter(|p| p.map.centre.z == 0)
+            .find(|p| open(p) * 10 >= VIEW_W * VIEW_H * 7)
+            .expect("a place on the land with the view open");
+        // The town: of the places round the start (the castle and the town by it), the one whose
+        // view shows the most cells in sight with still objects.
+        let furnished = |p: &State| {
+            let objects = |at: Cell| nodes(p, at).iter().any(|&(_, still)| still);
+            cells().filter(|&at| in_sight(p, at) && objects(at)).count()
+        };
+        let town_place = places_at(&start, (4..64).step_by(4))
+            .max_by_key(|p| furnished(p))
+            .quiet();
+        let runs = [
+            ("land, no light", false, false),
+            ("land, a light", true, false),
+            ("town", false, true),
+        ];
+        for (name, light, town) in runs {
+            let explorer = Rc::new(RefCell::new(Explorer {
+                light,
+                town,
+                ..Explorer::default()
+            }));
+            let hook = explorer.clone();
+            let mut state = if town {
+                town_place.clone()
+            } else {
+                place.clone()
+            };
+            state.rng.seed(0);
+            let mut e = Engine::with_game(state, files.clone(), move |st, io| async move {
+                let mut game = Box::pin(crate::main_loop::game_first(st.clone(), io));
+                std::future::poll_fn(move |cx| {
+                    {
+                        let mut w = hook.borrow_mut();
+                        let mut s = st.borrow_mut();
+                        if w.light {
+                            s.actors.timers[0] = 255;
+                        }
+                        if w.hp.is_empty() {
+                            w.hp = s.actors.attrs.hp.clone();
+                        }
+                        let party = s.actors.party.members[..s.actors.party.count()].to_vec();
+                        for m in party.iter().map(|&m| usize::from(m)) {
+                            s.actors.attrs.hp[m] = s.actors.attrs.hp[m].max(w.hp[m]);
+                        }
+                        keep_off(&mut s, &party);
+                        let z = s.map.centre.z;
+                        for at in cells().filter(|&at| in_sight(&s, at)) {
+                            let (x, y) = world(&s, at);
+                            w.seen.insert((z, x, y));
+                        }
+                        if std::mem::take(&mut w.plan) {
+                            explore(&mut s, &mut w);
+                        }
+                    }
+                    game.as_mut().poll(cx)
+                })
+                .await;
+            });
+            e.io().set_sight_memory(true);
+            let prompt = |e: &Engine| e.state().main.reading == 1 && e.io().pending_events() == 0;
+            let keys = [
+                crate::Key::Up,
+                crate::Key::Right,
+                crate::Key::Down,
+                crate::Key::Left,
+            ];
+            let minute = |e: &Engine| minutes(&e.state().actors.calendar);
+            let m0 = minute(&e);
+            let (mut hours, mut steps, mut passed, mut most) = (Vec::new(), 0usize, None, 0);
+            let days = if town { 1 } else { 5 };
+            while minute(&e) - m0 < days * 1440 {
+                let mut ready = 0;
+                for _ in 0..600 {
+                    e.tick(&[], 200);
+                    ready = if prompt(&e) { ready + 1 } else { 0 };
+                    if ready == 3 {
+                        break;
+                    }
+                }
+                assert!(ready == 3, "the prompt");
+                explorer.borrow_mut().plan = true;
+                e.tick(&[], 200);
+                let Some(d) = explorer.borrow_mut().next.take() else {
+                    break;
+                };
+                let before = e.state().leader_position().quiet();
+                e.tick(&[crate::InputEvent::Key(keys[d])], 200);
+                for _ in 0..30 {
+                    e.tick(&[], 200);
+                    if prompt(&e) {
+                        break;
+                    }
+                }
+                let after = e.state().leader_position().quiet();
+                if (after.x, after.y) == (before.x, before.y) {
+                    let mut w = explorer.borrow_mut();
+                    let x = (i32::from(before.x) + STEPS[d].0) as u16 & 0x3ff;
+                    w.refused
+                        .insert((x, (i32::from(before.y) + STEPS[d].1) as u16 & 0x3ff));
+                    w.route.clear();
+                } else {
+                    steps += 1;
+                }
+                let (t, n) = (minute(&e) - m0, e.state().gfx.cache.memory.len());
+                most = most.max(n);
+                let teleports = explorer.borrow().teleports;
+                let bound = VIEW_W * VIEW_H * (1 + teleports) + VIEW_W * steps;
+                assert!(
+                    n <= bound,
+                    "within the walk's geometric bound at every step"
+                );
+                while hours.len() as u64 <= t / 60 {
+                    let lit = e.state().actors.objlist_tail[AMBIENT];
+                    hours.push((n, lit));
+                }
+                if passed.is_none() && n > 131_072 {
+                    passed = Some(t);
+                }
+            }
+            let w = explorer.borrow();
+            let m = &e.state().gfx.cache.memory;
+            let per_hour: Vec<String> = (hours.windows(2))
+                .map(|h| format!("{}{}", h[1].0 - h[0].0, if h[1].1 == 7 { "" } else { "n" }))
+                .collect();
+            let day: Vec<usize> = (hours.windows(2))
+                .filter(|h| h[0].1 == 7 && h[1].1 == 7)
+                .map(|h| h[1].0 - h[0].0)
+                .collect();
+            println!(
+                "{name}: {} game hours, {steps} steps, {} teleports; cells per hour (n: not full \
+                 daylight): {}",
+                hours.len().saturating_sub(1),
+                w.teleports,
+                per_hour.join(" ")
+            );
+            let bound = VIEW_W * VIEW_H * (1 + w.teleports) + VIEW_W * steps;
+            let share = m.stacked() as f64 * 100.0 / m.len().max(1) as f64;
+            println!(
+                "{name}: {} cells at the end, {} with more than one layer ({share:.2} %), at most \
+                 {most} held, {} forgotten by the cap, {} teleports, geometric bound {bound}, {} \
+                 heap bytes; {:.0} cells per full daylight hour; 131072 passed at minute \
+                 {passed:?}",
+                m.len(),
+                m.stacked(),
+                m.evicted(),
+                w.teleports,
+                m.heap_bytes(),
+                day.iter().sum::<usize>() as f64 / day.len().max(1) as f64
+            );
+            if !town {
+                assert!(minute(&e) - m0 >= 5 * 1440, "five game days walked");
+            }
+            assert_eq!(m.evicted(), 0, "the cap forgot no cell");
+            assert!(most < MAX_CELLS, "under the cap all along");
         }
     }
 }
