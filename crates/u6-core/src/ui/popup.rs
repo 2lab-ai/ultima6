@@ -1003,8 +1003,8 @@ impl Popup {
             InputEvent::Pointer { x, y, buttons } => {
                 self.pointer_event(s, io, (x, y), buttons, (calm, held), out)
             }
-            InputEvent::Key(k) | InputEvent::Repeat(k) => {
-                let repeat = matches!(ev, InputEvent::Repeat(_));
+            InputEvent::Key(k) | InputEvent::Repeat(k) | InputEvent::Paced(k) => {
+                let repeat = matches!(ev, InputEvent::Repeat(_) | InputEvent::Paced(_));
                 let taken = self.keys.iter().position(|&(t, _)| t == k);
                 if self.open.is_none() {
                     // A press with the menu closed is the game's, and so is the key from then on.

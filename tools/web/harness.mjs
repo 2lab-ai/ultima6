@@ -262,8 +262,8 @@ export async function forgetLocalePack() {
 // generation of the game stepped last (whether or not the page stores its Saves), the engine
 // clock and the button changes the game took on it, the keys the game takes itself
 // (`__owned`, keys_owned after the step), the keys the page sent it (`__sent`, their DOM `key`,
-// and in order with them `text:` and the text of each Game.text_input: the tests' own words)
-// and, after each frame's report (`ran`), the game's speed (`__speed`, 0 = Max) and its lost
+// and in order with them `text:` and the text of each Game.text_input: the tests' own words;
+// `__keyAt`, the event time the last Game.key_down was given) and, after each frame's report (`ran`), the game's speed (`__speed`, 0 = Max) and its lost
 // time (`__dropped`, `__clamped`). The clock (`__clock`) is the ms of every step of a started
 // game summed: the engine adds a step's ms before the game runs in it, so an event queued
 // before a step reaches the game at the clock after that step (as the Rust tests' press:
@@ -307,9 +307,10 @@ globalThis.__presentMs = 0;
     globalThis.__pointerAt = [x, y];
     return pointer.call(this, x, y, buttons);
   };
-  Game.prototype.key_down = function (code, key, ctrl) {
+  Game.prototype.key_down = function (code, key, ...rest) {
     globalThis.__sent.push(key);
-    return keyDown.call(this, code, key, ctrl);
+    globalThis.__keyAt = rest[1];
+    return keyDown.call(this, code, key, ...rest);
   };
   const textInput = Game.prototype.text_input;
   Game.prototype.text_input = function (text) {
@@ -1297,11 +1298,15 @@ export async function click(page, x, y, settle) {
 /// script took them at the page's first evaluate, before this). The virtual clock starts at the
 /// real one: a loop already running moves over at its next real frame, which this waits for
 /// (that frame is less than one interval before the first virtual one); with `loop: false`
-/// (before a start) the loop starts on the virtual display. `displayCost` makes the page's own
-/// clock reads cost time (a slow host).
+/// (before a start) the loop starts on the virtual display. Events are stamped on it too (their
+/// `timeStamp`, which a browser keeps on the frames' timeline and the held walk's interval reads,
+/// spec 19 O1c), once, as they are dispatched (a listener on the window, capturing, reads it
+/// first) and fixed from then on: the time of the frame last run plus the input offset
+/// (`displayInputAt`: 0 unless a test places its input between two frames). `displayCost` makes
+/// the page's own clock reads cost time (a slow host).
 export async function virtualDisplay(page, hz, { loop = true } = {}) {
   await page.evaluate((rate) => {
-    const v = { hz: rate, base: performance.now(), frames: 0, queue: [], cost: 0, spent: 0 };
+    const v = { hz: rate, base: performance.now(), frames: 0, queue: [], cost: 0, spent: 0, offset: 0 };
     v.now = () => v.base + (v.frames * 1000) / v.hz;
     // The frames' callbacks: the frame's time, the clock's cost so far reset.
     v.run = () => {
@@ -1322,6 +1327,17 @@ export async function virtualDisplay(page, hz, { loop = true } = {}) {
       v.spent += v.cost;
       return t;
     };
+    const stamps = new WeakMap();
+    Object.defineProperty(Event.prototype, 'timeStamp', {
+      configurable: true,
+      get() {
+        if (!stamps.has(this)) stamps.set(this, v.now() + v.offset);
+        return stamps.get(this);
+      },
+    });
+    for (const type of ['keydown', 'keyup', 'compositionend', 'pointerdown', 'pointerup', 'pointermove']) {
+      window.addEventListener(type, (e) => e.timeStamp, { capture: true });
+    }
   }, hz);
   if (loop) await page.waitForFunction(() => window.__display.queue.length > 0, null, { timeout: 10_000 });
 }
@@ -1330,6 +1346,13 @@ export async function virtualDisplay(page, hz, { loop = true } = {}) {
 /// page's steps then take time: the frame's budget holds fewer of them); 0 makes them free again.
 export function displayCost(page, ms) {
   return page.evaluate((cost) => { window.__display.cost = cost; }, ms);
+}
+
+/// On the virtual display: input dispatched from now on is stamped `ms` after the frame last run
+/// (between that frame and the next while `ms` is under the frame interval); 0 puts it back on
+/// the frame.
+export function displayInputAt(page, ms) {
+  return page.evaluate((offset) => { window.__display.offset = offset; }, ms);
 }
 
 /// On the virtual display: `ms` pass with no frame (a stall, a hidden tab); the next frame comes
