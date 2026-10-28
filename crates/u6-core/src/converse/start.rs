@@ -342,7 +342,7 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
             0xf7 => {
                 let m = cx.msg(Msg::YouSay);
                 seams::print(cx, &m).await;
-                let line = seams::read_line(cx, INPUT_MAX).await;
+                let line = seams::read_said(cx, INPUT_MAX).await;
                 cx.cv(|c| c.input = line);
                 let m = cx.msg(Msg::Newline);
                 seams::print(cx, &m).await;

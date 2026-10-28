@@ -66,6 +66,9 @@ pub struct SaveLoad {
     /// The party-name table (objlist 0x0F00, 16 × 14 bytes) as last read: an unchanged name is
     /// written back with the bytes that followed its NUL.
     pub names_raw: Vec<u8>,
+    /// Port (spec 21): the Restores ([`restore`], 0x1052c8) that read a save since boot; a travel
+    /// to a pressed cell ends when it moves (`actors::travel`). Never saved.
+    pub restores: u32,
 }
 
 impl Default for SaveLoad {
@@ -75,6 +78,7 @@ impl Default for SaveLoad {
             block_gen: vec![0; BLOCK_COUNT],
             objlist: None,
             names_raw: Vec::new(),
+            restores: 0,
         }
     }
 }

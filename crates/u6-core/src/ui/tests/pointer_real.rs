@@ -549,3 +549,205 @@ fn a_held_map_press_during_the_exit_question_does_not_hang() {
     assert!(p.at_prompt(), "N: the prompt again");
     assert!(p.leader_at() == from);
 }
+
+/// Spec 22 receipt: Talk to member 1 by the pointer, then press its Name button, its Job button and
+/// a keyword the scroll shows in the alert colour; the same run with the pointer moved to the same
+/// places and the words typed instead (each word and Enter in one tick, as a press sends them) ends
+/// each answer with the same words, scroll, frame and state. At each read the two buttons are drawn
+/// again, their row the same pixels (and HD sources) as at the first: the row the read before
+/// filled with the paper on the real paper map is all paper again (gpt-a SHOULD 1), after the
+/// keyword's answer too (gpt a1-1). Counts and equality only; prints whether it ran; with
+/// `U6_TALK_FRAMES` set, frames of the buttons and of a hovered keyword go there.
+#[test]
+fn a_real_talk_answers_a_press_as_the_word_typed() {
+    let Some(files) = files() else {
+        println!("real talk receipt: skipped (no game files)");
+        return;
+    };
+    let begin = || {
+        let mut p = Play::boot(&files);
+        p.click(48, 184);
+        let (dx, dy) = p.member_cell(1);
+        p.click(dx, dy);
+        p.words();
+        p
+    };
+    let (mut press, mut typed) = (begin(), begin());
+    let rest = press.e.state().ui.pointer.at;
+    assert!(
+        press.e.state().ui.input.line_input,
+        "member 1 waits for words"
+    );
+    let (n, pixels) = press.buttons();
+    assert_eq!(n, 2, "the Job and Name buttons");
+    println!("buttons {n}, drawn pixels {pixels}");
+    let first_row = press.button_row();
+    press.frame("buttons");
+    let button = |p: &Play, i: usize| {
+        let s = p.e.state();
+        let b = &s.ui.talk.buttons[i];
+        let w = s.ui.text.window(WindowId::Status);
+        let col = usize::from(b.col) + b.cells.len() / 2;
+        let row = usize::from(w.y) + usize::from(w.height) - 1;
+        (((col * CELL) + 4) as i16, ((row * CELL) + 4) as i16)
+    };
+    // The next read after an answer: the words read again, the two buttons back, and, the
+    // pointer back where the read began (off the buttons: resting on one it shows it inverse,
+    // Contract 6), their row as at the first read.
+    let again = |press: &mut Play, typed: &mut Play, after: &str| {
+        assert!(
+            press.e.state().ui.input.line_input,
+            "{after}: the words read again"
+        );
+        assert_eq!(press.buttons().0, 2, "{after}: the buttons again");
+        for p in [&mut *press, &mut *typed] {
+            p.send(InputEvent::Pointer {
+                x: rest.0,
+                y: rest.1,
+                buttons: 0,
+            });
+        }
+        assert!(
+            press.button_row() == first_row,
+            "{after}: their row as at the first read"
+        );
+    };
+    let mut answers = 0;
+    // Name, then Job after a letter typed: the press takes the letter back first.
+    for (i, before) in [(1, 0), (0, 1)] {
+        let xy = button(&press, i);
+        let word = press.e.state().ui.talk.buttons[i].word.clone();
+        for p in [&mut press, &mut typed] {
+            for _ in 0..before {
+                p.send(InputEvent::Key(Key::Char('x')));
+            }
+        }
+        press.answer(xy, None);
+        typed.answer(xy, Some((before, &word)));
+        press.same_as(&typed, &word);
+        answers += 1;
+        again(&mut press, &mut typed, "a button's answer");
+    }
+    let span = {
+        let s = press.e.state();
+        s.ui.text.keys.spans.first().cloned()
+    };
+    let span = span.expect("a keyword in the alert colour after the answers");
+    let w = *press.e.state().ui.text.window(WindowId::Messages);
+    let (col, row) = (usize::from(w.x + span.col), usize::from(w.y + span.row));
+    let xy = (((col * CELL) + 4) as i16, ((row * CELL) + 4) as i16);
+    for p in [&mut press, &mut typed] {
+        p.send(InputEvent::Pointer {
+            x: xy.0,
+            y: xy.1,
+            buttons: 0,
+        });
+    }
+    assert!(
+        matches!(press.e.state().ui.talk.hot, Some(talk::Target::Key { .. })),
+        "the keyword under the pointer drawn inverse"
+    );
+    press.frame("keyword-hover");
+    let word = press.e.state().ui.text.keys.word(span.row, span.col);
+    press.answer(xy, None);
+    typed.answer(xy, Some((0, &word)));
+    press.same_as(&typed, &word);
+    answers += 1;
+    // gpt a1-1: the same after the keyword's answer.
+    again(&mut press, &mut typed, "the keyword's answer");
+    println!(
+        "presses answered as typed: {answers} (keyword of {} cells, spans shown {})",
+        span.cells.len(),
+        press.e.state().ui.text.keys.spans.len()
+    );
+    println!("real talk receipt: ran");
+}
+
+impl Play {
+    /// Pages on (Space) until the conversation waits for the player's words.
+    fn words(&mut self) {
+        for _ in 0..16 {
+            if self.e.state().ui.input.line_input {
+                break;
+            }
+            self.send(InputEvent::Key(Key::Space));
+        }
+    }
+
+    /// The buttons shown, and the pixels of the command colour on their row.
+    fn buttons(&self) -> (usize, usize) {
+        let s = self.e.state();
+        let command = s.ui.tables.colours.command;
+        let w = s.ui.text.window(WindowId::Status);
+        let row = usize::from(w.y) + usize::from(w.height) - 1;
+        let x0 = usize::from(w.x) * CELL;
+        let fb = self.e.frame();
+        let drawn = (row * CELL..(row + 1) * CELL)
+            .flat_map(|y| (x0..x0 + usize::from(w.width) * CELL).map(move |x| (x, y)))
+            .filter(|&(x, y)| fb.get(x, y) == Some(command))
+            .count();
+        (s.ui.talk.buttons.len(), drawn)
+    }
+
+    /// The buttons' row (the Status window's last) as the game drew it (no pointer sprite):
+    /// each pixel and its HD source.
+    fn button_row(&self) -> Vec<(Option<u8>, Option<u6_render::Src>)> {
+        let s = self.e.state();
+        let w = s.ui.text.window(WindowId::Status);
+        let row = usize::from(w.y) + usize::from(w.height) - 1;
+        let x0 = usize::from(w.x) * CELL;
+        let fb = self.e.published_frame();
+        (row * CELL..(row + 1) * CELL)
+            .flat_map(|y| (x0..x0 + usize::from(w.width) * CELL).map(move |x| (x, y)))
+            .map(|(x, y)| (fb.get(x, y), fb.src_at(x, y)))
+            .collect()
+    }
+
+    /// The pointer moved to `xy`, then a press and release there, or `back` Backspaces, `word`
+    /// and Enter typed in one tick; then paged on to the next words.
+    fn answer(&mut self, (x, y): (i16, i16), typed: Option<(usize, &[u8])>) {
+        self.send(InputEvent::Pointer { x, y, buttons: 0 });
+        match typed {
+            None => self.click(x, y),
+            Some((back, w)) => {
+                let mut keys = vec![InputEvent::Key(Key::Backspace); back];
+                keys.extend(String::from_utf8_lossy(w).chars().map(|c| match c {
+                    ' ' => InputEvent::Key(Key::Space),
+                    c => InputEvent::Key(Key::Char(c)),
+                }));
+                keys.push(InputEvent::Key(Key::Enter));
+                self.send_all(&keys);
+            }
+        }
+        self.words();
+    }
+
+    /// The answer `self` (pressed) got equals `typed`'s, and the player's words were `word`.
+    fn same_as(&self, typed: &Play, word: &[u8]) {
+        let (a, b) = (self.e.state(), typed.e.state());
+        assert!(a.converse.input == word, "the press typed its word");
+        assert!(a.converse.input == b.converse.input, "the same words");
+        assert!(a.ui.messages == b.ui.messages, "the same scroll");
+        assert!(
+            self.e.frame().pixels() == typed.e.frame().pixels(),
+            "the same frame"
+        );
+        assert!(*a == *b, "the same state");
+    }
+
+    /// Writes the frame to `$U6_TALK_FRAMES/<build>-<name>.png` when that is set.
+    fn frame(&self, name: &str) {
+        let Some(dir) = std::env::var_os("U6_TALK_FRAMES") else {
+            return;
+        };
+        let build = if cfg!(feature = "wide") {
+            "wide"
+        } else {
+            "original"
+        };
+        let path = std::path::Path::new(&dir).join(format!("{build}-{name}.png"));
+        std::fs::create_dir_all(&dir).quiet();
+        std::fs::write(&path, png(self.e.frame())).quiet();
+        println!("frame {}", path.display());
+    }
+}

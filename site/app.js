@@ -2969,6 +2969,7 @@ function frame(now) {
   last = now;
   if (dt > 0 && dt <= LONG_FRAME_MS) interval += (dt - interval) / 8;
   try {
+    game.set_clock(now);
     const due = game.pace(dt);
     const budget = budget_ms(interval);
     const start = performance.now();
@@ -3683,6 +3684,7 @@ function makeIme() {
   ime.dataset.i18nLabel = 'imeLabel';
   ime.setAttribute('aria-label', t('imeLabel'));
   ime.addEventListener('keydown', imeKey);
+  ime.addEventListener('blur', releaseKeys);
   ime.addEventListener('compositionstart', () => {
     composing = true;
     dropCommit = false;
@@ -3698,7 +3700,7 @@ function makeIme() {
       enterAfterCommit = false;
       enterSentAt = e.timeStamp;
       voice.cancel();
-      game.key_down('Enter', 'Enter', false);
+      game.key_down('Enter', 'Enter', false, e.timeStamp);
     }
     ime.value = '';
   });
@@ -3837,16 +3839,31 @@ async function leaveFullscreen() {
 // control commands (Ctrl-S save, Ctrl-R restore, ...) are game keys there, so the browser's own
 // Save page / Reload do not fire. The speed keys (`speedKey`) are the page's and never reach the
 // game. The browser's auto-repeat goes as repeats (spec 19 O1b), which the key's release takes
-// back.
+// back. Each press goes with its event's time (`timeStamp`, the animation frames' timeline: the
+// held walk's interval, spec 19 O1c).
 function gameKey(e) {
   gesture();
-  if (!game || crashed || e.metaKey || e.altKey) return;
+  if (!game || crashed) return;
+  if (e.metaKey) {
+    // A chord with Meta is not the game's, and its keyup may never come (macOS sends none for a
+    // key let go while Cmd is down): every held key is let go (spec 19 O1c).
+    releaseKeys();
+    return;
+  }
+  // Spec 19 O1c: while Ctrl or Alt is down a held walk pauses, as in the native window; nothing
+  // is let go. A chord with Alt is not the game's (the browser's Alt shortcuts).
+  game.set_modifiers(e.ctrlKey || e.altKey);
+  if (e.altKey) return;
   if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
   const by = speedKey(e);
   if (by !== 0) {
     e.preventDefault();
     changeSpeed(by);
-  } else if (e.repeat ? game.key_repeat(e.code, e.key, e.ctrlKey) : game.key_down(e.code, e.key, e.ctrlKey)) {
+  } else if (
+    e.repeat
+      ? game.key_repeat(e.code, e.key, e.ctrlKey, e.timeStamp)
+      : game.key_down(e.code, e.key, e.ctrlKey, e.timeStamp)
+  ) {
     e.preventDefault();
   }
 }
@@ -3854,10 +3871,13 @@ function gameKey(e) {
 // so a held key walks no further than the prompt it was let go at. The game releases what that
 // physical key gave (`code`), whatever the modifiers are now; a key it never had takes nothing.
 // Heard on the window, so a release after the focus moved to another control still counts; when
-// the window loses the focus or the page is hidden, a release may never come: every held key is
-// let go then.
+// the window loses the focus or the page is hidden, a release may never come, and when the canvas
+// (or the line input in its place) loses the focus a held key must walk no further (spec 19 O1c:
+// the context menu, a toolbar control, Settings, Tab): every held key is let go then.
 function gameKeyUp(e) {
-  if (game && !crashed) game.key_up(e.code);
+  if (!game || crashed) return;
+  game.set_modifiers(e.ctrlKey || e.altKey);
+  game.key_up(e.code);
 }
 function releaseKeys() {
   if (game && !crashed) game.release_keys();
@@ -3865,6 +3885,7 @@ function releaseKeys() {
 canvas.addEventListener('keydown', gameKey);
 window.addEventListener('keyup', gameKeyUp);
 window.addEventListener('blur', releaseKeys);
+canvas.addEventListener('blur', releaseKeys);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) releaseKeys();
 });
@@ -4033,8 +4054,22 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
-canvas.addEventListener('pointercancel', (e) =>
-  sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 }));
+// A cancelled press (the browser took the touch, a scroll or a zoom). While the game reads the
+// player's words by click (Game.reading_by_click: a conversation's read after "you say"), its
+// release goes to frame pixel (-1, -1), off every key cap and keyword, so it ends no click (spec 22
+// Contract 8: a key cap or a keyword types on a release over the target it was pressed on); at
+// every other time it is released where the touch was, as any release. A Wide window's drag
+// (`dragged`) ends as any release does, through dragWindow: its places kept and its release at
+// the rest pixel, where its press went, off every target.
+canvas.addEventListener('pointercancel', (e) => {
+  if (sentButtons !== 0 && !dragged && game && !crashed && game.reading_by_click()) {
+    sentButtons = 0;
+    game.pointer(-1, -1, 0);
+    showGamePointer();
+  } else {
+    sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
+  }
+});
 // A capture lost with a button still down for the game (no pointerup follows: the capture taken
 // away, the canvas hidden): every button up for it, as at a cancel. After a release the game has
 // them up already, and nothing is sent.
