@@ -1,11 +1,13 @@
 //! Spec 23's independent baseline on real data: with the message history never scrolled back,
 //! three conversations near the start, on the boot's paper, show the shown, published and HD
 //! frames of the tree without the feature. The digests below were recorded by this same file at
-//! 52cc339 (the parent: the tree without spec 23, through `git archive` of it with this file
-//! added), so the oracle shares none of the feature's code. Each frame digest takes the colour
+//! 17c09b6 (the parent: integ/r1027 without spec 23, through `git archive` of it with this file
+//! added; not 52cc339's digests: integ merged K2, C2, M4 and spec 22 between the two), so the
+//! oracle shares none of the feature's code. Each frame digest takes the colour
 //! indices, the sources and the palette; the HD frames at 2× and 4×, with the HD font off and on
-//! (then the cells the frame lists for the page's text too). Skips where the zip is missing;
-//! prints digests and actor slots only, never the dialogue (FNV-1a 64, no pixels).
+//! (then the cells the frame lists for the page's text too). Prints whether it ran; skips where
+//! the zip is missing, and fails then with `U6_REQUIRE_ARCHIVE=1` (a gate that requires the real
+//! data); prints digests and actor slots only, never the dialogue (FNV-1a 64, no pixels).
 
 use u6_render::hd::Scale;
 use u6_render::{Framebuffer, Src};
@@ -24,22 +26,22 @@ use u6_testkit::Quiet;
 /// frames at 2× and 4× ([`HD`]), each over every tick of the three conversations, and the ticks.
 #[cfg(not(feature = "wide"))]
 const PARENT: [u64; 7] = [
-    0xb99d_a937_a0b7_90f9,
-    0xb99d_a937_a0b7_90f9,
-    0xff12_e770_187f_0d0d,
-    0xc031_3678_24a5_cc15,
-    0xa8cb_4736_560f_8111,
-    0xc30b_9745_0199_5885,
+    0xe846_def2_63dd_1ff9,
+    0xe846_def2_63dd_1ff9,
+    0xbf86_44e7_884b_9db5,
+    0xba5c_a1e0_6f6f_4b75,
+    0x9fad_7c42_428b_0509,
+    0x6c04_c23f_6561_9955,
     54,
 ];
 #[cfg(feature = "wide")]
 const PARENT: [u64; 7] = [
-    0x2fb2_80a6_4ce1_e871,
-    0x2fb2_80a6_4ce1_e871,
-    0x9429_a9d3_75d4_2dc7,
-    0x39d0_4be5_48a7_3096,
-    0x8675_e3d1_b5d7_d4e7,
-    0xd73c_dbf9_9a54_ecfa,
+    0x183d_67cf_3b95_5bb1,
+    0x183d_67cf_3b95_5bb1,
+    0xd076_5f89_6556_8877,
+    0x6a0b_345b_99ae_7d16,
+    0xbe7c_2b75_ba43_3acb,
+    0xb75a_db9b_e0f8_1e86,
     54,
 ];
 
@@ -225,8 +227,18 @@ fn digests() -> Option<[u64; 7]> {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // a test may read the environment
 fn with_no_scroll_three_conversations_show_the_parents_frames() {
-    let Some(got) = digests() else { return };
+    let Some(got) = digests() else {
+        let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+        assert!(
+            !required,
+            "U6_REQUIRE_ARCHIVE=1: the user's zip is required"
+        );
+        println!("converse baseline: skipped (no game files)");
+        return;
+    };
+    println!("converse baseline: ran ({} ticks)", got[6]);
     println!("{got:#018x?}");
     assert_eq!(
         got, PARENT,

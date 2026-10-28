@@ -1652,6 +1652,11 @@ let x4 = null; // the offscreen canvas that holds the ×4 frame while the HD lay
 let x4Game = null; // the game whose ×4 frame x4 holds as drawn last (null: none, or stale)
 let parchmentShown = null; // the parchment's colour the last whole paint drew (`parchmentNow`)
 let sentButtons = 0; // the pointer's buttons as last sent to the game
+// After a press the page released for the game (releaseUnfinished: a cancel, a lost capture):
+// the buttons still held stay up for the game, up to an event with every button up or a new
+// press on the canvas (pointerdown), so a press the game saw end cannot start again where the
+// pointer comes back with them held.
+let releasedHeld = false;
 let mouseAt = null; // the mouse's client point as its last pointer event left it, or null
 // The canvas pixel mapped last (`layoutToGame`, `pixelAt`) shows no pixel of the game's at that
 // place: a gap or a margin round the game's regions, a letterbox side, a Wide window's frame or
@@ -4038,6 +4043,10 @@ function sendPointer(e) {
     showGamePointer();
     return;
   }
+  if (releasedHeld) {
+    if ((e.buttons & 3) === 0) releasedHeld = false;
+    else e = { type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 };
+  }
   const at = pointerPixel(e);
   if (!at) return;
   const buttons = e.buttons & 3;
@@ -4048,34 +4057,36 @@ function sendPointer(e) {
 canvas.addEventListener('pointerdown', (e) => {
   canvas.focus();
   keepCanvas = false; // a press on the canvas gives a line being read the hidden input again
+  releasedHeld = false;
   if (game && !crashed) canvas.setPointerCapture(e.pointerId);
   if (!openContextMenu(e)) sendPointer(e);
   gesture();
 });
 canvas.addEventListener('pointermove', sendPointer);
 canvas.addEventListener('pointerup', sendPointer);
-// A cancelled press (the browser took the touch, a scroll or a zoom). While the game reads the
-// player's words by click (Game.reading_by_click: a conversation's read after "you say"), its
-// release goes to frame pixel (-1, -1), off every key cap and keyword, so it ends no click (spec 22
-// Contract 8: a key cap or a keyword types on a release over the target it was pressed on); at
-// every other time it is released where the touch was, as any release. A Wide window's drag
-// (`dragged`) ends as any release does, through dragWindow: its places kept and its release at
-// the rest pixel, where its press went, off every target.
-canvas.addEventListener('pointercancel', (e) => {
-  if (sentButtons !== 0 && !dragged && game && !crashed && game.reading_by_click()) {
+// A press that ends with no release the canvas sees, with a button still down for the game: a
+// cancelled press (the browser took the touch, a scroll or a zoom) or a capture lost (taken away,
+// the canvas hidden). Every button goes up for the game, once (after a release the game has them
+// up already, and nothing is sent), and the buttons still held stay up for it (`releasedHeld`).
+// While the game reads the player's words by click (Game.reading_by_click: a conversation's read
+// after "you say"), the release goes to frame pixel (-1, -1), off every key cap and keyword, so it
+// ends no click (spec 22 Contract 8: a key cap or a keyword types on a release over the target it
+// was pressed on); at every other time it is released where the pointer was, as any release. A
+// Wide window's drag (`dragged`) ends as any release does, through dragWindow: its places kept and
+// its release at the rest pixel, where its press went, off every target.
+function releaseUnfinished(e) {
+  if (!game || crashed || sentButtons === 0) return;
+  if (!dragged && game.reading_by_click()) {
     sentButtons = 0;
     game.pointer(-1, -1, 0);
     showGamePointer();
   } else {
     sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
   }
-});
-// A capture lost with a button still down for the game (no pointerup follows: the capture taken
-// away, the canvas hidden): every button up for it, as at a cancel. After a release the game has
-// them up already, and nothing is sent.
-canvas.addEventListener('lostpointercapture', (e) => {
-  if (sentButtons !== 0) sendPointer({ type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: 0 });
-});
+  releasedHeld = true;
+}
+canvas.addEventListener('pointercancel', releaseUnfinished);
+canvas.addEventListener('lostpointercapture', releaseUnfinished);
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });

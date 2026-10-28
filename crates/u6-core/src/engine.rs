@@ -240,6 +240,8 @@ pub struct Io {
     prompt_state: OnceCell<std::rc::Weak<RefCell<State>>>,
     /// Port (spec 19 O1c): [`Io::prompt_takes`].
     prompt_takes: Cell<u64>,
+    /// Port-only (spec 23): [`Io::history_offset`].
+    history_offset: Cell<usize>,
 }
 
 impl Io {
@@ -263,7 +265,17 @@ impl Io {
             sight_memory: Cell::new(false),
             prompt_state: OnceCell::new(),
             prompt_takes: Cell::new(0),
+            history_offset: Cell::new(0),
         }
+    }
+
+    /// Port-only (spec 23 Decision 2): the lines the message history's view is back from the live
+    /// bottom ([`Engine::history_offset`]; 0: the live window), as the engine last set it: after a
+    /// tick's input, after its publish and at a wheel, so a pass of the game reads it as the
+    /// player sees the window. Spec 22's clicks read it: while scrolled back the window shows kept
+    /// lines, and none of its keywords is a target ([`crate::ui::talk::pointer`]).
+    pub fn history_offset(&self) -> usize {
+        self.history_offset.get()
     }
 
     /// Port (spec 19 O1c): the presses the command prompt has taken ([`command_prompt`] at the
@@ -1018,6 +1030,7 @@ impl Engine {
                 events.push_back(e);
             }
         }
+        self.io.history_offset.set(self.view.offset());
         self.io.now_ms.set(self.io.now_ms() + u64::from(elapsed_ms));
         if !self.finished {
             let mut cx = Context::from_waker(Waker::noop());
@@ -1047,6 +1060,7 @@ impl Engine {
             self.published_front = version;
             self.published_version += 1;
             self.view.publish(&self.state.borrow().ui.scrollback);
+            self.io.history_offset.set(self.view.offset());
         } else if sources {
             let mut front = self.io.front.borrow_mut();
             src_only = self.io.published.borrow_mut().sync_src_from(&mut front) > 0;
@@ -1123,6 +1137,7 @@ impl Engine {
             let game = s.main.program == main_loop::Program::Game;
             self.view.wheel(&s.ui, game, (x, y), dy)
         };
+        self.io.history_offset.set(self.view.offset());
         if taken && self.view.stamp() != self.view_shown {
             self.compose_shown();
         }

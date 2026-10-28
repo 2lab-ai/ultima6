@@ -252,12 +252,15 @@ pub fn echo(s: &mut State, io: &Io, c: u16) {
                 win.row += 1;
             } else if win.flags & text::SCROLL != 0 {
                 ui.text.drawn = true;
-                if ui.text.current == super::WindowId::Messages {
-                    super::talk::scroll(ui);
-                }
+                // Port (spec 22, 23): the keywords move up a row, those of the top row leave with
+                // it and are kept with it.
+                let spans = if ui.text.current == super::WindowId::Messages {
+                    super::talk::scroll(ui)
+                } else {
+                    Vec::new()
+                };
                 let w = *ui.text.win();
-                // Port (spec 23): the row that scrolls off is kept.
-                io.draw(|fb| super::scrollback::scrolled(ui, fb, &w));
+                io.draw(|fb| super::scrollback::scrolled(ui, fb, &w, spans));
                 io.draw(|fb| text::scroll_window(fb, &w, ui.paper.as_ref()));
             }
         }

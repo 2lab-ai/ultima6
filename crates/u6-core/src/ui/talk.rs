@@ -403,11 +403,16 @@ pub fn begin(s: &mut State, io: &Io) {
 /// button down on it and up again on it) types its word: one Backspace for each of the `typed`
 /// cells the line holds, the word, Enter, at the front of the queue, before any event after the
 /// release. A word that types nothing (a keyword of cells no key types) types nothing at all.
+///
+/// Port-only (spec 23 Decision 2): while the player has the message history scrolled back
+/// ([`Io::history_offset`]) the window shows kept lines, not the keywords under the pointer, so
+/// none of them is a target there (the buttons still are).
 pub fn pointer(s: &mut State, io: &Io, typed: usize) {
     loop {
         let before = io.pointer().buttons & POINTER_LEFT;
         let p = io.take_pointer_upto(1);
-        let target = target_at(s, p.x, p.y);
+        let back = io.history_offset() > 0;
+        let target = target_at(s, p.x, p.y).filter(|t| !(back && matches!(t, Target::Key { .. })));
         hover(s, io, target);
         match (before, p.buttons & POINTER_LEFT) {
             (0, POINTER_LEFT) => s.ui.talk.pressed = target,

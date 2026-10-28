@@ -3097,17 +3097,21 @@ mod tests {
         assert!(!game.finished());
     }
 
-    /// Spec 23 on the user's zip (skipped when absent; read only): passes at the prompt fill the
-    /// message window past its rows; scrolled back, a press on its bar is the history's until the
-    /// release: the game's handler sees no button, the pace runs at 1× as with one held, and the
-    /// speed again from the step that takes the release (queued, not yet stepped) on.
+    /// Spec 23 on the user's zip (read only; prints whether it ran, skips when the zip is absent
+    /// and fails then with `U6_REQUIRE_ARCHIVE=1`): passes at the prompt fill the message window
+    /// past its rows; scrolled back, a press on its bar is the history's until the release: the
+    /// game's handler sees no button, the pace runs at 1× as with one held, and the speed again
+    /// from the step that takes the release (queued, not yet stepped) on.
     #[test]
-    #[allow(clippy::disallowed_methods)] // tests may read files
+    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
     fn a_press_the_message_history_holds_paces_at_1x() {
         if !std::path::Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
+            let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+            assert!(!required, "U6_REQUIRE_ARCHIVE=1: {ZIP} is required");
+            println!("history pace: skipped ({ZIP} not present)");
             return;
         }
+        println!("history pace: ran");
         let mut game = Game::new();
         game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
             .quiet();

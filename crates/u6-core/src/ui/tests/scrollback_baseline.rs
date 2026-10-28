@@ -1,7 +1,8 @@
 //! Spec 23's independent baseline: with the message history never scrolled back, the shown, the
 //! published and the HD frames are the frames of the tree without the feature. The digests below
-//! were recorded by this same file at 52cc339 (the parent: the tree without spec 23, through
-//! `git archive` of it with this file added), so the oracle shares none of the feature's code.
+//! were recorded by this same file at 17c09b6 (the parent: integ/r1027 without spec 23, through
+//! `git archive` of it with this file added; the same digests as at 52cc339 before it), so the
+//! oracle shares none of the feature's code. Synthetic: it needs no game files and always runs.
 //! A scripted run prints and scrolls the message window over a paper with a speck in it, then
 //! takes presses on the bar's column and inside the window, keys, a repeat, a release and text
 //! (each one the game prints a line for) and lines on a timer; no wheel. Each frame digest takes
@@ -216,6 +217,7 @@ fn digests() -> [u64; 7] {
 #[test]
 fn with_no_scroll_the_frames_are_the_parents() {
     let got = digests();
+    println!("scrollback baseline: ran ({} ticks, synthetic)", got[6]);
     println!("{got:#018x?}");
     assert_eq!(
         got, PARENT,

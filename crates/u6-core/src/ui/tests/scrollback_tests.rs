@@ -9,7 +9,9 @@ use super::*;
 use crate::engine::{POINTER_LEFT, POINTER_RIGHT};
 use crate::main_loop::Program;
 use crate::ui::scrollback::{self, CellKind, HISTORY, MIN_THUMB};
+use crate::ui::talk::KeySpan;
 use crate::ui::text::Paper;
+use crate::ui::text::WindowId;
 
 /// The message window's first and last frame pixels: x 176..312, y 112..192.
 const X: std::ops::Range<usize> = 176..312;
@@ -253,7 +255,7 @@ fn history_keeps_the_scrolled_off_lines_in_order_up_to_the_bound() {
     );
     let bytes = sb.heap_bytes();
     println!("a bound of lines with no patch: {bytes} bytes");
-    assert!(bytes < 100_000, "about 0.1 MB at the bound: {bytes}");
+    assert!(bytes < 110_000, "about 0.1 MB at the bound: {bytes}");
     // The live rows are the shadow's.
     let rows: Vec<String> = sb.rows().iter().map(line_text).collect();
     assert_eq!(rows, shown_rows(e.frame()));
@@ -271,11 +273,34 @@ fn a_kept_line_keeps_each_cell_in_its_colours() {
     let s = e.state();
     let first = &s.ui.scrollback.lines()[0];
     assert_eq!(line_text(first), "say name. ok");
-    // The keyword's cells in the alert ink, the rest in the ink (spec 22's keyword spans of a
-    // kept line come with its merge, spec 23 Design 10).
+    // The keyword's cells in the alert ink, the rest in the ink, and the keyword's span (spec 22)
+    // kept with the line (spec 23 Design 10): its cells, its ink, a keyword of its own.
     assert!(first.cells[4..8].iter().all(|c| c.fg == ALERT));
     assert!(first.cells[..4].iter().all(|c| c.fg == INK));
     assert!(first.cells[8..12].iter().all(|c| c.fg == INK));
+    let spans: Vec<(u8, u8, Vec<u8>, u8, bool, bool)> = first
+        .spans
+        .iter()
+        .map(|k| {
+            (
+                k.row,
+                k.col,
+                k.word(),
+                k.ink,
+                k.joined.is_some(),
+                k.continued,
+            )
+        })
+        .collect();
+    assert_eq!(spans, [(0, 4, b"name".to_vec(), ALERT, false, false)]);
+    assert!(
+        s.ui.scrollback
+            .lines()
+            .iter()
+            .skip(1)
+            .all(|l| l.spans.is_empty()),
+        "the other lines show no keyword"
+    );
 }
 
 #[test]
@@ -1161,9 +1186,10 @@ fn at_the_bound_a_source_only_publish_keeps_the_view() {
 
 #[test]
 fn another_history_returns_the_view_to_the_live_bottom() {
-    // The game prints 25 lines (16 kept), then after half a second its history is another's (a
-    // new game's state, as a relaunch makes): fewer lines, as many as the view had (16: the count
-    // alone does not tell), or a bound more than the view's (its newest line out of reach).
+    // The game prints 25 lines (16 kept), then after half a second a new process takes its place
+    // (a relaunch's, through `main_loop::take_over`), and its history is the new state's: fewer
+    // lines, as many as the view had (16: the count alone does not tell), or a bound more than the
+    // view's (its newest line out of reach).
     for again in [5u16, 16, (HISTORY + 40) as u16] {
         let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
             for i in 0..25u16 {
@@ -1172,7 +1198,8 @@ fn another_history_returns_the_view_to_the_live_bottom() {
                 io.vblank().await;
             }
             io.sleep(500).await;
-            st.borrow_mut().ui.scrollback = Default::default();
+            // A relaunch's new process takes the old one's place (`main_loop::take_over`).
+            crate::main_loop::take_over(&mut st.borrow_mut(), game_state(), &io);
             // As a new game's screen: the window cleared to its paper (its lines then no patch).
             io.draw(|fb| {
                 for y in Y {
@@ -1181,7 +1208,8 @@ fn another_history_returns_the_view_to_the_live_bottom() {
                     }
                 }
             });
-            for i in 0..again {
+            // The new state's window starts at its top row: nine lines before the first scrolls.
+            for i in 0..again + 9 {
                 printf(&st, &io, b"n%d\n", &[Arg::Word(i)]).await;
             }
             io.present();
@@ -1219,4 +1247,332 @@ fn another_history_returns_the_view_to_the_live_bottom() {
             "{again}: the other history's rows"
         );
     }
+}
+
+/// The frame pixel at the middle of message-window cell (`row`, `col`).
+fn cell_px(row: u8, col: u8) -> (i16, i16) {
+    let x = (22 + i16::from(col)) * 8 + 4;
+    (x, (14 + i16::from(row)) * 8 + 4)
+}
+
+#[test]
+fn a_keyword_drawn_inverse_under_the_pointer_is_kept_in_its_ink() {
+    // Spec 22 Contract 6 draws the keyword under the pointer inverse; when its row scrolls off
+    // then, the history keeps the keyword as drawn (no patch in its cells), as without the hover.
+    let kept = |hover: bool| {
+        let hot = Rc::new(std::cell::Cell::new(None));
+        let seen = Rc::clone(&hot);
+        let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+            printf(&st, &io, b"say @name. ok\n", &[]).await;
+            io.present();
+            if hover {
+                while !io.pointer_ready() {
+                    io.vblank().await;
+                }
+                crate::ui::talk::pointer(&mut st.borrow_mut(), &io, 0);
+                seen.set(st.borrow().ui.talk.hot);
+            }
+            for _ in 0..10 {
+                printf(&st, &io, b"x\n", &[]).await;
+            }
+            io.present();
+            loop {
+                io.vblank().await;
+            }
+        });
+        for _ in 0..6 {
+            e.tick(&[at(cell_px(0, 5), 0)], 16);
+        }
+        let line = e.state().ui.scrollback.lines()[0].as_ref().clone();
+        (line, hot.get())
+    };
+    let (plain, none) = kept(false);
+    let (hovered, hot) = kept(true);
+    assert_eq!(none, None);
+    assert_eq!(
+        hot,
+        Some(crate::ui::talk::Target::Key { row: 0, col: 4 }),
+        "the keyword drawn inverse before its row scrolled off"
+    );
+    assert_eq!(line_text(&hovered), "say name. ok");
+    assert_eq!(hovered.spans.len(), 1);
+    // The patch pixels' cells (this fixture never paints the window's empty cells: theirs are
+    // patch in both runs).
+    let cells = |l: &scrollback::Line| {
+        let mut v: Vec<usize> = l
+            .patch
+            .iter()
+            .map(|&(i, _)| usize::from(i) % 136 / 8)
+            .collect();
+        v.dedup();
+        v
+    };
+    assert!(
+        !cells(&hovered).iter().any(|c| (4..8).contains(c)),
+        "no patch in the keyword's cells: {:?}",
+        cells(&hovered)
+    );
+    assert_eq!(hovered, plain, "kept as without the hover");
+}
+
+/// A keyword span (spec 22) of `cells` cells in `ink` at column `col` of a row about to scroll off.
+fn span(col: u8, cells: usize, ink: u8, joined: Option<Vec<u16>>, continued: bool) -> KeySpan {
+    KeySpan {
+        row: 0,
+        col,
+        cells: vec![0x61; cells],
+        ink,
+        joined,
+        continued,
+    }
+}
+
+#[test]
+fn a_kept_rest_is_linked_only_to_a_continued_span_of_its_ink_on_the_line_before() {
+    // Spec 22 links a keyword's rest (`joined`, at column 0) to the continued span of its ink on
+    // the row above (talk.rs `is_first`), not on `joined` alone; the history keeps only such links
+    // (T1 note D2-2): `joined` on a kept line means linked to the line kept before it.
+    let mut ui = game_state().ui;
+    let fb = Framebuffer::new();
+    let w = *ui.text.window(WindowId::Messages);
+    let mut keep = |spans: Vec<KeySpan>| {
+        scrollback::scrolled(&mut ui, &fb, &w, spans);
+        let l = ui.scrollback.lines().back().unwrap();
+        l.spans.iter().map(|s| s.joined.clone()).collect::<Vec<_>>()
+    };
+    let space = Some(vec![0x20]);
+    assert_eq!(
+        keep(vec![span(0, 2, ALERT, space.clone(), false)]),
+        [None],
+        "no line before"
+    );
+    keep(vec![span(13, 4, ALERT, None, true)]);
+    assert_eq!(
+        keep(vec![span(0, 2, ALERT, space.clone(), false)]),
+        [Some(vec![0x20])],
+        "after a continued span of its ink: linked"
+    );
+    assert_eq!(
+        keep(vec![span(0, 2, ALERT, Some(Vec::new()), false)]),
+        [None],
+        "after a span not continued: a keyword of its own"
+    );
+    keep(vec![span(13, 4, INK, None, true)]);
+    assert_eq!(
+        keep(vec![span(0, 2, ALERT, space.clone(), false)]),
+        [None],
+        "after a continued span of another ink"
+    );
+    keep(vec![span(13, 4, ALERT, None, true)]);
+    assert_eq!(
+        keep(vec![span(3, 2, ALERT, space.clone(), false)]),
+        [None],
+        "a span past column 0 is no rest"
+    );
+    // A window whose rect is not the message window keeps nothing.
+    let lines = ui.scrollback.lines().len();
+    let other = *ui.text.window(WindowId::Status);
+    scrollback::scrolled(&mut ui, &fb, &other, vec![span(0, 2, ALERT, None, false)]);
+    assert_eq!(ui.scrollback.lines().len(), lines);
+}
+
+#[test]
+fn while_scrolled_back_no_keyword_of_the_message_window_is_a_target() {
+    // Spec 23 Decision 2's exception: spec 22's hover and click read the view's offset (the Io's
+    // copy) and take no keyword of the window while it shows kept lines; the buttons and the live
+    // window's keywords are as before.
+    let mut e = Engine::with_game(game_state(), Files::default(), |st, io| async move {
+        for i in 0..12u16 {
+            printf(&st, &io, b"l%d\n", &[Arg::Word(i)]).await;
+        }
+        printf(&st, &io, b"say @name. ok\n", &[]).await;
+        io.present();
+        loop {
+            if io.pointer_ready() {
+                crate::ui::talk::pointer(&mut st.borrow_mut(), &io, 0);
+            }
+            io.vblank().await;
+        }
+    });
+    for _ in 0..4 {
+        e.tick(&[], 16);
+    }
+    let (row, col) = {
+        let s = e.state();
+        let k = &s.ui.text.keys.spans;
+        assert_eq!(k.len(), 1, "the keyword live in the window");
+        (k[0].row, k[0].col)
+    };
+    let key = Some(crate::ui::talk::Target::Key { row, col });
+    let hot = |e: &Engine| e.state().ui.talk.hot;
+    let over = at(cell_px(row, col + 1), 0);
+    e.tick(&[over], 16);
+    assert_eq!(hot(&e), key, "live: the keyword under the pointer");
+    assert!(e.wheel(IN.0, IN.1, -1));
+    e.tick(&[over], 16);
+    assert_eq!(
+        hot(&e),
+        None,
+        "scrolled back: no target there (the hover drawn as it was)"
+    );
+    assert!(e.wheel(IN.0, IN.1, 1));
+    e.tick(&[over], 16);
+    assert_eq!(hot(&e), key, "live again");
+    // A key in the same tick as the move leaves the history: the game reads the offset as after
+    // that tick's input (the move, queued before the key, taken with the window live).
+    assert!(e.wheel(IN.0, IN.1, -1));
+    e.tick(&[over], 16);
+    assert_eq!(hot(&e), None);
+    e.tick(&[over, InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(e.history_offset(), 0);
+    assert_eq!(
+        hot(&e),
+        key,
+        "the key left the history before the move was read"
+    );
+}
+
+#[test]
+fn the_game_reads_the_views_offset_as_the_engine_last_set_it() {
+    // Io's copy of the offset (spec 23 Decision 2's exception) equals the view's after each
+    // change: a wheel, new text anchoring the view at a publish (Design 5), a key.
+    let mut e = engine(game_state(), 25, 50, false);
+    let both = |e: &Engine| (e.io().history_offset(), e.history_offset());
+    assert!(e.wheel(IN.0, IN.1, -3));
+    assert_eq!(both(&e), (3, 3), "the wheel");
+    let mut grew = false;
+    for _ in 0..20 {
+        e.tick(&[], 16);
+        let (io, view) = both(&e);
+        assert_eq!(io, view, "after a tick");
+        grew |= view > 3;
+    }
+    assert!(grew, "new text anchored the view");
+    e.tick(&[InputEvent::Key(Key::Char('q'))], 16);
+    assert_eq!(both(&e), (0, 0), "a key");
+}
+
+#[test]
+fn a_paced_press_and_a_repeat_taken_back_at_the_command_prompt_return_to_live() {
+    // K2 (spec 19 O1c): a paced press is a key (spec 23 Decision 6). `View::input` runs before
+    // K2's take-back, so an OS repeat of a direction key the command prompt takes back (never
+    // queued) still returns the view to the live bottom.
+    let mut s = game_state();
+    s.main.reading = 1;
+    s.ui.input.targeting = 0;
+    s.ui.input.accept = true;
+    let mut e = engine(s, 25, 0, false);
+    assert!(e.wheel(IN.0, IN.1, -3));
+    e.tick(&[InputEvent::Repeat(Key::Up)], 16);
+    assert_eq!(e.history_offset(), 0, "a repeat taken back");
+    e.tick(&[], 16);
+    assert_eq!(
+        text_at(e.frame(), 22),
+        "l24",
+        "taken back: the game took no key"
+    );
+    assert!(e.wheel(IN.0, IN.1, -3));
+    e.tick(&[InputEvent::Paced(Key::Left)], 16);
+    assert_eq!(e.history_offset(), 0, "a paced press");
+    e.tick(&[], 16);
+    assert_eq!(text_at(e.frame(), 22), "k0", "and the game took it");
+}
+
+/// The bytes a kept line holds with its shared allocation (as [`scrollback::Scrollback`] counts
+/// it): its two counts and the line, its cells, its patch and its spans.
+fn line_bytes(l: &scrollback::Line) -> usize {
+    assert!(l.spans.is_empty());
+    2 * size_of::<usize>()
+        + size_of::<scrollback::Line>()
+        + l.cells.capacity() * size_of::<scrollback::Cell>()
+        + l.patch.capacity() * size_of::<(u16, u8)>()
+}
+
+#[test]
+fn the_view_adds_only_what_the_history_no_longer_holds() {
+    // gpt a, b (round 3): the history and the view share the lines of a publish, counted once.
+    // 1. A bound and 20 lines more, all patch, one presented a frame: right after each publish
+    //    the view adds its vector alone, made to the lines published (8 bytes a line).
+    // 2. 30 lines more with no publish: the view adds the 30 the history dropped since.
+    // 3. A publish: its vector alone again.
+    // 4. A relaunch's new state (`main_loop::take_over`): before its first publish the view adds
+    //    every line it keeps and its own token; after it, its vector alone, which keeps its size.
+    let n = (HISTORY + 20) as u16;
+    let mut e = Engine::with_game(game_state(), Files::default(), move |st, io| async move {
+        for _ in 0..n {
+            fill_window(&io);
+            printf(&st, &io, b"\n", &[]).await;
+            io.present();
+            io.vblank().await;
+        }
+        io.sleep(200).await;
+        for _ in 0..30 {
+            fill_window(&io);
+            printf(&st, &io, b"\n", &[]).await;
+        }
+        io.sleep(200).await;
+        io.present();
+        io.sleep(200).await;
+        crate::main_loop::take_over(&mut st.borrow_mut(), game_state(), &io);
+        for _ in 0..15 {
+            fill_window(&io);
+            printf(&st, &io, b"\n", &[]).await;
+        }
+        io.sleep(200).await;
+        io.present();
+        loop {
+            io.vblank().await;
+        }
+    });
+    let view = |e: &Engine| e.history_heap_bytes() - e.state().ui.scrollback.heap_bytes();
+    let rc = size_of::<Rc<scrollback::Line>>();
+    let mut checked = 0;
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+        let kept = e.state().ui.scrollback.lines().len();
+        assert_eq!(
+            view(&e),
+            kept * rc,
+            "1: right after a publish ({kept} lines)"
+        );
+        checked += usize::from(kept > 0);
+    }
+    assert_eq!(e.state().ui.scrollback.lines().len(), HISTORY);
+    assert!(checked > 400, "{checked} publishes checked");
+    let full = HISTORY * rc;
+    let total = |e: &Engine| e.state().ui.scrollback.total();
+    let published = |e: &Engine| e.view_version().0;
+    let until = |e: &mut Engine, done: &dyn Fn(&Engine) -> bool| {
+        for _ in 0..60 {
+            if done(e) {
+                return;
+            }
+            e.tick(&[], 16);
+        }
+        panic!("not reached in 60 ticks");
+    };
+    let before = total(&e);
+    until(&mut e, &|e| total(e) == before + 30);
+    let dropped = line_bytes(&e.state().ui.scrollback.lines()[0]);
+    assert_eq!(
+        view(&e),
+        full + 30 * dropped,
+        "2: the 30 the history dropped"
+    );
+    let at = published(&e);
+    until(&mut e, &|e| published(e) > at);
+    assert_eq!(view(&e), full, "3: published");
+    until(&mut e, &|e| total(e) < 100);
+    let fresh = e.state().ui.scrollback.lines().len();
+    assert!(fresh > 0, "the new state's lines, not yet published");
+    let token = 2 * size_of::<usize>();
+    assert_eq!(
+        view(&e),
+        full + token + HISTORY * dropped,
+        "4: before the new history's publish, the view's lines and token its own"
+    );
+    let at = published(&e);
+    until(&mut e, &|e| published(e) > at);
+    assert_eq!(view(&e), full, "4: published, the vector kept");
+    println!("the view's vector: {full} bytes; a dropped line all patch: {dropped} bytes");
 }

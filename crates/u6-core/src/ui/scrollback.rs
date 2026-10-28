@@ -18,6 +18,7 @@ use std::rc::Rc;
 use u6_render::{BITMAP_PAPER, Framebuffer, Kind, Src};
 
 use super::UiState;
+use super::talk::KeySpan;
 use super::text::{self, CELL, Paper, TextWindow, WindowId};
 use crate::engine::{InputEvent, POINTER_LEFT};
 
@@ -25,14 +26,19 @@ use crate::engine::{InputEvent, POINTER_LEFT};
 /// the state, and the view's lines as of a publish, copy a pointer a line. A line of the window's
 /// 17 cells as drawn holds 102 bytes of cells and its shared header; with no patch, about 0.1 MB
 /// at the bound. The patch adds 4 bytes a pixel: at most every pixel of the row (1088), so a bound
-/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11). The view
-/// keeps the lines as of the last publish, those dropped since included, so the two together hold
-/// at most two bounds ([`View::heap_bytes`]).
+/// of lines all patch is about 2.3 MB ([`Scrollback::heap_bytes`], spec 23 Design 11). A keyword's
+/// cells take no patch ([`scrolled`]), so its span never adds to that. The view keeps the lines as
+/// of the last publish, those dropped since included, so the two together hold at most two bounds
+/// ([`View::heap_bytes`]).
 pub const HISTORY: usize = 500;
+/// The bytes of a token's allocation ([`Generation`]): its two counts.
+fn token_bytes() -> usize {
+    2 * size_of::<usize>()
+}
 /// The bytes of a kept line's shared allocation beside what the line holds: its two counts and the
 /// line.
 fn shared_bytes() -> usize {
-    2 * size_of::<usize>() + size_of::<Line>()
+    token_bytes() + size_of::<Line>()
 }
 /// The thumb's least length, in pixels (one cell's height).
 pub const MIN_THUMB: usize = 8;
@@ -62,13 +68,18 @@ pub struct Cell {
 
 /// One row of the window: its cells, the paper it was cleared to, and what [`scrolled`] adds when
 /// it is kept: the pixels of the row (index in the row, row-major, and colour) the cells do not
-/// draw as they were shown. A patch pixel is drawn back in its colour alone: naming the paper
-/// where that colour is the paper's there, else no image (spec 23 Design 11).
+/// draw as they were shown, and the keywords the row showed (spec 22's spans, `row` 0). A patch
+/// pixel is drawn back in its colour alone: naming the paper where that colour is the paper's
+/// there, else no image (spec 23 Design 11).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Line {
     pub cells: Vec<Cell>,
     pub bg: u8,
     pub patch: Vec<(u16, u8)>,
+    /// The row's keyword spans as [`super::talk::KeySpans::scroll`] returned them, left to
+    /// right; a rest ([`KeySpan::joined`]) keeps its link only to a continued span of its ink on
+    /// the line kept before it (spec 23 Design 10).
+    pub spans: Vec<KeySpan>,
 }
 
 impl Line {
@@ -77,12 +88,29 @@ impl Line {
             cells: vec![Cell::default(); usize::from(width)],
             bg,
             patch: Vec::new(),
+            spans: Vec::new(),
         }
     }
 
-    /// The bytes the line holds on the heap, by capacity.
+    /// The bytes the line holds on the heap, by capacity: its cells, its patch, its spans and the
+    /// cells each holds.
     fn heap_bytes(&self) -> usize {
-        self.cells.capacity() * size_of::<Cell>() + self.patch.capacity() * size_of::<(u16, u8)>()
+        let cells = |v: &Vec<u16>| v.capacity() * size_of::<u16>();
+        self.cells.capacity() * size_of::<Cell>()
+            + self.patch.capacity() * size_of::<(u16, u8)>()
+            + self.spans.capacity() * size_of::<KeySpan>()
+            + self
+                .spans
+                .iter()
+                .map(|s| cells(&s.cells) + s.joined.as_ref().map_or(0, cells))
+                .sum::<usize>()
+    }
+
+    /// Whether cell `col` is one of a kept keyword's.
+    fn in_span(&self, col: usize) -> bool {
+        self.spans
+            .iter()
+            .any(|s| (usize::from(s.col)..usize::from(s.col) + s.cells.len()).contains(&col))
     }
 }
 
@@ -135,10 +163,11 @@ impl Scrollback {
         &self.rows
     }
 
-    /// The bytes the lines and the shadow hold on the heap, by capacity: each kept line's shared
-    /// allocation (its two counts and the line) and what the line holds.
+    /// The bytes the lines, the shadow and the token hold on the heap, by capacity: each kept
+    /// line's shared allocation (its two counts and the line) and what the line holds.
     pub fn heap_bytes(&self) -> usize {
-        self.lines.capacity() * size_of::<Rc<Line>>()
+        token_bytes()
+            + self.lines.capacity() * size_of::<Rc<Line>>()
             + self.lines.len() * shared_bytes()
             + self.rows.capacity() * size_of::<Line>()
             + self.lines.iter().map(|l| l.heap_bytes()).sum::<usize>()
@@ -175,9 +204,10 @@ impl fmt::Debug for Line {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Line({} cells, {} patched)",
+            "Line({} cells, {} patched, {} spans)",
             self.cells.len(),
-            self.patch.len()
+            self.patch.len(),
+            self.spans.len()
         )
     }
 }
@@ -224,10 +254,14 @@ pub fn note(ui: &mut UiState, w: &TextWindow, c: u16, at: (u16, u16), kind: Cell
 }
 
 /// Before `w` scrolls in `fb` ([`text::scroll_window`]): when `w` is the message window, its top
-/// row is kept, with the pixels of `fb` its cells do not draw, the oldest line dropped past
-/// [`HISTORY`], and the shadow moves up one row, the new last row blank in `w`'s paper. Another
-/// window over part of it clears the shadow.
-pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow) {
+/// row is kept with `spans`, the keywords it showed ([`super::talk::KeySpans::scroll`]), and the
+/// pixels of `fb` its cells do not draw outside them, the oldest line dropped past [`HISTORY`],
+/// and the shadow moves up one row, the new last row blank in `w`'s paper. Another window over
+/// part of it clears the shadow. A keyword's cells take no patch: the one under the pointer is
+/// drawn inverse (spec 22 Contract 6), and the history keeps it as drawn, in its ink. A rest keeps
+/// its link ([`KeySpan::joined`]) only to a continued span of its ink on the line kept before it
+/// ([`linked`]).
+pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow, spans: Vec<KeySpan>) {
     let m = messages(ui);
     let (a, b) = (rect(&m), rect(w));
     if a != b {
@@ -242,6 +276,7 @@ pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow) {
     }
     ui.scrollback.fit(&m);
     let mut line = ui.scrollback.rows.remove(0);
+    line.spans = linked(ui.scrollback.lines.back().map(Rc::as_ref), spans);
     line.patch = patch(ui, fb, &line, &m, m.y);
     let sb = &mut ui.scrollback;
     sb.lines.push_back(Rc::new(line));
@@ -250,6 +285,26 @@ pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow) {
     }
     sb.total += 1;
     sb.rows.push(Line::blank(m.width, w.bg));
+}
+
+/// `spans`, the keywords of a row kept after `above`, made to their length: a rest
+/// ([`KeySpan::joined`], at column 0) keeps its link only where `above` holds a continued span of
+/// its ink ([`KeySpan::continued`]), as spec 22 links the parts of a keyword on two rows; elsewhere
+/// it is a keyword of its own (`joined` on a kept line means linked to the line kept before it).
+fn linked(above: Option<&Line>, mut spans: Vec<KeySpan>) -> Vec<KeySpan> {
+    for s in &mut spans {
+        let ink = s.ink;
+        let first = |p: &KeySpan| p.continued && p.ink == ink;
+        if s.col != 0 || !above.is_some_and(|a| a.spans.iter().any(first)) {
+            s.joined = None;
+        }
+        s.cells.shrink_to_fit();
+        if let Some(j) = &mut s.joined {
+            j.shrink_to_fit();
+        }
+    }
+    spans.shrink_to_fit();
+    spans
 }
 
 /// The rows of a drawn cell's glyph as [`text::draw_char`] draws them: `u6.ch`'s for a byte, the
@@ -280,12 +335,15 @@ fn drawn(rows: &[u8; 8], cell: &Cell, bg: u8, (dx, dy): (usize, usize)) -> Optio
 }
 
 /// The pixels of screen row `row` of `fb` (the line's cells across window `m`) that the cells do
-/// not draw as `fb` shows them.
+/// not draw as `fb` shows them, a keyword's cells ([`Line::spans`]) aside.
 fn patch(ui: &UiState, fb: &Framebuffer, line: &Line, m: &TextWindow, row: u8) -> Vec<(u16, u8)> {
     let (x0, y0) = (usize::from(m.x) * CELL, usize::from(row) * CELL);
     let width = line.cells.len() * CELL;
     let mut out = Vec::new();
     for (k, cell) in line.cells.iter().enumerate() {
+        if line.in_span(k) {
+            continue;
+        }
         let rows = glyph(ui, cell.code);
         for dy in 0..CELL {
             for dx in 0..CELL {
@@ -474,12 +532,19 @@ impl View {
     }
 
     /// The bytes the view holds on the heap that `sb` does not, by capacity: its vector of lines,
-    /// and each line it keeps that `sb` no longer holds (dropped since the last publish), with its
-    /// shared allocation. With [`Scrollback::heap_bytes`], at most two bounds of lines: the view
-    /// keeps at most [`HISTORY`] lines, `sb` at most [`HISTORY`] others.
+    /// its token when it is not `sb`'s, and each line it keeps that `sb` no longer holds (dropped
+    /// since the last publish), with its shared allocation. With [`Scrollback::heap_bytes`], at
+    /// most two bounds of lines: the view keeps at most [`HISTORY`] lines, `sb` at most
+    /// [`HISTORY`] others, and the vector is made to the largest publish ([`View::publish`]).
     pub fn heap_bytes(&self, sb: &Scrollback) -> usize {
         let held: HashSet<*const Line> = sb.lines.iter().map(Rc::as_ptr).collect();
-        self.lines.capacity() * size_of::<Rc<Line>>()
+        let token = if Rc::ptr_eq(&self.generation, &sb.generation.0) {
+            0
+        } else {
+            token_bytes()
+        };
+        token
+            + self.lines.capacity() * size_of::<Rc<Line>>()
             + self
                 .lines
                 .iter()
@@ -513,7 +578,8 @@ impl View {
     /// At a publish: the lines kept now are those on the frame; scrolled back, the offset grows
     /// by those kept since the last publish, so the same lines stay in view. Another history
     /// (another token: a new game's state, whatever its lines) returns the view to the live
-    /// bottom.
+    /// bottom. The vector of lines grows only to the lines published (`reserve_exact`), so its
+    /// capacity is the most lines one publish took, at most [`HISTORY`].
     pub fn publish(&mut self, sb: &Scrollback) {
         let same = Rc::ptr_eq(&self.generation, &sb.generation.0);
         if same && sb.total == self.published {
@@ -524,6 +590,7 @@ impl View {
         self.generation = Rc::clone(&sb.generation.0);
         self.published = sb.total;
         self.lines.clear();
+        self.lines.reserve_exact(sb.lines.len());
         self.lines.extend(sb.lines.iter().cloned());
         if self.offset > 0 {
             self.offset = match new {

@@ -12784,7 +12784,15 @@ test('the message history (spec 23): a wheel with no vertical delta (a horizonta
   await step('over the map: not taken', map, { deltaY: -60 }, { prevented: false, offset: 1, asked: 1 });
   await step('then -60 inside: no line', inside, { deltaY: -60 }, { prevented: true, offset: 1, asked: 1 });
   await step('-120 since the map: a line', inside, { deltaY: -60 }, { prevented: true, offset: 2, asked: 2 });
-  console.log('  receipt: spec 23 wheel deltaY 0: not cancelled, the carry kept (pixel and line mode); a rejected wheel drops the carry: pass');
+  // Line mode alone (gpt c, round 3): the carry dropped first (a move over the map: not the
+  // engine's), then -60, a line-mode wheel with no vertical delta, -60: one line, the middle one
+  // neither asked nor cancelled, so only a carry it kept makes the line.
+  await moveAt(page, map);
+  await moveAt(page, inside);
+  await step('isolated: -60 carried', inside, { deltaY: -60 }, { prevented: true, offset: 2, asked: 1 });
+  await step('isolated: a horizontal line-mode notch', inside, { deltaX: 3, deltaY: 0, deltaMode: 1 }, { prevented: false, offset: 2, asked: 0 });
+  await step('isolated: -120 with the carry kept: one line', inside, { deltaY: -60 }, { prevented: true, offset: 3, asked: 2 });
+  console.log('  receipt: spec 23 wheel deltaY 0: not cancelled, the carry kept (pixel and line mode, alone too); a rejected wheel drops the carry: pass');
 }, { needs: h.haveHfes });
 
 test('the message history (spec 23): a press on the scrollbar whose pointer capture is lost without a release gives the game every button up, as a cancel does', async (env) => {
@@ -12824,8 +12832,22 @@ test('the message history (spec 23): a press on the scrollbar whose pointer capt
   await h.waitFrames(page, 2);
   assert.equal(await capture(), 'gotpointercapture lostpointercapture', 'the capture lost');
   assert.equal(await last(), 0, 'every button up for the game');
+  // Back over the canvas with the button still held (no capture: the canvas gets the moves): the
+  // game's buttons stay up until every button is up; then a new press is the game's.
+  const moves = await page.evaluate(() => globalThis.__buttons.length);
+  await page.mouse.move(...(await h.screenPoint(page, 200, 150)));
+  await page.mouse.move(...(await h.screenPoint(page, 40, 40)));
+  await h.waitFrames(page, 2);
+  assert.equal(await page.evaluate((n) => globalThis.__buttons.slice(n).some(([b]) => b !== 0), moves), false, 'the held button never reached the game again');
+  assert.equal(await page.evaluate(() => globalThis.__pointerAt.join(',')), '40,40', 'the moves reached it');
   await page.mouse.up();
-  console.log('  receipt: spec 23 lost pointer capture: the press released for the game: pass');
+  await page.mouse.down();
+  await h.waitFrames(page, 2);
+  assert.equal(await last(), 1, 'a new press is the game\'s');
+  await page.mouse.up();
+  await h.waitFrames(page, 2);
+  assert.equal(await last(), 0);
+  console.log('  receipt: spec 23 lost pointer capture: the press released for the game, the held button kept up: pass');
 }, { needs: h.haveHfes });
 
 // Spec 22 (conversation by click): koFixture's archive with the player's words after the
@@ -13064,6 +13086,61 @@ for (const layout of ['original', 'wide']) {
     console.log(`  receipt: ${layout}: Name pressed in the canvas answered as typed: pass`);
   }, { needs: h.haveHfes });
 }
+
+test('Conversation by click (spec 22) and the message history (spec 23): a press on Name whose pointer capture is lost during the read is released off every target, as a cancel is, and the button still held moved over Name stays up for the game until every button is up; the read goes on, and a new press answers', async (env) => {
+  const { page } = await h.openPage(env);
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await h.waitPrompt(page);
+  assert.equal(await h.replaceKept(page, 'converse.a', await clickTalkFixture()), 1, 'one archive replaced');
+  await page.reload();
+  await h.waitSettled(page);
+  await h.waitPrompt(page);
+  await page.focus('#screen');
+  await page.keyboard.press('t');
+  await h.waitTaken(page);
+  await page.keyboard.press('2');
+  await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
+  await h.waitFrames(page, 2);
+  const at = await h.screenPoint(page, ...NAME_BUTTON);
+  // The mouse's press on Name, its capture lost (the event as the browser fires it, pointer id 1),
+  // a move on Name with the button still held, the release on Name: one evaluation (one frame),
+  // each Game.pointer call the page made recorded.
+  const calls = await page.evaluate(([x, y]) => {
+    const c = document.getElementById('screen');
+    const g = globalThis.__shownGame;
+    const pointer = g.pointer;
+    const seen = [];
+    g.pointer = (...args) => {
+      seen.push(args);
+      return pointer.apply(g, args);
+    };
+    const send = (kind, buttons) => c.dispatchEvent(new PointerEvent(kind, { pointerType: 'mouse', pointerId: 1, isPrimary: true, clientX: x, clientY: y, buttons, bubbles: true, cancelable: true, composed: true }));
+    const reading = g.reading_by_click();
+    send('pointerdown', 1);
+    send('lostpointercapture', 1);
+    send('pointermove', 1);
+    send('pointerup', 0);
+    g.pointer = pointer;
+    return { reading, seen };
+  }, at);
+  assert.equal(calls.reading, true, 'during the read');
+  assert.deepEqual(calls.seen, [[...NAME_BUTTON, 1], [-1, -1, 0], [...NAME_BUTTON, 0], [...NAME_BUTTON, 0]], 'the press, its release off every target, the move held and the release with every button up for the game');
+  const target = () => page.evaluate(() => Array.from(globalThis.__shownGame.talk_target()));
+  for (let i = 0; i < 40; i += 1) {
+    await h.waitFrames(page, 1);
+    assert.equal(await page.evaluate(() => globalThis.__owned), 7, 'the words are still read');
+  }
+  assert.equal((await target())[1], -1, 'nothing pressed in the read');
+  // A new press on Name is the game's: it answers.
+  await page.mouse.move(...at);
+  await h.waitTaken(page);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForFunction(() => globalThis.__owned !== 7, null, { timeout: 15_000 });
+  console.log('  receipt: spec 22 + 23 capture lost during the read: released off every target, the held button kept up, a new press answers: pass');
+}, { needs: h.haveHfes });
 
 // The system's pointer over the game screen: the game draws its own (the engine's sprite over
 // the frame; with HD on the page draws it over the HD frame, spec 11 Design 7), so while a game

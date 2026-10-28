@@ -303,11 +303,14 @@ fn end_line(s: &mut State, io: &Io, c: i32, said: bool) {
         } else if w.flags & SCROLL != 0 {
             let w = *w;
             t.drawn = true;
-            if t.current == WindowId::Messages {
-                super::talk::scroll(&mut s.ui);
-            }
-            // Port (spec 23): the row that scrolls off is kept.
-            io.draw(|fb| scrollback::scrolled(&mut s.ui, fb, &w));
+            // Port (spec 22, 23): the keywords move up a row, those of the top row leave with it
+            // and are kept with it.
+            let spans = if t.current == WindowId::Messages {
+                super::talk::scroll(&mut s.ui)
+            } else {
+                Vec::new()
+            };
+            io.draw(|fb| scrollback::scrolled(&mut s.ui, fb, &w, spans));
             let paper = s.ui.paper.as_ref();
             io.draw(|fb| text::scroll_window(fb, &w, paper));
         }
