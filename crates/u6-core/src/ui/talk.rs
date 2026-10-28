@@ -33,6 +33,10 @@ pub struct KeySpan {
     /// column 0): the cells the wrap dropped between the two parts, a space or none; `None` for
     /// a keyword's first part.
     pub joined: Option<Vec<u16>>,
+    /// The word wrap broke the keyword after this span (it holds its row's last drawn cell): the
+    /// span the next row starts with at column 0, when it is a rest ([`KeySpan::joined`]), is
+    /// the keyword's next part.
+    pub continued: bool,
 }
 
 impl KeySpan {
@@ -55,16 +59,27 @@ fn trimmed(mut w: Vec<u8>) -> Vec<u8> {
     w
 }
 
+/// Whether `p` is the rest that follows continued span `s`, `p` on row `next` (`s`'s next).
+fn is_rest(p: &KeySpan, s: &KeySpan, next: u8) -> bool {
+    p.joined.is_some() && p.ink == s.ink && p.row == next && p.col == 0
+}
+
+/// Whether `p` is the continued span rest `s` follows, `p` on row `above` (`s`'s previous).
+fn is_first(p: &KeySpan, s: &KeySpan, above: u8) -> bool {
+    p.continued && p.ink == s.ink && p.row == above
+}
+
 /// The keywords the message window shows (`TextState::keys`): recorded as the line assembler
 /// draws its cells there ([`KeySpans::draw`]), forgotten where a cell is drawn over them
-/// ([`KeySpans::forget`]), moved by its scroll ([`KeySpans::scroll`]), the two parts of one the
-/// word wrap broke joined ([`KeySpans::wrapped`]).
+/// ([`KeySpans::forget`]), moved by its scroll ([`KeySpans::scroll`]), the parts of one the word
+/// wrap broke linked ([`KeySpans::wrapped`]): a part marked [`KeySpan::continued`] and the rest
+/// the next row starts with ([`KeySpan::joined`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeySpans {
     /// The spans shown.
     pub spans: Vec<KeySpan>,
     /// The cells the last wrap dropped inside a keyword it broke, until the next row's first
-    /// cell is drawn ([`KeySpans::wrapped`]).
+    /// cell is drawn ([`KeySpans::wrapped`]) or the next row is ([`KeySpans::row_drawn`]).
     wrap: Option<Vec<u16>>,
 }
 
@@ -96,21 +111,57 @@ impl KeySpans {
                 cells: vec![c],
                 ink,
                 joined: wrap,
+                continued: false,
             }),
             None => {}
         }
     }
 
-    /// The line assembler's word wrap broke the row inside a keyword (its last cell drawn and
-    /// the next cell in the alert colour, with the cells it dropped between them, `dropped`,
-    /// a space or none): the span the next row starts with at column 0 is that keyword's rest.
-    pub fn wrapped(&mut self, dropped: Vec<u16>) {
-        self.wrap = Some(dropped);
+    /// The line assembler's word wrap broke row `row` inside a keyword: its last drawn cell, at
+    /// column `col`, and the next cell are in the alert colour, `dropped` (a space or none) the
+    /// cells it dropped between them. The span holding that last cell is marked continued (no
+    /// other span of the row is), and the span the next row starts with at column 0 becomes the
+    /// keyword's rest; without a span there (a blank cell of the alert colour starts none),
+    /// nothing is.
+    pub fn wrapped(&mut self, row: u8, col: u8, dropped: Vec<u16>) {
+        let mut marked = false;
+        for s in self.spans.iter_mut().filter(|s| s.row == row) {
+            s.continued = s.covers(row, col);
+            marked |= s.continued;
+        }
+        self.wrap = marked.then_some(dropped);
     }
 
-    /// The cell at window cell (`row`, `col`) is drawn over: the span holding it goes.
+    /// Port (spec 22 Contract 4): the line assembler drew a row of the message window: a wrap
+    /// its first cell did not take is spent, so it can reach no later row.
+    pub fn row_drawn(&mut self) {
+        self.wrap = None;
+    }
+
+    /// The cell at window cell (`row`, `col`) is drawn over: the span holding it goes, and so
+    /// does its link to the part before or after it (that part is a keyword of its own then).
     pub fn forget(&mut self, row: u8, col: u8) {
-        self.spans.retain(|s| !s.covers(row, col));
+        while let Some(i) = self.spans.iter().position(|s| s.covers(row, col)) {
+            self.unlink(i);
+        }
+    }
+
+    /// Removes span `i` and its links: its rest is a keyword of its own then, and the part
+    /// before it ends its keyword.
+    fn unlink(&mut self, i: usize) {
+        let gone = self.spans.remove(i);
+        if gone.continued
+            && let Some(next) = gone.row.checked_add(1)
+            && let Some(rest) = self.spans.iter_mut().find(|p| is_rest(p, &gone, next))
+        {
+            rest.joined = None;
+        }
+        if gone.joined.is_some()
+            && let Some(above) = gone.row.checked_sub(1)
+            && let Some(first) = self.spans.iter_mut().find(|p| is_first(p, &gone, above))
+        {
+            first.continued = false;
+        }
     }
 
     /// The window scrolled its cells up a row (0x10525c): every span moves up with them; those
@@ -135,35 +186,37 @@ impl KeySpans {
     }
 
     /// The parts of the keyword one of whose cells is window cell (`row`, `col`), first to
-    /// last: a part that is the rest of another ([`KeySpan::joined`]) follows the last span of
-    /// its ink on the row above, and the span of its ink at column 0 of the row below that is
-    /// a rest follows it. Empty off every span.
+    /// last: before a rest ([`KeySpan::joined`]) the continued span of its ink on the row above,
+    /// after a continued span ([`KeySpan::continued`]) the rest of its ink at column 0 of the row
+    /// below. Empty off every span.
     pub fn parts(&self, row: u8, col: u8) -> Vec<&KeySpan> {
         let Some(s) = self.at(row, col) else {
             return Vec::new();
         };
         let mut parts = vec![s];
-        while let Some(first) = parts.first().copied().filter(|p| p.joined.is_some()) {
-            let above = self
-                .spans
-                .iter()
-                .filter(|p| p.ink == first.ink && Some(p.row) == first.row.checked_sub(1))
-                .max_by_key(|p| p.col);
-            match above {
-                Some(p) => parts.insert(0, p),
-                None => break,
-            }
+        while let Some(p) = parts.first().and_then(|&f| self.before(f)) {
+            parts.insert(0, p);
         }
-        while let Some(last) = parts.last().copied() {
-            let below = self.spans.iter().find(|p| {
-                p.joined.is_some() && p.ink == last.ink && p.col == 0 && p.row == last.row + 1
-            });
-            match below {
-                Some(p) => parts.push(p),
-                None => break,
-            }
+        while let Some(p) = parts.last().and_then(|&l| self.after(l)) {
+            parts.push(p);
         }
         parts
+    }
+
+    /// The part before rest `s`: the continued span of its ink on the row above.
+    fn before(&self, s: &KeySpan) -> Option<&KeySpan> {
+        s.joined.as_ref()?;
+        let above = s.row.checked_sub(1)?;
+        self.spans.iter().find(|p| is_first(p, s, above))
+    }
+
+    /// The part after continued span `s`: the rest of its ink at column 0 of the row below.
+    fn after(&self, s: &KeySpan) -> Option<&KeySpan> {
+        if !s.continued {
+            return None;
+        }
+        let next = s.row.checked_add(1)?;
+        self.spans.iter().find(|p| is_rest(p, s, next))
     }
 
     /// The word the keyword holding window cell (`row`, `col`) types (UTF-8): its parts' cells
@@ -211,9 +264,19 @@ pub enum Target {
 /// the conversation reads the player's words (`UiState::talk`); empty at every other time.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TalkClicks {
+    /// The read takes clicks ([`begin`] to [`end`]), with buttons or without.
+    pub reading: bool,
     pub buttons: Vec<Button>,
     pub hot: Option<Target>,
     pub pressed: Option<Target>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: the keys the last click put at the front of the queue ([`pointer`]), which
+    /// the line editor takes in the same pass.
+    pub(crate) static INJECTED: std::cell::RefCell<Vec<InputEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The cells `cells` as typed (UTF-8): an ASCII cell as itself, a runic glyph (0x80 | c) as its
@@ -300,7 +363,10 @@ fn draw_cells(s: &State, io: &Io, cells: &[u16], (col, row): (u16, u16), (ink, p
 /// row with their blank cells, they go without them; wider still (a row narrower than main's
 /// 17 cells, which two words of [`WORD_CELLS`] and the cell between fill), there are none.
 pub fn begin(s: &mut State, io: &Io) {
-    s.ui.talk = TalkClicks::default();
+    s.ui.talk = TalkClicks {
+        reading: true,
+        ..TalkClicks::default()
+    };
     let (row, x0, x1) = button_row(s);
     let paper = s.ui.tables.colours.paper;
     let y0 = usize::from(row) * CELL;
@@ -332,15 +398,15 @@ pub fn begin(s: &mut State, io: &Io) {
 }
 
 /// Spec 22 Contract 5 and 6, at each pass of the line editor's wait: the pointer events in front
-/// of the queue are taken in order ([`Io::take_pointer`], one press or release a take), the
-/// target under the pointer drawn inverse after each; a click on one (the left button down on it
-/// and up again on it) types its word: one Backspace for each of the `typed` cells the line
-/// holds, the word, Enter, at the front of the queue, before any event after the release. A
-/// word that types nothing (a keyword of cells no key types) types nothing at all.
+/// of the queue are taken in order, one a take ([`Io::take_pointer_upto`]), each where its own
+/// event put the pointer, the target under it drawn inverse after each; a click on one (the left
+/// button down on it and up again on it) types its word: one Backspace for each of the `typed`
+/// cells the line holds, the word, Enter, at the front of the queue, before any event after the
+/// release. A word that types nothing (a keyword of cells no key types) types nothing at all.
 pub fn pointer(s: &mut State, io: &Io, typed: usize) {
     loop {
         let before = io.pointer().buttons & POINTER_LEFT;
-        let p = io.take_pointer();
+        let p = io.take_pointer_upto(1);
         let target = target_at(s, p.x, p.y);
         hover(s, io, target);
         match (before, p.buttons & POINTER_LEFT) {
@@ -349,7 +415,10 @@ pub fn pointer(s: &mut State, io: &Io, typed: usize) {
                 if let Some(t) = s.ui.talk.pressed.take().filter(|&t| Some(t) == target) {
                     let word = word_of(s, t);
                     if !word.is_empty() {
-                        io.push_front(&keys(typed, &word));
+                        let keys = keys(typed, &word);
+                        #[cfg(test)]
+                        INJECTED.with(|k| k.replace(keys.clone()));
+                        io.push_front(&keys);
                         return;
                     }
                 }
@@ -369,16 +438,24 @@ pub fn cool(s: &mut State, io: &Io) {
 
 /// Spec 22 Contract 4 and 6: the message window scrolled its cells up a row (0x10525c): its
 /// keywords move up with them ([`KeySpans::scroll`], whose spans of the top row are returned),
-/// and so do the keyword drawn inverse and the one the left button went down on (one of the top
-/// row has left the window: none).
+/// and so do the keyword drawn inverse and the one the left button went down on: each becomes
+/// its first part still in the window, a row up (a keyword whose first part left with the top
+/// row is its rest then, drawn back from there; one wholly gone, none).
 pub fn scroll(ui: &mut super::UiState) -> Vec<KeySpan> {
-    let gone = ui.text.keys.scroll();
-    for t in [&mut ui.talk.hot, &mut ui.talk.pressed] {
-        if let Some(Target::Key { row, col }) = *t {
-            *t = row.checked_sub(1).map(|row| Target::Key { row, col });
+    let keys = &ui.text.keys;
+    let moved = |t: Option<Target>| match t {
+        Some(Target::Key { row, col }) => {
+            let part = keys.parts(row, col).into_iter().find(|p| p.row > 0);
+            part.map(|p| Target::Key {
+                row: p.row - 1,
+                col: p.col,
+            })
         }
-    }
-    gone
+        t => t,
+    };
+    let (hot, pressed) = (moved(ui.talk.hot), moved(ui.talk.pressed));
+    (ui.talk.hot, ui.talk.pressed) = (hot, pressed);
+    ui.text.keys.scroll()
 }
 
 /// Spec 22 Contract 2 and 6: the read ends: the hover goes, the buttons' row is filled with the
@@ -560,7 +637,7 @@ mod tests {
     fn a_keyword_the_wrap_broke_is_one_word_from_either_part() {
         let mut k = KeySpans::default();
         put(&mut k, 3, 10, &[0x62, 0x69, 0x67]);
-        k.wrapped(vec![BLANK]);
+        k.wrapped(3, 12, vec![BLANK]);
         // The more prompt's blank row between the two parts leaves the wrap.
         k.draw(4, 0, BLANK, 3, true);
         put(&mut k, 4, 0, &[0x63, 0x61, 0x74]);
@@ -591,12 +668,71 @@ mod tests {
         // A wrap whose next row starts with a cell of another ink is spent.
         k.clear();
         put(&mut k, 3, 14, &[0x61]);
-        k.wrapped(Vec::new());
+        k.wrapped(3, 14, Vec::new());
         k.draw(4, 0, 0x78, 1, false);
         put(&mut k, 5, 0, &[0x62]);
         assert_eq!(k.word(5, 0), b"b");
         assert_eq!(k.spans[1].joined, None);
+        // A wrap at a cell no span holds marks nothing, and a drawn row spends a wrap.
+        k.clear();
+        put(&mut k, 3, 10, &[0x61]);
+        k.wrapped(3, 16, vec![BLANK]);
+        put(&mut k, 4, 0, &[0x62]);
+        assert_eq!(k.spans[1].joined, None, "no span at the wrap's cell");
+        k.clear();
+        put(&mut k, 3, 16, &[0x61]);
+        k.wrapped(3, 16, vec![BLANK]);
+        k.row_drawn();
+        put(&mut k, 4, 0, &[0x62]);
+        assert_eq!(k.spans[1].joined, None, "spent by the drawn row");
+        assert_eq!(k.word(3, 16), b"a");
         println!("wrapped keyword: one word from either part: pass");
+    }
+
+    /// Spec 22 Contract 4 (opus M1, gpt a2-1): the parts of a wrapped keyword are linked to each
+    /// other only: keywords before and after them on their rows stay their own, and a part
+    /// drawn over takes its link with it.
+    #[test]
+    fn a_wrapped_keyword_s_parts_link_to_each_other_alone() {
+        // `b` and `c` on row 3, the wrap breaking `c` into `d`; `e` after `d` on row 4.
+        let chained = || {
+            let mut k = KeySpans::default();
+            put(&mut k, 3, 2, &[0x62]);
+            put(&mut k, 3, 10, &[0x63]);
+            k.wrapped(3, 10, vec![BLANK]);
+            put(&mut k, 4, 0, &[0x64]);
+            put(&mut k, 4, 6, &[0x65]);
+            k
+        };
+        let k = chained();
+        let words = [(3, 2), (3, 10), (4, 0), (4, 6)].map(|(r, c)| k.word(r, c));
+        assert_eq!(words, [&b"b"[..], b"c d", b"c d", b"e"].map(<[u8]>::to_vec));
+        let first = |r, c| {
+            k.parts(r, c)
+                .iter()
+                .map(|p| (p.row, p.col))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            first(3, 2),
+            [(3, 2)],
+            "the keyword before the broken one, alone"
+        );
+        assert_eq!(first(4, 6), [(4, 6)], "the keyword after its rest, alone");
+        assert_eq!(first(4, 0), [(3, 10), (4, 0)], "both parts, first to last");
+        // Drawn over, the first part takes the link with it: the rest is a keyword of its own,
+        // and joins no other span of the row above.
+        let mut k = chained();
+        k.forget(3, 10);
+        assert_eq!(k.word(4, 0), b"d");
+        assert_eq!(k.parts(4, 0).len(), 1);
+        assert_eq!(k.spans.iter().filter(|s| s.joined.is_some()).count(), 0);
+        // Drawn over, the rest ends the first part's keyword there.
+        let mut k = chained();
+        k.forget(4, 0);
+        assert_eq!(k.word(3, 10), b"c");
+        assert!(!k.spans.iter().any(|s| s.continued), "no part continued");
+        println!("wrapped keyword: parts linked to each other alone: pass");
     }
 
     #[test]

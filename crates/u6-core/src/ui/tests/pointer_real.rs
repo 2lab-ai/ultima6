@@ -550,14 +550,14 @@ fn a_held_map_press_during_the_exit_question_does_not_hang() {
     assert!(p.leader_at() == from);
 }
 
-/// Spec 22 receipt: Talk to member 1 by the pointer, then press its Name button, its Job button
-/// and a keyword the scroll shows in the alert colour; the same run with the pointer moved to the
-/// same places and the words typed instead (each word and Enter in one tick, as a press sends
-/// them) ends each answer with the same words, scroll, frame and state. At each read the two
-/// buttons are drawn again, their row the same pixels (and HD sources) as at the first: the row
-/// the read before filled with the paper on the real paper map is all paper again (gpt-a
-/// SHOULD 1). Counts and equality only; prints whether it ran; with `U6_TALK_FRAMES` set, frames
-/// of the buttons and of a hovered keyword go there.
+/// Spec 22 receipt: Talk to member 1 by the pointer, then press its Name button, its Job button and
+/// a keyword the scroll shows in the alert colour; the same run with the pointer moved to the same
+/// places and the words typed instead (each word and Enter in one tick, as a press sends them) ends
+/// each answer with the same words, scroll, frame and state. At each read the two buttons are drawn
+/// again, their row the same pixels (and HD sources) as at the first: the row the read before
+/// filled with the paper on the real paper map is all paper again (gpt-a SHOULD 1), after the
+/// keyword's answer too (gpt a1-1). Counts and equality only; prints whether it ran; with
+/// `U6_TALK_FRAMES` set, frames of the buttons and of a hovered keyword go there.
 #[test]
 fn a_real_talk_answers_a_press_as_the_word_typed() {
     let Some(files) = files() else {
@@ -591,6 +591,27 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
         let row = usize::from(w.y) + usize::from(w.height) - 1;
         (((col * CELL) + 4) as i16, ((row * CELL) + 4) as i16)
     };
+    // The next read after an answer: the words read again, the two buttons back, and, the
+    // pointer back where the read began (off the buttons: resting on one it shows it inverse,
+    // Contract 6), their row as at the first read.
+    let again = |press: &mut Play, typed: &mut Play, after: &str| {
+        assert!(
+            press.e.state().ui.input.line_input,
+            "{after}: the words read again"
+        );
+        assert_eq!(press.buttons().0, 2, "{after}: the buttons again");
+        for p in [&mut *press, &mut *typed] {
+            p.send(InputEvent::Pointer {
+                x: rest.0,
+                y: rest.1,
+                buttons: 0,
+            });
+        }
+        assert!(
+            press.button_row() == first_row,
+            "{after}: their row as at the first read"
+        );
+    };
     let mut answers = 0;
     // Name, then Job after a letter typed: the press takes the letter back first.
     for (i, before) in [(1, 0), (0, 1)] {
@@ -605,20 +626,7 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
         typed.answer(xy, Some((before, &word)));
         press.same_as(&typed, &word);
         answers += 1;
-        assert_eq!(press.buttons().0, 2, "the buttons again at the next read");
-        // The pointer back where the read began, off the buttons (resting on Name it shows it
-        // inverse: Contract 6).
-        for p in [&mut press, &mut typed] {
-            p.send(InputEvent::Pointer {
-                x: rest.0,
-                y: rest.1,
-                buttons: 0,
-            });
-        }
-        assert!(
-            press.button_row() == first_row,
-            "their row as at the first read"
-        );
+        again(&mut press, &mut typed, "a button's answer");
     }
     let span = {
         let s = press.e.state();
@@ -645,6 +653,8 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
     typed.answer(xy, Some((0, &word)));
     press.same_as(&typed, &word);
     answers += 1;
+    // gpt a1-1: the same after the keyword's answer.
+    again(&mut press, &mut typed, "the keyword's answer");
     println!(
         "presses answered as typed: {answers} (keyword of {} cells, spans shown {})",
         span.cells.len(),

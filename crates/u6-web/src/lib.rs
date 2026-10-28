@@ -467,6 +467,9 @@ pub struct Game {
     zip: Option<(zipscan::Sliced, usize)>,
     engine: Option<Engine>,
     pending: Vec<InputEvent>,
+    /// The buttons of the last pointer event [`Game::step`] handed to the engine (0 before
+    /// one): the pointer state before the first one queued now ([`queue_pointer`]).
+    handed: u8,
     blank: Framebuffer,
     rgba: Vec<u8>,
     /// The engine frame `rgba` holds ([`Engine::frame_version`]); `None` while it holds the
@@ -536,6 +539,7 @@ impl Game {
             zip: None,
             engine: None,
             pending: Vec::new(),
+            handed: 0,
             blank: Framebuffer::new(),
             rgba: Vec::new(),
             rgba_holds: None,
@@ -950,6 +954,7 @@ impl Game {
             if let Some(driver) = &mut self.audio {
                 driver.sync(&engine.state().sound, engine.io().files());
             }
+            self.handed = last_buttons(&self.pending).unwrap_or(self.handed);
         }
         self.pending.clear();
     }
@@ -1391,8 +1396,17 @@ impl Game {
     /// as DOM `buttons`. Ignored before the game starts.
     pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         if self.engine.is_some() {
-            queue_pointer(&mut self.pending, x, y, buttons);
+            queue_pointer(&mut self.pending, self.handed, x, y, buttons);
         }
+    }
+
+    /// Spec 22 Contract 8: whether the game reads the player's words by click now (a
+    /// conversation's read after "you say", op f7, from its start to its end; buttons drawn or
+    /// not). The page releases a cancelled press off every target then. False before a start.
+    pub fn reading_by_click(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.state().ui.talk.reading)
     }
 
     /// Voices on or off (spec 09 Design 1): while on, the engine's speech tap keeps what NPCs
@@ -1687,14 +1701,7 @@ impl Game {
     /// since the previous step (newer than the engine's), else the engine's handler pointer
     /// ([`u6_core::Io::handler_pointer`]). False before a start.
     fn pointer_held(&self) -> bool {
-        let queued = self.pending.iter().rev().find_map(|e| match *e {
-            InputEvent::Pointer { buttons, .. } => Some(buttons),
-            InputEvent::Key(_)
-            | InputEvent::Repeat(_)
-            | InputEvent::Release(_)
-            | InputEvent::Text(_) => None,
-        });
-        let buttons = queued.or_else(|| {
+        let buttons = last_buttons(&self.pending).or_else(|| {
             self.engine
                 .as_ref()
                 .map(|e| e.io().handler_pointer().buttons)
@@ -1715,6 +1722,7 @@ impl Game {
         self.audio = None;
         self.engine = Some(engine);
         self.pending.clear();
+        self.handed = 0;
         self.redraw();
         self.hd.restart();
         self.compose_hd();
@@ -1823,19 +1831,36 @@ fn pointer_pixels(e: &Engine) -> ([u32; 4], Vec<u8>) {
     (rect, rgba)
 }
 
-/// Queues a pointer event; a move right after one with the same buttons replaces it (the game
-/// samples the pointer once per frame and takes a run of moves at once anyway).
-fn queue_pointer(pending: &mut Vec<InputEvent>, x: i32, y: i32, buttons: u8) {
+/// The buttons of the last pointer event of `events`.
+fn last_buttons(events: &[InputEvent]) -> Option<u8> {
+    events.iter().rev().find_map(|e| match *e {
+        InputEvent::Pointer { buttons, .. } => Some(buttons),
+        InputEvent::Key(_)
+        | InputEvent::Repeat(_)
+        | InputEvent::Release(_)
+        | InputEvent::Text(_) => None,
+    })
+}
+
+/// Queues a pointer event. Spec 22 Contract 5: a move replaces the move queued last when both
+/// keep the same buttons (the game samples the pointer once per frame and takes a run of moves
+/// at once anyway): the event queued last is a pointer event with the new one's buttons, and the
+/// pointer had them before it too (the pointer event queued before it, else `handed`, the last
+/// one the engine was handed). A press or a release is never replaced, so it stays where its own
+/// event put it, and the moves after it follow it.
+fn queue_pointer(pending: &mut Vec<InputEvent>, handed: u8, x: i32, y: i32, buttons: u8) {
     let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let buttons = buttons & 3;
     let ev = InputEvent::Pointer {
         x: word(x),
         y: word(y),
-        buttons: buttons & 3,
+        buttons,
     };
-    let same =
-        |e: &InputEvent| matches!(*e, InputEvent::Pointer { buttons: b, .. } if b == buttons & 3);
-    if pending.last().is_some_and(same) {
-        pending.pop();
+    if let Some((InputEvent::Pointer { buttons: last, .. }, before)) = pending.split_last() {
+        let before = last_buttons(before).unwrap_or(handed);
+        if *last == buttons && before == buttons {
+            pending.pop();
+        }
     }
     pending.push(ev);
 }
@@ -1937,18 +1962,22 @@ mod tests {
     use u6_core::geom::{HALF_H, HALF_W};
     use u6_testkit::{Quiet, assert_same};
 
+    /// Spec 22 Contract 5: a run of moves keeping the buttons collapses to its last; a press or
+    /// a release is never replaced, so the move after it, the held move after a press included,
+    /// is queued behind it (until round 3 of spec 22 the press moved with that held move to
+    /// (21, 31), and a release to the hover after it).
     #[test]
     fn pointer_moves_collapse_and_button_changes_queue() {
         let mut q = Vec::new();
         let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
-        queue_pointer(&mut q, 10, 10, 0);
-        queue_pointer(&mut q, 20, 30, 0);
-        queue_pointer(&mut q, 20, 30, 1);
-        queue_pointer(&mut q, 21, 31, 5);
-        queue_pointer(&mut q, 21, 31, 0);
-        assert_eq!(q, [p(20, 30, 0), p(21, 31, 1), p(21, 31, 0)]);
+        queue_pointer(&mut q, 0, 10, 10, 0);
+        queue_pointer(&mut q, 0, 20, 30, 0);
+        queue_pointer(&mut q, 0, 20, 30, 1);
+        queue_pointer(&mut q, 0, 21, 31, 5);
+        queue_pointer(&mut q, 0, 21, 31, 0);
+        assert_eq!(q, [p(20, 30, 0), p(20, 30, 1), p(21, 31, 1), p(21, 31, 0)]);
         q.push(InputEvent::Key(Key::Space));
-        queue_pointer(&mut q, 99_999, -99_999, 2);
+        queue_pointer(&mut q, 0, 99_999, -99_999, 2);
         assert_eq!(
             q.last(),
             Some(&p(i16::MAX, i16::MIN, 2)),
@@ -1959,16 +1988,69 @@ mod tests {
         assert!(game.pending.is_empty(), "no game, nothing queued");
     }
 
+    /// Spec 22 Contract 5 (gpt c-2): a release and the hover after it in one frame (a click
+    /// whose release would otherwise be taken where the hover went), a press and the held move
+    /// after it, and a run of moves after either.
     #[test]
-    fn a_release_queued_again_replaces_the_one_before_it() {
-        // Spec 22 (site/app.js `pointercancel`): a cancelled press's release, queued again at
-        // (-1, -1) at once, is the only release the engine sees.
-        let mut q = Vec::new();
+    fn a_press_or_release_stays_where_its_event_put_it() {
         let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
-        queue_pointer(&mut q, 40, 50, 1);
-        queue_pointer(&mut q, 40, 50, 0);
-        queue_pointer(&mut q, -1, -1, 0);
-        assert_eq!(q, [p(40, 50, 1), p(-1, -1, 0)]);
+        let queued = |handed: u8, events: &[(i32, i32, u8)]| {
+            let mut q = Vec::new();
+            for &(x, y, b) in events {
+                queue_pointer(&mut q, handed, x, y, b);
+            }
+            q
+        };
+        assert_eq!(
+            queued(0, &[(40, 50, 1), (40, 50, 0), (60, 70, 0), (61, 71, 0)]),
+            [p(40, 50, 1), p(40, 50, 0), p(61, 71, 0)],
+            "release then hover: the release kept, the hover's moves one"
+        );
+        assert_eq!(
+            queued(0, &[(40, 50, 1), (45, 55, 1), (46, 56, 1)]),
+            [p(40, 50, 1), p(46, 56, 1)],
+            "press then held moves: the press kept, the held moves one"
+        );
+        assert_eq!(
+            queued(0, &[(1, 1, 0), (2, 2, 0), (3, 3, 0)]),
+            [p(3, 3, 0)],
+            "a run of moves collapses"
+        );
+        assert_eq!(
+            queued(1, &[(1, 1, 1), (2, 2, 1)]),
+            [p(2, 2, 1)],
+            "held moves after a press the engine has collapse"
+        );
+        assert_eq!(
+            queued(1, &[(-1, -1, 0), (40, 50, 0)]),
+            [p(-1, -1, 0), p(40, 50, 0)],
+            "a release of a press the engine has: kept before the hover"
+        );
+    }
+
+    /// Spec 22 Contract 8: the press handed to the engine at one step, its release (the page's
+    /// cancelled press, at (-1, -1)) and a hover over the press's place queued before the next:
+    /// both reach the engine, the release where it was queued.
+    #[test]
+    fn a_release_after_a_handed_press_is_not_moved_by_the_hover_after_it() {
+        let mut game = Game::new();
+        game.engine = Some(Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_, io| async move {
+                io.sleep(u32::MAX).await;
+            },
+        ));
+        game.pointer(40, 50, 1);
+        game.step(16);
+        game.pointer(-1, -1, 0);
+        game.pointer(40, 50, 0);
+        let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
+        assert_eq!(game.pending, [p(-1, -1, 0), p(40, 50, 0)]);
+        game.step(16);
+        game.pointer(41, 51, 0);
+        game.pointer(42, 52, 0);
+        assert_eq!(game.pending, [p(42, 52, 0)], "moves after it collapse");
     }
 
     #[test]

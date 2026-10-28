@@ -56,16 +56,10 @@ fn talk_state(body: &[u8], pack: Option<&Pack>) -> (State, Files) {
 
 /// The conversation with NPC 3 in `s`, run idle until it waits for the player.
 fn waiting(s: State, f: Files) -> Engine {
-    waiting_after(s, f, &[])
-}
-
-/// [`waiting`], `first` queued at its first tick.
-fn waiting_after(s: State, f: Files, first: &[InputEvent]) -> Engine {
     let mut e = Engine::with_game(s, f, |st, io| async move {
         begin(&super::Cx::new(&st, &io), 0, 3).await;
     });
-    e.tick(first, 16);
-    for _ in 1..12 {
+    for _ in 0..12 {
         e.tick(&[], 16);
     }
     assert!(!e.finished(), "waiting for the player");
@@ -616,13 +610,40 @@ fn after_ascii_and_hangul_typed_a_click_types_its_word_alone() {
     let k = k.expect("the keyword shown");
     let key = message_pixel(&probe.state(), k.col + 1, k.row);
     let name = button_pixel(&probe, 1);
+    let prompt = probe.state().ui.text.win().col;
+    // The draft the prefix leaves (gpt b-1): its two cells echoed, and submitted as it is, the
+    // letter and the syllable.
+    let mut draft = waiting(s.clone(), f.clone());
+    draft.tick(&typed("x가"), 16);
+    assert_eq!(
+        draft.state().ui.text.win().col,
+        prompt + 2,
+        "two cells echoed"
+    );
+    draft.tick(&typed("\n"), 16);
+    finish(&mut draft);
+    assert_eq!(draft.state().converse.input, "x가".as_bytes(), "the draft");
     for (xy, word, answer) in [(name, "이름", "Me."), (key, "cat", "Purr.")] {
         let run = |clicks: bool| {
             let mut e = waiting(s.clone(), f.clone());
             e.tick(&[at(xy.0, xy.1, 0)], 16);
             e.tick(&typed("x가"), 16);
+            assert_eq!(
+                e.state().ui.text.win().col,
+                prompt + 2,
+                "the draft before the click"
+            );
             if clicks {
+                talk::INJECTED.with(|k| k.borrow_mut().clear());
                 click(&mut e, xy, POINTER_LEFT);
+                // Spec 22 Contract 5 (opus N1): one Backspace for each cell typed, no more.
+                let back = talk::INJECTED.with(|k| {
+                    let k = k.borrow();
+                    k.iter()
+                        .filter(|&&e| e == InputEvent::Key(Key::Backspace))
+                        .count()
+                });
+                assert_eq!(back, 2, "{word}: two Backspaces put in front of the queue");
             } else {
                 let mut keys = vec![InputEvent::Key(Key::Backspace); 2];
                 keys.extend(typed(&format!("{word}\n")));
@@ -883,17 +904,28 @@ fn a_keyword_the_wrap_broke_types_all_of_it_from_either_part() {
         targets[0].is_some() && targets[0] == targets[1],
         "one target"
     );
-    // Hovered by its rest: both parts inverse (the leftmost pixel of each cell the alert colour).
+    // Hovered by its rest: the spans as before (gpt b-2), and both parts, where they were before
+    // the hover, inverse (the leftmost pixel of each cell the alert colour).
     let mut hovered = waiting(s.clone(), f.clone());
     hovered.tick(&[at(pixels[1].0, pixels[1].1, 0)], 16);
+    assert!(
+        hovered.state().ui.text.keys.spans == st.ui.text.keys.spans,
+        "the hover keeps the spans"
+    );
     let alert = st.ui.tables.colours.alert;
     let w = *st.ui.text.window(WindowId::Messages);
     let fb = hovered.frame();
-    for k in &hovered.state().ui.text.keys.spans {
+    let [first, rest] = [&st.ui.text.keys.spans[0], &st.ui.text.keys.spans[1]];
+    for (part, k) in [("first", first), ("rest", rest)] {
+        assert_eq!(k.cells.len(), 3, "{part}: three cells");
         for i in 0..k.cells.len() {
             let x = (usize::from(w.x + k.col) + i) * CELL;
             let y = usize::from(w.y + k.row) * CELL;
-            assert_eq!(fb.get(x, y), Some(alert), "inverse: row {} cell {i}", k.row);
+            assert_eq!(
+                fb.get(x, y),
+                Some(alert),
+                "inverse: the {part} part, cell {i}"
+            );
         }
     }
     for xy in pixels {
@@ -912,4 +944,271 @@ fn a_keyword_the_wrap_broke_types_all_of_it_from_either_part() {
     assert_eq!((b.row, b.col), (a.row + 1, 0), "on the two sides of a wrap");
     assert_eq!(st.ui.text.keys.word(b.row, 0), b"cd", "two words");
     println!("wrapped keyword: one target, typed whole from either part: pass");
+}
+
+/// Spec 22 Contract 4 (opus M1, gpt a2-1): a keyword on the row of a keyword the wrap breaks is
+/// its own: hovered, only its cells are inverse, and a click types it alone; a click on either
+/// part of the broken one types all of that one.
+#[test]
+fn a_keyword_beside_a_wrapped_one_is_its_own_word() {
+    let body: &[u8] = b"@ab Xxxxxxxx @{cd ef}.\xf7\xefab\xf6Aa.\xb6\xefcd ef\xf6Cc.\xb6\xeeNo.\xb6";
+    let (mut s, f) = talk_state(body, None);
+    s.ui.text.set_wide(true);
+    let e = waiting(s.clone(), f.clone());
+    let st = e.state().clone();
+    let spans = st.ui.text.keys.spans.clone();
+    let r = spans.first().expect("keywords shown").row;
+    let laid: Vec<(u8, u8, Vec<u8>)> = spans.iter().map(|k| (k.row - r, k.col, k.word())).collect();
+    assert_eq!(
+        laid,
+        [
+            (0, 0, b"ab".to_vec()),
+            (0, 12, b"cd".to_vec()),
+            (1, 0, b"ef".to_vec())
+        ],
+        "`ab` and the broken `cd ef` on one row, its rest on the next"
+    );
+    let pixel = |k: &talk::KeySpan| message_pixel(&st, k.col + 1, k.row);
+    let w = *st.ui.text.window(WindowId::Messages);
+    let alert = st.ui.tables.colours.alert;
+    let mut hovered = waiting(s.clone(), f.clone());
+    let (x, y) = pixel(&spans[0]);
+    hovered.tick(&[at(x, y, 0)], 16);
+    let fb = hovered.frame();
+    for (k, inverse) in [(&spans[0], true), (&spans[1], false), (&spans[2], false)] {
+        for i in 0..k.cells.len() {
+            let x = (usize::from(w.x + k.col) + i) * CELL;
+            let y = usize::from(w.y + k.row) * CELL;
+            let paper = if inverse { alert } else { w.bg };
+            assert_eq!(
+                fb.get(x, y),
+                Some(paper),
+                "row {} col {} cell {i}",
+                k.row,
+                k.col
+            );
+        }
+    }
+    for (k, line) in [
+        (&spans[0], "ab\n"),
+        (&spans[1], "cd ef\n"),
+        (&spans[2], "cd ef\n"),
+    ] {
+        let (e, same) = press_against_typing(&s, &f, |_| pixel(k), line);
+        assert!(same, "{line:?}: the state and frame of typing it");
+        assert_eq!(e.state().converse.input, line.trim_end().as_bytes());
+    }
+    println!("a keyword beside a wrapped one: its own word and cells: pass");
+}
+
+/// Spec 22 Contract 4 (opus N2): a braced keyword the wrap breaks twice is one word from each of
+/// its three parts: the middle part takes the first wrap and gives the second.
+#[test]
+fn a_keyword_the_wrap_breaks_twice_is_one_word_from_each_part() {
+    let (mut s, _) = talk_state(BODY, None);
+    s.ui.text.set_wide(true);
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        let line = b"Xxxxxxxxxxxxx @{aa bbbbbbbbbbbbbbb cc}.\n";
+        crate::ui::printf::printf(&st, &io, line, &[]).await;
+    });
+    finish(&mut e);
+    let st = e.state();
+    let keys = &st.ui.text.keys;
+    let parts: Vec<(u8, u8, usize)> = keys
+        .spans
+        .iter()
+        .map(|k| (k.row, k.col, k.cells.len()))
+        .collect();
+    assert_eq!(parts, [(0, 14, 2), (1, 0, 15), (2, 0, 2)], "three parts");
+    for &(row, col, _) in &parts {
+        assert_eq!(
+            keys.word(row, col),
+            b"aa bbbbbbbbbbbbbbb cc",
+            "from row {row}"
+        );
+    }
+    println!("keyword broken twice: one word from each part: pass");
+}
+
+/// Spec 22 Contract 4 (opus N2): a wrap the next row's first cell does not take (a blank cell
+/// there) is spent with that row: a keyword at the start of a later row is no rest.
+#[test]
+fn a_wrap_the_next_row_does_not_take_is_spent_with_that_row() {
+    let (mut s, _) = talk_state(BODY, None);
+    s.ui.text.set_wide(true);
+    let mut e = Engine::with_game(s, Files::default(), |st, io| async move {
+        crate::ui::printf::printf(&st, &io, b"Xxxxxxxxxxx @{big cat}", &[]).await;
+        // The rest the wrap left in the line starts with a blank cell (the assembler puts none
+        // there itself: it drops a space at a wrapped row's start).
+        st.borrow_mut().ui.text.line[0] = 0x20;
+        crate::ui::print::put_raw(&st, &io, -1).await;
+        crate::ui::printf::printf(&st, &io, b"\n@dog\n", &[]).await;
+    });
+    finish(&mut e);
+    let st = e.state();
+    let keys = &st.ui.text.keys;
+    let dog = keys.spans.iter().find(|k| k.word() == b"dog");
+    let dog = dog.expect("`dog` shown");
+    assert_eq!(
+        (dog.row, dog.col),
+        (2, 0),
+        "at a row's start, two rows down"
+    );
+    assert_eq!(dog.joined, None, "no wrap reached it");
+    println!("a wrap not taken is spent with its row: pass");
+}
+
+/// Spec 22 Contract 5 (gpt c-2): in the f7 read each pointer event is hit-tested where its own
+/// event put the pointer: a click whose pointer went off the keyword before the next frame types
+/// it, and a press released off every target (the page's cancel) with the pointer back over the
+/// keyword before the next frame types nothing.
+#[test]
+fn a_release_is_taken_where_its_own_event_put_the_pointer() {
+    let (s, f) = talk_state(KEYED, None);
+    let probe = waiting(s.clone(), f.clone());
+    let k = probe.state().ui.text.keys.spans[0].clone();
+    let key = message_pixel(&probe.state(), k.col + 1, k.row);
+    let mut e = waiting(s.clone(), f.clone());
+    e.tick(&[at(key.0, key.1, 0)], 16);
+    e.tick(
+        &[
+            at(key.0, key.1, POINTER_LEFT),
+            at(key.0, key.1, 0),
+            at(4, 4, 0),
+        ],
+        16,
+    );
+    finish(&mut e);
+    assert_eq!(e.state().converse.input, b"cat", "the click typed the word");
+    let mut e = waiting(s, f);
+    e.tick(&[at(key.0, key.1, 0)], 16);
+    e.tick(
+        &[
+            at(key.0, key.1, POINTER_LEFT),
+            at(-1, -1, 0),
+            at(key.0, key.1, 0),
+        ],
+        16,
+    );
+    idle(&mut e, 8);
+    e.tick(&typed("cat\n"), 16);
+    finish(&mut e);
+    assert_eq!(
+        e.state().converse.input,
+        b"cat",
+        "the line held nothing before"
+    );
+    println!("each pointer event hit-tested where it is: pass");
+}
+
+/// Spec 22 Contract 6 (opus S2): a wrapped keyword hovered by its first part when the line
+/// editor's entry put scrolls that part off the top leaves no cell inverse once the pointer is
+/// off it, and the read's end draws nothing inverse: the frame of the same read never hovered.
+#[test]
+fn a_keyword_whose_hovered_first_part_scrolled_off_leaves_no_cell_inverse() {
+    let (mut s, f) = talk_state(BODY, None);
+    s.ui.text.set_wide(true);
+    // Four cells wide: `abc` and its rest `d`, rows of filler, and a full last row, so the read
+    // starts with a put that scrolls `abc` off.
+    s.ui.text.windows[WindowId::Messages.index()].width = 4;
+    let run = |over: Option<(i16, i16)>| {
+        let mut e = Engine::with_game(s.clone(), f.clone(), |st, io| async move {
+            let text = b"@{abc d}\n1\n2\n3\n4\n5\n6\n7\nwxyz";
+            crate::ui::printf::printf(&st, &io, text, &[]).await;
+            crate::ui::keyread::read_said(&st, &io, 20).await;
+        });
+        let (x, y) = over.unwrap_or((4, 4));
+        e.tick(&[at(x, y, 0)], 16);
+        idle(&mut e, 2);
+        e
+    };
+    let mut plain = run(None);
+    let spans = plain.state().ui.text.keys.spans.clone();
+    assert_eq!(
+        spans
+            .iter()
+            .map(|k| (k.row, k.col, k.word()))
+            .collect::<Vec<_>>(),
+        [(0, 0, b"d".to_vec())],
+        "its first part scrolled off, its rest on the top row"
+    );
+    // The pointer over `abc`'s third cell (row 0 before the scroll; nothing there after it).
+    let mut hovered = run(Some(message_pixel(&plain.state(), 2, 0)));
+    assert!(
+        hovered.state().ui.talk.hot.is_none(),
+        "off every target after the scroll"
+    );
+    assert!(
+        hovered.frame().pixels() == plain.frame().pixels(),
+        "no cell left inverse in the read"
+    );
+    for e in [&mut plain, &mut hovered] {
+        e.tick(&typed("zz\n"), 16);
+        for _ in 0..4 {
+            e.tick(&[], 16);
+        }
+        assert!(e.finished(), "the read ended");
+    }
+    assert!(
+        hovered.frame().pixels() == plain.frame().pixels(),
+        "none after its end"
+    );
+    println!("hovered first part scrolled off: no cell inverse: pass");
+}
+
+/// Spec 22 Contract 5 (gpt b-3): with a draft typed, a press cancelled off every target, a
+/// right click on a button and a click on a keyword that types nothing leave it: Enter alone
+/// then submits the draft.
+#[test]
+fn a_rejected_click_leaves_the_draft_as_it_was() {
+    let body: &[u8] = b"See @{^e}.\xf7\xefjob\xf6Work.\xb6\xefname\xf6Me.\xb6\xeeNo.\xb6";
+    let (mut s, f) = talk_state(body, None);
+    s.ui.text.set_wide(true);
+    let mut e = waiting(s, f);
+    e.tick(&typed("job"), 16);
+    let name = button_pixel(&e, 1);
+    e.tick(&[at(name.0, name.1, 0)], 16);
+    e.tick(&[at(name.0, name.1, POINTER_LEFT), at(-1, -1, 0)], 16);
+    e.tick(&[at(name.0, name.1, 0)], 16);
+    click(&mut e, name, 2);
+    let k = e.state().ui.text.keys.spans.first().cloned();
+    let k = k.expect("the cell shown in the alert colour");
+    let key = message_pixel(&e.state(), k.col, k.row);
+    e.tick(&[at(key.0, key.1, 0)], 16);
+    click(&mut e, key, POINTER_LEFT);
+    idle(&mut e, 4);
+    e.tick(&[InputEvent::Key(Key::Enter)], 16);
+    finish(&mut e);
+    assert_eq!(e.state().converse.input, b"job", "the draft survived");
+    assert!(screen(&e.state()).ends_with("Work."), "its answer");
+    println!("rejected clicks leave the draft: pass");
+}
+
+/// Spec 22 Contract 4 (opus S3): a press on a keyword the scroll then moves up a row (typing past
+/// the last row) moves with it, and its release on the keyword's cells there types the word.
+#[test]
+fn a_press_the_scroll_moves_types_on_its_release_where_the_keyword_went() {
+    let body: &[u8] = b"Hi @cat.\n1\n2\n3\n4\n5\n6\n7\xf7\xefcat\xf6Purr.\xb6\xeeNo.\xb6";
+    let (s, f) = talk_state(body, None);
+    let mut e = waiting(s, f);
+    let (row, col) = {
+        let k = &e.state().ui.text.keys.spans[0];
+        (k.row, k.col)
+    };
+    let down = message_pixel(&e.state(), col + 1, row);
+    e.tick(&[at(down.0, down.1, 0)], 16);
+    e.tick(&[at(down.0, down.1, POINTER_LEFT)], 16);
+    assert_eq!(e.state().ui.talk.pressed, Some(Target::Key { row, col }));
+    e.tick(&typed("abcdefghijklm"), 16);
+    assert_eq!(
+        e.state().ui.talk.pressed,
+        Some(Target::Key { row: row - 1, col }),
+        "the press a row up with its keyword"
+    );
+    let up = message_pixel(&e.state(), col + 1, row - 1);
+    e.tick(&[at(up.0, up.1, POINTER_LEFT), at(up.0, up.1, 0)], 16);
+    finish(&mut e);
+    assert_eq!(e.state().converse.input, b"cat");
+    assert!(screen(&e.state()).ends_with("Purr."), "its answer");
+    println!("a press moved by the scroll types on its release there: pass");
 }
