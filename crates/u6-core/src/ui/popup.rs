@@ -34,8 +34,8 @@ const NAME_ROWS: i32 = 0x10 - 6;
 const INVENTORY_SLOT: usize = 2;
 
 /// The engine's record of the map cells "Go here" asked travel to, in order (spec 21: each given
-/// to [`crate::engine::Engine::travel_to`] as it was chosen, [`Popup::take_go_here`]; the engine
-/// holds it, [`crate::engine::Engine::go_here_asked`]).
+/// to [`crate::engine::Engine::travel_to`] as it was chosen, [`Popup::take_go_here`], unless a
+/// menu was open after that input; the engine holds it, [`crate::engine::Engine::go_here_asked`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Travel {
     pub asked: Vec<(i16, i16)>,
@@ -62,6 +62,19 @@ pub fn go_here_reason(r: crate::actors::travel::Reason) -> Option<Reason> {
 const DOUBLE_CLICK_MS: u64 = 500;
 /// How far from the choosing press (frame pixels, each way) a press is its double click.
 const DOUBLE_CLICK_PX: i16 = 4;
+
+/// Whether the menu is in Korean (spec 17 Words): the installed locale pack's language is
+/// ([`crate::locale::install`] sets `State::locale`). The text layer's `ui.text.language` is not
+/// the pack's: it is the language of the string being printed, which `puts`, `printf`, Look and
+/// the conversation set for one pack string and put back (`ui/printf.rs` `puts`), English at rest.
+/// The one reading of the menu's language: its layout, its words, its note and theft mark and the
+/// check that lays an open menu out again ([`Popup::after_poll`]).
+pub(crate) fn korean(s: &State) -> bool {
+    s.locale
+        .pack
+        .as_ref()
+        .is_some_and(|p| p.language == Language::Korean)
+}
 
 /// The port's words of the menu, by language (spec 17: one table, the page has none).
 fn command_word(code: u16, korean: bool) -> &'static str {
@@ -235,10 +248,11 @@ pub struct Open {
 }
 
 impl Open {
-    /// The menu of `menu` for a press at frame pixel `at`, laid out for `s` (its language, its
-    /// paper, its click regions), kept off the frame rects `hidden` where it can ([`place`]).
+    /// The menu of `menu` for a press at frame pixel `at`, laid out for `s` (its language,
+    /// [`korean`]; its paper, its click regions), kept off the frame rects `hidden` where it can
+    /// ([`place`]).
     pub fn new(menu: &Menu, at: (i16, i16), s: &State, hidden: &[Rect]) -> Open {
-        let korean = s.ui.text.language == Language::Korean;
+        let korean = korean(s);
         let mut rows = Vec::new();
         // The underlined command first: Rest and Combat only there, any other as the first entry
         // that has it.
@@ -507,6 +521,7 @@ impl Open {
             rect: self.rect(),
             text: self.text_rect(),
             hover: self.hover,
+            korean: self.korean,
             rows,
         }
     }
@@ -568,6 +583,8 @@ pub struct View {
     pub text: (i32, i32, i32, i32),
     /// The highlighted row.
     pub hover: usize,
+    /// Laid out and drawn in the Korean words ([`korean`]).
+    pub korean: bool,
     pub rows: Vec<RowView>,
 }
 
@@ -911,7 +928,7 @@ impl Popup {
     }
 
     /// The map cell "Go here" chose since the last call, once (the engine starts spec 21's travel
-    /// there, [`crate::engine::Engine::travel_to`]).
+    /// there, [`crate::engine::Engine::travel_to`], when no menu is open after the input).
     pub fn take_go_here(&mut self) -> Option<(i16, i16)> {
         self.go_here.take()
     }
@@ -1005,16 +1022,12 @@ impl Popup {
     }
 
     /// After the game's poll: a menu whose prompt went (A4-0x7a2c no longer 1) closes; one whose
-    /// language changed is laid out again.
+    /// language changed ([`korean`]: a pack installed or another game's state) is laid out again.
     pub fn after_poll(&mut self, s: &State) {
         if self.open.is_some() && s.main.reading != 1 {
             self.close();
             self.pointer = None;
-        } else if self
-            .open
-            .as_ref()
-            .is_some_and(|o| o.korean != (s.ui.text.language == Language::Korean))
-        {
+        } else if self.open.as_ref().is_some_and(|o| o.korean != korean(s)) {
             self.relay(s);
         }
     }

@@ -995,7 +995,8 @@ impl Engine {
     /// ends the travel when the menu took new input); queued as the player's keys are, but neither
     /// the menu's input nor the player's input to the message history's view (spec 23 Decision 6:
     /// it leaves the view where it is). "Go here" chosen in this input starts its travel after
-    /// that ([`Engine::travel_to`]), so its first step is the next tick's.
+    /// that ([`Engine::travel_to`]), so its first step is the next tick's, unless a menu is open
+    /// after the input (a right press after the choice opened one: no travel runs under a menu).
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
         self.tick_dismissing(input, &[], elapsed_ms);
     }
@@ -1024,10 +1025,13 @@ impl Engine {
         };
         let step = self.travel_press(input, took);
         // Spec 21's merge contract: "Go here" chosen in this input starts travel to its cell
-        // after this tick's press of the travel under way; a cell refused now starts none.
+        // after this tick's press of the travel under way; a cell refused now starts none, and so
+        // does a menu open after the input (opened after the choice: no travel runs under it).
         if let Some(cell) = self.popup.take_go_here() {
             self.go_here.asked.push(cell);
-            let _ = self.travel_to((cell.0 as u16, cell.1 as u16));
+            if self.popup.open().is_none() {
+                let _ = self.travel_to((cell.0 as u16, cell.1 as u16));
+            }
         }
         {
             let mut events = self.io.events.borrow_mut();
@@ -1379,8 +1383,13 @@ impl Engine {
     /// platform's clock: a platform that steps the game faster than 1× gives it, false until
     /// [`MIN_STEP_MS`] of its clock passed since the command prompt last took a press
     /// ([`Engine::prompt_takes`]: the travel's own key is one, as a held key's paced press), so a
-    /// travel walks as a held arrow does. True by default (every prompt; the native window's 1×
-    /// and the headless runs); the stops stay at once either way.
+    /// travel walks as a held arrow does. True by default: at every prompt, as the headless runs
+    /// have it (the native window has speeds but starts no travel). The stops
+    /// [`crate::actors::travel::Travel::next`] tests before the step (the input, the program, a
+    /// Restore, another prompt) stay at once either way; those it reads at the step (`Gone` with no
+    /// leader, `Displaced` by another leader, level or cell, `Arrived`, `Combat`, `Foe`, `Party`,
+    /// `Blocked`) only when one is due, so [`Engine::travel_end`] can come up to [`MIN_STEP_MS`]
+    /// late.
     pub fn set_travel_due(&mut self, due: bool) {
         self.travel_due = due;
     }
@@ -1396,7 +1405,7 @@ impl Engine {
     /// the arrow at the context menu's pointer while the menu takes the pointer), if any: its top
     /// left in frame pixels and its rows of values 0..=3 (0 clear). Port-only use (spec 11
     /// Design 7): a platform that shows the HD frame, composed without it
-    /// ([`Engine::published_frame`]), draws it over that frame itself.
+    /// ([`Engine::screen_frame`]), draws it over that frame itself.
     pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
     }
@@ -1422,8 +1431,9 @@ impl Engine {
         self.src_shows
     }
 
-    /// The last published frame (320×200 indices plus the palette), the context menu over it
-    /// while one is open ([`Engine::screen_frame`]), with the pointer sprite.
+    /// The last published frame (320×200 indices plus the palette) with the message history the
+    /// player scrolled back to and the context menu over it ([`Engine::screen_frame`]), and the
+    /// pointer sprite over those.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
     }
@@ -1444,15 +1454,17 @@ impl Engine {
         self.published_version
     }
 
-    /// Port-only (spec 17 Presentation): the published frame with the context menu drawn over
-    /// it, without the pointer sprite: what [`Engine::frame`] is composed from, and the HD frame.
-    /// The published frame itself while no menu is open.
+    /// Port-only (spec 17 Presentation, spec 23 Decision 3): the published frame with the message
+    /// history the player scrolled back to over it (spec 23: nothing at the live bottom) and the
+    /// context menu over that, without the pointer sprite: what [`Engine::frame`] is composed from,
+    /// and the HD frame. The published frame itself at the live bottom with no menu open.
     pub fn screen_frame(&self) -> &Framebuffer {
         &self.layer
     }
 
     /// Port-only (spec 17): changes whenever [`Engine::screen_frame`] was synced again for a
-    /// change: a publish ([`Engine::published_version`]) or a change of the drawn menu; 0 before.
+    /// change: a publish ([`Engine::published_version`]), a change of the drawn menu or of the
+    /// message history's view (its stamp, [`Engine::view_version`]); 0 before.
     pub fn screen_version(&self) -> u64 {
         self.layer_version
     }
@@ -1580,8 +1592,9 @@ impl Engine {
         &mut self.popup
     }
 
-    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, each given to
-    /// [`Engine::travel_to`] (spec 21) as it was chosen, refused or not.
+    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, each as it was chosen:
+    /// given to [`Engine::travel_to`] (spec 21), refused or not, unless a menu was open after the
+    /// input that chose it (then no travel starts).
     pub fn go_here_asked(&self) -> &crate::ui::popup::Travel {
         &self.go_here
     }

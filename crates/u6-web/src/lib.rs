@@ -893,12 +893,14 @@ impl Game {
     }
 
     /// Spec 17 Presentation: the context menu the engine has open and drawn in the frame, `""`
-    /// while none is: JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover, colours: [paper,
-    /// ink, heading], rows: [{kind: "head"|"entry"|"note", code: code | null, enabled, reason:
-    /// code | null, theft, y}]}`, the box with its frame and the text area in frame pixels, the
-    /// highlighted row's index, the colours its text area is drawn in (0xRRGGBB, the game's
-    /// palette now: the page's tests compare pixels with them and report counts), each row's
-    /// top pixel row; codes only ([`u6_core::Engine::context_menu`]).
+    /// while none is: JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover, korean, colours:
+    /// [paper, ink, heading], rows: [{kind: "head"|"entry"|"note", code: code | null, enabled,
+    /// reason: code | null, theft, y}]}`, the box with its frame and the text area in frame
+    /// pixels, the highlighted row's index, whether it is laid out and drawn in the Korean words
+    /// (the installed pack's language, `u6_core::ui::popup::korean`; no words), the colours its
+    /// text area is drawn in (0xRRGGBB, the game's palette now: the page's tests compare pixels
+    /// with them and report counts), each row's top pixel row; codes only
+    /// ([`u6_core::Engine::context_menu`]).
     pub fn menu_view(&self) -> String {
         let Some(e) = self.engine.as_ref() else {
             return String::new();
@@ -1148,10 +1150,11 @@ impl Game {
     /// frame, after its steps; steps that composed no new frame convert nothing. Before a start
     /// the RGBA frame stays black.
     ///
-    /// With HD on ([`Game::set_hd`]) it then composes the HD frame when the published frame's
-    /// colours or sources changed since the last composition (a move of the pointer sprite alone
-    /// composes nothing, spec 11 Design 7), and takes the pointer the page draws over it
-    /// ([`Game::hd_pointer`]).
+    /// With HD on ([`Game::set_hd`]) it then composes the HD frame when the engine's screen frame
+    /// changed since the last composition ([`Engine::screen_version`]: the published frame, the
+    /// message history the player scrolled back to and the context menu over it; a move of the
+    /// pointer sprite alone composes nothing, spec 11 Design 7), and takes the pointer the page
+    /// draws over it ([`Game::hd_pointer`]).
     pub fn present(&mut self) {
         let version = self.engine.as_ref().map(Engine::frame_version);
         if version.is_some() && version != self.rgba_holds {
@@ -2014,9 +2017,9 @@ impl Game {
         }
     }
 
-    /// With HD on: composes the HD frame from the engine's published frame (black before a start)
-    /// when it does not hold that frame's colours and sources at the HD setting now
-    /// ([`HdView::present`]).
+    /// With HD on: composes the HD frame from the engine's screen frame ([`Engine::screen_frame`]:
+    /// the published frame with the history view and the menu over it; black before a start) when
+    /// it does not hold that frame's version at the HD setting now ([`HdView::present`]).
     fn compose_hd(&mut self) {
         let wrote = self.hd.present(self.engine.as_ref(), &self.blank);
         self.conversions += u64::from(wrote);
@@ -2226,10 +2229,11 @@ fn view_json(v: &u6_core::ui::popup::View, [paper, ink, head]: [u32; 3]) -> Stri
         format!("[{x0},{y0},{},{}]", x1 - x0 + 1, y1 - y0 + 1)
     };
     let mut out = format!(
-        "{{\"rect\":{},\"text\":{},\"hover\":{},\"colours\":[{paper},{ink},{head}],\"rows\":[",
+        "{{\"rect\":{},\"text\":{},\"hover\":{},\"korean\":{},\"colours\":[{paper},{ink},{head}],\"rows\":[",
         wh(v.rect),
         wh(v.text),
-        v.hover
+        v.hover,
+        v.korean
     );
     for (i, r) in v.rows.iter().enumerate() {
         if i > 0 {
@@ -5368,8 +5372,8 @@ mod tests {
     }
 
     /// Spec 17 Presentation: the drawn menu's JSON: the box and the text area as x, y, width,
-    /// height, the highlighted row, each row's kind, code, whether it runs, reason, theft mark and
-    /// top pixel row.
+    /// height, the highlighted row, whether it is in the Korean words (round 5, MUST 4), each
+    /// row's kind, code, whether it runs, reason, theft mark and top pixel row.
     #[test]
     fn the_drawn_menus_json() {
         use u6_core::ui::menu::Reason;
@@ -5385,6 +5389,7 @@ mod tests {
             rect: (35, 51, 100, 84),
             text: (40, 56, 95, 79),
             hover: 1,
+            korean: false,
             rows: vec![
                 row(RowKind::Head, None, None, false, 56),
                 row(RowKind::Entry, Some(0x85), None, true, 64),
@@ -5393,7 +5398,7 @@ mod tests {
         };
         assert_eq!(
             view_json(&v, [0x10_2030, 0x40_5060, 0xff_0001]),
-            r#"{"rect":[35,51,66,34],"text":[40,56,56,24],"hover":1,"colours":[1056816,4214880,16711681],"rows":[{"kind":"head","code":null,"enabled":false,"reason":null,"theft":false,"y":56},{"kind":"entry","code":133,"enabled":true,"reason":null,"theft":true,"y":64},{"kind":"note","code":null,"enabled":false,"reason":null,"theft":false,"y":72}]}"#
+            r#"{"rect":[35,51,66,34],"text":[40,56,56,24],"hover":1,"korean":false,"colours":[1056816,4214880,16711681],"rows":[{"kind":"head","code":null,"enabled":false,"reason":null,"theft":false,"y":56},{"kind":"entry","code":133,"enabled":true,"reason":null,"theft":true,"y":64},{"kind":"note","code":null,"enabled":false,"reason":null,"theft":false,"y":72}]}"#
         );
         let off = View {
             rows: vec![row(
@@ -5406,6 +5411,11 @@ mod tests {
             ..v
         };
         assert!(view_json(&off, [0; 3]).contains(r#""enabled":false,"reason":"far""#));
+        let korean = View {
+            korean: true,
+            ..off
+        };
+        assert!(view_json(&korean, [0; 3]).contains(r#""hover":1,"korean":true,"colours""#));
     }
 
     /// Presses the pointer's `buttons` at (x, y) and lets them go, a step after each.
@@ -5886,58 +5896,124 @@ mod tests {
         );
     }
 
-    /// Spec 21 S3 (K2 r6 opus SHOULD 1, the merge round): at Max, where the page runs up to 40
-    /// steps a frame on one clock, a travel past the castle's fight steps at most once a
-    /// `MIN_STEP_MS` of the page's clock, as a held arrow does: the page clock at each step the
-    /// prompt took is at least 150 ms after the one before, and the travel still arrives.
-    #[test]
-    fn at_max_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock() {
-        use u6_core::actors::travel::{End, reachable};
-        let Some(mut game) = castle_game() else {
-            return;
-        };
-        game.set_speed(0.0);
-        let p = game.leader_position();
-        let to = [(3i16, 0i16), (-3, 0), (0, 3), (0, -3), (2, 2), (-2, -2)]
-            .into_iter()
-            .map(|(dx, dy)| (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy)))
-            .find(|&c| reachable(&game.engine.as_ref().quiet().state(), c).is_none())
-            .quiet();
-        assert!(game.travel_to(to.0, to.1), "a reachable cell starts");
-        let (mut t, mut at, mut steps) = (10_000.0, Vec::new(), 0u32);
+    /// [`page_frame`]s 16 wall ms apart from `t` on (the page's clock given at each) until the
+    /// travel ends (at most 2000 frames): the page clock at each step whose tick the command
+    /// prompt took a press in.
+    fn travel_takes(game: &mut Game, t: &mut f64) -> Vec<f64> {
+        let mut at = Vec::new();
         for _ in 0..2000 {
             if !game.travel_active() {
                 break;
             }
-            t += 16.0;
-            game.set_clock(t);
+            *t += 16.0;
+            game.set_clock(*t);
             let k = game.pace(16.0).min(40);
             for _ in 0..k {
                 let takes = game.prompt_takes();
                 game.step(step_ms());
-                steps += 1;
                 if game.prompt_takes() != takes {
-                    at.push(t);
+                    at.push(*t);
                 }
             }
             game.ran(k);
         }
-        let gaps: Vec<f64> = at.windows(2).map(|w| w[1] - w[0]).collect();
-        let least = gaps.iter().copied().fold(f64::INFINITY, f64::min);
-        println!(
-            "speed 0: {} travel steps over {steps} engine steps, the least gap {least} page ms",
-            at.len()
-        );
-        assert_eq!(
-            game.engine.as_ref().quiet().travel_end(),
-            Some(End::Arrived),
-            "the travel arrived"
-        );
-        assert!(at.len() >= 3, "three or more steps: {}", at.len());
+        at
+    }
+
+    /// Spec 21 S3 (K2 r6 opus SHOULD 1, the merge round; round 5, gpt b SHOULD 1): at every speed,
+    /// 1×, 4×, 8× and Max (where the page runs up to 40 steps a frame on one clock), a travel past
+    /// the castle's fight steps no sooner than a `MIN_STEP_MS` of the page's clock after the press
+    /// the prompt took last, as a held arrow does, the travel's own or the player's: its first step
+    /// after entering clocked mode from headless stepping ([`castle_game`] steps with no clock, so
+    /// its last take, the fight's `b`, stands at the page clock's 0; the clock then starts at 16
+    /// ms), each step after the one before to its arrival, and the first step of a travel started
+    /// right after an ordinary command the prompt took (Space, a pass). The least gap of each
+    /// speed, printed.
+    #[test]
+    fn at_every_speed_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock() {
+        use u6_core::actors::travel::{End, reachable};
+        let min = f64::from(u6_core::engine::MIN_STEP_MS);
+        // Per speed: the first step after entering clocked mode, the least gap between steps, the
+        // first step after the pass (page ms after the take before each).
+        let mut seen = Vec::new();
+        for speed in [1.0, 4.0, 8.0, 0.0] {
+            let Some(mut game) = castle_game() else {
+                return;
+            };
+            game.set_speed(speed);
+            assert!(
+                game.prompt_takes() > 0.0,
+                "the fixture: headless, the prompt took the fight's key"
+            );
+            let p = game.leader_position();
+            let to = [(3i16, 0i16), (-3, 0), (0, 3), (0, -3), (2, 2), (-2, -2)]
+                .into_iter()
+                .map(|(dx, dy)| (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy)))
+                .find(|&c| reachable(&game.engine.as_ref().quiet().state(), c).is_none())
+                .quiet();
+            assert!(game.travel_to(to.0, to.1), "a reachable cell starts");
+            let mut t = 0.0;
+            let at = travel_takes(&mut game, &mut t);
+            assert_eq!(
+                game.engine.as_ref().quiet().travel_end(),
+                Some(End::Arrived),
+                "speed {speed}: the travel arrived"
+            );
+            assert!(
+                at.len() >= 3,
+                "speed {speed}: three or more steps: {}",
+                at.len()
+            );
+            // The ordinary command: Space at the prompt, the step that takes it at page clock
+            // `pass`; a travel back started at once.
+            for _ in 0..200 {
+                if game.at_prompt() {
+                    break;
+                }
+                t += 16.0;
+                page_frame(&mut game, t, 16.0);
+            }
+            assert!(
+                game.at_prompt(),
+                "speed {speed}: the prompt after the arrival"
+            );
+            let takes = game.prompt_takes();
+            assert!(game.key_down("Space", " ", false, t));
+            let mut pass = None;
+            for _ in 0..200 {
+                t += 16.0;
+                page_frame(&mut game, t, 16.0);
+                if game.prompt_takes() != takes {
+                    pass = Some(t);
+                    break;
+                }
+            }
+            let pass = pass.expect("the prompt took the pass");
+            assert!(game.key_up("Space"));
+            assert!(game.travel_to(p[0], p[1]), "speed {speed}: back");
+            let back = travel_takes(&mut game, &mut t);
+            assert!(!back.is_empty(), "speed {speed}: the travel back steps");
+            let least = at
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .fold(f64::INFINITY, f64::min);
+            let (first, after) = (at[0], back[0] - pass);
+            println!(
+                "speed {speed}: entering clocked mode, the first step at page ms {first} (the last \
+                 headless take at 0); {} steps, the least gap {least} page ms; after a pass, the \
+                 first step {after} page ms on",
+                at.len()
+            );
+            seen.push((speed, first, least, after));
+        }
+        let soon: Vec<_> = seen
+            .iter()
+            .filter(|&&(_, first, least, after)| first < min || least < min || after < min)
+            .collect();
         assert!(
-            gaps.iter()
-                .all(|&g| g >= f64::from(u6_core::engine::MIN_STEP_MS)),
-            "each step 150 page ms or more after the one before: {gaps:?}"
+            soon.is_empty(),
+            "a step sooner than 150 page ms after the take before it (speed, after entering \
+             clocked mode, the least gap, after the pass): {soon:?}"
         );
     }
 

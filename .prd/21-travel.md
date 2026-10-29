@@ -188,8 +188,8 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
   press and release, the choosing key's repeats and release. Not tails: the press that opens the menu, a key or a
   press inside it.
 - `travel_press` runs on `through`, the flag a stop when set (a travel under way ends when the menu opens).
-- A chosen "여기로 이동" (`go_here`) calls `Engine::travel_to` after that tick's `travel_press`; the new travel's
-  first press is the next tick's.
+- A chosen "여기로 이동" (`go_here`) calls `Engine::travel_to` after that tick's `travel_press`, when no menu is
+  open after the input (below); the new travel's first press is the next tick's.
 - The travel's step is appended to `through` after the filter and never fed to `popup.input`: an open menu takes Up
   and Down, and M3 counts the game's keys there (M3 `engine.rs:821-822`, per the review).
 - The wiring round's tests, each a travel the menu just started that keeps walking until a later press ends it: a
@@ -201,10 +201,28 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
   `a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu` (a right press opening a menu in the tick after
   the choice ends that travel before its first step; RED: the flag ignored); the real walk:
   `a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to` (the party arrives on the pressed cell).
+  Round 5: each of the three tails against a control of as many ticks with no input (gpt c SHOULD 2: the same cells
+  walked and keys pressed at the same ticks, Go here chosen once, no press or key of the tail the game's); the stop
+  flag without the zip, `a_key_the_menu_takes_ends_a_travel_under_way_by_its_flag` (a menu shown over a travel under
+  way, a key it takes: `Input` before the first step; RED: `travel_press` handed `false`). The stop-flag test feeds
+  the choosing press's release and the right press in one tick, so alone it would pass a build that stopped on the
+  release (gpt d SHOULD 2); the siblings exclude that: `the_tail_of_a_choice_is_not_new_input` (the release is no new
+  input), `…_a_double_click_on_the_entry` (its tail starts with that release alone in its tick, and the travel walks
+  on) and `a_release_or_a_move_does_not_stop_it` (a button-less move is no stop).
 - A press off the frame (the page's `dismiss_menu`, a press that reaches no frame pixel) is never new input but when
   it closes an open menu (spec 17, Layer flow, Close): a travel under way walks on through one with no menu open.
   Harmless as long as an open menu means no travel runs: a menu opens only by new input (a right press at the command
-  prompt), which ends a travel, and "여기로 이동" starts one only as the menu closes.
+  prompt), which ends a travel under way, and "여기로 이동" starts one only as its menu closes and only when no menu
+  is open after the tick's input. One tick can hold the choosing left press, its release and a right press on the map
+  (three events in one page frame): the right press opens a new menu after the choice, and the engine then starts no
+  travel (`Engine::tick_dismissing` reads `Popup::open` after the input, before the poll); the cell is still recorded
+  (`go_here_asked`), and `travel_end` stays as it was, no travel having started. The check is the rule itself, at the
+  one place a travel starts, not a clearing of the chosen cell in the menu's opening (spec 17's Layer flow keeps Open
+  and Choose apart, and the record keeps every choice). Round 4 started that travel under the new menu, and its next
+  quiet tick pressed past it (opus SHOULD 1, round 5): `popup_real`'s
+  `a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel` (one tick of the three events: the menu open, no
+  travel, the cell asked; over quiet ticks and after Escape the party stands; RED on 7ff3213: the travel active under
+  the menu).
 - Names and types: M3 has no `Engine::travel()` (it asks with `go_here_asked`); this unit's accessor is
   `Engine::travel_progress()`. M3's cells are `i16`; `travel_to` takes them `as u16` and masks them with the level's
   mask, so a cell left of x 0 wraps as the map does.
@@ -219,13 +237,24 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
 - S3: one step in 150 ms at the prompt (K2's `MIN_STEP_MS`). Due-ness comes from the platform's clock through a
   setter (`Engine::set_travel_due` into `Polled.due`, true by default, so native, headless and this unit's tests are
   unchanged; the page gives it from its clock and `last_step` at every step once it has a clock, done in M3's merge
-  round, u6-web `at_max_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock`: at Max the page clock at each
-  step the prompt took is at least 150 ms after the one before; RED without the setter, gaps 0 and 16 ms; the
-  hold and the stops while not due: `a_step_not_due_holds_it_and_the_stops_stay_at_once`). `next` tests
-  it in the Hold branch after the stops (`travel.rs:624`, after `:612-623`), never after `pressed.take()` (`:639`):
-  there it would take `pressed` and pop the path with no press (a false blockage, or `Displaced`). `travel_press`
-  still runs every tick while a step is not due, so the stops stay immediate. The travel's key is a prompt take, so
-  it already moves K2's `last_step`: the held walk and the travel share one step time; keep it so.
+  round; since round 5 at every speed, u6-web
+  `at_every_speed_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock`: at 1×, 4×, 8× and Max no step of the
+  travel comes sooner than 150 ms of the page clock after the press the prompt took last, the first after entering
+  clocked mode from headless stepping (the last headless take at the page clock's 0), each after the one before, and
+  the first after an ordinary command (a pass); least gaps, round 5: 1× 640 ms (the castle's turn is longer than the
+  interval), 4×, 8× and Max 160 ms, the first step 160 ms after the headless take at every speed, and after the pass
+  848, 208, 160 and 160 ms; RED without the setter, gaps 0 and 16 ms at Max (round 4), and round 5's three: the
+  setter always true (every part sooner at 8× and Max: the first step 16 ms after the headless take, the least gap 80
+  and 0 ms, after the pass 96 and 16 ms), the page's take time stamped only once it has a clock (the first step 16 ms
+  after the headless take at 4×, 8× and Max) and only while a travel walks (that, and after the pass 96 and 16 ms at
+  8× and Max); the hold and the stops while not due: `a_step_not_due_holds_it_and_the_stops_stay_at_once`, with a
+  press outstanding since round 5). `next` tests it in the Hold branch after the stops (`travel.rs:624`, after
+  `:612-623`), never after `pressed.take()` (`:639`): there it would take `pressed` and pop the path with no press (a
+  false blockage, or `Displaced`). `travel_press` still runs every tick while a step is not due, so the stops tested
+  before the step (the input, the program, a Restore, another prompt) stay immediate; those read at the step (`Gone`
+  with no leader, `Displaced` by another leader, level or cell, `Arrived`, `Combat`, `Foe`, `Party`, `Blocked`) wait
+  for a due step, so the travel's end can come up to 150 ms late (round 5, opus NIT). The travel's key is a prompt
+  take, so it already moves K2's `last_step`: the held walk and the travel share one step time; keep it so.
 - N2: K2's own command-prompt test (K2 `engine.rs:81`) lacks `!line_input` beside `travel::command_prompt`
   (`travel.rs:450`); the merge keeps one predicate for both. Done in K2 round 6 (2026-10-28): the travel reads
   `engine::command_prompt`, and the line editor's flag stays only where it decides a result, in `other_prompt`

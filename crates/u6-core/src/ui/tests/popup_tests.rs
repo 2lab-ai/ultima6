@@ -557,19 +557,39 @@ fn the_engine_draws_the_menu_over_the_published_frame_only() {
     assert_eq!(e.published_version(), published);
 }
 
-/// Spec 17 Presentation, Words: with the Korean language set (as the Korean pack sets it) the
-/// menu is laid out and drawn from the Korean words of the one table: the text area is as wide
-/// as the widest Korean row (Go here's 6 cells and the mark's column, 7, where the English rows
-/// make it 12), and each label's syllables are drawn from the Hangul table (here every syllable a
-/// full block: a cell of ink), its spaces with the game font's space.
+/// A Korean locale pack (it holds no runs: the menu's words are the port's own) installed on `s`
+/// as the page installs one ([`crate::locale::install`], `Game::set_locale` through
+/// [`Engine::install_locale`]), with a Hangul table whose every syllable is a full block (a cell
+/// of ink). The text layer's language stays the English it is at rest.
+fn with_korean_pack(s: &mut State) {
+    let glyphs = vec![[0xff; 8]; u6_formats::font::HANGUL_GLYPHS];
+    let table = u6_formats::font::HangulFont::from_glyphs(glyphs).expect("a table");
+    let pack = crate::locale::Pack::new(
+        crate::ui::Language::Korean,
+        "test/1",
+        crate::locale::fingerprint([]),
+        [],
+    )
+    .expect("an empty Korean pack");
+    crate::locale::install(s, &Files::default(), Rc::new(pack), Some(Rc::new(table)))
+        .expect("installed");
+    assert_eq!(
+        s.ui.text.language,
+        crate::ui::Language::English,
+        "the fixture: the text layer's language as the pack leaves it"
+    );
+}
+
+/// Spec 17 Presentation, Words (round 5, MUST 4: the pack installed as the page installs it, not
+/// the text layer's language set by hand): with the Korean pack installed the menu is laid out
+/// and drawn from the Korean words of the one table: the text area is as wide as the widest
+/// Korean row (Go here's 6 cells and the mark's column, 7, where the English rows make it 12),
+/// and each label's syllables are drawn from the Hangul table (here every syllable a full block:
+/// a cell of ink), its spaces with the game font's space.
 #[test]
 fn korean_words_are_laid_out_and_drawn_with_the_hangul_glyphs() {
     let mut s = prompt();
-    s.ui.text.language = crate::ui::wide::Language::Korean;
-    let glyphs = vec![[0xff; 8]; u6_formats::font::HANGUL_GLYPHS];
-    s.ui.hangul = Some(Rc::new(
-        u6_formats::font::HangulFont::from_glyphs(glyphs).expect("a table"),
-    ));
+    with_korean_pack(&mut s);
     let o = Open::new(&menu(), AT, &s, &[]);
     assert!(o.korean);
     assert_eq!(o.text.2, 7, "the widest Korean row");
@@ -607,6 +627,60 @@ fn korean_words_are_laid_out_and_drawn_with_the_hangul_glyphs() {
     assert_eq!(cell(&fb, 4, 3), space, "its space, the game font's glyph");
     // Look (row 1): three syllables, highlighted (the mark in column 0).
     assert!((1..=3).all(|c| cell(&fb, c, 1) == ink), "Look's syllables");
+}
+
+/// Round 5, MUST 4 (deploy 37 in ko-KR drew English rows under a Korean section name): a game
+/// with the Korean pack installed through the engine as the page does it
+/// ([`Engine::install_locale`], `Game::set_locale`), the text layer's language left at its
+/// default: a menu opened over it is in the Korean words (its view says so), its Go here row
+/// drawn in the frame from the Hangul table, and it stays so over the ticks after (the relayout
+/// check reads the same language). Without the pack, the English words.
+#[test]
+fn a_menu_over_a_game_with_the_korean_pack_is_in_korean() {
+    let s = prompt();
+    let english = Open::new(&menu(), AT, &s, &[]);
+    assert!(!english.korean, "no pack: English");
+    let mut e = checkered_engine(&s);
+    let glyphs = vec![[0xff; 8]; u6_formats::font::HANGUL_GLYPHS];
+    let table = u6_formats::font::HangulFont::from_glyphs(glyphs).expect("a table");
+    let pack = crate::locale::Pack::new(
+        crate::ui::Language::Korean,
+        "test/1",
+        crate::locale::fingerprint([]),
+        [],
+    )
+    .expect("an empty Korean pack");
+    e.install_locale(Rc::new(pack), Some(Rc::new(table)))
+        .expect("installed");
+    assert_eq!(
+        e.state().ui.text.language,
+        crate::ui::Language::English,
+        "the fixture: the text layer's language at rest"
+    );
+    let o = Open::new(&menu(), AT, &e.state(), &[]);
+    e.popup_mut().show(o);
+    for _ in 0..3 {
+        e.tick(&[], 16);
+    }
+    let v = e.context_menu().expect("open");
+    let tx0 = v.text.0;
+    let go = v
+        .rows
+        .iter()
+        .position(|r| r.code == Some(GO_HERE))
+        .expect("Go here");
+    let y = v.rows[go].y;
+    let frame = e.screen_frame();
+    let ink_cell = |col: i32| {
+        (0..64)
+            .all(|k| frame.get((tx0 + col * 8 + k % 8) as usize, (y + k / 8) as usize) == Some(INK))
+    };
+    let syllables: Vec<bool> = (1..=6).map(ink_cell).collect();
+    assert_eq!(
+        (v.korean, v.text.2 - tx0 + 1, syllables),
+        (true, 7 * 8, vec![true, true, true, false, true, true]),
+        "the Korean words: the view, the widest Korean row, Go here's syllables in the frame"
+    );
 }
 
 /// Spec 17 Presentation, Where it is placed: a menu keeps off the frame rects the platform shows
@@ -1715,7 +1789,7 @@ fn an_open_menu_is_laid_out_again_for_new_hidden_rects_and_language() {
     assert!(e.popup_mut().version() > v, "drawn again");
     assert!(e.screen_version() > screen, "at once, no tick");
     let mut korean = s.clone();
-    korean.ui.text.language = crate::ui::wide::Language::Korean;
+    with_korean_pack(&mut korean);
     let mut p = popup_with(&o);
     p.after_poll(&korean);
     let k = p.open().expect("open");

@@ -11,8 +11,9 @@
 //! Each skips without the zip, unless `U6_REQUIRE_ARCHIVE=1`, which fails it instead. The release
 //! receipt is that run, in both builds, writing the frames:
 //! `U6_REQUIRE_ARCHIVE=1 U6_FRAMES_DIR=<a directory outside the repository> scripts/cargo.sh test
-//! -p u6-core --profile gate --lib [--features wide] -- popup_real --nocapture`. The data is read
-//! only.
+//! -p u6-core --profile gate --lib [--features wide] -- popup_real --nocapture`, with
+//! `U6_KO_PACK=<the user's ko.u6lp>` for the Go here receipt to install the user's Korean pack
+//! (else a pack of no runs). The data is read only.
 #![allow(clippy::disallowed_methods)] // the test reads the zip and writes the PNG receipts
 
 use std::path::{Component, Path, PathBuf};
@@ -567,32 +568,117 @@ fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
     println!("{NAME}: ran");
 }
 
+/// Spec 21's merge contract (round 5, opus SHOULD 1): Go here chosen by a left press, its
+/// release and a right press on the map, all in one tick's input: the right press opens a menu
+/// after the choice, and no travel starts under it (the engine starts Go here's travel only when
+/// no menu is open after the input); the cell is recorded as asked all the same. Over quiet ticks
+/// the menu stays open and the party where it stood; Escape closes it and no travel walks. Frames:
+/// `r5-menu-no-walk` (the menu open after those ticks).
+#[test]
+fn a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel() {
+    const NAME: &str = "a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (cell, at) = bare_ground(&p);
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    let stood = p.e.state().leader_position().expect("a leader");
+    let ptr = |(x, y): (i16, i16), buttons: u8| InputEvent::Pointer { x, y, buttons };
+    p.e.tick(
+        &[
+            ptr(go_at, POINTER_LEFT),
+            ptr(go_at, 0),
+            ptr(at, POINTER_RIGHT),
+        ],
+        STEP_MS,
+    );
+    assert!(
+        p.e.context_menu().is_some(),
+        "the right press opened a menu"
+    );
+    assert!(!p.e.travel_active(), "no travel under it");
+    assert_eq!(p.e.go_here_asked().asked, [cell], "Go here asked");
+    p.release(at);
+    let quiet = 30;
+    for _ in 0..quiet {
+        p.e.tick(&[], STEP_MS);
+    }
+    let now = p.e.state().leader_position().expect("a leader");
+    assert!(
+        p.e.context_menu().is_some() && !p.e.travel_active() && now == stood,
+        "over {quiet} quiet ticks: the menu open, no travel, the party where it stood"
+    );
+    p.frames("r5-menu-no-walk");
+    p.e.tick(&[InputEvent::Key(Key::Escape)], STEP_MS);
+    p.e.tick(&[InputEvent::Release(Key::Escape)], STEP_MS);
+    assert!(
+        p.e.context_menu().is_none(),
+        "the fixture: Escape closed it"
+    );
+    for _ in 0..quiet {
+        p.e.tick(&[], STEP_MS);
+    }
+    let after = p.e.state().leader_position().expect("a leader");
+    println!(
+        "the menu open over {quiet} quiet ticks, then closed and {quiet} more: travel steps {}, \
+         Go here asked {}, the leader moved {}",
+        p.e.travel_log().len(),
+        p.e.go_here_asked().asked.len(),
+        u8::from(after != stood)
+    );
+    assert!(
+        !p.e.travel_active() && p.e.travel_log().is_empty() && after == stood,
+        "closed: no travel walks, the party where it stood"
+    );
+    println!("{NAME}: ran");
+}
+
 /// Spec 17 Acceptance 9 with spec 21 (the merge round): a right press on bare ground (a view
 /// cell whose menu is the tile's Look alone, two or more cells from the leader, Go here able to
 /// run: the travel's own `reachable`) opens the menu with Look and Go here last; chosen by a left
 /// press on its row it starts the real travel to the cell (`Engine::travel_to`): the menu closed,
 /// the party walks there, a key a step, and the travel ends on it (`Arrived`), the prompt up.
-/// The menu in the port's Korean words ("여기로 이동"), as the Korean pack sets the language,
-/// drawn from the site's Hangul table (the game's own text stays the English it is without the
-/// pack). Frames: `r4-menu-ground` (the menu over bare ground), `r4-go-here-walking` (the party on
-/// its way, at the first prompt after its first step).
+/// The menu in the port's Korean words ("여기로 이동"), the Korean pack installed as the page
+/// installs it (`Engine::install_locale`, `Game::set_locale`; round 5, MUST 4: rounds 1 to 4 set
+/// the text layer's language by hand, which no pack does), with the site's Hangul table, the text
+/// layer's language left at its default: the user's own pack when `U6_KO_PACK` names its file
+/// (outside the repository, which holds none), else a pack of no runs (the menu's words are the
+/// port's own, so it shows them the same). Frames: `r4-menu-ground` (the menu over bare ground),
+/// `r4-go-here-walking` (the party on its way, at the first prompt after its first step).
 #[test]
 fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
     const NAME: &str = "a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to";
     let Some(files) = archive(NAME) else { return };
     let mut p = Play::boot(&files);
     p.beside_a_door();
-    {
-        let table = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../site/fonts/galmuri7-hangul.bin"
-        ));
-        let mut s = p.st.borrow_mut();
-        s.ui.text.language = crate::ui::wide::Language::Korean;
-        s.ui.hangul = Some(Rc::new(
-            u6_formats::font::HangulFont::parse(table).expect("the site's Hangul table"),
-        ));
-    }
+    let table = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../site/fonts/galmuri7-hangul.bin"
+    ));
+    let hangul = u6_formats::font::HangulFont::parse(table).expect("the site's Hangul table");
+    let (pack, whose) = match std::env::var_os("U6_KO_PACK") {
+        Some(path) => {
+            let bytes = std::fs::read(&path).expect("the pack U6_KO_PACK names");
+            let pack = crate::locale::Pack::parse(&bytes).expect("a pack");
+            (pack, "the user's")
+        }
+        None => {
+            let base = crate::locale::fingerprint([]);
+            let pack = crate::locale::Pack::new(crate::ui::Language::Korean, "test/1", base, [])
+                .expect("a pack of no runs");
+            (pack, "one of no runs")
+        }
+    };
+    assert_eq!(pack.language, crate::ui::Language::Korean, "a Korean pack");
+    p.e.install_locale(Rc::new(pack), Some(Rc::new(hangul)))
+        .expect("the pack checks against the user's files");
+    assert_eq!(
+        p.e.state().ui.text.language,
+        crate::ui::Language::English,
+        "the fixture: the text layer's language as the pack leaves it"
+    );
+    println!("the Korean pack installed: {whose}");
     let leader = p.e.state().leader_position().expect("a leader");
     let (lx, ly) = (leader.x as i16, leader.y as i16);
     let (cell, at) = bare_ground(&p);
@@ -615,9 +701,28 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
         "Go here can run (the travel's reachable)"
     );
     let text = drawn_in_the_frame(&p, &v);
+    // The cells of the text area drawn from the Hangul table: their glyph sources name a syllable.
+    let syllables = {
+        let f = p.e.screen_frame();
+        let (tx0, ty0, tx1, ty1) = v.text;
+        let hangul = |x: i32, y: i32| {
+            f.src_at(x as usize, y as usize).is_some_and(|s| {
+                s.kind == u6_render::Kind::Glyph && (0xac00..=0xd7a3).contains(&s.id)
+            })
+        };
+        (ty0..=ty1)
+            .step_by(8)
+            .flat_map(|y| (tx0..=tx1).step_by(8).map(move |x| (x, y)))
+            .filter(|&(x, y)| (0..64).any(|k| hangul(x + k % 8, y + k / 8)))
+            .count()
+    };
     println!(
-        "ground menu: {} rows, text area {text} pixels",
+        "ground menu: {} rows, text area {text} pixels, {syllables} cells of Hangul syllables",
         v.rows.len()
+    );
+    assert!(
+        v.korean && syllables > 0,
+        "the menu in the Korean words, drawn from the Hangul table"
     );
     p.frames("r4-menu-ground");
     let steps = (lx - cell.0).abs().max((ly - cell.1).abs());

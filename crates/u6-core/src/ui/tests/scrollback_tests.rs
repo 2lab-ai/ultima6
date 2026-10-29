@@ -647,6 +647,42 @@ fn a_press_inside_the_window_while_scrolled_back_returns_to_live_and_is_not_the_
     assert_eq!(presses(&log.borrow()), [0, POINTER_RIGHT, 0]);
 }
 
+/// Round 5 (opus SHOULD 3): with the context menu on, the presses it counts as the game's
+/// ([`Engine::game_presses`]) are those the view passed on: a left press in the window off the bar
+/// while scrolled back, the history's, counts none; the same press at the live bottom counts one.
+#[test]
+fn the_menus_count_of_the_games_presses_leaves_out_a_press_the_history_takes() {
+    let (mut e, log) = recorded();
+    e.set_context_menu(true);
+    assert!(e.wheel(IN.0, IN.1, -3));
+    let before = e.game_presses();
+    let mut counts = Vec::new();
+    for ev in [
+        at(IN, POINTER_LEFT),
+        at(IN, 0),
+        at(IN, POINTER_LEFT),
+        at(IN, 0),
+    ] {
+        e.tick(&[ev], 16);
+        counts.push(e.game_presses() - before);
+    }
+    assert_eq!(
+        e.history_offset(),
+        0,
+        "the fixture: live after the first press"
+    );
+    assert_eq!(
+        counts,
+        [0, 0, 1, 1],
+        "the history's press and its release count none; at the live bottom the press counts one"
+    );
+    assert_eq!(
+        presses(&log.borrow()),
+        [0, POINTER_LEFT, 0],
+        "the fixture: as the game took them"
+    );
+}
+
 #[test]
 fn the_wheel_over_anything_but_the_window_does_nothing() {
     let mut e = engine(game_state(), 25, 0, false);
@@ -1795,8 +1831,8 @@ fn the_view_adds_only_what_the_history_no_longer_holds() {
 /// the map, the screen frame shows the kept lines in the window and the menu's box, and outside
 /// both it is the published frame; the HD frame (2×, no pack: a pixel is a 2 × 2 block of its
 /// colour) shows both, every pixel of the window and of the box; a wheel with the menu open
-/// composes the HD frame again (the view's stamp in its key) with the menu still over it; the
-/// menu closed, the HD frame shows the history alone.
+/// composes the HD frame again (the screen frame's version, its one key, moved with the view)
+/// with the menu still over it; the menu closed, the HD frame shows the history alone.
 #[test]
 fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
     use crate::hd::HdView;
@@ -1905,7 +1941,7 @@ fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
     assert!(e.context_menu().is_some(), "the menu still open");
     assert!(
         hd.present(Some(&e), &Framebuffer::new()),
-        "the wheel with the menu open: composed again"
+        "the wheel with the menu open: the screen version moved, composed again"
     );
     screen_shows(&e, 4);
     assert_eq!(hd_is_screen(&e, &hd), None, "4 back: the HD frame");
@@ -1923,4 +1959,130 @@ fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
         "the box gone"
     );
     assert_eq!(hd_is_screen(&e, &hd), None, "closed: the HD frame");
+}
+
+/// Round 5 (gpt d SHOULD 1): the one composition's order where the layers overlap. Scrolled back
+/// with the menu open over the message window and the pointer sprite over the menu (over the
+/// window too), the screen frame is the published frame with the history's window over it and
+/// the menu's box over that, and the shown frame is the screen frame with the sprite's pixels over
+/// it. The expected frames are built here from their parts in that order: the history alone (the
+/// screen frame scrolled back before the menu opens), the menu alone (drawn as it is open on a
+/// copy of the published frame) and the sprite's own shape.
+#[test]
+fn where_the_layers_overlap_the_menu_is_over_the_history_and_the_sprite_over_both() {
+    use crate::ui::menu::{Entry, Kind, LOOK, Menu, Section};
+    use crate::ui::pointer::{Shape, SpriteFrame};
+    let n = 30u16;
+    // The command read up (A4-0x7a2c), which an open menu needs to stay open; a pointer shape of
+    // 16 × 4 pixels of value 1, shown.
+    let mut s = game_state();
+    s.main.reading = 1;
+    let shape = Shape {
+        dx: 0,
+        dy: 0,
+        rows: vec![[1; 16]; 4],
+    };
+    s.ui.pointer.tables.shapes = vec![shape; 10];
+    s.ui.pointer.shown = true;
+    let mut e = Engine::with_game(s, Files::default(), talker(n, 0));
+    e.set_context_menu(true);
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    assert!(e.wheel(IN.0, IN.1, -3));
+    let history = e.screen_frame().clone();
+    let published = e.published_frame().clone();
+    let menu = Menu {
+        kind: Kind::Map,
+        cell: Some((1, 1)),
+        underlined: None,
+        sections: vec![Section {
+            object: -1,
+            kind: None,
+            name: String::new(),
+            entries: vec![Entry {
+                code: LOOK,
+                reason: None,
+                theft: false,
+            }],
+        }],
+        go_here: None,
+    };
+    let press = (X.start as i16 + 8, Y.start as i16 + 4);
+    let open = crate::ui::popup::Open::new(&menu, press, &e.state(), &[]);
+    let (x0, y0, x1, y1) = open.rect();
+    let (tx0, ty0, ..) = open.text_rect();
+    e.popup_mut().show(open);
+    // The pointer in the menu's text area, the sprite's 16 × 4 pixels there.
+    let pointer = ((tx0 + 4) as i16, (ty0 + 2) as i16);
+    e.tick(&[at(pointer, 0)], 16);
+    assert_eq!(e.history_offset(), 3, "still scrolled back");
+    assert!(e.context_menu().is_some(), "the menu open");
+    let mut alone = published.clone();
+    let now = e.popup_mut().open().expect("open").clone();
+    now.draw(&mut alone, &e.state());
+    let in_box =
+        |x: usize, y: usize| (x0..=x1).contains(&(x as i32)) && (y0..=y1).contains(&(y as i32));
+    let in_window = |x: usize, y: usize| X.contains(&x) && Y.contains(&y);
+    let (px, py) = (pointer.0 as usize, pointer.1 as usize);
+    let in_sprite = |x: usize, y: usize| (px..px + 16).contains(&x) && (py..py + 4).contains(&y);
+    let ink = SpriteFrame::colour_index(1);
+    // The fixture: the box over the window where the history shows something else than the menu,
+    // and the sprite inside the box and the window, its colour not the menu's there.
+    let (mut covered, mut hidden) = (0, 0);
+    for y in 0..u6_render::HEIGHT {
+        for x in 0..u6_render::WIDTH {
+            if in_box(x, y) && in_window(x, y) {
+                covered += 1;
+                hidden += usize::from(history.get(x, y) != alone.get(x, y));
+            }
+            if in_sprite(x, y) {
+                assert!(
+                    in_box(x, y) && in_window(x, y),
+                    "the sprite over the menu and the window"
+                );
+                assert_ne!(alone.get(x, y), ink, "the sprite's colour not the menu's");
+            }
+        }
+    }
+    assert!(
+        covered > 0 && hidden * 2 > covered,
+        "the box over the window: {hidden} of {covered} pixels differ from the history"
+    );
+    // Built in order: the published frame, the window of the history, the box of the menu, the
+    // sprite.
+    let mut want = published.clone();
+    for y in 0..u6_render::HEIGHT {
+        for x in 0..u6_render::WIDTH {
+            let v = if in_box(x, y) {
+                alone.get(x, y)
+            } else if in_window(x, y) {
+                history.get(x, y)
+            } else {
+                published.get(x, y)
+            };
+            want.set(x, y, v.expect("a frame pixel"));
+        }
+    }
+    let mut shown = want.clone();
+    for y in py..py + 4 {
+        for x in px..px + 16 {
+            shown.set(x, y, ink.expect("the sprite's colour"));
+        }
+    }
+    let first_off = |got: &Framebuffer, want: &Framebuffer| {
+        (0..u6_render::HEIGHT)
+            .flat_map(|y| (0..u6_render::WIDTH).map(move |x| (x, y)))
+            .find(|&(x, y)| got.get(x, y) != want.get(x, y))
+    };
+    assert_eq!(
+        first_off(e.screen_frame(), &want),
+        None,
+        "the screen frame: published, history, menu"
+    );
+    assert_eq!(
+        first_off(e.frame(), &shown),
+        None,
+        "the shown frame: the sprite over all"
+    );
 }
