@@ -104,9 +104,10 @@ impl Files {
     }
 
     /// `name` looked up in layer `layer` alone: its stored path and bytes (a platform reading
-    /// back the files it supplied, under any layers added on top).
+    /// back the files it supplied, under any layers added on top). Of layers of one name, the
+    /// topmost, as [`Files::get`].
     pub fn get_in(&self, layer: &str, name: &str) -> Option<(&str, &[u8])> {
-        let l = self.layers.iter().find(|l| l.name == layer)?;
+        let l = self.layers.iter().rev().find(|l| l.name == layer)?;
         let key = l.resolve(name)?;
         Some((key, l.files.get(key)?.as_slice()))
     }
@@ -198,6 +199,19 @@ mod tests {
         assert_eq!(
             (f.layer_len("base"), f.layer_len("save"), f.layer_len("x")),
             (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn of_two_layers_of_one_name_the_topmost_is_read() {
+        let mut f = Files::new(map(&[("U6/objlist", b"new")]));
+        f.overlay("save", map(&[("savegame/objlist", b"first")]));
+        f.overlay("save", map(&[("savegame/objlist", b"second")]));
+        assert_eq!(f.get("savegame/objlist"), Some(&b"second"[..]), "get");
+        assert_eq!(
+            f.get_in("save", "savegame/objlist"),
+            Some(("savegame/objlist", &b"second"[..])),
+            "get_in: the topmost layer of that name, as get"
         );
     }
 

@@ -550,9 +550,10 @@ fn seen_round(run: &mut Run) -> bool {
 /// Restore (control-R). Before any Save of the session a Restore reads the platform's file: the
 /// stored save's own brings back the memory it holds, not the one the session gathered since the
 /// boot. With none, or one it refuses (truncated), the memory the session gathered is forgotten
-/// whole, as before C3, and the two Restores leave the same state and, with the switch on again,
-/// the same frames: a cell seen on the way shows out of sight where the save stands
-/// ([`seen_round`]), so a memory left over would show there.
+/// whole, as before C3: it held cells, one of them out of sight where the save stands
+/// ([`seen_round`]), and after the Restore it holds none (`cells() == 0`, which proves the
+/// forget). The no-file and the refused-file Restore then agree: the same state and, with the
+/// switch on again, the same frames.
 #[test]
 fn real_a_restore_before_any_save_reads_the_platforms_sight_file() {
     let Some(files) = archive("real_a_restore_before_any_save_reads_the_platforms_sight_file")

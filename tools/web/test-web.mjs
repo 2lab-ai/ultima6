@@ -12889,12 +12889,25 @@ const storedSights = (page) => page.evaluate(() => new Promise((done, fail) => {
   };
 }));
 
-test('remembered sight (spec 18, saved with the game): a dropped savegame folder holding the save\'s own sight file and, last, one of exactly the largest size the page takes: that last one alone is read and stored, the save\'s own left unread (synthetic sight bytes: the last within the limit is the one taken, whether or not it reads as a memory, since neither the page nor the engine reads a candidate\'s bytes to choose it)', async (env) => {
+test('remembered sight (spec 18, saved with the game): a dropped savegame folder holding the save\'s own sight file and, last, one of exactly the largest size the page takes: that last one alone is read and stored, the save\'s own left unread (synthetic sight bytes: the last within the limit is the one taken, whether or not it reads as a memory, since neither the page nor the engine reads a candidate\'s bytes to choose it); load state refuses it (malformed), so the game starts from the folder with nothing remembered out of sight where the save stands, where the save\'s own memory showed what the room\'s door showed', async (env) => {
   const { page } = await h.openPage(env, { memory: 'on' });
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
-  await walkAndSave(page);
+  await walkSouth(page, 10);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  const at = (await atPrompt(page)).leader;
+  await page.focus('#screen');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  // The control: where the save stands, the memory its Save wrote shows out of sight.
+  const shown = (await memoryShown(page)).flagged;
+  assert.ok(shown >= 256, 'the save\'s own memory: a cell\'s worth of remembered pixels where it stands');
   const folder = asFolder(await h.savedFiles(page));
   const own = folder.find(({ name }) => isSight(name));
   assert.ok(own && own.bytes.length < SIGHT_MAX, 'the Save stored its own sight file, under the limit');
@@ -12906,8 +12919,11 @@ test('remembered sight (spec 18, saved with the game): a dropped savegame folder
   const s = await started(page, FILES);
   assert.deepEqual((await readSince(page, from)).filter(isSight), [last.name], 'the last sight file, at the limit, read alone');
   assert.ok(!s.status.includes('Left out'), 'nothing left out');
+  assert.equal((await atPrompt(page)).leader, at, 'the folder resumes where it was saved');
+  const after = (await memoryShown(page)).flagged;
+  assert.equal(after, 0, 'that one refused (malformed): nothing remembered out of sight where the save stands');
   assert.deepEqual(await storedSights(page), [{ length: SIGHT_MAX, zeros: true }], 'the stored save holds that one alone');
-  console.log(`  receipt: spec 18 sight file at the limit: the last of 2 sight files, ${SIGHT_MAX} bytes, read and stored alone`);
+  console.log(`  receipt: spec 18 sight file at the limit: the last of 2 sight files, ${SIGHT_MAX} bytes, read and stored alone; remembered pixels where the save stands: ${shown} with its own memory, ${after} after the start`);
 }, { needs: h.haveHfes });
 
 // --- the message history (spec 23) --------------------------------------------------------------
