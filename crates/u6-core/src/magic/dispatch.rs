@@ -43,7 +43,7 @@ async fn timed(state: &RefCell<State>, io: &Io, spell: u16, timer: usize, value:
 /// A newline, the spell's case, then the view flags (0x109e74) and the view refresh (0x102ef0).
 /// Spell numbers without a spell (circle × 16 + 10..15, 0x7a..0x7f) do nothing.
 pub async fn dispatch(state: &RefCell<State>, io: &Io, spell: u16, chosen: bool) {
-    let nl = game_string(io, MSG_NEWLINE);
+    let nl = game_string(io, crate::string_registry::text!(MSG_NEWLINE));
     printf(state, io, &nl, &[]).await;
     let pre = i16::from(chosen);
     let any = |tile| Target {

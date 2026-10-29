@@ -50,6 +50,13 @@
 // shows the map cells in view that were seen and are out of sight now as they last looked, their
 // ground and still objects in dark grey (Game.set_sight_memory), where the original shows black.
 //
+// Smooth motion (spec 20; on unless `u6.motion` is kept 'off'): in each game the page starts the
+// leader's step and every object that moved one cell slide there over 18 PAL frames of the game's
+// clock (Game.set_motion), where the original jumps; while a slide runs the page presents and
+// draws every display frame, with no step too (Game.sliding). With HD off the game's RGBA frame
+// shows the slide; with HD on the HD frame stays the game's and the page draws the slide's
+// layers over its map (`drawSlide`).
+//
 // The HD layout (spec 10; Settings' "Screen layout", kept in localStorage, HD 16:9 unless
 // Original 16:10 was chosen): with HD on and that layout, the canvas is 1280 × 720 in a 16:9 box
 // (at most 1280 CSS px wide on the page) and the compositor runs at S 4. The ×4 frame is kept on
@@ -228,6 +235,7 @@ import {
   storeLocalePack, storePack, storeSaves, storeVoicePack,
 } from './store.js';
 import { TEXT } from './i18n.js';
+import { probeWideScale } from './wide-scale.mjs';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
 import { createVoices } from './voice/player.js';
 import { PACK_FORMAT, PACK_FORMAT_2, readPack } from './voice/profile.js';
@@ -249,6 +257,7 @@ const statusLine = document.getElementById('status');
 const badge = document.getElementById('speed-badge');
 const slower = document.getElementById('slower');
 const faster = document.getElementById('faster');
+const turnsChoice = document.getElementById('turns');
 const speedLabel = document.getElementById('speed-label');
 const speedReached = document.getElementById('speed-reached');
 const behindMark = document.getElementById('behind');
@@ -1245,6 +1254,22 @@ function storedSpeed() {
   }
 }
 
+const TURNS_KEY = 'u6.turns';
+const TURN_FACTORS = ['1', '2', '4', '0'];
+function storedTurns() {
+  let kept = null;
+  try { kept = localStorage.getItem(TURNS_KEY); } catch { /* Default original. */ }
+  return TURN_FACTORS.includes(kept) ? Number(kept) : 1;
+}
+let turnFactor = storedTurns();
+turnsChoice.value = String(turnFactor);
+function changeTurns() {
+  turnFactor = TURN_FACTORS.includes(turnsChoice.value) ? Number(turnsChoice.value) : 1;
+  if (game && !crashed) game.set_turn_speed(turnFactor);
+  try { localStorage.setItem(TURNS_KEY, String(turnFactor)); } catch { /* This visit only. */ }
+  canvas.focus();
+}
+
 let speedAt = storedSpeed(); // the chosen speed, an index into SPEEDS
 let badgeRecent = false; // the speed changed less than BADGE_MS ago
 let badgeTimer = 0;
@@ -1263,6 +1288,7 @@ function resetReach() {
 // now: the time its start took (the synchronous intake, with no frame) is not owed to it.
 function paceGame(g) {
   g.set_speed(SPEEDS[speedAt]);
+  g.set_turn_speed(turnFactor);
   last = performance.now();
   dropped = 0;
   droppedAt = -Infinity;
@@ -1385,7 +1411,7 @@ function draw() {
   if (WIDE && view === REGIONS_VIEW && pollPanel()) wideStale = true;
   const pointer = hd ? game.hd_pointer() : null;
   const pointerMoved = hd && drawnHd && game === drawnGame && pointer[4] !== pointerShown?.[4];
-  if (game === drawnGame && version === drawnVersion && view === shownView && !wideStale && !pointerMoved) return;
+  if (game === drawnGame && version === drawnVersion && view === shownView && !wideStale && !pointerMoved && !slideChanged()) return;
   if (WIDE) {
     composeWide(view, hd, version, pointer);
     return;
@@ -1426,7 +1452,8 @@ function draw() {
   const before = over ? pointerShown : null;
   const shown = takePointer(pointer);
   const moved = before === null || before[4] !== shown[4];
-  if (over && rect.length === 0 && !moved) return;
+  const slid = slideChanged() || slideOn === canvas;
+  if (over && rect.length === 0 && !moved && !slid) return;
   const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
   const image = new ImageData(pixels, w, h);
   if (over) {
@@ -1434,10 +1461,109 @@ function draw() {
     // The pointer moved: the HD frame put back under its old and new boxes.
     if (moved) for (const box of [before, shown].map((p) => scaledBox(p, s)).filter(Boolean)) ctx.putImageData(image, 0, 0, ...box);
   } else ctx.putImageData(image, 0, 0);
+  // Spec 20 Design 5: the slide over the map (the puts above can cover part of it), or the map put
+  // back after it.
+  if (slid) drawSlide(canvas, s, () => image);
   // Then the pointer, whole: at a whole scale each canvas pixel takes one of its pixels, so
   // drawing it again over itself changes nothing.
   [pointerShown, pointerOf] = [shown, game];
   paintPointer(ctx, [0, 0, game.width(), game.height()], [0, 0, w, h], [0, 0, w, h]);
+}
+
+// --- smooth motion's HD layers (spec 20 Design 5) -------------------------------------------
+// With HD on the game composes a slide's layers once a publication (Game.slide_layers_version:
+// the static map with a cell round it, the cursor and border, each mover, what covers each) and
+// places them each display frame (Game.slide: layer, x, y in frame pixels, in draw order); the
+// page draws them over the map of the HD frame it holds (the canvas, the ×4 frame or Wide's frame),
+// clipped to the shown map, and once the slide is over puts the HD frame's map back. The static
+// and the frame layers come as their changes from those the page holds (Game.slide_layer_patch:
+// moved with the camera, then the blocks that differ), which the page applies and reports
+// (Game.slide_applied); a page that does not hold them asks for them whole (Game.slide_reset).
+
+let slideLayers = null; // { game, version, s, canvases }: the layers as canvases
+let slideOn = null; // the canvas whose map shows a slide drawn over it, or null
+let slideSeen = -1; // the Game.slide_version() drawn last
+let slideGame = null; // its game
+
+// Whether the slide changed since the last draw drew it.
+const slideChanged = () => game.hd_on() && (slideGame !== game || game.slide_version() !== slideSeen);
+
+// Layer `i` of the game's slide at `s` device pixels per frame pixel into canvas `layer` (whole, or
+// its changes over what it holds); false when it holds no layer the changes apply to.
+function takeLayer(layer, i, s, holds) {
+  const [w, h] = game.slide_layer_size(i);
+  const patch = game.slide_layer_patch(i);
+  // Re-create the views every time: wasm memory growth detaches old buffers.
+  const view = (ptr, len) => new Uint8ClampedArray(wasm.memory.buffer, ptr, len);
+  if (patch.length === 0) {
+    // A put replaces every pixel: a canvas of the size already is not made again.
+    if (layer.width !== w * s || layer.height !== h * s) [layer.width, layer.height] = [w * s, h * s];
+    const pixels = view(game.slide_layer_ptr(i), game.slide_layer_len(i));
+    if (pixels.length === w * s * h * s * 4) layer.getContext('2d').putImageData(new ImageData(pixels, w * s, h * s), 0, 0);
+    else layer.getContext('2d').clearRect(0, 0, w * s, h * s);
+    return true;
+  }
+  if (!holds || layer.width !== w * s || layer.height !== h * s) return false;
+  const ctx = layer.getContext('2d');
+  const [dx, dy, n] = patch;
+  if (dx !== 0 || dy !== 0) {
+    // Moved in place: a canvas drawn over itself is drawn from a copy of itself; `copy` leaves
+    // nothing of the old pixels outside the moved ones (the changes cover those).
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(layer, dx * s, dy * s);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  for (let k = 0; k < n; k += 1) {
+    const [x, y, rw, rh] = patch.slice(3 + 4 * k, 7 + 4 * k);
+    const pixels = view(game.slide_patch_ptr(i, k), game.slide_patch_len(i, k));
+    if (pixels.length === rw * s * rh * s * 4) ctx.putImageData(new ImageData(pixels, rw * s, rh * s), x * s, y * s);
+  }
+  return true;
+}
+
+// Draws the game's slide over canvas `c`, which holds its HD frame at `s` device pixels per frame
+// pixel (`image()`: that frame as ImageData); with no slide, puts the HD frame's map back where one
+// was drawn. Returns the rect of `c` it drew (x, y, width, height), or null.
+function drawSlide(c, s, image) {
+  [slideSeen, slideGame] = [game.slide_version(), game];
+  const placed = game.slide();
+  const [mx, my, mw, mh] = Array.from(shown_map(), (v) => v * s);
+  const ctx = c.getContext('2d');
+  const back = () => {
+    if (slideOn !== c) return null;
+    slideOn = null;
+    ctx.putImageData(image(), 0, 0, mx, my, mw, mh);
+    return [mx, my, mw, mh];
+  };
+  if (placed.length === 0) return back();
+  const version = game.slide_layers_version();
+  if (slideLayers?.game !== game || slideLayers.version !== version || slideLayers.s !== s) {
+    const kept = slideLayers?.game === game && slideLayers.s === s ? slideLayers.canvases : [];
+    const holds = kept.length > 0 && slideLayers.version === game.slide_layers_base();
+    const canvases = [];
+    for (let i = 0; i < game.slide_layer_count(); i += 1) {
+      const layer = kept[i] ?? document.createElement('canvas');
+      if (!takeLayer(layer, i, s, holds)) {
+        // The changes apply to layers this page does not hold: the next present makes them whole.
+        game.slide_reset();
+        slideLayers = null;
+        return back();
+      }
+      canvases.push(layer);
+    }
+    for (const old of kept.slice(canvases.length)) [old.width, old.height] = [0, 0];
+    slideLayers = { game, version, s, canvases };
+    game.slide_applied(version);
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(mx, my, mw, mh);
+  ctx.clip();
+  ctx.imageSmoothingEnabled = false;
+  for (let k = 0; k + 2 < placed.length; k += 3) ctx.drawImage(slideLayers.canvases[placed[k]], placed[k + 1] * s, placed[k + 2] * s);
+  ctx.restore();
+  slideOn = c;
+  return [mx, my, mw, mh];
 }
 
 // --- HD ------------------------------------------------------------------------------------
@@ -1456,12 +1582,22 @@ function storedHd() {
 let hdOn = storedHd();
 
 const MEMORY_KEY = 'u6.memory'; // localStorage: 'off' when the remembered sight is switched off
+const MOTION_KEY = 'u6.motion'; // localStorage: 'off' when smooth motion is switched off
 
 // The stored choice of the remembered sight (spec 18); unreadable storage or any other value is
 // on.
 function storedMemory() {
   try {
     return localStorage.getItem(MEMORY_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+// The stored choice of smooth motion (spec 20); unreadable storage or any other value is on.
+function storedMotion() {
+  try {
+    return localStorage.getItem(MOTION_KEY) !== 'off';
   } catch {
     return true;
   }
@@ -1528,6 +1664,9 @@ function applyHd() {
   if (!game) return;
   game.set_hd(hdOn, WIDE ? WIDE_S : layoutOn() ? LAYOUT_S : hdScale());
   game.set_hd_font(fontDrawn);
+  // Rebuild posed pixels/layers at the selected scale before the synchronous first paint.
+  // This presents the current state; it does not take an engine step or advance its clock.
+  game.present();
   draw();
   fitRendering(game.hd_on());
 }
@@ -1715,17 +1854,19 @@ function compose(view, version, meta) {
   shownView = view;
   [pointerShown, pointerOf] = [pointer, game];
   if (fresh) fitRendering(true);
-  if (over && rect.length === 0 && !whole && !moved) return;
+  const slid = slideChanged() || slideOn === x4;
+  if (over && rect.length === 0 && !whole && !moved && !slid) return;
+  // Re-create the view every frame: wasm memory growth detaches old buffers.
+  const image = () => new ImageData(new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len()), w, h);
   if (!over || rect.length > 0) {
-    // Re-create the view every frame: wasm memory growth detaches old buffers.
-    const pixels = new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len());
-    const image = new ImageData(pixels, w, h);
     const ctx = x4.getContext('2d');
-    if (over) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
-    else ctx.putImageData(image, 0, 0);
+    if (over) ctx.putImageData(image(), 0, 0, rect[0], rect[1], rect[2], rect[3]);
+    else ctx.putImageData(image(), 0, 0);
     x4Game = game;
   }
-  paint(view, whole || !over ? null : union(rect.length > 0 ? [...rect] : null, moved));
+  // Spec 20 Design 5: the slide over the ×4 frame's map, or the map put back after it.
+  const slide = slid ? drawSlide(x4, LAYOUT_S, image) : null;
+  paint(view, whole || !over ? null : union(union(rect.length > 0 ? [...rect] : null, slide), moved));
 }
 
 // The part of rect `a` inside rect `b` (x, y, width, height), or null when they do not meet.
@@ -1994,6 +2135,9 @@ globalThis.__u6Layout = {
   get scale() {
     return WIDE ? WIDE_S : LAYOUT_S;
   },
+  get composeMedianMs() {
+    return WIDE ? wideComposeMedian : null;
+  },
 };
 
 // The switch to the other build (spec 13 Decision 2): the screen chosen across the builds while
@@ -2103,11 +2247,30 @@ function refreshSwitchLine() {
 // --- the Wide layout (spec 13) -----------------------------------------------------------------
 
 // The Wide layout's canvas (spec 13 Design 5), 16:9, and the compositor's scale while it shows
-// (Design 6: 4 unless its time per frame on a game frame passes 8 ms, measured by the web test
-// "Wide layout (spec 13 Design 6)", then 2).
+// (Design 6: 4 unless a full composition's median on this machine passes 8 ms, then 2).
 const WIDE_W = 1920;
 const WIDE_H = 1080;
-const WIDE_S = 4;
+let WIDE_S = 4;
+let wideMeasuredGame = null;
+let wideScaleProbe = null;
+let wideComposeMedian = null;
+
+// Once per new game with HD on, at prompts: one composition probe per rendered frame,
+// spread across six frames so calibration never queues a batch before the first draw. The
+// launcher is not representative. Every probe restores the prior scale before draw().
+function chooseWideScale() {
+  if (!WIDE || !hdOn || wideMeasuredGame === game || game.program() !== 'game' || !game.at_prompt()) return;
+  wideScaleProbe ??= probeWideScale(game);
+  const sample = wideScaleProbe.next();
+  if (!sample.done) return;
+  const measured = sample.value;
+  wideScaleProbe = null;
+  wideMeasuredGame = game;
+  wideComposeMedian = measured.medianMs;
+  WIDE_S = measured.scale;
+  game.set_hd(true, WIDE_S);
+  game.present(); // draw below must see actor layers at the newly chosen scale too
+}
 // The windows' frames, U7-style in colours of our own (no art of another program's): a dark
 // border WINDOW_BORDER wide (a lighter line along its inside), then a title strip WINDOW_TITLE
 // tall with the window's name in the page's font (WINDOW_TITLE_PAD in from either end of the
@@ -2358,19 +2521,22 @@ function composeWide(view, hd, version, meta) {
   wideStale = false;
   [pointerShown, pointerOf] = [pointer, game];
   if (fresh) fitRendering(hd);
+  // Re-create the view every frame: wasm memory growth detaches old buffers.
+  const image = () => new ImageData(hd
+    ? new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len())
+    : new Uint8ClampedArray(wasm.memory.buffer, game.frame_ptr(), game.frame_len()), w, h);
   if (!over || !hd || rect.length > 0) {
-    // Re-create the view every frame: wasm memory growth detaches old buffers.
-    const pixels = hd
-      ? new Uint8ClampedArray(wasm.memory.buffer, game.hd_frame_ptr(), game.hd_frame_len())
-      : new Uint8ClampedArray(wasm.memory.buffer, game.frame_ptr(), game.frame_len());
-    const image = new ImageData(pixels, w, h);
     const ctx = wideSrc.getContext('2d');
-    if (over && hd) ctx.putImageData(image, 0, 0, rect[0], rect[1], rect[2], rect[3]);
-    else ctx.putImageData(image, 0, 0);
+    if (over && hd) ctx.putImageData(image(), 0, 0, rect[0], rect[1], rect[2], rect[3]);
+    else ctx.putImageData(image(), 0, 0);
     wideSrcGame = game;
     wideSrcScale = s;
   }
-  const dirty = union(rect.length > 0 ? [...rect] : null, moved);
+  // Spec 20 Design 5: with HD the slide over Wide's frame's map, or the map put back after it
+  // (with HD off the classic frame holds the slide; a classic frame put whole holds no slide).
+  if (!hd && slideOn === wideSrc) slideOn = null;
+  const slide = hd && (slideChanged() || slideOn === wideSrc) ? drawSlide(wideSrc, s, image) : null;
+  const dirty = union(union(rect.length > 0 ? [...rect] : null, slide), moved);
   if (whole) paintWide(view, null);
   else if (dirty) paintWide(view, dirty);
 }
@@ -3124,8 +3290,8 @@ function toggleHd() {
 // One display frame: the steps its wall time is worth at the chosen speed (`pace`; the first
 // frame's time can precede `last`, which counts 0), run while the frame's budget lasts (half the
 // display's interval, at least 3 ms; the first always) and until the sequence ends, then
-// reported (`ran`). If any ran, the frame is converted and drawn once, when they changed it;
-// the sound, a Save to store and the reflected state once per frame.
+// reported (`ran`). If any ran, or a slide runs (spec 20), the frame is converted and drawn once,
+// when they changed it; the sound, a Save to store and the reflected state once per frame.
 function frame(now) {
   if (leaving) {
     looping = false;
@@ -3158,8 +3324,9 @@ function frame(now) {
     const log = game.take_log();
     if (log) console.info(log);
     if (voice.ready) hearSpeech();
-    if (k > 0) {
+    if (k > 0 || game.sliding()) {
       game.present();
+      chooseWideScale();
       draw();
     }
     feedAudio();
@@ -3226,10 +3393,16 @@ async function boot(next, origin) {
   }
   const old = game;
   game = next;
+  WIDE_S = 4;
+  wideMeasuredGame = null;
+  wideScaleProbe = null;
+  wideComposeMedian = null;
   hiddenGiven = null; // the new game has none until the next frame gives them
   owner = next;
   next.set_voices(voice.ready);
   next.set_sight_memory(storedMemory());
+  next.set_motion(storedMotion());
+  next.set_attack_suspended(!setup.hidden);
   voice.newGame();
   old?.free();
   drawnGame = null; // the freed game's frame is not this one's
@@ -3667,8 +3840,10 @@ function showVoiceTerms() {
 // pending (noted, or under way): then the switch line, on the chooser's line only (the status
 // line keeps what it says: a wait, a download).
 function openSetup() {
+  releaseKeys();
   for (const input of setup.querySelectorAll('input[name="setup-lang"]')) input.checked = input.value === lang;
   setup.hidden = false;
+  game?.set_attack_suspended(true);
   showHdChoice();
   setupVoices.checked = setupFirst || voiceIsOn();
   setupRestrictions.textContent = RESTRICTIONS;
@@ -3691,6 +3866,7 @@ function keepSetup() {
   }
   setupFirst = false;
   setup.hidden = true;
+  game?.set_attack_suspended(false);
 }
 
 // A listed pack: downloaded (its progress on the status line), then loaded and kept as a dropped
@@ -4040,6 +4216,7 @@ function gameKey(e) {
   // Spec 19 O1c: while Ctrl or Alt is down a held walk pauses, as in the native window; nothing
   // is let go. A chord with Alt is not the game's (the browser's Alt shortcuts).
   game.set_modifiers(e.ctrlKey || e.altKey);
+  game.set_control_action(setup.hidden && e.ctrlKey && !e.altKey && !e.metaKey);
   if (e.altKey) return;
   if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
   const by = speedKey(e);
@@ -4064,10 +4241,24 @@ function gameKey(e) {
 function gameKeyUp(e) {
   if (!game || crashed) return;
   game.set_modifiers(e.ctrlKey || e.altKey);
+  game.set_control_action(setup.hidden && e.ctrlKey && !e.altKey && !e.metaKey);
   game.key_up(e.code);
 }
-function releaseKeys() {
-  if (game && !crashed) game.release_keys();
+function releaseKeys(event) {
+  if (game && !crashed) {
+    game.release_keys();
+    // Canvas and IME are the same game input surface. followLine hands focus back to the
+    // IME after a Korean choice's pointerdown; that internal handoff must keep its click.
+    const internal = event?.type === 'blur' && ime !== null
+      && ((event.target === canvas && event.relatedTarget === ime)
+        || (event.target === ime && event.relatedTarget === canvas));
+    // A lost focus can also lose the physical mouse-up of a captured Ctrl click.
+    // Cancel it now; releaseUnfinished masks its still-held buttons until their real release.
+    if (!internal && sentButtons !== 0) {
+      const [clientX, clientY] = mouseAt ?? [0, 0];
+      releaseUnfinished({ type: 'pointercancel', clientX, clientY });
+    }
+  }
 }
 canvas.addEventListener('keydown', gameKey);
 window.addEventListener('keyup', gameKeyUp);
@@ -4084,6 +4275,7 @@ mute.addEventListener('click', () => {
   gesture();
 });
 hdButton.addEventListener('change', toggleHd);
+turnsChoice.addEventListener('change', changeTurns);
 for (const input of layoutChoices) input.addEventListener('change', () => chooseLayout(input.value));
 for (const input of fontChoices) input.addEventListener('change', () => chooseFont(input.value));
 settings.addEventListener('click', () => {
@@ -4225,7 +4417,10 @@ function showGamePointer() {
 }
 
 function sendPointer(e) {
-  if (!game || crashed) return;
+  if (!game || crashed || !setup.hidden) return;
+  // Pointer modifiers also cover Ctrl pressed before the canvas acquired focus.
+  game.set_modifiers(e.ctrlKey || e.altKey);
+  game.set_control_action(setup.hidden && e.ctrlKey && !e.altKey && !e.metaKey);
   const id = e.pointerId;
   if (releasedHeld) {
     releasedHeld &= e.buttons & 3;
@@ -4233,6 +4428,7 @@ function sendPointer(e) {
   }
   const at = pointerPixel(e);
   if (!at) {
+    game.set_control_action(false);
     if (e.type === 'pointerdown') closeMenu();
     return;
   }
@@ -4277,7 +4473,8 @@ function releaseUnfinished(e) {
   if (!game || crashed || sentButtons === 0) return;
   // The buttons the game holds now, and those released before still held (kept with them).
   const [held, kept] = [sentButtons, releasedHeld];
-  if (!dragged && game.reading_by_click()) {
+  game.set_control_action(false);
+  if ((!dragged && game.reading_by_click()) || !setup.hidden) {
     sentButtons = 0;
     game.pointer(-1, -1, 0);
     showGamePointer();

@@ -101,25 +101,25 @@ pub fn report_wounds(s: &mut State, actor: i16) {
         / crate::actors::leaves::max_hp(s, actor as u16) as i16;
     if quarters < 4 {
         let n = name(s, actor);
-        say(s, NAME_SPACE, vec![n]);
+        say(s, crate::string_registry::text!(NAME_SPACE), vec![n]);
         s.actors.work.prompt = 1;
     }
     match quarters {
         0 => {
-            say(s, CRITICAL, vec![]);
+            say(s, crate::string_registry::text!(CRITICAL), vec![]);
             let int = crate::actors::leaves::intelligence(s, actor as u16);
             let wt = s.actors.worktype[a];
             if int >= 5 && ![6, 0x0e, 2, 3, 1, 0].contains(&wt) {
                 s.actors.worktype[a] = 7;
             }
         }
-        1 => say(s, HEAVILY, vec![]),
-        2 => say(s, LIGHTLY, vec![]),
-        3 => say(s, BARELY, vec![]),
+        1 => say(s, crate::string_registry::text!(HEAVILY), vec![]),
+        2 => say(s, crate::string_registry::text!(LIGHTLY), vec![]),
+        3 => say(s, crate::string_registry::text!(BARELY), vec![]),
         _ => {}
     }
     if (1..4).contains(&quarters) {
-        say(s, WOUNDED, vec![]);
+        say(s, crate::string_registry::text!(WOUNDED), vec![]);
     }
 }
 
@@ -158,7 +158,11 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
     }
     if dmg <= 0 {
         flash(s, target);
-        say(s, GRAZED, vec![target_name.clone()]);
+        say(
+            s,
+            crate::string_registry::text!(GRAZED),
+            vec![target_name.clone()],
+        );
         s.actors.work.prompt = 1;
     } else {
         let t = target as usize;
@@ -181,7 +185,7 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
     }
     let tk = kind(s, target);
     if s.actors.attrs.hp[t] == 0 && ![0x1a7, 0x19e, 0x19f, 0x19c].contains(&tk) {
-        say(s, KILLED, vec![target_name]);
+        say(s, crate::string_registry::text!(KILLED), vec![target_name]);
         s.actors.work.prompt = 1;
         let p = &s.ui.panel;
         if p.mode == 0x90 && member(s, p.member.max(0) as usize) == attacker {
@@ -191,7 +195,11 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
     }
     let index = objects::monster_index(&s.objects, kind(s, attacker));
     if index == 8 {
-        say(s, DRAGGED, vec![target_name.clone()]);
+        say(
+            s,
+            crate::string_registry::text!(DRAGGED),
+            vec![target_name.clone()],
+        );
         s.actors.attrs.movement_flags[t] |= 0x10;
         s.actors.work.prompt = 1;
         s.map.view_dirty = 1;
@@ -200,7 +208,7 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
         let o = leaves::pick_to_take(s, target, 0);
         if o >= 0 {
             let (who, what) = (name(s, target), name(s, o));
-            say(s, DISSOLVES, vec![who, what]);
+            say(s, crate::string_registry::text!(DISSOLVES), vec![who, what]);
             s.actors.work.prompt = 1;
             objects::remove(s, o);
         }
@@ -209,13 +217,17 @@ pub fn apply_damage(s: &mut State, attacker: i16, target: i16, damage: i16) {
         let o = leaves::pick_to_take(s, target, 1);
         if o >= 0 {
             let who = name(s, target);
-            say(s, ROBBED, vec![who]);
+            say(s, crate::string_registry::text!(ROBBED), vec![who]);
             s.actors.work.prompt = 1;
             objects::remove(s, o);
         }
     }
     if s.combat.tables.flags(index) & 0x0040 != 0 && s.rng.range(0, 3) == 0 {
-        say(s, POISONED, vec![target_name]);
+        say(
+            s,
+            crate::string_registry::text!(POISONED),
+            vec![target_name],
+        );
         s.actors.work.prompt = 1;
         s.actors.attrs.status[t] |= 0x08;
         let p = &s.ui.panel;
@@ -378,7 +390,7 @@ fn slime_divides(s: &mut State, actor: i16) {
             let new = objects::create_actor(s, ty, nx as u16, ny as u16, z);
             if new >= 0 {
                 leaves::copy_actor(s, actor, new);
-                say(s, SLIME, vec![]);
+                say(s, crate::string_registry::text!(SLIME), vec![]);
                 s.actors.work.prompt = 1;
                 s.map.view_dirty = 1;
             }
@@ -408,7 +420,11 @@ fn party_numbers(s: &mut State, actor: i16) {
             q.push(Pending::Window(WindowId::Status));
             q.push(Pending::Cursor(14, ((k - first) * 2 + 2) as i16));
             let hp = i16::from(s.actors.attrs.hp[actor as usize]);
-            say(s, HP_NUMBER, vec![Text::Word(hp)]);
+            say(
+                s,
+                crate::string_registry::text!(HP_NUMBER),
+                vec![Text::Word(hp)],
+            );
             s.main
                 .pending_print
                 .push(Pending::Window(WindowId::Messages));
@@ -426,7 +442,7 @@ fn hurt_object(s: &mut State, obj: i16, t: u16, damage: i16) {
         s.actors.attrs.status[v] |= 0x10;
         s.objects.obj_status[v] &= !0x02;
         s.actors.worktype[v] = 0;
-        say(s, VINE, vec![]);
+        say(s, crate::string_registry::text!(VINE), vec![]);
         s.actors.work.prompt = 1;
         return;
     }
@@ -448,7 +464,7 @@ fn hurt_object(s: &mut State, obj: i16, t: u16, damage: i16) {
         return;
     }
     let n = name(s, obj);
-    say(s, BROKEN, vec![n]);
+    say(s, crate::string_registry::text!(BROKEN), vec![n]);
     s.actors.work.prompt = 1;
     if objects::find_child(&mut s.objects, obj, 0x151, 0x16) != -1 {
         objects::spring_trap(s, obj);
@@ -601,7 +617,7 @@ pub fn yell_for_help(s: &mut State, target: i16, attacker: i16, damage: i16) {
     let player = s.actors.worktype[attacker as usize] == 2;
     if player && index >= 0 && s.combat.tables.flags(index) & 0x4000 != 0 && damage > 0 {
         let n = name(s, target);
-        say(s, YELLS, vec![n]);
+        say(s, crate::string_registry::text!(YELLS), vec![n]);
         rouse_neutrals(s);
         s.actors.work.prompt = 1;
     }

@@ -138,10 +138,10 @@ pub(super) fn give_key(s: &mut State, x: u16, y: u16, tile: u8) -> bool {
     let (lx, ly) = (s.objects.x(leader), s.objects.y(leader));
     move_to(s, leader, lx, ly, z);
     refresh(s);
-    queue_at(s, S_SEARCHING, Vec::new());
+    queue_at(s, crate::string_registry::text!(S_SEARCHING), Vec::new());
     name_prefix(s, key);
     let name = shown_name(s, key).into_bytes();
     queue(s, name, Vec::new());
-    queue_at(s, S_DOT, Vec::new());
+    queue_at(s, crate::string_registry::text!(S_DOT), Vec::new());
     true
 }

@@ -8,6 +8,8 @@ disallowed-types = [
     "std::net::UdpSocket",
 ]
 disallowed-methods = [
+    { path = "u6_core::image::GameImage::cstr", reason = "game text reads require a registered string_registry::Text; u/end have narrow separate-program boundaries" },
+    { path = "u6_core::objects::commands::data::GameData::cstr", reason = "loaded game text reads require a registered string_registry::Text" },
     "std::fs::read",
     "std::fs::read_to_string",
     "std::fs::write",

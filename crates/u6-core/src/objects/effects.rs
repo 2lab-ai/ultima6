@@ -124,19 +124,19 @@ pub fn toggle_passthrough(s: &mut State, slot: Slot) {
         super::moves::move_to(s, slot, nx, ny, z);
         let t = &mut s.objects.type_frame[slot as usize];
         *t = (*t & 0x3ff).wrapping_add((frame | 2) << 10);
-        super::seams::print(s, STR_OPEN, &[]);
+        super::seams::print(s, crate::string_registry::text!(STR_OPEN), &[]);
         return;
     }
     let (nx, ny) = if vertical { (x, y + 1) } else { (x + 1, y) };
     let here = begin_at(&mut s.objects, &s.tables, nx, ny, z);
     if here != -1 && here < super::ACTOR_SLOTS as Slot {
-        super::seams::print(s, STR_NOT_NOW, &[]);
+        super::seams::print(s, crate::string_registry::text!(STR_NOT_NOW), &[]);
         return;
     }
     super::moves::move_to(s, slot, nx, ny, z);
     let t = &mut s.objects.type_frame[slot as usize];
     *t = (*t & 0x3ff).wrapping_add((frame & 1) << 10);
-    super::seams::print(s, STR_CLOSE, &[]);
+    super::seams::print(s, crate::string_registry::text!(STR_CLOSE), &[]);
 }
 
 /// Image addresses of the strings 0x1301e2 prints.

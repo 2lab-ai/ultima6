@@ -29,10 +29,6 @@ serde_json = { version = "1", features = ["raw_value"] }
 u6-intake.workspace = true
 # Content-free equality for the real-data tests (spec 01 §Rights).
 u6-testkit.workspace = true
-# The print-site scan (locale/tests_scan.rs) parses the crate's sources as Rust, with line numbers.
-syn = { version = "2", features = ["full", "visit"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }
-
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # Runs the executor gate (tests/nested_prompt.rs) under wasm-bindgen-test-runner (node).
 # Must match the installed wasm-bindgen CLI (0.2.129).

@@ -62,10 +62,10 @@ pub async fn find_typed_spell(state: &RefCell<State>, io: &Io) -> i16 {
             .map_or(-1, |n| n as i16)
     };
     if found < 0 {
-        let msg = a4_string(io, MSG_NOT_IN_BOOK);
+        let msg = a4_string(io, crate::string_registry::text!(MSG_NOT_IN_BOOK));
         printf(state, io, &msg, &[]).await;
     }
-    let nl = game_string(io, MSG_NEWLINE);
+    let nl = game_string(io, crate::string_registry::text!(MSG_NEWLINE));
     printf(state, io, &nl, &[]).await;
     let mut s = state.borrow_mut();
     s.magic.typed_mask = 0;

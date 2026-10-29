@@ -36,16 +36,17 @@ use crate::objects::{ACTOR_SLOTS, BLOCK_COUNT, FIRST_TEMP_ACTOR, Slot};
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 #[cfg(not(feature = "wide"))]
-const ORACLE: &str = "/Users/zhugehyuk/Games/ultima6/oracle/saveload";
+fn oracle() -> std::path::PathBuf {
+    u6_testkit::data_path_with("U6_ORACLE_HOME", "oracle").join("saveload")
+}
 
 fn zip_files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -56,8 +57,9 @@ fn zip_files() -> Option<Files> {
 /// `ORACLE/<dir>/*` as `savegame/<name>` (a `savegame/` directory taken off the PLAYER disk).
 #[cfg(not(feature = "wide"))]
 fn oracle_save(dir: &str) -> Option<MemStore> {
-    let path = Path::new(ORACLE).join(dir);
+    let path = oracle().join(dir);
     let Ok(entries) = std::fs::read_dir(&path) else {
+        u6_testkit::available(false, "U6_ORACLE_HOME save reference");
         eprintln!("skipped: {} not present", path.display());
         return None;
     };
@@ -1927,7 +1929,7 @@ fn repository_roots(tree: &Path) -> Result<Vec<PathBuf>, &'static str> {
 /// first layer, on the path as written), that exists, and that is not inside any of `roots` by
 /// identity: no ancestor of its resolved path (itself included) is the same directory, by device
 /// and inode, as a root. A path names a directory in more ways than resolving it undoes (on
-/// macOS `/System/Volumes/Data/Users/...` is `/Users/...` through the Data volume's firmlink, and
+/// macOS home paths can also be reached through the Data volume's firmlink, and
 /// resolving leaves that form as it is), so no path prefix decides. A root whose metadata does
 /// not read, or an ancestor's, refuses. Writes nothing.
 ///

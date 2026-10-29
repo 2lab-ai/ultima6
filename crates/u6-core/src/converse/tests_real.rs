@@ -1,6 +1,6 @@
 //! Real data: conversations with NPCs near the party start, from the user's archive.org zip.
 //! Skips where the zip is missing; prints actor numbers and pass/fail, never the dialogue, a
-//! name, or how many lines or how long (no game text in the repo or the test output).
+//! name (only content-free counts and digests; no game text in the repo or the test output).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::path::Path;
@@ -19,14 +19,12 @@ use crate::objects::ObjectId;
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 pub(super) fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -63,10 +61,10 @@ fn lines_of(s: &State) -> Vec<String> {
     let mut last: String = t
         .transcript_line
         .iter()
-        .map(|&b| crate::ui::wide::latin_char(b))
+        .map(|&b| crate::ui::wide::cell_char(b))
         .collect();
     let pending = &t.line[usize::from(t.line_start)..usize::from(t.line_len)];
-    last.extend(pending.iter().map(|&b| crate::ui::wide::latin_char(b)));
+    last.extend(pending.iter().map(|&b| crate::ui::wide::cell_char(b)));
     lines.push(last);
     lines
 }
@@ -275,7 +273,7 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
     let w = usize::from(m.width) * 8;
     let bar = (w - 3)..w;
     let (mut talks, mut kept, mut compared, mut equal, mut barred) = (0, 0, 0, 0, 0);
-    let (mut patched, mut agree, mut heap) = (0, 0, 0);
+    let (mut patched, mut agree, mut heap, mut spans) = (0, 0, 0, 0);
     for &npc in near_the_start(&base).iter().take(40) {
         let mut s = base.clone();
         if name_from_script(&mut s, &files, npc).0.is_empty() {
@@ -314,18 +312,24 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
                 }
             }
         }
-        let (total, base_line, n_patched) = {
+        let (total, base_line, n_patched, n_spans) = {
             let sb = &e.state().ui.scrollback;
             let len = sb.lines().len() as u64;
             let patched = sb.lines().iter().filter(|l| !l.patch.is_empty()).count();
             heap = heap.max(sb.heap_bytes());
-            (sb.total(), sb.total() - len, patched)
+            (
+                sb.total(),
+                sb.total() - len,
+                patched,
+                sb.lines().iter().map(|l| l.spans.len()).sum::<usize>(),
+            )
         };
         if total < u64::from(m.height) {
             continue;
         }
         talks += 1;
         patched += n_patched;
+        spans += n_spans;
         // Back a line at a time to the oldest line kept.
         let mut back = 0;
         while e.wheel(200, 150, -1) && e.history_offset() > back {
@@ -379,7 +383,7 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
         "scrollback receipt: ran; {talks} conversations scrolled; {kept} lines kept and \
          wheeled to; {compared} compared with their published rows, {equal} equal ({barred} \
          under the bar, {agree} rows seen on two frames agreed); {patched} with patched pixels; \
-         at most {heap} bytes kept"
+         {spans} keyword spans kept; at most {heap} bytes kept"
     );
     assert!(talks >= 3, "three conversations scrolled the window");
     // Every line wheeled to was on a published frame above the cursor before it scrolled off.
@@ -592,3 +596,6 @@ fn speech_tap_on_npcs_near_the_start_says_what_the_scroll_shows() {
         "every utterance is on the scroll and none is the look text"
     );
 }
+
+#[path = "tests_choices_real.rs"]
+mod choices_real;

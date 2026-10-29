@@ -105,7 +105,7 @@ pub(crate) fn sky_bar_tail(s: &mut State) {
 }
 
 /// The NUL-terminated string at image address `addr` of the user's `game` (main_loop's reader).
-pub(crate) fn game_string(io: &Io, addr: u32) -> Vec<u8> {
+pub(crate) fn game_string(io: &Io, addr: crate::string_registry::Text) -> Vec<u8> {
     crate::main_loop::game_string(io, addr)
 }
 

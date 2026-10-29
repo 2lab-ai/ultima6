@@ -152,8 +152,9 @@ fn leader(s: &State) -> Slot {
 pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
     seams::music_off(&mut state.borrow_mut());
     let q = (state.borrow().objects.qq_of(obj) >> 8) as u8;
-    print_at(state, io, S_BLANK_LINES, &[]).await;
-    let name = super::text::string(&state.borrow(), S_BOOK_DAT).to_ascii_lowercase();
+    print_at(state, io, crate::string_registry::text!(S_BLANK_LINES), &[]).await;
+    let name = super::text::string(&state.borrow(), crate::string_registry::text!(S_BOOK_DAT))
+        .to_ascii_lowercase();
     let file = io
         .files()
         .get(&String::from_utf8_lossy(&name))
@@ -199,7 +200,13 @@ pub async fn read_book(state: &RefCell<State>, io: &Io, obj: Slot) {
 pub async fn look(state: &RefCell<State>, io: &Io) {
     let mut read = false;
     state.borrow_mut().ui.text.win_mut().flags |= crate::ui::text::PAGED;
-    print_at(state, io, S_THOU_DOST_SEE, &[]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(S_THOU_DOST_SEE),
+        &[],
+    )
+    .await;
     {
         let mut s = state.borrow_mut();
         let (px, py) = s.ui.input.pointer;
@@ -211,7 +218,7 @@ pub async fn look(state: &RefCell<State>, io: &Io) {
         }
     }
     if state.borrow().ui.input.target_void {
-        print_at(state, io, S_DARKNESS, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_DARKNESS), &[]).await;
         state.borrow_mut().ui.input.unpage = true;
         return;
     }
@@ -272,9 +279,9 @@ async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
         };
         super::text::print(state, io, &name, &[]).await;
     } else {
-        print_at(state, io, S_NOTHING, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_NOTHING), &[]).await;
     }
-    print_at(state, io, S_DOT, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_DOT), &[]).await;
     let (tx, ty) = state.borrow().ui.input.target;
     let near = |a: i16, b: u16| a.wrapping_sub(b as i16).wrapping_abs() <= 1;
     if near(tx, lx) && near(ty, ly) {
@@ -284,7 +291,13 @@ async fn look_at_tile(state: &RefCell<State>, io: &Io, lx: u16, ly: u16) {
         if gave {
             crate::main_loop::flush_prints(state, io).await;
         } else {
-            print_at(state, io, S_SEARCH_NOTHING, &[]).await;
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_SEARCH_NOTHING),
+                &[],
+            )
+            .await;
         }
     }
 }
@@ -362,16 +375,22 @@ async fn look_at_object(
         print_at(
             state,
             io,
-            if count == 1 {
-                S_IT_WEIGHS
-            } else {
-                S_THEY_WEIGH
-            },
+            crate::string_registry::choose(
+                (if count == 1 {
+                    S_IT_WEIGHS
+                } else {
+                    S_THEY_WEIGH
+                }) as i64,
+                &[
+                    crate::string_registry::text!(0x0012848c),
+                    crate::string_registry::text!(0x00128498),
+                ],
+            ),
             &[],
         )
         .await;
         let args = [Arg::Word((wt / 10) as u16), Arg::Word((wt % 10) as u16)];
-        print_at(state, io, S_STONES, &args).await;
+        print_at(state, io, crate::string_registry::text!(S_STONES), &args).await;
     }
     let (dmg, absorb) = {
         let s = state.borrow();
@@ -385,11 +404,36 @@ async fn look_at_object(
         } else {
             S_AND
         };
-        print_at(state, io, lead, &[]).await;
-        print_at(state, io, S_DAMAGE, &[Arg::Word(dmg as u16)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::choose(
+                (lead) as i64,
+                &[
+                    crate::string_registry::text!(0x001284b4),
+                    crate::string_registry::text!(0x001284ba),
+                    crate::string_registry::text!(0x001284bc),
+                ],
+            ),
+            &[],
+        )
+        .await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_DAMAGE),
+            &[Arg::Word(dmg as u16)],
+        )
+        .await;
     }
     if absorb > 0 {
-        print_at(state, io, S_ABSORB, &[Arg::Word(absorb as u16)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_ABSORB),
+            &[Arg::Word(absorb as u16)],
+        )
+        .await;
     }
     if is_readable(&state.borrow(), sel) {
         if state.borrow().objects.place(sel) != 0 {
@@ -432,7 +476,7 @@ async fn look_at_object(
     if kind == CLOCK || (kind == SUNDIAL && (5..0x14).contains(&hour)) {
         tell_time(state, io).await;
     } else {
-        print_at(state, io, S_DOT, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_DOT), &[]).await;
     }
     read
 }
@@ -440,7 +484,7 @@ async fn look_at_object(
 /// One readable object: ":" before the first, then its text.
 async fn read_one(state: &RefCell<State>, io: &Io, obj: Slot, read: &mut bool) {
     if !*read {
-        print_at(state, io, S_COLON, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_COLON), &[]).await;
     }
     read_book(state, io, obj).await;
     *read = true;
@@ -480,7 +524,7 @@ async fn spellbook(state: &RefCell<State>, io: &Io, book: Slot) {
         let spell = seams::spell_in_slot(&state.borrow(), sel);
         describe_spell(state, io, spell).await;
     } else {
-        print_at(state, io, S_DOT, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_DOT), &[]).await;
     }
     let mut s = state.borrow_mut();
     s.actors.party.leader_index = saved_leader;
@@ -501,7 +545,12 @@ async fn describe_spell(state: &RefCell<State>, io: &Io, spell: u8) {
         let s = state.borrow();
         let d = &s.objcmds.data;
         let at = |off: i32, i: u32| super::GameData::a4(off).wrapping_add(4 * i);
-        let name = crate::locale::shown(&s, d.pointed(at(SPELL_NAMES, u32::from(spell))));
+        let name = crate::locale::shown(
+            &s,
+            crate::string_registry::text_table!(SPELL_NAMES)
+                .get(usize::from(spell))
+                .map_or_else(Vec::new, |text| text.data(d)),
+        );
         let list = d.long(at(SPELL_WORDS, u32::from(spell)));
         let mut words = Vec::new();
         let mut k = 0;
@@ -510,27 +559,61 @@ async fn describe_spell(state: &RefCell<State>, io: &Io, spell: u8) {
             if k > 0 && w == 0 {
                 break;
             }
-            words.push(d.pointed(at(SYLLABLES, u32::from(w))));
+            words.push(
+                crate::string_registry::text_table!(SYLLABLES)
+                    .get(usize::from(w))
+                    .map_or_else(Vec::new, |text| text.data(d)),
+            );
             k += 1;
         }
         let reagents = d.a4_byte(SPELL_REAGENTS + i32::from(spell));
-        let names: Vec<Vec<u8>> = (0..8).map(|b| d.pointed(at(REAGENT_NAMES, b))).collect();
+        let names: Vec<Vec<u8>> = (0..8)
+            .map(|b| {
+                crate::string_registry::text_table!(REAGENT_NAMES)
+                    .get(b)
+                    .map_or_else(Vec::new, |text| text.data(d))
+            })
+            .collect();
         (name, words, reagents, names)
     };
-    print_at(state, io, S_BLANK_LINES, &[]).await;
-    print_at(state, io, S_NAME_DASH, &[Arg::Str(&name)]).await;
+    print_at(state, io, crate::string_registry::text!(S_BLANK_LINES), &[]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(S_NAME_DASH),
+        &[Arg::Str(&name)],
+    )
+    .await;
     for (i, w) in words.iter().enumerate() {
         let fmt = if i == 0 { S_WORD } else { S_SPACE_WORD };
-        print_at(state, io, fmt, &[Arg::Str(w)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::choose(
+                (fmt) as i64,
+                &[
+                    crate::string_registry::text!(0x0012850c),
+                    crate::string_registry::text!(0x00128510),
+                ],
+            ),
+            &[Arg::Str(w)],
+        )
+        .await;
     }
-    print_at(state, io, S_INGREDIENTS, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_INGREDIENTS), &[]).await;
     if reagents == 0 {
-        print_at(state, io, S_NONE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_NONE), &[]).await;
     }
     for (b, n) in names.iter().enumerate() {
         if (reagents >> b) & 1 != 0 {
             let n = crate::locale::shown(&state.borrow(), n.clone());
-            print_at(state, io, S_REAGENT, &[Arg::Str(&n)]).await;
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_REAGENT),
+                &[Arg::Str(&n)],
+            )
+            .await;
         }
     }
 }
@@ -539,16 +622,48 @@ async fn describe_spell(state: &RefCell<State>, io: &Io, spell: u8) {
 /// minutes (0x128540), 1..=11 as h:mm (0x12854e), 12 with the minutes (0x12855c), later hours
 /// as (h - 12):mm (0x12856a).
 async fn tell_time(state: &RefCell<State>, io: &Io) {
-    print_at(state, io, S_TIME_IS, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_TIME_IS), &[]).await;
     let (h, m) = {
         let c = state.borrow().actors.calendar;
         (u16::from(c.hour), u16::from(c.minute))
     };
     match h {
-        0 => print_at(state, io, S_MIDNIGHT, &[Arg::Word(m)]).await,
-        1..=11 => print_at(state, io, S_AM, &[Arg::Word(h), Arg::Word(m)]).await,
-        12 => print_at(state, io, S_NOON, &[Arg::Word(m)]).await,
-        _ => print_at(state, io, S_PM, &[Arg::Word(h - 12), Arg::Word(m)]).await,
+        0 => {
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_MIDNIGHT),
+                &[Arg::Word(m)],
+            )
+            .await
+        }
+        1..=11 => {
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_AM),
+                &[Arg::Word(h), Arg::Word(m)],
+            )
+            .await
+        }
+        12 => {
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_NOON),
+                &[Arg::Word(m)],
+            )
+            .await
+        }
+        _ => {
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_PM),
+                &[Arg::Word(h - 12), Arg::Word(m)],
+            )
+            .await
+        }
     }
 }
 

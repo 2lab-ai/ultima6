@@ -44,7 +44,7 @@
 //! (2026-10-25, [`crate::objects::commands::LABELS`], each on a wrapping line: no budget), the
 //! wind's names the date line prints through `%s`
 //! ([`crate::actors::clock::LABELS`]), the carried items' and the wand's names the vanished line
-//! prints through `%s` (2026-10-27, labels at their own addresses, [`shown_at`]), the combat-mode
+//! prints through `%s` (2026-10-27, labels at their own addresses, the registry's fixed labels), the combat-mode
 //! names the panels' line prints through `%s` (2026-10-24, [`crate::ui::tables::LABELS`], each
 //! within the line's field), and the
 //! conversation's `$G`, `$T` and `$Y` words. And (2026-10-24) the inventory view's two weight
@@ -420,16 +420,8 @@ pub(crate) fn install_test_catalogue(
 /// `STR_AN`, `STR_THE`; modules the locale layer cannot name, so the scan's test pins each to
 /// those consts), which no list catalogues and the uncatalogued count leaves out
 /// ([`Catalogue::uncatalogued`]).
+#[cfg(test)]
 pub(crate) const ENGLISH_AT: [u32; 3] = [0x0012_83e2, 0x0012_83e6, 0x0012_83ea];
-
-/// Port-only (spec 16 item 1, 2026-10-27): the pointer slots of the incantation syllables, the
-/// game's magic words, shown in English on purpose (A4-0x70b8 + 4 c for the letters c,
-/// [`crate::usecmd::defs::SPELL_NAMES`]; magic's syllable table), which the uncatalogued count
-/// leaves out ([`Catalogue::uncatalogued`]).
-pub(crate) fn english_slots() -> impl Iterator<Item = u32> {
-    (u32::from(b'A')..=u32::from(b'Z'))
-        .map(|c| A4.wrapping_add_signed(crate::usecmd::defs::SPELL_NAMES) + 4 * c)
-}
 
 /// Port-only (spec 16 item 1, 2026-10-27): the display name of no object (0x10eef8's word for a
 /// slot below 0; the string at 0x10a4ce, which the object tables' loader reads, `objects::defs`
@@ -442,40 +434,23 @@ pub(crate) const NAME_PRINTED: &[u32] = &[0x0010_a4ce];
 
 /// The image addresses of the strings game code passes to `printf` as its format (or to `puts`,
 /// `put_raw_str`), each module's list in site order: the catalogue's printed strings.
+#[cfg(test)]
 pub(crate) fn printed() -> impl Iterator<Item = u32> {
-    crate::main_loop::commands::PRINTED
+    crate::string_registry::GROUPS
         .iter()
-        .chain(
-            crate::objects::commands::PRINTED
-                .iter()
-                .flat_map(|s| s.iter()),
-        )
-        .chain(crate::usecmd::PRINTED.iter().flat_map(|s| s.iter()))
-        .chain(crate::actors::rest::PRINTED)
-        .chain(crate::combat::attack::PRINTED)
-        .chain(crate::combat::damage::PRINTED)
-        .chain(crate::inventory::PRINTED)
-        .chain(crate::ui::click::PRINTED)
-        .chain(crate::magic::PRINTED.iter().flat_map(|s| s.iter()))
-        .chain(crate::actors::clock::PRINTED)
-        .chain(crate::actors::turn::PRINTED)
-        .chain(crate::actors::party::PRINTED)
-        .chain(crate::actors::npc::PRINTED)
-        .chain(crate::actors::walk::PRINTED)
-        .chain(crate::objects::PRINTED.iter().flat_map(|s| s.iter()))
-        .chain(crate::ui::tables::PRINTED)
-        .chain(crate::magic::PAGE_PRINTED)
-        .chain(crate::map::seams::PRINTED)
-        .chain(crate::inventory::PANEL_PRINTED)
-        .chain(NAME_PRINTED)
-        .copied()
+        .filter(|g| g.usage == crate::string_registry::Use::Printed && !g.pointed)
+        .flat_map(|g| g.addresses.iter().copied())
 }
 
 /// The pointer slots of the strings game code passes to `printf` as its format through a pointer
 /// (2026-10-27: the place names, [`crate::map::seams::PLACE_NAMES`]): catalogued as printed
 /// strings, not labels.
+#[cfg(test)]
 pub(crate) fn pointed() -> impl Iterator<Item = u32> {
-    crate::map::seams::PLACE_NAMES.iter().copied()
+    crate::string_registry::GROUPS
+        .iter()
+        .filter(|g| g.usage == crate::string_registry::Use::Printed && g.pointed)
+        .flat_map(|g| g.addresses.iter().copied())
 }
 
 /// How a printed string is shown: a format when it holds a conversion, else a message.
@@ -487,85 +462,40 @@ fn printed_kind(text: &[u8]) -> Kind {
     }
 }
 
-/// The pointer slots of the labels game code reads for display ([`super::shown`]): the
-/// catalogue's labels.
-pub(crate) fn labels() -> impl Iterator<Item = u32> {
-    crate::main_loop::commands::LABELS
-        .iter()
-        .chain(&SHARED_MESSAGES)
-        .chain(crate::objects::commands::LABELS)
-        .chain(crate::inventory::LABELS)
-        .chain(crate::magic::LABELS)
-        .chain(crate::actors::clock::LABELS)
-        .chain(crate::ui::tables::LABELS)
-        .chain(&crate::magic::NAME_LABELS)
-        .chain(&crate::magic::CIRCLE_LABELS)
-        .copied()
-}
-
 /// The labels game code reads for display at their own addresses (no pointer slot holds them):
 /// the panels' ([`crate::ui::tables::SHOWN_AT`], each within its English's cells) and
 /// (2026-10-27) the vanished line's item words ([`crate::actors::clock::SHOWN_AT`],
 /// [`crate::combat::attack::SHOWN_AT`], on a wrapping line: no budget).
+#[cfg(test)]
 pub(crate) fn shown_at() -> impl Iterator<Item = u32> {
-    crate::ui::tables::SHOWN_AT
+    crate::string_registry::GROUPS
         .iter()
-        .chain(crate::actors::clock::SHOWN_AT)
-        .chain(crate::combat::attack::SHOWN_AT)
-        .copied()
+        .filter(|g| g.usage == crate::string_registry::Use::Label && !g.pointed)
+        .flat_map(|g| g.addresses.iter().copied())
 }
 
 impl Catalogue {
-    /// The catalogue of `game` (the decrunched executable): every site's string that reads
-    /// (inside the image, NUL-ended) and is [`MIN_BYTES`] or longer ([`printed`], then
-    /// [`pointed`]'s, each through its pointer), a label read for display (a pointer table's,
-    /// [`labels`], or a panel label at its own address, [`crate::ui::tables::SHOWN_AT`]) 1 byte
-    /// or longer ([`Catalogue::add_label`]). A file that is no hunk file gives an empty catalogue
-    /// (nothing is substituted then).
+    /// The catalogue of the decrunched game: the registry's printed entries first, then
+    /// its labels and conversation messages, preserving their registered order and cell budgets.
+    /// A printable entry needs at least [`MIN_BYTES`]; labels need one byte. A file that is no
+    /// hunk file gives an empty catalogue, so nothing is substituted.
     pub fn from_game(game: &[u8]) -> Catalogue {
         let mut c = Catalogue::default();
         let Ok(img) = GameImage::parse(game) else {
             return c;
         };
-        for at in printed() {
-            if let Ok(text) = img.cstr(at) {
-                // A panel's string (the spellbook page's level word, the inventory view's weight
-                // values too) is drawn at a fixed cell: the English's cells.
-                let cells = (crate::ui::tables::PRINTED.contains(&at)
-                    || crate::magic::PAGE_PRINTED.contains(&at)
-                    || crate::inventory::PANEL_PRINTED.contains(&at))
-                .then(|| english_cells(&text));
-                c.add_within(printed_kind(&text), text, MIN_BYTES, cells);
-            }
-        }
-        for ptr in pointed() {
-            if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
-                c.add_within(printed_kind(&text), text, MIN_BYTES, None);
-            }
-        }
-        for ptr in labels() {
-            if let Ok(text) = img.pointer(ptr).and_then(|p| img.cstr(p)) {
-                // A combat-mode name is centred in its line's field; a spell's and a circle's
-                // name each fill a field of the spellbook page.
-                let cells = if crate::ui::tables::LABELS.contains(&ptr) {
-                    Some(crate::ui::tables::MODE_CELLS)
-                } else if crate::magic::NAME_LABELS.contains(&ptr) {
-                    Some(crate::magic::NAME_CELLS)
-                } else if crate::magic::CIRCLE_LABELS.contains(&ptr) {
-                    Some(crate::magic::CIRCLE_CELLS)
-                } else {
-                    None
+        for (source, usage, budget) in crate::string_registry::entries() {
+            if let Ok(text) = source.image(&img) {
+                use crate::string_registry::{Budget, Use};
+                let cells = match budget {
+                    Budget::None => None,
+                    Budget::English => Some(english_cells(&text)),
+                    Budget::Fixed(n) => Some(n),
                 };
-                c.add_label(text, cells);
-            }
-        }
-        // The labels read for display at their own addresses, a panel's at a fixed cell.
-        for at in shown_at() {
-            if let Ok(text) = img.cstr(at) {
-                let cells = crate::ui::tables::SHOWN_AT
-                    .contains(&at)
-                    .then(|| english_cells(&text));
-                c.add_label(text, cells);
+                match usage {
+                    Use::Printed => c.add_within(printed_kind(&text), text, MIN_BYTES, cells),
+                    Use::Label => c.add_label(text, cells),
+                }
             }
         }
         if let Ok(messages) = ConverseText::from_game(game) {
@@ -588,16 +518,12 @@ impl Catalogue {
     /// segment that starts at a string's start (the segment's start or after a NUL) and ends at a
     /// NUL inside the segment (a run the segment ends without one is none), [`MIN_BYTES`] to
     /// [`MAX_BYTES`] long, with a word of its own; but the strings shown in English on purpose
-    /// ([`ENGLISH_AT`], [`english_slots`]'s). A string that follows code with no NUL before it
+    /// (the registry's English-only entries). A string that follows code with no NUL before it
     /// starts no run here (its run starts at the last NUL before it, in the code): such a string
     /// is not in the set, a blind spot of the count.
     fn unlisted_of(&self, img: &GameImage<'_>) -> BTreeSet<u64> {
-        let english: BTreeSet<u64> = ENGLISH_AT
-            .iter()
-            .filter_map(|&at| img.cstr(at).ok())
-            .chain(
-                english_slots().filter_map(|slot| img.pointer(slot).and_then(|p| img.cstr(p)).ok()),
-            )
+        let english: BTreeSet<u64> = crate::string_registry::english()
+            .filter_map(|source| source.image(img).ok())
             .map(|text| hash64(&text))
             .collect();
         let mut out = BTreeSet::new();

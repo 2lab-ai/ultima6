@@ -517,11 +517,15 @@ fn hatch_templates(
             && st & 0x10 == 0
             && seams::distance(s, SCOUT, c.x, c.y) < 6
         {
-            let at = super::GameData::a4(DIR_NAMES).wrapping_add_signed(i32::from(dir) * 4);
             // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label
             // of it when it has one ([`crate::magic::LABELS`], [`crate::locale::shown`]).
-            let name = crate::locale::shown(s, s.objcmds.data.pointed(at));
-            let fmt = text::a4_string(s, MSG_WARNING);
+            let name = crate::locale::shown(
+                s,
+                crate::string_registry::text_table!(DIR_NAMES)
+                    .get(dir as usize)
+                    .map_or_else(Vec::new, |text| text.data(&s.objcmds.data)),
+            );
+            let fmt = text::a4_string(s, crate::string_registry::text!(MSG_WARNING));
             text::queue(s, fmt, vec![PrintArg::Str(name)]);
             s.actors.work.prompt = 1;
         }

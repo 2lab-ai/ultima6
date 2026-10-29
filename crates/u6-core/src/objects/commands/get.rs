@@ -50,8 +50,8 @@ const MOONSTONES: usize = 0x2a;
 /// The message the pointer at `A4 + off` names. Port (spec 08, slice K2): read for display only
 /// (the commands print it through `%s`), so the locale pack's label of it is shown in its place
 /// ([`crate::locale::shown`]).
-pub(super) fn message(s: &State, off: i32) -> Vec<u8> {
-    crate::locale::shown(s, s.objcmds.data.pointed(super::GameData::a4(off)))
+pub(super) fn message(s: &State, off: crate::string_registry::Text) -> Vec<u8> {
+    crate::locale::shown(s, s.objcmds.data.pointed(off))
 }
 
 /// Original: 0x128aa4 (objects: `obj` and everything inside it may be taken (status bit 0))
@@ -180,8 +180,14 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
     resolve(&mut state.borrow_mut());
     let sel = state.borrow().ui.input.selection;
     if sel == -1 || state.borrow().objects.place(sel) != 0 {
-        let msg = message(&state.borrow(), P_NOTHING);
-        print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(&state.borrow(), crate::string_registry::pointer!(P_NOTHING));
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     {
@@ -198,14 +204,32 @@ pub async fn get(state: &RefCell<State>, io: &Io) {
     print(state, io, &name, &[]).await;
     putc(state, io, b'\n').await;
     if out_of_reach(&state.borrow(), actor) {
-        let msg = message(&state.borrow(), P_OUT_OF_RANGE);
-        print_at(state, io, S_BANG_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_OUT_OF_RANGE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_BANG_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let tile = tile_of(&state.borrow().tables, state.borrow().objects.tf(sel));
     if hazard(&state.borrow(), sel) {
-        let msg = message(&state.borrow(), P_NOT_POSSIBLE);
-        print_at(state, io, S_NL_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_NOT_POSSIBLE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         crate::actors::party::tile_effect(&mut state.borrow_mut(), actor as u16, tile);
         putc(state, io, b'\n').await;
         seams::wound_text(&mut state.borrow_mut(), actor);
@@ -223,17 +247,32 @@ async fn take(state: &RefCell<State>, io: &Io, actor: Slot, sel: Slot) -> bool {
     let wt = weigh(&mut state.borrow_mut(), actor, sel);
     let kind = state.borrow().objects.kind(sel);
     if cannot_take(&state.borrow(), sel, wt) {
-        let msg = message(&state.borrow(), P_NOT_POSSIBLE);
-        print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_NOT_POSSIBLE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL_LINE_NL),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return true;
     }
     if too_heavy(&state.borrow(), actor, wt) {
-        print_at(state, io, S_TOO_HEAVY, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_TOO_HEAVY), &[]).await;
         return true;
     }
     let stored = store(&mut state.borrow_mut(), actor, sel, kind);
     if !stored {
-        print_at(state, io, S_NO_FREE_HAND, &[]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NO_FREE_HAND),
+            &[],
+        )
+        .await;
     }
     stored
 }
@@ -285,10 +324,10 @@ fn store(s: &mut State, actor: Slot, sel: Slot, kind: u16) -> bool {
             st & 0x60 == 0 && crate::converse::on_screen(s, a) && st & 0x04 == 0
         });
         if witness {
-            queue_at(s, S_STOP_THIEF, Vec::new());
+            queue_at(s, crate::string_registry::text!(S_STOP_THIEF), Vec::new());
             seams::turn_hostile(s);
         } else {
-            queue_at(s, S_STEALING, Vec::new());
+            queue_at(s, crate::string_registry::text!(S_STEALING), Vec::new());
         }
     }
     crate::map::view::update_view(s);

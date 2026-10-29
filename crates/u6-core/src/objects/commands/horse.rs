@@ -93,7 +93,7 @@ pub fn dismount(s: &mut State, rider: Slot) {
     if c >= 0 {
         remove(s, c);
     } else {
-        queue_at(s, S_REAR_HORSE, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_REAR_HORSE), Vec::new());
     }
     let lz = z(s);
     let horse = spawn_monster(s, HORSE, 0, 0, lz);
@@ -116,7 +116,7 @@ pub fn dismount(s: &mut State, rider: Slot) {
         }
     }
     if !placed {
-        queue_at(s, S_NO_ROOM, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_NO_ROOM), Vec::new());
         remove(s, horse);
     }
     refresh(s);

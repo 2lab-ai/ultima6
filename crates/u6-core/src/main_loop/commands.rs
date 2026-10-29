@@ -135,7 +135,12 @@ fn tail(s: &State, i: usize) -> u8 {
 }
 
 /// `printf` of the image string at `addr`.
-async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+async fn print_at(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = game_string(io, addr);
     printf(state, io, &fmt, args).await;
 }
@@ -146,9 +151,17 @@ async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) 
 /// Port (spec 08, slice K2): the name is read for display, so the locale pack's label of it is
 /// shown in its place ([`crate::locale::shown`]).
 async fn print_command(state: &RefCell<State>, io: &Io, code: u16) {
-    let name = pointed_string(io, name_pointer(code));
+    let name = crate::string_registry::text_table!(COMMAND_NAMES)
+        .get(usize::from(code))
+        .map_or_else(Vec::new, |text| pointed_string(io, text));
     let name = crate::locale::shown(&state.borrow(), name);
-    print_at(state, io, FMT_NAME_DASH, &[Arg::Str(&name)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NAME_DASH),
+        &[Arg::Str(&name)],
+    )
+    .await;
 }
 
 /// Original: 0x1041d8 (command loop + A-Z key dispatcher, end-of-turn)
@@ -159,7 +172,13 @@ async fn print_command(state: &RefCell<State>, io: &Io, code: u16) {
 /// turn ([`end_of_turn`]). Code 0x12d (exit confirmed) ends the loop.
 pub async fn command_loop(state: &RefCell<State>, io: &Io) {
     let name = leader_name(&state.borrow());
-    print_at(state, io, FMT_PROMPT, &[Arg::Str(&name)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_PROMPT),
+        &[Arg::Str(&name)],
+    )
+    .await;
     loop {
         crate::ui::panels::redraw_panel(state, io).await;
         {
@@ -172,6 +191,9 @@ pub async fn command_loop(state: &RefCell<State>, io: &Io) {
         state.borrow_mut().main.reading = 0;
         let code = map_letter(state, io, key).await;
         let code = dispatch(state, io, code).await;
+        if state.borrow().main.ending.is_some() {
+            return;
+        }
         // The frames and lines the synchronous combat and object code queued for this command
         // (none for most), then any lines still queued.
         crate::combat::play_effects(state, io).await;
@@ -323,7 +345,13 @@ async fn yes_no(state: &RefCell<State>, io: &Io) -> bool {
             break k;
         }
     };
-    print_at(state, io, FMT_KEY_ECHO, &[Arg::Word(key)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_KEY_ECHO),
+        &[Arg::Word(key)],
+    )
+    .await;
     key == 0x59
 }
 
@@ -341,11 +369,11 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
     }
     match code {
         0x05 | 0x11 | EXIT => {
-            say(state, io, MSG_EXIT, &[]).await;
+            say(state, io, crate::string_registry::text!(MSG_EXIT), &[]).await;
             return if yes_no(state, io).await { EXIT } else { 0 };
         }
         0x08 => {
-            print_at(state, io, MSG_HELP, &[]).await;
+            print_at(state, io, crate::string_registry::text!(MSG_HELP), &[]).await;
             // A4-0x7a50: the help mode is the keyword colour of the text layer.
             let on = {
                 let mut s = state.borrow_mut();
@@ -353,16 +381,28 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
                 t.keyword_colour = !t.keyword_colour;
                 t.keyword_colour
             };
-            print_at(state, io, if on { MSG_ON } else { MSG_OFF }, &[]).await;
-            print_at(state, io, MSG_BANG, &[]).await;
+            print_at(
+                state,
+                io,
+                crate::string_registry::choose(
+                    (if on { MSG_ON } else { MSG_OFF }) as i64,
+                    &[
+                        crate::string_registry::text!(0x00101f62),
+                        crate::string_registry::text!(0x00101f66),
+                    ],
+                ),
+                &[],
+            )
+            .await;
+            print_at(state, io, crate::string_registry::text!(MSG_BANG), &[]).await;
         }
         0x12 => {
-            print_at(state, io, MSG_RESTORE, &[]).await;
+            print_at(state, io, crate::string_registry::text!(MSG_RESTORE), &[]).await;
             if yes_no(state, io).await {
                 crate::saveload::restore_game(state, io).await;
             }
         }
-        0x16 => say(state, io, MSG_VERSION, &[]).await,
+        0x16 => say(state, io, crate::string_registry::text!(MSG_VERSION), &[]).await,
         0x1a => {
             // 0x104c12..0x104c36: on = the flag (A4-0x7b5c) and the area song; off = song 0
             // and the flag cleared ([`crate::sound::toggle_sound`]), then the line.
@@ -370,7 +410,13 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
             say(
                 state,
                 io,
-                if on { MSG_SOUND_ON } else { MSG_SOUND_OFF },
+                crate::string_registry::choose(
+                    (if on { MSG_SOUND_ON } else { MSG_SOUND_OFF }) as i64,
+                    &[
+                        crate::string_registry::text!(0x00154475),
+                        crate::string_registry::text!(0x0015447f),
+                    ],
+                ),
                 &[],
             )
             .await;
@@ -409,7 +455,7 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
         COMBAT => return combat_toggle(state, io).await,
         SAVE => {
             if state.borrow().map.flag_7afb == 0 {
-                say(state, io, MSG_SAVE, &[]).await;
+                say(state, io, crate::string_registry::text!(MSG_SAVE), &[]).await;
                 if yes_no(state, io).await {
                     crate::saveload::save_game(state, io).await;
                     end_command(&mut state.borrow_mut(), io);
@@ -428,7 +474,7 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
                     .collect::<Vec<_>>()
             };
             let args: Vec<Arg<'_>> = args.into_iter().map(Arg::Word).collect();
-            print_at(state, io, FMT_COORDS, &args).await;
+            print_at(state, io, crate::string_registry::text!(FMT_COORDS), &args).await;
             // 0x13410a: the map overview, shown until a key.
             crate::combat::peer::overview(state, io).await;
         }
@@ -448,7 +494,7 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
         }
         0x119 => super::debug_hook(),
         _ => {
-            say(state, io, MSG_WHAT, &[]).await;
+            say(state, io, crate::string_registry::text!(MSG_WHAT), &[]).await;
             end_command(&mut state.borrow_mut(), io);
         }
     }
@@ -461,7 +507,7 @@ pub(crate) async fn dispatch(state: &RefCell<State>, io: &Io, code: u16) -> u16 
 /// drift step waits nothing: no vessel was reachable in the oracle to trace it (aboard, its own
 /// followers' pass and Pass's have no one to move).
 async fn pass(state: &RefCell<State>, io: &Io) {
-    say(state, io, MSG_PASS, &[]).await;
+    say(state, io, crate::string_registry::text!(MSG_PASS), &[]).await;
     let leader = {
         let mut s = state.borrow_mut();
         let leader =
@@ -502,13 +548,31 @@ async fn party_mode(state: &RefCell<State>, io: &Io) {
         )
     };
     if aboard {
-        say(state, io, MSG_ABOARD, &[]).await;
+        say(state, io, crate::string_registry::text!(MSG_ABOARD), &[]).await;
     } else if combat {
-        say(state, io, MSG_NOT_IN_COMBAT, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_NOT_IN_COMBAT),
+            &[],
+        )
+        .await;
     } else if !all_here {
-        say(state, io, MSG_NOT_ALL_HERE, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_NOT_ALL_HERE),
+            &[],
+        )
+        .await;
     } else {
-        say(state, io, MSG_PARTY_MODE, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_PARTY_MODE),
+            &[],
+        )
+        .await;
         let mut s = state.borrow_mut();
         super::end_solo(&mut s, io);
         s.ui.input.target_pending = 0;
@@ -543,11 +607,23 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
         )
     };
     if !able {
-        say(state, io, MSG_FAILS, &[Arg::Str(&name)]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_FAILS),
+            &[Arg::Str(&name)],
+        )
+        .await;
     } else if aboard {
-        say(state, io, MSG_ABOARD, &[]).await;
+        say(state, io, crate::string_registry::text!(MSG_ABOARD), &[]).await;
     } else if combat {
-        say(state, io, MSG_NOT_IN_COMBAT, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_NOT_IN_COMBAT),
+            &[],
+        )
+        .await;
     } else {
         {
             let mut s = state.borrow_mut();
@@ -576,7 +652,7 @@ async fn solo_mode(state: &RefCell<State>, io: &Io, code: u16) {
                 s.ui.panel.dirty = true;
             }
         }
-        say(state, io, MSG_SOLO, &[]).await;
+        say(state, io, crate::string_registry::text!(MSG_SOLO), &[]).await;
         end_command(&mut state.borrow_mut(), io);
     }
 }
@@ -594,7 +670,7 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
         };
         if aboard {
             print_command(state, io, code).await;
-            say(state, io, MSG_ABOARD, &[]).await;
+            say(state, io, crate::string_registry::text!(MSG_ABOARD), &[]).await;
             return code;
         }
     }
@@ -627,7 +703,7 @@ async fn targeted(state: &RefCell<State>, io: &Io, code: u16) -> u16 {
             _ => {}
         }
     } else {
-        say(state, io, MSG_WHAT, &[]).await;
+        say(state, io, crate::string_registry::text!(MSG_WHAT), &[]).await;
     }
     end_command(&mut state.borrow_mut(), io);
     code
@@ -646,16 +722,28 @@ async fn combat_toggle(state: &RefCell<State>, io: &Io) -> u16 {
         )
     };
     if solo >= 0 {
-        say(state, io, MSG_NOT_SOLO, &[]).await;
+        say(state, io, crate::string_registry::text!(MSG_NOT_SOLO), &[]).await;
         return COMBAT;
     }
     if combat {
-        say(state, io, MSG_BREAK_COMBAT, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_BREAK_COMBAT),
+            &[],
+        )
+        .await;
         crate::combat::mode::break_off(&mut state.borrow_mut());
     } else if aboard {
-        say(state, io, MSG_ABOARD, &[]).await;
+        say(state, io, crate::string_registry::text!(MSG_ABOARD), &[]).await;
     } else {
-        say(state, io, MSG_BEGIN_COMBAT, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(MSG_BEGIN_COMBAT),
+            &[],
+        )
+        .await;
         crate::combat::mode::begin_combat(&mut state.borrow_mut());
     }
     COMBAT
@@ -687,6 +775,12 @@ async fn end_of_turn(state: &RefCell<State>, io: &Io, code: u16) {
 /// and after a cut handler.
 async fn reprompt(state: &RefCell<State>, io: &Io) {
     let name = leader_name(&state.borrow());
-    print_at(state, io, FMT_REPROMPT, &[Arg::Str(&name)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_REPROMPT),
+        &[Arg::Str(&name)],
+    )
+    .await;
     state.borrow_mut().actors.work.prompt = 0;
 }

@@ -15,14 +15,12 @@ use crate::objects::Slot;
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -444,7 +442,10 @@ fn shown_line(e: &Engine, lines: &[String], sites: &[u32]) -> i32 {
     sites
         .iter()
         .map(|&a| {
-            let text = crate::main_loop::game_string(e.io(), a);
+            let text = crate::main_loop::game_string(
+                e.io(),
+                crate::string_registry::fixture((a) as i64, false),
+            );
             bare(
                 &text
                     .iter()

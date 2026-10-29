@@ -95,7 +95,7 @@ impl UExe {
         };
         let song_names = pointers(A4 + 0xa0, 13)
             .into_iter()
-            .map(|p| img.cstr(p).unwrap_or_default())
+            .map(|p| song_file(&img, p))
             .collect();
         Ok(Self {
             song_names,
@@ -175,4 +175,10 @@ impl UExe {
         }
         self.flat[o..o + data.len()].copy_from_slice(data);
     }
+}
+
+// The u executable has its own address space and catalogue, outside B13's game registry.
+#[allow(clippy::disallowed_methods)]
+fn song_file(image: &GameImage<'_>, address: u32) -> Vec<u8> {
+    image.cstr(address).unwrap_or_default()
 }

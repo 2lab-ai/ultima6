@@ -10,11 +10,12 @@
 
 use std::fmt;
 
+mod quick;
+
 use u6_render::{Framebuffer, HEIGHT, WIDTH};
 
 use super::menu::{self, Entry, Kind, Menu, Reason, Run, Step};
 use super::text::{self, CELL, TextWindow, WindowId};
-use super::wide::Language;
 use crate::engine::{InputEvent, Io, Key, POINTER_LEFT, POINTER_RIGHT, Pointer};
 use crate::objects::Slot;
 use crate::state::State;
@@ -33,12 +34,29 @@ const NAME_ROWS: i32 = 0x10 - 6;
 /// The inventory view's slot among [`crate::geom::SLOTS`] (roster, stats, inventory).
 const INVENTORY_SLOT: usize = 2;
 
-/// The engine's record of the map cells "Go here" asked travel to, in order (spec 21: each given
-/// to [`crate::engine::Engine::travel_to`] as it was chosen, [`Popup::take_go_here`]; the engine
-/// holds it, [`crate::engine::Engine::go_here_asked`]).
+/// The engine's record of the map cells "Go here" asked travel to, in order, every choice (spec
+/// 21: each given to [`crate::engine::Engine::travel_to`] as it was chosen,
+/// [`Popup::take_go_here`]; the engine holds it, [`crate::engine::Engine::go_here_asked`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Travel {
     pub asked: Vec<(i16, i16)>,
+}
+
+/// One choice of "Go here" in an input ([`Popup::take_go_here`]): what spec 21's merge contract
+/// reads after it in the same input, so a tick's events stop the travel as the same events in the
+/// next tick would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GoHere {
+    /// The map cell chosen.
+    pub cell: (i16, i16),
+    /// Where the choice sits in the events the menu passed on ([`Popup::input_with`]'s output):
+    /// the index after its own (the move [`Popup::close_here`] gives the game); the events from
+    /// it on came after the choice.
+    pub at: usize,
+    /// The menu took new input ([`Popup::took_new_input`]) after the choice: a press that opened
+    /// another menu, an event while it was open, closing it. The choosing press's or key's own is
+    /// not, nor its tail.
+    pub later: bool,
 }
 
 /// How "Go here" shows spec 21's refusal `r` ([`crate::actors::travel::reachable`]): `Here`,
@@ -235,10 +253,11 @@ pub struct Open {
 }
 
 impl Open {
-    /// The menu of `menu` for a press at frame pixel `at`, laid out for `s` (its language, its
-    /// paper, its click regions), kept off the frame rects `hidden` where it can ([`place`]).
+    /// The menu of `menu` for a press at frame pixel `at`, laid out for `s` (its language,
+    /// [`crate::locale::pack_is_korean`]; its paper, its click regions), kept off the frame rects
+    /// `hidden` where it can ([`place`]).
     pub fn new(menu: &Menu, at: (i16, i16), s: &State, hidden: &[Rect]) -> Open {
-        let korean = s.ui.text.language == Language::Korean;
+        let korean = crate::locale::pack_is_korean(s);
         let mut rows = Vec::new();
         // The underlined command first: Rest and Combat only there, any other as the first entry
         // that has it.
@@ -507,6 +526,7 @@ impl Open {
             rect: self.rect(),
             text: self.text_rect(),
             hover: self.hover,
+            korean: self.korean,
             rows,
         }
     }
@@ -568,6 +588,8 @@ pub struct View {
     pub text: (i32, i32, i32, i32),
     /// The highlighted row.
     pub hover: usize,
+    /// Laid out and drawn in the Korean words ([`crate::locale::pack_is_korean`]).
+    pub korean: bool,
     pub rows: Vec<RowView>,
 }
 
@@ -823,11 +845,18 @@ pub struct Popup {
     chose: Option<Chose>,
     /// The player's clock in the current [`Popup::input_with`] (ms).
     now: u64,
-    /// The map cell "Go here" chose, for the engine ([`Popup::take_go_here`]).
-    go_here: Option<(i16, i16)>,
+    /// The choices of "Go here" since the engine took them last, in order
+    /// ([`Popup::take_go_here`]).
+    go_here: Vec<GoHere>,
     /// The last [`Popup::input`] took an event that is not the tail of a gesture the menu already
     /// held ([`Popup::took_new_input`]).
     new_input: bool,
+    /// Ctrl-only representative action; independent of the full right-click menu.
+    control: bool,
+    quick: Option<Open>,
+    quick_press: Option<Open>,
+    quick_down: bool,
+    last_pointer: Option<(i16, i16)>,
 }
 
 impl Popup {
@@ -845,8 +874,13 @@ impl Popup {
             self.keys.clear();
             self.buttons = 0;
             self.chose = None;
-            self.go_here = None;
+            self.go_here.clear();
             self.new_input = false;
+            self.control = false;
+            self.set_quick(None);
+            self.quick_press = None;
+            self.quick_down = false;
+            self.last_pointer = None;
         }
     }
 
@@ -910,10 +944,12 @@ impl Popup {
         self.open.is_some() || self.keys.iter().any(|&(t, _)| t == k)
     }
 
-    /// The map cell "Go here" chose since the last call, once (the engine starts spec 21's travel
-    /// there, [`crate::engine::Engine::travel_to`]).
-    pub fn take_go_here(&mut self) -> Option<(i16, i16)> {
-        self.go_here.take()
+    /// The choices of "Go here" since the last call, in order, each once: the engine takes them
+    /// after every input and starts spec 21's travel to each cell in turn
+    /// ([`crate::engine::Engine::travel_to`]), which a stop after the choice in the same input
+    /// ends at once ([`GoHere`]).
+    pub fn take_go_here(&mut self) -> Vec<GoHere> {
+        std::mem::take(&mut self.go_here)
     }
 
     /// Whether the last [`Popup::input`] took an event that is not the tail of a gesture the
@@ -970,6 +1006,19 @@ impl Popup {
         now: u64,
         dismissals: &[usize],
     ) -> Vec<InputEvent> {
+        self.input_controls(s, io, input, quiet, (now, &[]), dismissals)
+    }
+
+    /// As `input_with`, with Ctrl changes at their ordered positions in the input.
+    pub fn input_controls(
+        &mut self,
+        s: &State,
+        io: &Io,
+        input: &[InputEvent],
+        quiet: bool,
+        (now, controls): (u64, &[(usize, bool)]),
+        dismissals: &[usize],
+    ) -> Vec<InputEvent> {
         let mut tail = Vec::new();
         self.new_input = false;
         self.now = now;
@@ -988,24 +1037,58 @@ impl Popup {
         let mut out = Vec::with_capacity(input.len() + tail.len());
         let mut calm = quiet;
         let mut marks = dismissals.iter().copied().peekable();
+        let mut controls = controls.iter().copied().peekable();
+        self.refresh_quick(s, io, quiet);
         for (i, &ev) in input.iter().enumerate() {
-            while marks.next_if(|&m| m <= i).is_some() {
-                self.new_input |= self.dismiss();
+            while let Some((_, down)) = controls.next_if(|&(at, _)| at <= i) {
+                self.control = down;
+                if !down {
+                    self.quick_press = None;
+                }
+                self.refresh_quick(s, io, calm);
             }
+            while marks.next_if(|&m| m <= i).is_some() {
+                let new = self.dismiss();
+                self.took_after(new, self.go_here.len());
+            }
+            // The event's own new input, apart: a choice it makes is after the rest of it.
+            let (was, chosen) = (std::mem::take(&mut self.new_input), self.go_here.len());
             if !self.take(s, io, ev, (calm, held), &mut out) {
                 calm &= inert(prompt, &ev);
                 out.push(ev);
             }
+            let new = std::mem::replace(&mut self.new_input, was);
+            self.took_after(new, chosen);
         }
         if marks.next().is_some() {
-            self.new_input |= self.dismiss();
+            let new = self.dismiss();
+            self.took_after(new, self.go_here.len());
         }
+        for (_, down) in controls {
+            self.control = down;
+            if !down {
+                self.quick_press = None;
+            }
+        }
+        self.refresh_quick(s, io, calm);
         out.extend(tail);
         out
     }
 
+    /// New input taken ([`Popup::took_new_input`]) when `new`, after the first `chosen` of the
+    /// choices of Go here held ([`GoHere::later`]).
+    fn took_after(&mut self, new: bool, chosen: usize) {
+        self.new_input |= new;
+        if new {
+            for c in &mut self.go_here[..chosen] {
+                c.later = true;
+            }
+        }
+    }
+
     /// After the game's poll: a menu whose prompt went (A4-0x7a2c no longer 1) closes; one whose
-    /// language changed is laid out again.
+    /// language changed ([`crate::locale::pack_is_korean`]: a pack installed or another game's
+    /// state) is laid out again.
     pub fn after_poll(&mut self, s: &State) {
         if self.open.is_some() && s.main.reading != 1 {
             self.close();
@@ -1013,7 +1096,7 @@ impl Popup {
         } else if self
             .open
             .as_ref()
-            .is_some_and(|o| o.korean != (s.ui.text.language == Language::Korean))
+            .is_some_and(|o| o.korean != crate::locale::pack_is_korean(s))
         {
             self.relay(s);
         }
@@ -1093,6 +1176,11 @@ impl Popup {
         let before = std::mem::replace(&mut self.buttons, b);
         let down = b & !before;
         let at = Pointer { x, y, buttons: 0 };
+        self.last_pointer = Some((x, y));
+        self.refresh_quick(s, io, calm && !held);
+        if self.quick_pointer(s, (before, b), calm && !held, out) {
+            return true;
+        }
         if self.swallow {
             self.swallow = b != 0;
             if !self.swallow && self.open.is_none() {
@@ -1259,15 +1347,18 @@ impl Popup {
     pub fn dismiss(&mut self) -> bool {
         let open = self.open.is_some();
         self.close();
+        self.set_quick(None);
+        self.quick_press = None;
+        self.last_pointer = None;
         self.pointer = None;
         self.chose = None;
         open
     }
 
     /// Runs row `i`'s entry (spec 17 Running a choice): Go here asks spec 21's travel to the cell
-    /// ([`Popup::take_go_here`]), a slot's own action is a left click on the slot, Rest and Combat
-    /// their icon's press, any other command its icon's press now and the press at the target
-    /// once it reads it. The menu closes.
+    /// ([`Popup::take_go_here`], with its place among the events passed on, `out`), a slot's own
+    /// action is a left click on the slot, Rest and Combat their icon's press, any other command
+    /// its icon's press now and the press at the target once it reads it. The menu closes.
     fn choose(&mut self, s: &State, i: usize, out: &mut Vec<InputEvent>) {
         let Some(open) = self.open.as_ref() else {
             return;
@@ -1277,8 +1368,23 @@ impl Popup {
         };
         let (at, cell) = (open.at, open.cell);
         self.close_here(out);
+        self.run_item(s, item, at, cell, out);
+    }
+
+    fn run_item(
+        &mut self,
+        s: &State,
+        item: Item,
+        at: (i16, i16),
+        cell: Option<(i16, i16)>,
+        out: &mut Vec<InputEvent>,
+    ) {
         match item.code {
-            menu::GO_HERE => self.go_here = cell,
+            menu::GO_HERE => self.go_here.extend(cell.map(|cell| GoHere {
+                cell,
+                at: out.len(),
+                later: false,
+            })),
             menu::OPEN | menu::READY | menu::UNREADY => out.extend(menu::left_press(at.0, at.1)),
             code => match Run::start(s, code, at) {
                 Some((icon, run)) => {

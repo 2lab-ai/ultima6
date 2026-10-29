@@ -203,7 +203,7 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
                 if s.rng.range(0, 1) != 0 {
                     let left = seams::obj_quality(s, obj);
                     if minutes >= i16::from(left) {
-                        seams::print(s, TORCH_OUT, &[]);
+                        seams::print(s, crate::string_registry::text!(TORCH_OUT), &[]);
                         seams::remove_object(s, obj);
                         s.actors.work.prompt = 1;
                     } else {
@@ -253,7 +253,17 @@ fn carried_items(s: &mut State, actor: u16, minutes: i16, f: &mut TickFlags) {
             _ => {}
         }
         if f.vanish {
-            seams::print(s, VANISHED, &[Arg::Image(name)]);
+            seams::print(
+                s,
+                crate::string_registry::text!(VANISHED),
+                &[Arg::Image(crate::string_registry::choose(
+                    (name) as i64,
+                    &[
+                        crate::string_registry::text!(RING_NAME),
+                        crate::string_registry::text!(CLOAK_NAME),
+                    ],
+                ))],
+            );
             seams::remove_object(s, obj);
             s.actors.work.prompt = 1;
             f.vanish = false;
@@ -440,16 +450,72 @@ fn set_light(s: &mut State, f: &TickFlags) {
 /// The date line in the status area (the format at A4-0x7293): month, day, year and the wind
 /// name (the name table at A4-0x7ae4 is indexed by the signed wind byte).
 pub(crate) fn date_line(s: &mut State) {
+    // The predictor has already run the real minute's rules and RNG on its private copy.
+    // This routine only queues Screen/Cursor/date text/Messages, under the map in Original
+    // and beside it in Wide. Omit that UI queue on the copy instead of requesting live I/O
+    // for its strings or treating it as an NPC effect. Runtime output and pacing stay exact.
+    if crate::engine::prediction_omits_date_line(s) {
+        return;
+    }
     let c = s.actors.calendar;
     seams::date_line_window(s, true);
     let args = [
         Arg::Word(i16::from(c.month)),
         Arg::Word(i16::from(c.day)),
         Arg::Word(c.year as i16),
-        Arg::Pointer(wind_offset(s.actors.wind as i8)),
+        Arg::Pointer(
+            crate::string_registry::text_table!(0x7ae8)
+                .get((i16::from(s.actors.wind as i8) + 1) as usize),
+        ),
     ];
-    seams::print(s, DATE, &args);
+    seams::print(s, crate::string_registry::text!(DATE), &args);
     seams::date_line_window(s, false);
+}
+
+/// Date-only proof for the predictor. Screen output begins at row 21 and without SCROLL
+/// stays on its last row even for arbitrarily long/multiline translations (`print::end_line`).
+/// The current line flushed before selecting Screen must also be wholly outside the map.
+/// A translated `*` could enter a key wait and run idle/map work, so it remains unknown.
+pub(crate) fn date_preview_safe(s: &State, files: &crate::Files) -> bool {
+    use crate::ui::text::{PAGED, SCROLL, WindowId};
+    let t = &s.ui.text;
+    if !matches!(t.current, WindowId::Messages | WindowId::Status) {
+        return false;
+    }
+    let screen = t.windows[WindowId::Screen.index()];
+    if (screen.x, screen.y, screen.width, screen.height) != (0, 0, 40, 25)
+        || screen.flags & (SCROLL | PAGED) != 0
+    {
+        return false;
+    }
+    let w = t.win();
+    let (mx0, my0, mx1, my1) = crate::geom::SHOWN;
+    let (x, y) = (u16::from(w.x) * 8, u16::from(w.y) * 8);
+    let (right, bottom) = (x + u16::from(w.width) * 8, y + u16::from(w.height) * 8);
+    if w.width == 0 || w.height == 0 || !(right <= mx0 || x > mx1 || bottom <= my0 || y > my1) {
+        return false;
+    }
+    let Some(image) = files
+        .get("game")
+        .and_then(|bytes| crate::image::GameImage::parse(bytes).ok())
+    else {
+        return false;
+    };
+    let copy = s.clone();
+    let format = crate::string_registry::text!(DATE)
+        .image(&image)
+        .unwrap_or_default();
+    if format.is_empty() {
+        return false;
+    }
+    let format = crate::locale::exe_string(&copy, &format).map_or(format, |(_, text)| text);
+    let Some(wind) = crate::string_registry::text_table!(0x7ae8)
+        .get((i16::from(s.actors.wind as i8) + 1) as usize)
+    else {
+        return false;
+    };
+    let wind = crate::locale::shown(&copy, wind.image(&image).unwrap_or_default());
+    !format.contains(&b'*') && !wind.contains(&b'*')
 }
 
 #[cfg(test)]
@@ -659,7 +725,14 @@ mod tests_words {
         let game = crate::locale::strings::test_game(&parts);
         let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game)]));
         let mut e = crate::engine::Engine::with_game(s, files, move |st, _io| async move {
-            seams::print(&mut st.borrow_mut(), VANISHED, &[Arg::Image(at)]);
+            seams::print(
+                &mut st.borrow_mut(),
+                crate::string_registry::fixture((VANISHED) as i64, false),
+                &[Arg::Image(crate::string_registry::fixture(
+                    (at) as i64,
+                    false,
+                ))],
+            );
         });
         for _ in 0..40 {
             if e.finished() {

@@ -15,6 +15,10 @@ The intro program `u` has its own table: markers written `u 0xADDR` (`/// Origin
 against the procedures of `u` (REA's u-procedures.json plus the code hunk bases of u.json, less
 the `jmp abs.l` thunks read from u.bin).
 
+The ending executable uses `Original: end 0xADDR` markers and has a separate address space.
+Those markers are not part of either table; they must never mark a same-address game or u
+function as ported. Its research and runtime validation are tracked in spec 16 E1.
+
 A stub under a higher-ranked status shows beside it (`ported; stub at <site>`). A stub that names a
 ported address can be a stale seam, a mode the port lacks, a guard inside the port, or a stub that
 names the wrong address; the totals line counts those addresses as `also named by a stub`. Partial

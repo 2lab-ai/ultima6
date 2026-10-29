@@ -257,9 +257,10 @@ pub fn note(ui: &mut UiState, w: &TextWindow, c: u16, at: (u16, u16), kind: Cell
 /// row is kept with `spans`, the keywords it showed ([`super::talk::KeySpans::scroll`]), and the
 /// pixels of `fb` its cells do not draw outside them, the oldest line dropped past [`HISTORY`],
 /// and the shadow moves up one row, the new last row blank in `w`'s paper. Another window over
-/// part of it clears the shadow. A keyword is kept only while each of its cells shows its drawing
-/// or that drawing inverse, and its cells take no patch: the one under the pointer is drawn inverse
-/// (spec 22 Contract 6), and the history keeps it as drawn, in its ink; a keyword drawn over is not
+/// part of it clears the shadow. A keyword is kept only while the shadow still has its codes and
+/// ink and each cell shows its drawing or that drawing inverse. Its cells take no patch: the one
+/// under the pointer is drawn inverse (spec 22 Contract 6), and the history keeps it as drawn,
+/// in its ink; a keyword drawn over is not
 /// kept, and its cells take their patch as any other. A rest keeps its link ([`KeySpan::joined`])
 /// only to a continued span of its ink on the line kept before it ([`linked`]).
 pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow, spans: Vec<KeySpan>) {
@@ -277,13 +278,17 @@ pub fn scrolled(ui: &mut UiState, fb: &Framebuffer, w: &TextWindow, spans: Vec<K
     }
     ui.scrollback.fit(&m);
     let mut line = ui.scrollback.rows.remove(0);
-    // opus N1 (round 4): a span drawn over (a cell that shows neither its drawing nor that drawing
-    // inverse, as a window over the message window may draw while the spans are not updated) is
-    // not kept, and its cells take their patch.
+    // Another window's drawing can update the shadow through `note` without updating the
+    // keyword spans. Check identity before pixels: a newly drawn shadow cell must not preserve
+    // an old keyword just because it now matches the frame.
     let cells = line.cells.len();
     let shown = |s: &KeySpan| {
         let end = usize::from(s.col) + s.cells.len();
-        end <= cells && (usize::from(s.col)..end).all(|k| as_drawn(&*ui, fb, &line, &m, m.y, k))
+        end <= cells
+            && (usize::from(s.col)..end).zip(&s.cells).all(|(k, &code)| {
+                let cell = &line.cells[k];
+                cell.code == code && cell.fg == s.ink && as_drawn(&*ui, fb, &line, &m, m.y, k)
+            })
     };
     let spans = spans.into_iter().filter(shown).collect();
     line.spans = linked(ui.scrollback.lines.back().map(Rc::as_ref), spans);

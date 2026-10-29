@@ -106,9 +106,11 @@ pub(crate) const NO_DIRTY: [i16; 4] = [
 /// than a tick: the stall is made up a tick a wait. After anything else waited (a key, a
 /// prompt) the schedule starts again from now.
 pub async fn pace(state: &RefCell<State>, io: &Io, ms: u16) {
-    let due = schedule(state, io, ms);
+    let _waiting = io.playback.wait();
+    let mut due = schedule(state, io, ms);
     loop {
         let (now, tick) = display_frame(io).await;
+        due.ms = io.playback_speed().millis(ms);
         if now >= due.at(tick) {
             break;
         }
@@ -149,7 +151,7 @@ fn schedule(state: &RefCell<State>, io: &Io, ms: u16) -> Due {
     Due {
         prev,
         start: now,
-        ms,
+        ms: io.playback_speed().millis(ms),
     }
 }
 
@@ -195,6 +197,8 @@ pub struct Effect {
     pub mark: usize,
     /// The window was presented dissolving (0x1520e2): playback reveals it over its time.
     pub dissolve: bool,
+    /// Display-only onset before this existing wait; no extra effect, frame or wait.
+    pub strike: Option<u6_render::motion::attacks::Strike>,
 }
 
 /// Records the screen rectangle (x0, y0)..=(x1, y1) as it is now (after a present), shown after
@@ -221,7 +225,18 @@ pub(crate) fn capture(s: &mut State, x0: usize, y0: usize, x1: usize, y1: usize,
             cost,
             mark,
             dissolve: false,
+            strike: None,
         });
+    }
+}
+
+/// Attach an onset to the first effect the attack already produced. An attack with no
+/// drawing wait (e.g. a miss on empty ground) queues it now; it never adds an effect or yield.
+pub(crate) fn strike(s: &mut State, first: usize, strike: u6_render::motion::attacks::Strike) {
+    if let Some(effect) = s.combat.effects.get_mut(first) {
+        effect.strike = Some(strike);
+    } else {
+        with_current_io(|io| io.strike(strike));
     }
 }
 
@@ -258,6 +273,7 @@ pub(crate) fn capture_pause(s: &mut State, cost: u16) {
         cost,
         mark,
         dissolve: false,
+        strike: None,
     });
 }
 
@@ -388,6 +404,9 @@ pub async fn play_effects(state: &RefCell<State>, io: &Io) {
                 last = Some(io.draw(|fb| window_of(fb)));
             }
         }
+        if let Some(strike) = e.strike {
+            io.strike(strike);
+        }
         if e.dissolve && (e.w, e.h) == WINDOW {
             reveal(state, io, &e).await;
         } else {
@@ -481,13 +500,16 @@ async fn reveal(state: &RefCell<State>, io: &Io, e: &Effect) {
     let taps = state.borrow().gfx.tables.dissolve_taps;
     let order = crate::gfx::blit::MapDissolve::new(&taps);
     let steps = order.steps();
-    let wait = schedule(state, io, e.cost);
-    let render = u64::from(WINDOW_MS.min(e.cost));
+    let _waiting = io.playback.wait();
+    let mut wait = schedule(state, io, e.cost);
     let mut done = 0;
     loop {
         let (now, tick) = display_frame(io).await;
+        let speed = io.playback_speed();
+        wait.ms = speed.millis(e.cost);
+        let render = u64::from(speed.millis(WINDOW_MS.min(e.cost)));
         let due = wait.at(tick);
-        let begin = due - u64::from(e.cost) + render;
+        let begin = due.saturating_sub(u64::from(wait.ms)) + render;
         let upto = if now >= due {
             steps
         } else {
@@ -1018,7 +1040,7 @@ const SAID_KEPT: usize = 64;
 /// Port (spec 08, 2026-10-24): the format is queued whole
 /// ([`crate::main_loop::Pending::PrintSwallowed`]) so the locale layer finds it; the newlines
 /// are dropped from the text it puts ([`crate::ui::printf::printf_swallowed`]).
-pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
+pub(crate) fn say(s: &mut State, at: crate::string_registry::Text, args: Vec<Text>) {
     if !s.ui.text.on {
         return;
     }
@@ -1027,7 +1049,7 @@ pub(crate) fn say(s: &mut State, at: u32, args: Vec<Text>) {
         said.remove(0);
     }
     said.push(Said {
-        at,
+        at: at.address(),
         args: args.clone(),
     });
     let fmt = with_current_io(|io| crate::main_loop::game_string(io, at));

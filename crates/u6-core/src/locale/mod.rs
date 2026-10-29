@@ -162,7 +162,7 @@ mod tests;
 #[cfg(test)]
 mod tests_program;
 #[cfg(test)]
-mod tests_scan;
+mod tests_registry;
 #[cfg(test)]
 mod tests_strings;
 #[cfg(test)]
@@ -1613,15 +1613,25 @@ pub(crate) fn look_at(state: &State, index: usize, english: &[u8], count: bool) 
     })
 }
 
-/// Slice K3: whether the object name of look entry `index` shows from a pack whose language is
-/// Korean (no article goes before it then). Counts nothing.
-pub(crate) fn look_is_korean(state: &State, index: usize, english: &[u8]) -> bool {
+/// Whether the installed pack's language is Korean ([`install`] sets `State::locale`). The text
+/// layer's `ui.text.language` is not the pack's: it is the language of the string being printed,
+/// which `puts`, `printf`, Look and the conversation set for one pack string and put back
+/// (`ui/printf.rs` `puts`), English at rest. The one reading of it: Look's article
+/// ([`look_is_korean`]) and the context menu's language (spec 17 Words: its layout, its words, its
+/// note and theft mark and the check that lays an open menu out again,
+/// [`crate::ui::popup::Popup::after_poll`]).
+pub(crate) fn pack_is_korean(state: &State) -> bool {
     state
         .locale
         .pack
         .as_ref()
         .is_some_and(|p| p.language == Language::Korean)
-        && look_at(state, index, english, false).is_some()
+}
+
+/// Slice K3: whether the object name of look entry `index` shows from a pack whose language is
+/// Korean (no article goes before it then). Counts nothing.
+pub(crate) fn look_is_korean(state: &State, index: usize, english: &[u8]) -> bool {
+    pack_is_korean(state) && look_at(state, index, english, false).is_some()
 }
 
 /// Slice K3: the book `book.dat` holds at `index` (Look reads it from `file`; `english` is what it

@@ -41,6 +41,7 @@ fn cell(s: &mut State, io: &Io, c: u16, col: u8, row: u16) {
         let keys = &mut s.ui.text.keys;
         let r = row.saturating_sub(u16::from(w.y)) as u8;
         keys.draw(r, col, c, w.fg, w.fg == alert);
+        super::talk::choices::note(&mut s.ui, r, col);
     }
     scrollback::note(&mut s.ui, &w, c, (x, row), CellKind::Char);
 }
@@ -50,7 +51,14 @@ fn code(c: i32) -> u16 {
     u16::try_from(c).unwrap_or(u16::MAX)
 }
 
-/// Port-side transcript of the message scroll: a finished line goes to `UiState::messages`.
+#[cfg(test)]
+thread_local! {
+    /// Paired content receipt before the bounded 64-line transcript drops its oldest line.
+    pub(crate) static TRANSCRIPT_ALL: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Port-side transcript of the message scroll: a finished line goes to `UiState::messages`,
+/// counted (`UiState::lines_finished`).
 fn transcript_end(s: &mut State) {
     let ui = &mut s.ui;
     if ui.text.current == WindowId::Messages {
@@ -60,7 +68,14 @@ fn transcript_end(s: &mut State) {
             .drain(..)
             .map(wide::cell_char)
             .collect();
+        #[cfg(test)]
+        TRANSCRIPT_ALL.with(|all| {
+            if let Some(all) = all.borrow_mut().as_mut() {
+                all.push(line.clone());
+            }
+        });
         ui.messages.push(line);
+        ui.lines_finished += 1;
         let n = ui.messages.len();
         if n > TRANSCRIPT {
             ui.messages.drain(..n - TRANSCRIPT);
@@ -393,4 +408,37 @@ pub async fn put_raw_n(state: &RefCell<State>, io: &Io, n: i16, c: i32) {
         put_cell(state, io, c).await;
     }
     state.borrow_mut().ui.text.tail = tail;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_lines_keep_growing_after_the_transcript_is_full() {
+        let mut state = State::empty();
+        state.ui.text.current = WindowId::Messages;
+        for _ in 0..TRANSCRIPT {
+            transcript_end(&mut state);
+        }
+        let before = state.ui.lines_finished;
+        transcript_end(&mut state);
+        assert_eq!(
+            state.ui.messages.len(),
+            TRANSCRIPT,
+            "retention stays bounded"
+        );
+        assert_eq!(
+            state.ui.lines_finished,
+            before + 1,
+            "completion still advances"
+        );
+        state.ui.text.current = WindowId::Screen;
+        transcript_end(&mut state);
+        assert_eq!(
+            state.ui.lines_finished,
+            before + 1,
+            "other windows do not count"
+        );
+    }
 }

@@ -73,25 +73,23 @@ pub fn a4_sbyte(io: &Io, off: i32, i: usize) -> i8 {
 }
 
 /// The string the pointer at A4 + `off` + 4 `i` names.
-pub fn a4_pointed(io: &Io, off: i32, i: usize) -> Vec<u8> {
-    pointed_string(io, a4(off).wrapping_add(4 * i as u32))
+pub fn a4_pointed(io: &Io, off: crate::string_registry::Table, i: usize) -> Vec<u8> {
+    off.get(i)
+        .map_or_else(Vec::new, |text| pointed_string(io, text))
 }
 
 /// The bytes the pointer at A4 + `off` + 4 `i` names, up to the first 0 (at most 64).
-pub fn a4_pointed_list(io: &Io, off: i32, i: usize) -> Vec<u8> {
-    let Some(img) = io.game_image() else {
-        return Vec::new();
-    };
-    let Ok(p) = img.pointer(a4(off).wrapping_add(4 * i as u32)) else {
-        return Vec::new();
-    };
-    let list = img.read_zero_filled(p, 64).unwrap_or_default();
-    list.into_iter().take_while(|&b| b != 0).collect()
+pub fn a4_pointed_list(io: &Io, off: crate::string_registry::Table, i: usize) -> Vec<u8> {
+    off.get(i).map_or_else(Vec::new, |text| text.byte_list(io))
 }
 
 /// The name of direction `dir` (0 = north, clockwise).
 pub fn direction_name(io: &Io, dir: i16) -> Vec<u8> {
-    a4_pointed(io, DIRECTION_NAMES, (dir & 7) as usize)
+    a4_pointed(
+        io,
+        crate::string_registry::text_table!(DIRECTION_NAMES),
+        (dir & 7) as usize,
+    )
 }
 
 /// (dx, dy) of direction `dir` (0 = north, clockwise).

@@ -296,7 +296,7 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn a_game_whose_med_tables_fail_the_checks_runs_silent() {
-        let zip = Path::new("/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip");
+        let zip = u6_testkit::archive();
         if !zip.exists() {
             eprintln!("skipped: {} not present", zip.display());
             return;
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn the_boot_renders_music() {
-        let zip = Path::new("/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip");
+        let zip = u6_testkit::archive();
         if !zip.exists() {
             eprintln!("skipped: {} not present", zip.display());
             return;

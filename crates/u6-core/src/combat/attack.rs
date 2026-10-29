@@ -148,10 +148,22 @@ pub fn list_weapons(s: &mut State) {
         } else {
             BARE_HANDS
         };
-        say(s, at, vec![]);
+        say(
+            s,
+            crate::string_registry::choose(
+                (at) as i64,
+                &[
+                    crate::string_registry::text!(0x00121ba0),
+                    crate::string_registry::text!(0x00121bb0),
+                    crate::string_registry::text!(0x00153fe7),
+                    crate::string_registry::text!(0x00153ffa),
+                ],
+            ),
+            vec![],
+        );
     } else {
         let n = name(s, s.combat.weapons[0]);
-        say(s, WITH, vec![n]);
+        say(s, crate::string_registry::text!(WITH), vec![n]);
     }
 }
 
@@ -248,13 +260,13 @@ pub(crate) fn refusal_on(s: &mut State) -> Option<WeaponRefusal> {
 pub async fn attack(state: &RefCell<State>, io: &Io) {
     let aboard = {
         let mut s = state.borrow_mut();
-        say(&mut s, ATTACK_WORD, vec![]);
+        say(&mut s, crate::string_registry::text!(ATTACK_WORD), vec![]);
         let aboard = refused_aboard(&s);
         if aboard {
-            say(&mut s, DASH, vec![]);
-            say(&mut s, NOT_ABOARD, vec![]);
+            say(&mut s, crate::string_registry::text!(DASH), vec![]);
+            say(&mut s, crate::string_registry::text!(NOT_ABOARD), vec![]);
         } else {
-            say(&mut s, SPACE, vec![]);
+            say(&mut s, crate::string_registry::text!(SPACE), vec![]);
             s.ui.input.target_pending = 1;
             s.ui.input.target_command = 0x81;
             list_weapons(&mut s);
@@ -288,12 +300,20 @@ pub async fn attack(state: &RefCell<State>, io: &Io) {
             crate::ui::panels::redraw_panel(state, io).await;
             key = crate::ui::wait::read_key(state, io).await;
             if key != CONFIRMED {
-                say(&mut state.borrow_mut(), WHAT, vec![]);
+                say(
+                    &mut state.borrow_mut(),
+                    crate::string_registry::text!(WHAT),
+                    vec![],
+                );
                 break;
             }
         }
     } else {
-        say(&mut state.borrow_mut(), WHAT, vec![]);
+        say(
+            &mut state.borrow_mut(),
+            crate::string_registry::text!(WHAT),
+            vec![],
+        );
     }
     {
         let mut s = state.borrow_mut();
@@ -323,28 +343,42 @@ pub fn attack_with_weapon(s: &mut State) {
     let weapon = current_weapon(s, attacker);
     let wt = kind(s, weapon);
     if no_ammo(s, attacker, wt) {
-        say(s, if is_bow(wt) { NO_ARROWS } else { NO_BOLTS }, vec![]);
+        say(
+            s,
+            crate::string_registry::choose(
+                (if is_bow(wt) { NO_ARROWS } else { NO_BOLTS }) as i64,
+                &[
+                    crate::string_registry::text!(0x00154014),
+                    crate::string_registry::text!(0x00154024),
+                ],
+            ),
+            vec![],
+        );
     } else {
         let sel = s.ui.input.selection;
         if sel >= 0 {
             if sel == attacker {
-                say(s, PASS, vec![]);
+                say(s, crate::string_registry::text!(PASS), vec![]);
             } else {
                 let n = name(s, sel);
-                say(s, NAMED, vec![n]);
+                say(s, crate::string_registry::text!(NAMED), vec![n]);
             }
         } else if s.ui.input.target_void {
-            say(s, NOTHING, vec![]);
+            say(s, crate::string_registry::text!(NOTHING), vec![]);
         } else {
             let (x, y) = s.ui.input.target;
             let z = u16::from(s.map.centre.z);
             let t = crate::actors::seams::tile_at(s, x as u16, y as u16, z);
             // Port (spec 08, slice K3): shown, so the locale pack's object name when it has one.
             let look = crate::objects::shown_look(s, u16::from(t)).into_bytes();
-            say(s, NAMED, vec![Text::Str(look)]);
+            say(
+                s,
+                crate::string_registry::text!(NAMED),
+                vec![Text::Str(look)],
+            );
         }
         if s.ui.input.selection != attacker {
-            say(s, NEWLINE, vec![]);
+            say(s, crate::string_registry::text!(NEWLINE), vec![]);
             s.combat.swallow = true;
             let (x, y) = s.ui.input.target;
             if s.ui.input.selection < 0 {
@@ -354,10 +388,10 @@ pub fn attack_with_weapon(s: &mut State) {
                 1 => {
                     let foe = i16::from(s.actors.attrs.unknown_18f1[attacker as usize]);
                     let n = name(s, foe);
-                    say(s, INTERFERES, vec![n]);
+                    say(s, crate::string_registry::text!(INTERFERES), vec![n]);
                 }
                 2 => {
-                    say(s, OUT_OF_RANGE, vec![]);
+                    say(s, crate::string_registry::text!(OUT_OF_RANGE), vec![]);
                     s.main.attack_target = -1;
                 }
                 _ => {}
@@ -380,7 +414,7 @@ pub(crate) fn next_weapon(s: &mut State) {
         let w = s.combat.weapons[s.combat.weapon_index as usize];
         aim(s, w);
         let n = name(s, w);
-        say(s, NEXT_WEAPON, vec![n]);
+        say(s, crate::string_registry::text!(NEXT_WEAPON), vec![n]);
     } else {
         s.ui.input.target_pending = 0;
         s.ui.input.targeting = 0;
@@ -540,71 +574,84 @@ pub fn hit(s: &mut State, attacker: i16, x: i16, y: i16, weapon: i16) -> i16 {
         item_spell(s, attacker, weapon, wt, target);
         return 0;
     }
-    if s.combat.hit >= 0 && target < 0x100 {
-        res = i16::from(to_hit(s, attacker, target, weapon));
-        if res == 0 && flies {
-            res = -1;
-            x = x.wrapping_add(s.rng.range(0, 2) as i16 - 1);
-            y = y.wrapping_add(s.rng.range(0, 2) as i16 - 1);
-            s.combat.hit = leaves::actor_at(s, attacker, x, y);
-            let _ = leaves::owner(s, s.combat.hit);
-        }
-    }
-    if flies && missile(s, attacker, weapon, &mut x, &mut y) == 0 {
-        res = -1;
-    }
-    target = leaves::owner(s, s.combat.hit);
-    if res == -1 {
-        res = 1;
+    let first = s.combat.effects.len();
+    let result = (|| {
         if s.combat.hit >= 0 && target < 0x100 {
             res = i16::from(to_hit(s, attacker, target, weapon));
+            if res == 0 && flies {
+                res = -1;
+                x = x.wrapping_add(s.rng.range(0, 2) as i16 - 1);
+                y = y.wrapping_add(s.rng.range(0, 2) as i16 - 1);
+                s.combat.hit = leaves::actor_at(s, attacker, x, y);
+                let _ = leaves::owner(s, s.combat.hit);
+            }
         }
-    }
-    if wt == 0x32 {
-        for k in 0..bolts.max(0) as usize {
-            if k > 0 {
-                let (sx, sy) = (s.combat.spread.0[k], s.combat.spread.1[k]);
-                s.combat.hit = leaves::actor_at(s, attacker, sx, sy);
-                target = leaves::owner(s, s.combat.hit);
+        if flies && missile(s, attacker, weapon, &mut x, &mut y) == 0 {
+            res = -1;
+        }
+        target = leaves::owner(s, s.combat.hit);
+        if res == -1 {
+            res = 1;
+            if s.combat.hit >= 0 && target < 0x100 {
                 res = i16::from(to_hit(s, attacker, target, weapon));
             }
-            if res != 0 && s.combat.hit >= 0 && target != attacker {
+        }
+        if wt == 0x32 {
+            for k in 0..bolts.max(0) as usize {
+                if k > 0 {
+                    let (sx, sy) = (s.combat.spread.0[k], s.combat.spread.1[k]);
+                    s.combat.hit = leaves::actor_at(s, attacker, sx, sy);
+                    target = leaves::owner(s, s.combat.hit);
+                    res = i16::from(to_hit(s, attacker, target, weapon));
+                }
+                if res != 0 && s.combat.hit >= 0 && target != attacker {
+                    apply_damage(s, attacker, target, dmg);
+                }
+            }
+            return 0;
+        }
+        if res != 0 && s.combat.hit >= 0 && target != attacker {
+            let i = objects::monster_index(&s.objects, kind(s, target));
+            if s.combat.tables.flags(i) & 0x0080 != 0 && ![0x30, 0x32, 0x36].contains(&wt) {
+                dmg = (dmg + 1) >> 1;
+            }
+            if wt != 0x5b {
                 apply_damage(s, attacker, target, dmg);
             }
+            if wt == 0x30 {
+                say(s, crate::string_registry::text!(SHATTERED), vec![]);
+                objects::remove(s, weapon);
+                s.actors.work.prompt = 1;
+            }
         }
-        return 0;
-    }
-    if res != 0 && s.combat.hit >= 0 && target != attacker {
-        let i = objects::monster_index(&s.objects, kind(s, target));
-        if s.combat.tables.flags(i) & 0x0080 != 0 && ![0x30, 0x32, 0x36].contains(&wt) {
-            dmg = (dmg + 1) >> 1;
+        if wt == 0x31 {
+            let (ax, ay) = pos(s, attacker);
+            let tile = s.tables.basetile.base.get(0x31).copied().unwrap_or(0);
+            let (mut xs, mut ys) = ([x], [y]);
+            present::fly(
+                s,
+                ax,
+                ay,
+                &mut xs,
+                &mut ys,
+                1,
+                100,
+                tile,
+                present::flight::RETURN,
+            );
         }
-        if wt != 0x5b {
-            apply_damage(s, attacker, target, dmg);
-        }
-        if wt == 0x30 {
-            say(s, SHATTERED, vec![]);
-            objects::remove(s, weapon);
-            s.actors.work.prompt = 1;
-        }
-    }
-    if wt == 0x31 {
-        let (ax, ay) = pos(s, attacker);
-        let tile = s.tables.basetile.base.get(0x31).copied().unwrap_or(0);
-        let (mut xs, mut ys) = ([x], [y]);
-        present::fly(
-            s,
-            ax,
-            ay,
-            &mut xs,
-            &mut ys,
-            1,
-            100,
-            tile,
-            present::flight::RETURN,
-        );
-    }
-    0
+        0
+    })();
+    present::strike(
+        s,
+        first,
+        u6_render::motion::attacks::Strike {
+            slot: attacker as u16,
+            direction: (ddx.signum() as i8, ddy.signum() as i8),
+            ranged: flies,
+        },
+    );
+    result
 }
 
 /// A spellbook's or spell object's cast its hit (0x124232) leaves for the async code that called
@@ -646,7 +693,7 @@ fn item_spell(s: &mut State, attacker: i16, weapon: i16, wt: u16, target: i16) {
         let c = s.map.centre;
         objects::move_to(s, attacker, c.x, c.y, u16::from(c.z));
         if super::mode::scatter(s, attacker, false) {
-            say(s, WISP, vec![]);
+            say(s, crate::string_registry::text!(WISP), vec![]);
             s.actors.work.prompt = 1;
         } else {
             objects::move_to(s, attacker, ox as u16, oy as u16, u16::from(c.z));
@@ -724,7 +771,19 @@ pub(crate) async fn cast_item(state: &RefCell<State>, io: &Io) -> bool {
         };
         if let Some(at) = report {
             let n = name(&mut s, sel);
-            say(&mut s, at, vec![n]);
+            say(
+                &mut s,
+                crate::string_registry::choose(
+                    (at) as i64,
+                    &[
+                        crate::string_registry::text!(0x00121ba0),
+                        crate::string_registry::text!(0x00121bb0),
+                        crate::string_registry::text!(0x00153fe7),
+                        crate::string_registry::text!(0x00153ffa),
+                    ],
+                ),
+                vec![n],
+            );
         }
         s.actors.party.leader_index = leader;
         for &step in &cast.after {
@@ -873,7 +932,7 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
         0x4f | 0x50 if s.rng.range(1, 100) == 0x25 => {
             objects::remove(s, weapon);
             let wand = with_wand(s);
-            say(s, VANISHED, vec![wand]);
+            say(s, crate::string_registry::text!(VANISHED), vec![wand]);
             s.actors.work.prompt = 1;
         }
         _ => {}
@@ -897,7 +956,9 @@ pub fn missile(s: &mut State, attacker: i16, weapon: i16, x: &mut i16, y: &mut i
 /// item 1, 2026-10-27): read for display, so the locale pack's label of it when it has one
 /// ([`SHOWN_AT`], [`crate::locale::shown`]).
 fn with_wand(s: &State) -> Text {
-    let b = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, WAND));
+    let b = crate::engine::with_current_io(|io| {
+        crate::main_loop::game_string(io, crate::string_registry::text!(WAND))
+    });
     Text::Str(crate::locale::shown(s, b.unwrap_or_default()))
 }
 

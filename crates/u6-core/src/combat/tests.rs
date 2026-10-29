@@ -71,6 +71,61 @@ fn world() -> State {
     s
 }
 
+#[test]
+fn physical_attack_cues_preserve_state_pixels_rng_and_every_tick() {
+    use crate::{Engine, Files};
+    for ranged in [false, true] {
+        let make = |on| {
+            let mut s = world();
+            s.ui = crate::main_loop::test_support::test_ui();
+            s.gfx.window_shown = 1;
+            s.ui.input.selection = 2;
+            s.objects.type_frame[0x201] = if ranged { 0x21 } else { 0x22 };
+            let mut e = Engine::with_game(s, Files::default(), |s, io| async move {
+                attack::hit(&mut s.borrow_mut(), 1, 21, 20, 0x201);
+                present::play_effects(&s, &io).await;
+            });
+            e.set_motion(on);
+            e
+        };
+        let (mut on, mut off) = (make(true), make(false));
+        let mut cues = Vec::new();
+        for tick in 0..2000 {
+            let ms = [16, 17, 7, 0, 33][tick % 5];
+            on.tick(&[], ms);
+            off.tick(&[], ms);
+            assert!(*on.state() == *off.state(), "complete State, including RNG");
+            assert!(on.published_frame().pixels() == off.published_frame().pixels());
+            assert_eq!(on.finished(), off.finished(), "identical completion tick");
+            assert!(off.io().take_attacks().is_empty());
+            cues.extend(on.io().take_attacks());
+            if on.finished() {
+                break;
+            }
+        }
+        assert!(on.finished());
+        assert_eq!(cues.len(), 1, "ranged={ranged}");
+        assert_eq!(cues[0].1.slot, 1);
+        assert_eq!(cues[0].1.direction, (1, 0));
+        assert_eq!(cues[0].1.ranged, ranged);
+    }
+}
+
+#[test]
+fn refused_attacks_do_not_start_display_motion() {
+    for (weapon, x, y) in [(0x22, 40, 40), (0x29, 21, 20)] {
+        let mut s = world();
+        s.objects.type_frame[0x201] = weapon;
+        let mut e = crate::Engine::with_game(s, crate::Files::default(), move |s, _| async move {
+            attack::hit(&mut s.borrow_mut(), 1, x, y, 0x201);
+        });
+        e.set_motion(true);
+        e.tick(&[], 20);
+        assert!(e.finished());
+        assert!(e.io().take_attacks().is_empty(), "range/ammunition refusal");
+    }
+}
+
 /// An evil orc (actor `a`) at (x, y).
 fn orc(s: &mut State, a: usize, x: u16, y: u16) {
     s.objects.type_frame[a] = ORC;

@@ -4,7 +4,6 @@
 #![allow(clippy::disallowed_methods)] // tests may read files
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 use u6_formats::objblk::ObjLocation;
@@ -21,16 +20,14 @@ use super::walk::{DX8, DY8, can_move_to, step};
 use super::{GameTables, clock, path, turn};
 use u6_testkit::{Quiet, assert_same};
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 /// The start state after load state: `State::new_game` and the object, region and view steps
 /// of 0x105350's tail (what `main_loop::finish_load_state` runs, less the command-bar draw).
 fn start() -> Option<(State, Files)> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -1723,4 +1720,112 @@ fn an_arrest_jails_at_the_cell_and_takes_types_3f_and_40_of_quality_9() {
         Some(9),
     );
     assert_eq!(got, want);
+}
+
+/// Spec 19 O3/O5: actual world rules and RNG agree for every factor and a skipped turn.
+/// No data from the user's files is printed; only controlled factors and timing are reported.
+#[test]
+fn turn_playback_factors_and_skip_preserve_the_world_state() {
+    let Some((mut initial, files)) = start() else {
+        return;
+    };
+    initial.main.program = crate::main_loop::Program::Game;
+    initial.ui.input.accept = true;
+    playback_receipt(&initial, &files);
+}
+
+#[test]
+fn turn_playback_factors_and_skip_preserve_the_start_fight() {
+    let Some((_, files)) = start() else { return };
+    let mut state = State::new_game(&files).quiet();
+    state.rng.seed(0);
+    let mut boot = Engine::with_game(state, files.clone(), crate::main_loop::game_first);
+    for _ in 0..20000 {
+        boot.tick(&[], 10);
+        if crate::engine::command_prompt(&boot.state()) {
+            break;
+        }
+    }
+    assert!(
+        crate::engine::command_prompt(&boot.state()),
+        "fight fixture reaches the command prompt"
+    );
+    let mut initial = boot.state().clone();
+    initial.main.reading = 0;
+    initial.ui.input.in_wait = false;
+    playback_receipt(&initial, &files);
+}
+
+fn playback_receipt(initial: &State, files: &Files) {
+    use crate::turn_speed::TurnSpeed;
+    let run = |speed: TurnSpeed, skip: Option<crate::Key>| {
+        let done = Rc::new(std::cell::Cell::new(None));
+        let output = done.clone();
+        let mut e = Engine::with_game(initial.clone(), files.clone(), move |st, io| async move {
+            let at = io.now_ms();
+            pass(&st, &io).await;
+            output.set(Some(io.now_ms() - at));
+        });
+        e.io().set_turn_speed(speed);
+        for tick in 0..10000 {
+            let events = if tick == 5 {
+                skip.map(crate::InputEvent::Key)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            e.tick(&events, 10);
+            if done.get().is_some() {
+                break;
+            }
+        }
+        let time = done.get().expect("the world turn finishes");
+        assert_eq!(
+            e.io().pending_events(),
+            0,
+            "no queued command survives a skip"
+        );
+        let mut state = e.state().clone();
+        state.combat.due_ms = 0;
+        state.combat.paced_at_ms = 0;
+        (time, state)
+    };
+    let (base, baseline) = run(TurnSpeed::Original, None);
+    // Each drawing wait must publish at least one host frame. At fast factors a flight's
+    // short waits hit that floor; the error bound is one 10 ms host frame per actual wait,
+    // not a percentage of the total (the original receipts already cover schedule drift).
+    let waits: u64 = baseline
+        .combat
+        .paced
+        .iter()
+        .map(|(cost, count)| {
+            u64::from(*count - initial.combat.paced.get(cost).copied().unwrap_or(0))
+        })
+        .sum();
+    assert!(waits > 0, "the fixture exercises real drawing waits");
+    for (speed, k) in [
+        (TurnSpeed::Quick, 2),
+        (TurnSpeed::Fast, 4),
+        (TurnSpeed::Instant, 0),
+    ] {
+        let (ms, state) = run(speed, None);
+        assert!(
+            state == baseline,
+            "full world state and RNG agree apart from presentation deadlines"
+        );
+        assert!(ms < base, "turns finish sooner");
+        if let Some(scaled) = base.checked_div(k) {
+            assert!(
+                ms.abs_diff(scaled) <= waits * 10,
+                "factor timing stays within one host frame per actual drawing wait"
+            );
+        }
+        eprintln!("turn factor {k}: state/RNG equal; elapsed {ms} ms (original {base} ms)");
+    }
+    for key in [crate::Key::Space, crate::Key::Escape] {
+        let (ms, state) = run(TurnSpeed::Original, Some(key));
+        assert!(state == baseline, "skip keeps full world state and RNG");
+        assert!(ms < base, "the physical skip reduces the remaining waits");
+    }
 }

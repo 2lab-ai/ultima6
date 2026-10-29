@@ -175,8 +175,14 @@ pub(crate) fn lying_down(s: &State, sel: Slot) -> bool {
 pub async fn push(state: &RefCell<State>, io: &Io) {
     let sel = state.borrow().ui.input.selection;
     if sel == -1 || sel as u16 == state.borrow().ui.panel.container {
-        let msg = message(&state.borrow(), P_NOTHING);
-        print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(&state.borrow(), crate::string_registry::pointer!(P_NOTHING));
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let name = shown_name(&state.borrow(), sel).into_bytes();
@@ -191,8 +197,17 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         (s.map.centre.x, s.map.centre.y)
     };
     if out_of_reach(&state.borrow()) {
-        let msg = message(&state.borrow(), P_OUT_OF_RANGE);
-        print_at(state, io, S_BANG_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_OUT_OF_RANGE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_BANG_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let (ox, oy) = {
@@ -209,29 +224,48 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         s.inventory.pointer_origin = view_pixel(ox, oy, cx, cy);
         (ox, oy)
     };
-    print_at(state, io, S_TO, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_TO), &[]).await;
     if crate::ui::wait::read_key(state, io).await != WALK {
-        print_at(state, io, S_NOWHERE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_NOWHERE), &[]).await;
         reset_pointer(&mut state.borrow_mut());
         return;
     }
     let dir = state.borrow().ui.input.direction;
     let dir_name = {
         let s = state.borrow();
-        let at = super::GameData::a4(DIR_NAMES).wrapping_add_signed(i32::from(dir) * 4);
         // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
         // it when it has one ([`crate::magic::LABELS`], [`crate::locale::shown`]).
-        crate::locale::shown(&s, s.objcmds.data.pointed(at))
+        crate::locale::shown(
+            &s,
+            crate::string_registry::text_table!(DIR_NAMES)
+                .get(dir as usize)
+                .map_or_else(Vec::new, |text| text.data(&s.objcmds.data)),
+        )
     };
-    print_at(state, io, S_DIR_LINE, &[Arg::Str(&dir_name)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(S_DIR_LINE),
+        &[Arg::Str(&dir_name)],
+    )
+    .await;
     let pusher = leader(&state.borrow());
     let wt = {
         let s = state.borrow();
         seams::weight(&s, sel).wrapping_add(seams::contents_weight(&s, sel))
     };
     if immovable(&state.borrow(), sel) {
-        let msg = message(&state.borrow(), P_NOT_POSSIBLE);
-        print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_NOT_POSSIBLE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL_LINE_NL),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         reset_pointer(&mut state.borrow_mut());
         finish(state);
         return;
@@ -244,8 +278,14 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
                 || lying_down(&s, sel)
         };
         if failed {
-            let msg = message(&state.borrow(), P_FAILED);
-            print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
+            let msg = message(&state.borrow(), crate::string_registry::pointer!(P_FAILED));
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(S_NL_LINE_NL),
+                &[Arg::Str(&msg)],
+            )
+            .await;
             reset_pointer(&mut state.borrow_mut());
             return;
         }
@@ -272,8 +312,14 @@ pub async fn push(state: &RefCell<State>, io: &Io) {
         }
     };
     if blocked {
-        let msg = message(&state.borrow(), P_BLOCKED);
-        print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
+        let msg = message(&state.borrow(), crate::string_registry::pointer!(P_BLOCKED));
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL_LINE_NL),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         let mut s = state.borrow_mut();
         turn_chair(&mut s, sel, dir);
         reset_pointer(&mut s);
@@ -344,17 +390,23 @@ async fn move_carried(state: &RefCell<State>, io: &Io, obj: Slot) {
         (kind, stack_kind(&s.objects, kind), s.ui.panel.member)
     };
     if giver_away(&state.borrow()) {
-        print_at(state, io, S_NOT_AROUND, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_NOT_AROUND), &[]).await;
         return;
     }
     let n = how_many(state, io, obj).await;
     if n == 0 {
         return;
     }
-    print_at(state, io, S_TO, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_TO), &[]).await;
     if fixed(&state.borrow(), obj) {
-        let msg = message(&state.borrow(), P_FIXED);
-        print_at(state, io, S_NL2_LINE_NL, &[Arg::Str(&msg)]).await;
+        let msg = message(&state.borrow(), crate::string_registry::pointer!(P_FIXED));
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL2_LINE_NL),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     {
@@ -368,7 +420,7 @@ async fn move_carried(state: &RefCell<State>, io: &Io, obj: Slot) {
     let key = crate::ui::wait::read_key(state, io).await;
     let t = state.borrow().ui.input.selection;
     if key & 0xff != TARGETED || t == -1 {
-        print_at(state, io, S_NOBODY, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_NOBODY), &[]).await;
         return;
     }
     let far = {
@@ -384,8 +436,17 @@ async fn move_carried(state: &RefCell<State>, io: &Io, obj: Slot) {
             }
     };
     if far {
-        let msg = message(&state.borrow(), P_OUT_OF_RANGE);
-        print_at(state, io, S_NL2_BANG_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_OUT_OF_RANGE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL2_BANG_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let moved = if t < 0x100 {
@@ -439,11 +500,11 @@ async fn to_member(
 ) -> bool {
     let giver = member(&state.borrow(), m);
     if t == giver {
-        print_at(state, io, S_YOURSELF, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_YOURSELF), &[]).await;
     } else {
         let name = shown_name(&state.borrow(), t).into_bytes();
         print(state, io, &name, &[]).await;
-        print_at(state, io, S_DOT, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_DOT), &[]).await;
         let refusal = {
             let s = state.borrow();
             let party = s.actors.attrs.status.get(t as usize).copied().unwrap_or(0) & 0x80;
@@ -456,12 +517,33 @@ async fn to_member(
             }
         };
         if let Some(line) = refusal {
-            print_at(state, io, line, &[]).await;
+            print_at(
+                state,
+                io,
+                crate::string_registry::choose(
+                    (line) as i64,
+                    &[
+                        crate::string_registry::text!(0x00128612),
+                        crate::string_registry::text!(0x00128636),
+                        crate::string_registry::text!(0x00128648),
+                        crate::string_registry::text!(0x0012867e),
+                        crate::string_registry::text!(0x00128692),
+                        crate::string_registry::text!(0x001286ba),
+                        crate::string_registry::text!(0x001286e6),
+                        crate::string_registry::text!(0x00128708),
+                        crate::string_registry::text!(0x00128730),
+                        crate::string_registry::text!(0x0012875a),
+                        crate::string_registry::text!(0x0012878a),
+                    ],
+                ),
+                &[],
+            )
+            .await;
             return false;
         }
         let fits = can_carry(&mut state.borrow_mut(), obj, (kind, sk, n), t);
         if !fits {
-            print_at(state, io, S_CANT_CARRY, &[]).await;
+            print_at(state, io, crate::string_registry::text!(S_CANT_CARRY), &[]).await;
             let mut s = state.borrow_mut();
             let shown = member(&s, s.ui.panel.member);
             seams::sum_inventory(&mut s, shown);
@@ -584,11 +666,44 @@ async fn to_container(
 ) -> bool {
     let refusal = container_refusal(&state.borrow(), obj, t);
     if let Some(line) = refusal {
-        print_at(state, io, line, &[]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::choose(
+                (line) as i64,
+                &[
+                    crate::string_registry::text!(0x00128612),
+                    crate::string_registry::text!(0x00128636),
+                    crate::string_registry::text!(0x00128648),
+                    crate::string_registry::text!(0x0012867e),
+                    crate::string_registry::text!(0x00128692),
+                    crate::string_registry::text!(0x001286ba),
+                    crate::string_registry::text!(0x001286e6),
+                    crate::string_registry::text!(0x00128708),
+                    crate::string_registry::text!(0x00128730),
+                    crate::string_registry::text!(0x0012875a),
+                    crate::string_registry::text!(0x0012878a),
+                ],
+            ),
+            &[],
+        )
+        .await;
         return false;
     }
     let out = state.borrow().objects.parent(obj) == t;
-    print_at(state, io, if out { S_OUT_OF } else { S_INTO }, &[]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::choose(
+            (if out { S_OUT_OF } else { S_INTO }) as i64,
+            &[
+                crate::string_registry::text!(0x001287c8),
+                crate::string_registry::text!(0x001287d0),
+            ],
+        ),
+        &[],
+    )
+    .await;
     {
         let mut s = state.borrow_mut();
         let s = &mut *s;

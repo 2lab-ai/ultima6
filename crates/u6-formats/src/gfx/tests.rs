@@ -323,9 +323,20 @@ fn gfx_palette_words_and_exe_checks() {
 }
 
 /// Directory with the PowerPacker-decrunched disk tree (`d1/INSTALL`, `d2/DATA1`), outside the repo.
-const UNPACKED: &str = "/Users/zhugehyuk/Games/ultima6/unpacked";
+fn unpacked() -> std::path::PathBuf {
+    u6_testkit::data_path_with("U6_DATA_DIR", "unpacked")
+}
 /// Where the contact sheets go (outside the repo: they are game-derived).
-const SHEET_DIR: &str = "/Users/zhugehyuk/Games/ultima6/re";
+fn sheet_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("U6_SHEET_DIR").map(|path| {
+        let path = std::fs::canonicalize(path).quiet();
+        assert!(
+            path.is_dir() && path.ancestors().all(|dir| !dir.join(".git").exists()),
+            "U6_SHEET_DIR must name a private directory outside every git worktree"
+        );
+        path
+    })
+}
 
 /// Paints tiles `range` into an RGB image, `cols` tiles per row, each scaled by `scale`, with a
 /// 2-pixel grey gap. Transparent pixels get a dark teal checkerboard: the palette has magentas
@@ -379,9 +390,9 @@ fn write_png(path: &std::path::Path, (w, h, data): (u32, u32, Vec<u8>)) {
 #[test]
 #[allow(clippy::disallowed_methods)]
 fn gfx_real_data_all_tiles_and_contact_sheet() {
-    let root = std::path::Path::new(UNPACKED);
-    if !root.is_dir() {
-        eprintln!("skipped: {UNPACKED} not present");
+    let root = unpacked();
+    if !u6_testkit::available(root.is_dir(), "U6_DATA_DIR unpacked files") {
+        eprintln!("skipped: unpacked data path not present");
         return;
     }
     let read = |p: &str| std::fs::read(root.join(p)).quiet();
@@ -444,8 +455,11 @@ fn gfx_real_data_all_tiles_and_contact_sheet() {
         .collect();
     u6_testkit::assert_same!(pal, raw_pal, "the palette words");
 
-    let out = std::path::Path::new(SHEET_DIR);
-    if out.is_dir() {
+    if let Some(out) = sheet_dir() {
+        assert!(
+            out.is_dir(),
+            "U6_SHEET_DIR must name an existing private output directory"
+        );
         write_png(
             &out.join("tiles.png"),
             sheet(&set, &pal, &am, 0..TILE_COUNT, 64, 2),

@@ -20,7 +20,6 @@ use crate::image::A4;
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// The two creature types named after gargoyles in the monster list.
 const GARGOYLE_TYPES: [u16; 2] = [0x16a, 0x16b];
 /// Messages the receipt looks for: the Attack command word and its weapon lines (with a
@@ -33,18 +32,19 @@ const GRAZED: u32 = A4 - 0x7723;
 /// The words of a one-argument message format after its `%s`, as the message scroll shows
 /// them (read from the user's `game`).
 fn after_argument(io: &Io, at: u32) -> String {
-    let fmt = crate::main_loop::game_string(io, at);
+    let fmt =
+        crate::main_loop::game_string(io, crate::string_registry::fixture((at) as i64, false));
     let fmt = String::from_utf8_lossy(&fmt);
     let tail = fmt.split_once("%s").map_or(&*fmt, |(_, t)| t);
     tail.trim().to_string()
 }
 
 fn start() -> Option<(State, Files)> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -526,7 +526,13 @@ fn cast_turn(
     let mut e = Engine::with_game(state, files, move |st, io| async move {
         let formats = at
             .iter()
-            .map(|&a| String::from_utf8_lossy(&crate::main_loop::game_string(&io, a)).into_owned())
+            .map(|&a| {
+                String::from_utf8_lossy(&crate::main_loop::game_string(
+                    &io,
+                    crate::string_registry::fixture((a) as i64, false),
+                ))
+                .into_owned()
+            })
             .collect();
         let actor = {
             let mut s = st.borrow_mut();

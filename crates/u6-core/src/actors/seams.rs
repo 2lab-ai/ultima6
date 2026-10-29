@@ -141,14 +141,15 @@ pub enum Arg {
     Name(ObjectId),
     /// A string in the data hunk at A4 + offset. Port (spec 16 item 1, 2026-10-27): as an
     /// argument (not the format), read for display ([`crate::locale::shown`]).
-    Text(i32),
+    Text(crate::string_registry::Text),
     /// A string at an absolute image address (PC-relative strings in code hunks). Port (spec 16
     /// item 1, 2026-10-27): as an argument (not the format), read for display
     /// ([`crate::locale::shown`]: a carried item's name in the vanishing line).
-    Image(u32),
+    Image(crate::string_registry::Text),
     /// The string the pointer at A4 + offset points to (a name table entry: the date line's wind
-    /// name), as the locale shows it ([`crate::locale::shown`]).
-    Pointer(i32),
+    /// name), as the locale shows it ([`crate::locale::shown`]). An absent slot from an invalid
+    /// saved selector prints an empty field without reading outside the registry.
+    Pointer(Option<crate::string_registry::Text>),
 }
 
 /// The bytes of a string argument; `None` for a word. A string at an image address the line
@@ -170,15 +171,12 @@ fn arg_text(s: &State, io: &Io, a: Arg, field: bool) -> Option<Vec<u8>> {
             .map_or_else(Vec::new, |n| n.as_bytes().to_vec()),
         // Port (spec 08, slice K3): printed, so the locale pack's object name when it has one.
         Arg::Name(id) => crate::objects::shown_name(s, id.slot()).into_bytes(),
-        Arg::Text(off) => shown(crate::main_loop::game_string(
-            io,
-            crate::image::A4.wrapping_add_signed(off),
-        )),
+        Arg::Text(off) => shown(crate::main_loop::game_string(io, off)),
         Arg::Image(at) => shown(crate::main_loop::game_string(io, at)),
         // Port (spec 08, slice K2): printed, so the locale pack's label when it has one.
         Arg::Pointer(off) => crate::locale::shown(
             s,
-            crate::main_loop::pointed_string(io, crate::image::A4.wrapping_add_signed(off)),
+            off.map_or_else(Vec::new, |text| crate::main_loop::pointed_string(io, text)),
         ),
         Arg::Word(_) => return None,
     })
@@ -187,15 +185,15 @@ fn arg_text(s: &State, io: &Io, a: Arg, field: bool) -> Option<Vec<u8>> {
 /// [ui] 0x108658: formats the data-hunk string at A4 + `text` with `args` into the message scroll
 /// (strings stay in the user's `game`). Queued for the command loop to print: the actor code is
 /// synchronous and the ui's printf may wait on a more prompt.
-pub fn print(s: &mut State, text: i32, args: &[Arg]) {
+pub fn print(s: &mut State, text: crate::string_registry::Text, args: &[Arg]) {
     let line = with_current_io(|io| {
         let mut args = args.iter();
-        let fmt = if text == 0 {
+        let fmt = if text.is_argument() {
             args.next()
                 .and_then(|&a| arg_text(s, io, a, false))
                 .unwrap_or_default()
         } else {
-            crate::main_loop::game_string(io, crate::image::A4.wrapping_add_signed(text))
+            crate::main_loop::game_string(io, text)
         };
         let rest: Vec<PrintArg> = args
             .map(|&a| match a {
@@ -212,12 +210,12 @@ pub fn print(s: &mut State, text: i32, args: &[Arg]) {
 
 /// [ui] 0x108658 with an object's display name (0x10eef8) as the format.
 pub fn print_name(s: &mut State, id: ObjectId) {
-    print(s, 0, &[Arg::Name(id)]);
+    print(s, crate::string_registry::ARGUMENT, &[Arg::Name(id)]);
 }
 
 /// [ui] 0x108658 with a string at an absolute image address (PC-relative strings).
-pub fn print_image(s: &mut State, at: u32) {
-    print(s, 0, &[Arg::Image(at)]);
+pub fn print_image(s: &mut State, at: crate::string_registry::Text) {
+    print(s, crate::string_registry::ARGUMENT, &[Arg::Image(at)]);
 }
 
 /// [main] 0x102f2a: after an actor's turn, redraws the view when A4-0x6a8e asks for it.
@@ -394,7 +392,11 @@ mod tests_words {
         }
         let files = crate::files::Files::new(BTreeMap::from([("game".to_string(), game)]));
         let mut e = crate::engine::Engine::with_game(s, files, move |st, _io| async move {
-            print(&mut st.borrow_mut(), text, &args);
+            print(
+                &mut st.borrow_mut(),
+                crate::string_registry::fixture((text) as i64, false),
+                &args,
+            );
         });
         for _ in 0..40 {
             if e.finished() {
@@ -411,7 +413,17 @@ mod tests_words {
 
     #[test]
     fn a_data_hunk_string_in_a_field_is_the_packs_form_and_else_the_english() {
-        let field = |pack| queued(FORMAT, vec![Arg::Text(WORD)], pack).1;
+        let field = |pack| {
+            queued(
+                FORMAT,
+                vec![Arg::Text(crate::string_registry::fixture(
+                    (WORD) as i64,
+                    false,
+                ))],
+                pack,
+            )
+            .1
+        };
         assert_eq!(
             field(true),
             [PrintArg::Str("말".as_bytes().to_vec())],
@@ -426,7 +438,14 @@ mod tests_words {
 
     #[test]
     fn the_format_from_the_first_argument_stays_the_english_with_a_pack() {
-        let (format, args) = queued(0, vec![Arg::Image(LINE)], true);
+        let (format, args) = queued(
+            0,
+            vec![Arg::Image(crate::string_registry::fixture(
+                (LINE) as i64,
+                false,
+            ))],
+            true,
+        );
         assert_eq!(format, b"Zl1 line\n", "the format as it is");
         assert!(args.is_empty(), "no argument left");
     }

@@ -100,7 +100,12 @@ const NO_GUARD: Slot = 0x100;
 const TARGET_DONE: u16 = 0x8e;
 
 /// `printf` of the image string at `addr`.
-async fn say(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+async fn say(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = game_string(io, addr);
     printf(state, io, &fmt, args).await;
 }
@@ -324,7 +329,13 @@ pub async fn repair_hull(state: &RefCell<State>, io: &Io) {
         s.actors.attrs.hp[ship]
     };
     flush_prints(state, io).await;
-    say(state, io, STR_HULL, &[Arg::Word(u16::from(hp))]).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(STR_HULL),
+        &[Arg::Word(u16::from(hp))],
+    )
+    .await;
 }
 
 /// The first camp check that fails, in 0x127b1a's order.

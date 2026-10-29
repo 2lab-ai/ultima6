@@ -92,7 +92,13 @@ pub async fn create_food(state: &RefCell<State>, io: &Io, spell: u16) {
         crate::objects::add_to_owner(&mut s, Slot::from(caster as i16), FOOD, n);
         n
     };
-    print_at(state, io, MSG_FOOD, &[Arg::Word(n)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(MSG_FOOD),
+        &[Arg::Word(n)],
+    )
+    .await;
 }
 
 /// The synchronous part of 0x11785e ([`resurrect_and_rejoin`]): everything before the rejoin.
@@ -163,7 +169,7 @@ pub async fn resurrect_and_rejoin(state: &RefCell<State>, io: &Io, body: i16) {
 /// (`Msg::Success`), one of quality 0 gets the too-old line (0x1158ea); anything else
 /// `Msg::NoEffect`)
 pub async fn resurrect_spell(state: &RefCell<State>, io: &Io, pre: i16) {
-    say(state, io, FMT_S, Msg::OnWhom).await;
+    say(state, io, crate::string_registry::text!(FMT_S), Msg::OnWhom).await;
     if pre == 0 {
         let saved = {
             let mut s = state.borrow_mut();
@@ -178,15 +184,27 @@ pub async fn resurrect_spell(state: &RefCell<State>, io: &Io, pre: i16) {
     }
     let sel = state.borrow().ui.input.selection;
     if sel == -1 {
-        say(state, io, FMT_S_NL, Msg::Nothing).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_S_NL),
+            Msg::Nothing,
+        )
+        .await;
     } else {
         print_name(state, io, sel).await;
-        print_at(state, io, NEWLINE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     }
     let caster = super::cast::caster(&state.borrow());
     flash_actor(state, io, caster, 0).await;
     if sel == -1 || state.borrow().map.flag_7afb != 0 {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     flash_actor(state, io, sel as u16, 1).await;
@@ -195,12 +213,24 @@ pub async fn resurrect_spell(state: &RefCell<State>, io: &Io, pre: i16) {
         (s.objects.kind(sel), quality(&s.objects, sel))
     };
     if !matches!(kind, 0x153 | 0x162 | 0x155 | 0x154) || q >= 0xe0 {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
     } else if q == 0 {
-        print_at(state, io, MSG_TOO_OLD, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_TOO_OLD), &[]).await;
     } else {
         resurrect_and_rejoin(state, io, sel).await;
-        say(state, io, FMT_NL_S_NL, Msg::Success).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Success,
+        )
+        .await;
         state.borrow_mut().magic.result = 0;
     }
 }
@@ -211,7 +241,13 @@ pub async fn peer(state: &RefCell<State>, io: &Io, spell: u16) {
     flash_actor(state, io, caster, 0).await;
     flash_window(state, io, spell / 16 + 1).await;
     crate::objects::commands::use_up(state, io, 0).await;
-    say(state, io, FMT_NL_S_NL, Msg::Done).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Done,
+    )
+    .await;
 }
 
 /// Original: 0x118ac8 (magic: a spell on the first object of every tile within 7 of the
@@ -238,7 +274,13 @@ pub async fn all_foes(state: &RefCell<State>, io: &Io, spell: u16) {
             }
         }
     }
-    say(state, io, FMT_NL_S_NL, Msg::Success).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Success,
+    )
+    .await;
 }
 
 /// One tile's object under 0x118ac8.
@@ -294,18 +336,28 @@ const DIRECTION_NAMES: u32 = 0x61be;
 /// target pending; a direction prints its name, anything else the no-direction word (0x115a8a); the
 /// wind takes the last direction read (A4-0x2efc) either way)
 pub async fn wind_change(state: &RefCell<State>, io: &Io) {
-    print_at(state, io, MSG_DIRECTION, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_DIRECTION), &[]).await;
     state.borrow_mut().ui.input.target_pending = 0;
     let key = crate::ui::wait::read_key(state, io).await;
     let dir = state.borrow().ui.input.direction;
     if key == 0x80 {
-        let at = crate::image::A4.wrapping_sub(DIRECTION_NAMES) + 4 * (dir as u32);
         // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
         // it when it has one ([`super::tables::LABELS`], [`crate::locale::shown`]).
-        let name = crate::locale::shown(&state.borrow(), crate::main_loop::pointed_string(io, at));
-        print_at(state, io, FMT_S_DOT, &[Arg::Str(&name)]).await;
+        let name = crate::locale::shown(
+            &state.borrow(),
+            crate::string_registry::text_table!(DIRECTION_NAMES)
+                .get(dir as usize)
+                .map_or_else(Vec::new, |text| text.io(io)),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(FMT_S_DOT),
+            &[Arg::Str(&name)],
+        )
+        .await;
     } else {
-        print_at(state, io, MSG_NOWHERE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NOWHERE), &[]).await;
     }
     state.borrow_mut().actors.wind = dir as u8;
 }
@@ -337,5 +389,11 @@ pub async fn xray(state: &RefCell<State>, io: &Io, spell: u16) {
         crate::map::view::update_view(&mut s);
         crate::gfx::view::refresh_view(&mut s, io);
     }
-    say(state, io, FMT_NL_S_NL, Msg::Done).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Done,
+    )
+    .await;
 }

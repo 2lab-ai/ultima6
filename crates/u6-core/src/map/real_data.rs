@@ -2,8 +2,6 @@
 //! the leader gets. Skipped when the archive is absent; reads it, copies nothing, prints only
 //! tile numbers and flag letters.
 
-use std::path::Path;
-
 use super::flags::*;
 use super::view::DARK;
 use super::{WINDOW, cell, region, view};
@@ -12,15 +10,13 @@ use crate::geom::{self, HALF_H, HALF_W, RULE_HALF, VIEW_H, VIEW_W};
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 #[allow(clippy::disallowed_methods)] // tests may read files
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,

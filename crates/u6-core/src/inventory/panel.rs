@@ -312,7 +312,10 @@ pub async fn draw_list(state: &RefCell<State>, io: &Io) {
             weight::stones(inv.carried_weight.wrapping_add(inv.equip_weight)),
         )
     };
-    let (blank, fmt) = (game_string(io, STR_BLANK), game_string(io, STR_WEIGHT));
+    let (blank, fmt) = (
+        game_string(io, crate::string_registry::text!(STR_BLANK)),
+        game_string(io, crate::string_registry::text!(STR_WEIGHT)),
+    );
     let w = |v: i16| Arg::Word(v as u16);
     set_cursor(state, io, 2, 9).await;
     printf(state, io, &blank, &[]).await;

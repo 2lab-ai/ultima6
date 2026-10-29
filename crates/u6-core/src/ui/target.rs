@@ -86,6 +86,32 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         crate::converse::disasm::trace::wait_put();
         put_raw(state, io, -1).await;
     }
+    // Finish the prompt before saving the temporary answer row. If the question occupies
+    // the bottom row, give it its own line so the choices cannot obscure its last words.
+    let answer_line = {
+        let s = state.borrow();
+        let w = s.ui.text.win();
+        s.ui.choices.yes_no
+            && !super::talk::choices::answering(&s)
+            && s.ui.text.current == super::WindowId::Messages
+            && w.row + 1 >= w.height
+            && w.col > 0
+    };
+    if answer_line {
+        // This is presentation space, not another scripted line: it must never spend the
+        // script's paging budget or recurse into a more-prompt while the answer UI is pending.
+        let (flags, rows) = {
+            let mut s = state.borrow_mut();
+            let saved = (s.ui.text.win().flags, s.ui.text.more_rows);
+            s.ui.text.win_mut().flags &= !super::text::PAGED;
+            saved
+        };
+        put_raw(state, io, 0).await;
+        let mut s = state.borrow_mut();
+        s.ui.text.win_mut().flags = flags;
+        s.ui.text.more_rows = rows;
+    }
+    super::talk::choices::begin_answer(&mut state.borrow_mut(), io);
     let mut key: u16 = 0;
     {
         let mut s = state.borrow_mut();
@@ -96,7 +122,11 @@ pub async fn wait_event(state: &RefCell<State>, io: &Io) -> u16 {
         if key != 0 {
             return key;
         }
-        key = pointer_click(state, io).await;
+        if super::talk::choices::answering(&state.borrow()) {
+            super::talk::pointer(&mut state.borrow_mut(), io, 0);
+        } else {
+            key = pointer_click(state, io).await;
+        }
         if key != 0 {
             continue;
         }
@@ -281,7 +311,8 @@ async fn pointer_click(state: &RefCell<State>, io: &Io) -> u16 {
         // A walk: the next sample is due a pace after this one's due time (an unpaced sample's
         // is now); any other code or none: no pace.
         let at = due.unwrap_or_else(|| io.now_ms());
-        ptr.walk_due = (code == super::wait::WALK).then(|| at + u64::from(HELD_WALK_MS));
+        ptr.walk_due = (code == super::wait::WALK)
+            .then(|| at + u64::from(io.turn_speed().millis(HELD_WALK_MS as u16)));
     }
     code
 }

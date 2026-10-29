@@ -344,14 +344,11 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
     let want = [code(&s, right), code(&s, Key::Char('a')), code(&s, letter)];
     let seen = Rc::new(RefCell::new(Vec::new()));
     let out = Rc::clone(&seen);
-    let late = Rc::new(std::cell::Cell::new(0));
-    let lates = Rc::clone(&late);
     let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
         for cycle in 0.. {
             io.sleep(100).await;
             st.borrow_mut().main.reading = 1;
             if cycle % 2 == 1 {
-                lates.set(lates.get() + 1);
                 io.vblank().await;
                 io.vblank().await;
             }
@@ -371,7 +368,7 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
         (30, InputEvent::Key(Key::Char('a'))),
         (47, InputEvent::Repeat(letter)),
     ];
-    let (mut sent, mut checked) = (0, 0);
+    let (mut sent, mut checked, mut dropped_queued) = (0, 0, 0);
     for t in 0..90 {
         let mut input = vec![InputEvent::Repeat(right)];
         if let Some(&(_, p)) = presses.iter().find(|(at, _)| *at == t) {
@@ -379,6 +376,7 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
             sent += 1;
         }
         let at_prompt = e.state().main.reading == 1;
+        let pending_before = e.io().pending_events();
         e.tick(&input, 16);
         let read = seen.borrow().len();
         assert!(
@@ -389,6 +387,7 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
         let unread = sent - read;
         if at_prompt && e.state().main.reading == 1 {
             checked += 1;
+            dropped_queued += usize::from(pending_before > unread);
             assert_eq!(
                 e.io().pending_events(),
                 unread,
@@ -397,14 +396,16 @@ fn the_command_prompts_read_takes_back_the_direction_repeats_queued_before_and_a
         }
     }
     println!(
-        "{checked} ticks at the prompt checked, {} prompts polled two frames late",
-        late.get()
+        "{checked} ticks at the prompt checked, {dropped_queued} ticks removed already queued repeats"
     );
     assert!(
         checked >= 20,
         "the queue checked at the prompt: {checked} ticks"
     );
-    assert!(late.get() >= 2, "late prompts: {}", late.get());
+    assert!(
+        dropped_queued >= 2,
+        "ticks that removed already queued repeats: {dropped_queued}"
+    );
     assert_eq!(
         *seen.borrow(),
         want,

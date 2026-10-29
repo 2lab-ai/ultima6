@@ -1,19 +1,19 @@
 //! Port-only (spec 22): conversation by click. While the conversation reads what the player says
-//! (op f7), a click on one of two buttons below the portrait types the script's `job` or `name`
-//! keyword, and a click on a keyword the message scroll shows in the alert colour types that
+//! (op f7), a click on the conversation-local choice grid types its word,
+//! and a click on a keyword the message scroll shows in the alert colour types that
 //! keyword: each as the keys the keyboard would send, put at the front of the engine's queue for
 //! the line editor ([`crate::Io::push_front`]). The button or keyword under the pointer is drawn
 //! inverse. All of it is drawn by the engine, cell by cell with the game's glyph renderer
 //! ([`text::draw_char`], 0x105228) in the game's colours; the page only sends the pointer.
 
-use super::text::{self, CELL, TextWindow, WindowId, fill_rect};
+use super::text::{self, TextWindow, WindowId};
 use super::wide;
 use crate::engine::{InputEvent, Io, Key, POINTER_LEFT};
 use crate::state::State;
 
-/// Most cells a button's word is shown in (a pack's word is at most 8 syllables, spec 08 Design
-/// 4).
-const WORD_CELLS: usize = 8;
+#[path = "talk_choices.rs"]
+pub mod choices;
+
 /// A blank cell (the space's glyph).
 const BLANK: u16 = 0x20;
 
@@ -240,9 +240,13 @@ impl KeySpans {
     }
 }
 
-/// A button below the portrait ([`begin`]), on the Status window's last row.
+/// An engine-drawn choice, page arrow or restricted-reader answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Button {
+    /// Stable conversation-local identity, independent of page and sorting.
+    pub id: usize,
+    pub row: u8,
+    pub used: bool,
     /// The screen column of its first cell.
     pub col: u8,
     /// Its cells: the word shown, between its blank cells.
@@ -254,10 +258,15 @@ pub struct Button {
 /// What a click can reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// [`TalkClicks::buttons`]`[i]`.
+    /// Stable topic ID (not its current visual position).
     Button(usize),
+    Page(bool),
+    Answer(bool),
     /// The keyword of the message window whose first part starts at window cell (`row`, `col`).
-    Key { row: u8, col: u8 },
+    Key {
+        row: u8,
+        col: u8,
+    },
 }
 
 /// The buttons shown, the target drawn inverse and the one the left button went down on, while
@@ -296,47 +305,6 @@ fn typed(cells: &[u16]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// The cells a word shows in: its codes through the UTF-8 assembler ([`wide::decode`]), at most
-/// [`WORD_CELLS`].
-fn shown(word: &[u8]) -> Vec<u16> {
-    wide::decode(word)
-        .into_iter()
-        .filter_map(|c| u16::try_from(c).ok())
-        .take(WORD_CELLS)
-        .collect()
-}
-
-/// The two buttons' words (shown, typed): the first word the locale pack gives the keyword for
-/// the script loaded ([`crate::locale::Pack::aliases`]), else the keyword; typed as it is, shown
-/// with its first letter a capital when it is a lower-case ASCII one.
-fn words(s: &State) -> [(Vec<u16>, Vec<u8>); 2] {
-    // The buttons' keywords, as the scripts hold them (and `keywords()` keys a pack's aliases).
-    let keywords: [&[u8]; 2] = [b"job", b"name"];
-    keywords.map(|k| {
-        let word = s
-            .locale
-            .pack
-            .as_ref()
-            .zip(s.converse.script_key)
-            .and_then(|(p, key)| p.aliases(key, k)?.first().cloned())
-            .unwrap_or_else(|| k.to_vec());
-        let mut cap = word.clone();
-        if let Some(c) = cap.first_mut() {
-            *c = c.to_ascii_uppercase();
-        }
-        (shown(&cap), word)
-    })
-}
-
-/// The Status window's last row (screen row; 12 for the window main sets up), below the
-/// portrait panel's name on its row 10 (0x128ce8), and its first and last pixel columns.
-fn button_row(s: &State) -> (u16, i32, i32) {
-    let w = s.ui.text.window(WindowId::Status);
-    let row = u16::from(w.y) + u16::from(w.height).saturating_sub(1);
-    let x0 = i32::from(w.x) * CELL as i32;
-    (row, x0, x0 + i32::from(w.width) * CELL as i32 - 1)
-}
-
 /// The window record drawing a cell of `ink` on `paper` (only its colours are read).
 fn colours(ink: u8, paper: u8) -> TextWindow {
     TextWindow {
@@ -357,43 +325,14 @@ fn draw_cells(s: &State, io: &Io, cells: &[u16], (col, row): (u16, u16), (ink, p
     });
 }
 
-/// Spec 22 Contract 2: the read of the player's words begins. When every pixel of the Status
-/// window's last row is the paper colour (the portrait panel leaves it so), the two buttons are
-/// drawn there, centred, one blank cell between them, and recorded; else none. Wider than the
-/// row with their blank cells, they go without them; wider still (a row narrower than main's
-/// 17 cells, which two words of [`WORD_CELLS`] and the cell between fill), there are none.
+/// Begin a keyword read without resetting the conversation-local choices.
 pub fn begin(s: &mut State, io: &Io) {
     s.ui.talk = TalkClicks {
         reading: true,
         ..TalkClicks::default()
     };
-    let (row, x0, x1) = button_row(s);
-    let paper = s.ui.tables.colours.paper;
-    let y0 = usize::from(row) * CELL;
-    let blank = io.draw(|fb| {
-        (y0..y0 + CELL).all(|y| (x0..=x1).all(|x| fb.get(x as usize, y) == Some(paper)))
-    });
-    if !blank || s.ui.font.is_none() {
-        return;
-    }
-    let [(a, ta), (b, tb)] = words(s);
-    let width = s.ui.text.window(WindowId::Status).width as usize;
-    if a.len() + b.len() + 1 > width {
-        return;
-    }
-    let pad = usize::from(a.len() + b.len() + 5 <= width);
-    let total = a.len() + b.len() + 4 * pad + 1;
-    let mut col = (x0 as usize / CELL + width.saturating_sub(total) / 2) as u8;
-    for (shown, word) in [(a, ta), (b, tb)] {
-        let mut cells = vec![BLANK; pad];
-        cells.extend(shown);
-        cells.extend(vec![BLANK; pad]);
-        let next = col + cells.len() as u8 + 1;
-        s.ui.talk.buttons.push(Button { col, cells, word });
-        col = next;
-    }
-    for i in 0..s.ui.talk.buttons.len() {
-        draw_target(s, io, Target::Button(i), false);
+    if s.ui.font.is_some() {
+        choices::begin(s, io);
     }
 }
 
@@ -412,15 +351,25 @@ pub fn pointer(s: &mut State, io: &Io, typed: usize) {
         let before = io.pointer().buttons & POINTER_LEFT;
         let p = io.take_pointer_upto(1);
         let back = io.history_offset() > 0;
-        let target = target_at(s, p.x, p.y).filter(|t| !(back && matches!(t, Target::Key { .. })));
+        let target = target_at(s, p.x, p.y)
+            .filter(|t| !(back && matches!(t, Target::Key { .. } | Target::Answer(_))));
         hover(s, io, target);
         match (before, p.buttons & POINTER_LEFT) {
             (0, POINTER_LEFT) => s.ui.talk.pressed = target,
             (POINTER_LEFT, 0) => {
                 if let Some(t) = s.ui.talk.pressed.take().filter(|&t| Some(t) == target) {
+                    if let Target::Page(next) = t {
+                        choices::page(s, io, next);
+                        return;
+                    }
                     let word = word_of(s, t);
                     if !word.is_empty() {
-                        let keys = keys(typed, &word);
+                        let keys = if let Target::Answer(yes) = t {
+                            vec![InputEvent::Key(Key::Char(if yes { 'y' } else { 'n' }))]
+                        } else {
+                            choices::used(s, &word);
+                            keys(typed, &word)
+                        };
                         #[cfg(test)]
                         INJECTED.with(|k| k.replace(keys.clone()));
                         io.push_front(&keys);
@@ -447,6 +396,7 @@ pub fn cool(s: &mut State, io: &Io) {
 /// its first part still in the window, a row up (a keyword whose first part left with the top
 /// row is its rest then, drawn back from there; one wholly gone, none).
 pub fn scroll(ui: &mut super::UiState) -> Vec<KeySpan> {
+    choices::discover(ui, true);
     let keys = &ui.text.keys;
     let moved = |t: Option<Target>| match t {
         Some(Target::Key { row, col }) => {
@@ -463,30 +413,35 @@ pub fn scroll(ui: &mut super::UiState) -> Vec<KeySpan> {
     ui.text.keys.scroll()
 }
 
-/// Spec 22 Contract 2 and 6: the read ends: the hover goes, the buttons' row is filled with the
-/// paper again (0x1521f4, as the portrait panel's clear), and nothing is shown any more.
+/// Restore the portrait panel when a keyword read ends; keep the discovered choices.
 pub fn end(s: &mut State, io: &Io) {
     cool(s, io);
-    if !s.ui.talk.buttons.is_empty() {
-        let (row, x0, x1) = button_row(s);
-        let y0 = i32::from(row) * CELL as i32;
-        let paper = s.ui.tables.colours.paper;
-        let map = s.ui.paper.as_ref();
-        io.draw(|fb| fill_rect(fb, x0, y0, x1, y0 + CELL as i32 - 1, paper, map));
-    }
+    choices::end(s, io);
     s.ui.talk = TalkClicks::default();
 }
 
 /// What frame pixel (`x`, `y`) is on: a button's cell, or a keyword's cell in the message window.
 pub fn target_at(s: &State, x: i16, y: i16) -> Option<Target> {
     let (col, row) = (u16::try_from(x).ok()? / 8, u16::try_from(y).ok()? / 8);
-    if row == button_row(s).0 {
-        let i = s.ui.talk.buttons.iter().position(|b| {
-            col >= u16::from(b.col) && usize::from(col - u16::from(b.col)) < b.cells.len()
-        });
-        if let Some(i) = i {
-            return Some(Target::Button(i));
-        }
+    let hit = |b: &&Button| {
+        row == u16::from(b.row)
+            && col >= u16::from(b.col)
+            && usize::from(col - u16::from(b.col)) < b.cells.len()
+    };
+    if choices::answering(s) {
+        return s
+            .ui
+            .choices
+            .answers
+            .iter()
+            .find(hit)
+            .map(|b| Target::Answer(b.id == 0));
+    }
+    if let Some(b) = s.ui.talk.buttons.iter().find(hit) {
+        return Some(Target::Button(b.id));
+    }
+    if let Some(b) = s.ui.choices.arrows.iter().find(hit) {
+        return Some(Target::Page(b.id != 0));
     }
     let w = s.ui.text.window(WindowId::Messages);
     let (c, r) = (
@@ -509,10 +464,13 @@ fn word_of(s: &State, t: Target) -> Vec<u8> {
         Target::Button(i) => {
             s.ui.talk
                 .buttons
-                .get(i)
+                .iter()
+                .find(|b| b.id == i)
                 .map_or_else(Vec::new, |b| b.word.clone())
         }
         Target::Key { row, col } => s.ui.text.keys.word(row, col),
+        Target::Answer(yes) => vec![if yes { b'y' } else { b'n' }],
+        Target::Page(_) => Vec::new(),
     }
 }
 
@@ -537,6 +495,17 @@ fn hover(s: &mut State, io: &Io, target: Option<Target>) {
     if s.ui.talk.hot == target {
         return;
     }
+    if matches!(s.ui.talk.hot, Some(Target::Button(_))) || matches!(target, Some(Target::Button(_)))
+    {
+        choices::header(
+            s,
+            io,
+            match target {
+                Some(Target::Button(id)) => Some(id),
+                _ => None,
+            },
+        );
+    }
     if let Some(old) = s.ui.talk.hot.take() {
         draw_target(s, io, old, false);
     }
@@ -553,12 +522,39 @@ fn draw_target(s: &State, io: &Io, t: Target, hot: bool) {
     let swap = |(ink, paper): (u8, u8)| if hot { (paper, ink) } else { (ink, paper) };
     match t {
         Target::Button(i) => {
-            let Some(b) = s.ui.talk.buttons.get(i) else {
+            let Some(b) = s.ui.talk.buttons.iter().find(|b| b.id == i) else {
                 return;
             };
             let c = s.ui.tables.colours;
-            let at = (u16::from(b.col), button_row(s).0);
-            draw_cells(s, io, &b.cells, at, swap((c.paper, c.command)));
+            let at = (u16::from(b.col), u16::from(b.row));
+            let colours = if b.used {
+                (choices::grey(io, c.paper), c.paper)
+            } else {
+                (c.paper, c.command)
+            };
+            draw_cells(s, io, &b.cells, at, swap(colours));
+        }
+        Target::Page(next) | Target::Answer(next) => {
+            let buttons = if matches!(t, Target::Page(_)) {
+                &s.ui.choices.arrows
+            } else {
+                &s.ui.choices.answers
+            };
+            let id = usize::from(if matches!(t, Target::Page(_)) {
+                next
+            } else {
+                !next
+            });
+            if let Some(b) = buttons.iter().find(|b| b.id == id) {
+                let c = s.ui.tables.colours;
+                draw_cells(
+                    s,
+                    io,
+                    &b.cells,
+                    (u16::from(b.col), u16::from(b.row)),
+                    swap((c.alert, c.paper)),
+                );
+            }
         }
         Target::Key { row, col } => {
             let w = s.ui.text.window(WindowId::Messages);

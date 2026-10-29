@@ -12,9 +12,10 @@ import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as o from './lib.mjs';
+import { DATA_ROOT } from '../data-paths.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const GAMES = process.env.U6_GAMES || '/Users/zhugehyuk/Games/ultima6';
+const GAMES = process.env.U6_GAMES || DATA_ROOT;
 const IMG = join(GAMES, 'img');
 const DISKS = join(o.ORACLE_HOME, 'disks');
 const INSTALLED = join(o.ORACLE_HOME, 'installed');

@@ -61,7 +61,12 @@ pub(crate) fn caster(s: &State) -> u16 {
     crate::actors::party::leader_actor(s)
 }
 
-async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+async fn print_at(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = game_string(io, addr);
     printf(state, io, &fmt, args).await;
 }
@@ -90,7 +95,7 @@ pub(crate) fn readied_books(s: &mut State) -> Vec<Slot> {
 pub async fn cast(state: &RefCell<State>, io: &Io) {
     let books = readied_books(&mut state.borrow_mut());
     match books.as_slice() {
-        [] => print_at(state, io, MSG_NO_BOOK, &[]).await,
+        [] => print_at(state, io, crate::string_registry::text!(MSG_NO_BOOK), &[]).await,
         [a] => book_cast(state, io, *a, 0).await,
         [a, b, ..] => book_cast(state, io, *a, *b).await,
     }
@@ -121,17 +126,41 @@ async fn announce(state: &RefCell<State>, io: &Io, spell: u16) {
         )
     };
     if typed {
-        print_at(state, io, FMT_PAREN, &[Arg::Str(&name)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(FMT_PAREN),
+            &[Arg::Str(&name)],
+        )
+        .await;
         state.borrow_mut().magic.typed = 0;
         return;
     }
-    print_at(state, io, FMT_NAME_QUOTE, &[Arg::Str(&name)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NAME_QUOTE),
+        &[Arg::Str(&name)],
+    )
+    .await;
     for (i, &c) in word.iter().enumerate() {
         let syl = state.borrow().magic.tables.syllable(c).to_vec();
         let fmt = if i == 0 { FMT_S } else { FMT_SPACE_S };
-        print_at(state, io, fmt, &[Arg::Str(&syl)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::choose(
+                (fmt) as i64,
+                &[
+                    crate::string_registry::text!(0x001158b0),
+                    crate::string_registry::text!(0x00115a62),
+                ],
+            ),
+            &[Arg::Str(&syl)],
+        )
+        .await;
     }
-    print_at(state, io, MSG_QUOTE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_QUOTE), &[]).await;
 }
 
 /// Moves the book's marker to the chosen line: blanks on every marked line, the glyph on line
@@ -173,11 +202,11 @@ pub async fn book_cast(state: &RefCell<State>, io: &Io, book1: Slot, book2: Slot
         if negated(&s) { None } else { Some(caster(&s)) }
     };
     let Some(actor) = actor else {
-        print_at(state, io, MSG_NO_MAGIC, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NO_MAGIC), &[]).await;
         return;
     };
     if !has_spells(&mut state.borrow_mut()) {
-        print_at(state, io, MSG_NO_SPELLS, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NO_SPELLS), &[]).await;
         return;
     }
     draw_book(&mut state.borrow_mut(), io);
@@ -194,7 +223,7 @@ pub async fn book_cast(state: &RefCell<State>, io: &Io, book1: Slot, book2: Slot
     };
     let confirmed = key & 0xff == REPEAT;
     if !(confirmed && sel != -1) && target.0 == -1 {
-        print_at(state, io, MSG_NOTHING, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NOTHING), &[]).await;
         let mut s = state.borrow_mut();
         s.ui.panel.mode = s.magic.saved_panel;
         s.ui.panel.dirty = true;
@@ -242,7 +271,20 @@ async fn checks_pass(state: &RefCell<State>, io: &Io, actor: u16, spell: u16, ci
     } else {
         return true;
     };
-    print_at(state, io, refusal, &[]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::choose(
+            (refusal) as i64,
+            &[
+                crate::string_registry::text!(0x00115ae8),
+                crate::string_registry::text!(0x00115b0a),
+                crate::string_registry::text!(0x00115b26),
+            ],
+        ),
+        &[],
+    )
+    .await;
     false
 }
 

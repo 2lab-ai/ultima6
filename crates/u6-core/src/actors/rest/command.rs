@@ -26,11 +26,28 @@ use crate::objects::{build_draw_lists, create_from_record, display_name};
 /// first hungry one (0x1279d4, announced), the counter becomes 12. The view centre moves to the
 /// leader.
 pub async fn rest(state: &RefCell<State>, io: &Io) {
-    say(state, io, STR_REST, &[]).await;
+    say(state, io, crate::string_registry::text!(STR_REST), &[]).await;
     let targeting = state.borrow().ui.input.targeting;
     let refused = refusal(&mut state.borrow_mut());
     if let Some(msg) = refused {
-        say(state, io, msg, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::choose(
+                (msg) as i64,
+                &[
+                    crate::string_registry::text!(0x001272d2),
+                    crate::string_registry::text!(0x001272ea),
+                    crate::string_registry::text!(0x00127302),
+                    crate::string_registry::text!(0x0012731c),
+                    crate::string_registry::text!(0x00127338),
+                    crate::string_registry::text!(0x00127356),
+                    crate::string_registry::text!(0x0012736a),
+                ],
+            ),
+            &[],
+        )
+        .await;
         return;
     }
     if aboard(&state.borrow()) {
@@ -42,16 +59,22 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
         (0..size(&s)).any(|i| s.objects.kind(member(&s, i)) == HORSE_RIDER)
     };
     if mounted {
-        say(state, io, STR_DISMOUNT, &[]).await;
+        say(state, io, crate::string_registry::text!(STR_DISMOUNT), &[]).await;
         return;
     }
-    say(state, io, STR_HOURS, &[]).await;
+    say(state, io, crate::string_registry::text!(STR_HOURS), &[]).await;
     let key = crate::ui::wait::read_key(state, io).await;
     if !(0x31..=0x39).contains(&key) {
-        say(state, io, STR_ZERO, &[]).await;
+        say(state, io, crate::string_registry::text!(STR_ZERO), &[]).await;
         return;
     }
-    say(state, io, STR_KEY, &[Arg::Word(key)]).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(STR_KEY),
+        &[Arg::Word(key)],
+    )
+    .await;
     let hours = key - 0x30;
     let guard = if size(&state.borrow()) != 1 {
         choose_guard(state, io, targeting).await
@@ -59,11 +82,11 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
         NO_GUARD
     };
     let fire = make_camp(state, io);
-    say(state, io, STR_MEAL, &[]).await;
+    say(state, io, crate::string_registry::text!(STR_MEAL), &[]).await;
     let bard = start_tune(&mut state.borrow_mut());
     if let Some(bard) = bard {
         say_name(state, io, bard).await;
-        say(state, io, STR_TUNE, &[]).await;
+        say(state, io, crate::string_registry::text!(STR_TUNE), &[]).await;
     }
     build_draw_lists(&mut state.borrow_mut());
     let hungry = meal(state, io).await;
@@ -75,9 +98,15 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
     for i in 0..n {
         let m = member(&state.borrow(), i);
         if m == guard {
-            say(state, io, STR_NEWLINE, &[]).await;
+            say(state, io, crate::string_registry::text!(STR_NEWLINE), &[]).await;
             say_name(state, io, i).await;
-            say(state, io, STR_STANDS_GUARD, &[]).await;
+            say(
+                state,
+                io,
+                crate::string_registry::text!(STR_STANDS_GUARD),
+                &[],
+            )
+            .await;
         } else {
             lie_down(&mut state.borrow_mut(), m);
         }
@@ -90,7 +119,7 @@ pub async fn rest(state: &RefCell<State>, io: &Io) {
 /// The guard question (0x1273aa): the guard chosen with the cross-hair or a digit, `NO_GUARD`
 /// for none.
 async fn choose_guard(state: &RefCell<State>, io: &Io, targeting: u8) -> Slot {
-    say(state, io, STR_GUARD, &[]).await;
+    say(state, io, crate::string_registry::text!(STR_GUARD), &[]).await;
     state.borrow_mut().ui.input.target_pending = 1;
     if targeting != 0 {
         state.borrow_mut().ui.input.range = 7;
@@ -123,10 +152,10 @@ async fn choose_guard(state: &RefCell<State>, io: &Io, targeting: u8) -> Slot {
     if key == TARGET_DONE && sel != -1 && tx != -1 && sel < 0x100 && is_member(&state.borrow()) {
         let name = display_name(&state.borrow(), sel);
         printf(state, io, name.as_bytes(), &[]).await;
-        say(state, io, STR_NEWLINE, &[]).await;
+        say(state, io, crate::string_registry::text!(STR_NEWLINE), &[]).await;
         sel
     } else {
-        say(state, io, STR_NONE, &[]).await;
+        say(state, io, crate::string_registry::text!(STR_NONE), &[]).await;
         NO_GUARD
     }
 }
@@ -224,9 +253,9 @@ async fn meal(state: &RefCell<State>, io: &Io) -> usize {
             say_name(state, io, m).await;
             let fed = member_eats(&mut state.borrow_mut(), m);
             if fed {
-                say(state, io, STR_FOOD, &[]).await;
+                say(state, io, crate::string_registry::text!(STR_FOOD), &[]).await;
             } else {
-                say(state, io, STR_NO_FOOD, &[]).await;
+                say(state, io, crate::string_registry::text!(STR_NO_FOOD), &[]).await;
                 hungry.get_or_insert(m);
             }
         }
@@ -258,7 +287,7 @@ async fn sleep(state: &RefCell<State>, io: &Io, guard: Slot, hours: u16) -> u8 {
         };
         if attacked {
             if guard < 0x100 {
-                say(state, io, STR_HEAR, &[]).await;
+                say(state, io, crate::string_registry::text!(STR_HEAR), &[]).await;
                 ambushed = 1;
             } else {
                 ambushed = 2;

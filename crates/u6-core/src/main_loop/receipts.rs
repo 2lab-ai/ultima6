@@ -17,7 +17,6 @@ use crate::objects::{IN_CONTAINER, READIED};
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 const HERO: i16 = 1;
 /// Where the receipts read the lines they look for (the user's `game`): the command-name table
 /// at A4-0x7c8e and the format its names are printed with (0x101f48), Cast's code, Rest's own
@@ -29,13 +28,13 @@ const STR_REST: u32 = 0x0012_72cc;
 const STR_STANDS_GUARD: u32 = 0x0012_73fc;
 
 pub(super) fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
-        data: std::fs::read(ZIP).quiet(),
+        data: std::fs::read(u6_testkit::archive()).quiet(),
     }]);
     Some(Files::new(r.files))
 }
@@ -113,8 +112,15 @@ fn text(bytes: &[u8]) -> String {
 
 /// The line the command loop prints for command `code`: its name through the name format.
 fn command_line(e: &Engine, code: u32) -> String {
-    let name = super::pointed_string(e.io(), A4.wrapping_sub(COMMAND_NAMES) + 4 * code);
-    let line = text(&super::game_string(e.io(), FMT_NAME_DASH)).replace("%s", &text(&name));
+    let name = super::pointed_string(
+        e.io(),
+        crate::string_registry::fixture((A4.wrapping_sub(COMMAND_NAMES) + 4 * code) as i64, true),
+    );
+    let line = text(&super::game_string(
+        e.io(),
+        crate::string_registry::fixture((FMT_NAME_DASH) as i64, false),
+    ))
+    .replace("%s", &text(&name));
     assert!(!name.is_empty(), "the name of command {code:#x}");
     line
 }
@@ -308,7 +314,10 @@ fn rest_one_hour_through_the_command_loop() {
     press(&mut e, &chars("r"), 10);
     press(&mut e, &chars("1"), 10);
     press(&mut e, &chars("2"), 10);
-    let guard = text(&super::game_string(e.io(), STR_STANDS_GUARD));
+    let guard = text(&super::game_string(
+        e.io(),
+        crate::string_registry::fixture((STR_STANDS_GUARD) as i64, false),
+    ));
     let mut camp = None;
     for t in 0..6000 {
         e.tick(&[], 16);
@@ -328,7 +337,13 @@ fn rest_one_hour_through_the_command_loop() {
     idle(&mut e, 60);
     dump(&e, "int-b-rest-after");
     let s = e.state();
-    let tail = scroll(&e, &text(&super::game_string(e.io(), STR_REST)));
+    let tail = scroll(
+        &e,
+        &text(&super::game_string(
+            e.io(),
+            crate::string_registry::fixture((STR_REST) as i64, false),
+        )),
+    );
     assert!(holds(&tail, &guard), "no guard line in the scroll");
     assert!(s.actors.calendar.hour != hour0, "an hour passed");
 }

@@ -96,10 +96,12 @@ pub async fn bury(ux: Ux<'_>, obj: Slot) {
         (x, y, z, t.unwrap_or(0))
     };
     if !(1..=7).contains(&tile) && !(0x10..=0x6f).contains(&tile) {
-        ux.print(STR_CANT_BURY, &[]).await;
+        ux.print(crate::string_registry::text!(STR_CANT_BURY), &[])
+            .await;
         return;
     }
-    ux.print(STR_BURIED, &[]).await;
+    ux.print(crate::string_registry::text!(STR_BURIED), &[])
+        .await;
     let mut s = ux.s();
     let i = MOONSTONES + 6 * usize::from(s.objects.tf(obj) >> 10);
     if let Some(b) = s.actors.objlist_tail.get_mut(i..i + 6) {
@@ -125,7 +127,7 @@ pub async fn bury(ux: Ux<'_>, obj: Slot) {
 /// (the ball ended short of the aim) the explosion (0x1331b4, tile 0x189) is one tile further;
 /// an object at the end that is not a counted kind takes 1..60 damage (0x1231be).
 pub async fn cannon(ux: Ux<'_>, obj: Slot) {
-    ux.print(STR_FIRE, &[]).await;
+    ux.print(crate::string_registry::text!(STR_FIRE), &[]).await;
     let mut s = ux.s();
     let f = usize::from(s.objects.tf(obj) >> 10);
     let dx = i16::from(defs::a4_sbyte(ux.io, defs::CANNON_DX, f));
@@ -166,11 +168,16 @@ pub async fn light_keg(ux: Ux<'_>, obj: Slot) {
         (s.objects.tf(obj) >> 10, s.actors.tail_word(KEG_TIMER))
     };
     if frame != 0 {
-        ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_NO_EFFECT),
+        )
+        .await;
         return;
     }
     if timer != 0 {
-        ux.print(STR_NOT_NOW, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NOT_NOW), &[])
+            .await;
         return;
     }
     {
@@ -179,7 +186,8 @@ pub async fn light_keg(ux: Ux<'_>, obj: Slot) {
         s.actors.set_tail_word(KEG_TIMER, 3);
         s.actors.set_tail_word(KEG_OBJECT, obj as u16);
     }
-    ux.print(STR_POWDER_LIT, &[]).await;
+    ux.print(crate::string_registry::text!(STR_POWDER_LIT), &[])
+        .await;
     let mut s = ux.s();
     if s.objects.place(obj) == 0 {
         redraw(&mut s);
@@ -204,7 +212,8 @@ pub fn actor_at(s: &mut State, x: u16, y: u16, z: u16) -> Slot {
 /// when the marker's frame has bit 1) unless an actor stands there (the line 0x12cb16 ends the
 /// walk). The line 0x12cb02 when something moved, else 0x12cae6.
 pub async fn lever(ux: Ux<'_>, obj: Slot) {
-    ux.print(STR_LEVER, &[]).await;
+    ux.print(crate::string_registry::text!(STR_LEVER), &[])
+        .await;
     let outcome = {
         let mut s = ux.s();
         let f = s.objects.tf(obj) >> 10;
@@ -216,7 +225,20 @@ pub async fn lever(ux: Ux<'_>, obj: Slot) {
         1 => STR_NOISE,
         _ => STR_CANT_CLOSE,
     };
-    ux.print(msg, &[]).await;
+    ux.print(
+        crate::string_registry::choose(
+            (msg) as i64,
+            &[
+                crate::string_registry::text!(STR_STRANGE),
+                crate::string_registry::text!(STR_NOISE),
+                crate::string_registry::text!(STR_CANT_CLOSE),
+                crate::string_registry::text!(STR_FOUNTAIN),
+                crate::string_registry::text!(STR_NUGGET),
+            ],
+        ),
+        &[],
+    )
+    .await;
 }
 
 /// The marker walk of 0x12e538 (portcullis 0x136) and 0x12e77c (force field 0xaf): 0 nothing,
@@ -269,15 +291,25 @@ fn operate(s: &mut State, obj: Slot, gate: u16) -> u8 {
 
 /// Original: 0x12e77c (objects: operate a switch: force fields 0xaf on its markers come and go)
 pub async fn switch(ux: Ux<'_>, obj: Slot) {
-    ux.print(STR_SWITCH, &[]).await;
+    ux.print(crate::string_registry::text!(STR_SWITCH), &[])
+        .await;
     let moved = {
         let mut s = ux.s();
         let f = s.objects.tf(obj) >> 10;
         set_frame(&mut s, obj, f ^ 1);
         operate(&mut s, obj, 0xaf)
     };
-    ux.print(if moved != 0 { STR_NOISE } else { STR_STRANGE }, &[])
-        .await;
+    ux.print(
+        crate::string_registry::choose(
+            (if moved != 0 { STR_NOISE } else { STR_STRANGE }) as i64,
+            &[
+                crate::string_registry::text!(0x0012cae6),
+                crate::string_registry::text!(0x0012cb02),
+            ],
+        ),
+        &[],
+    )
+    .await;
 }
 
 /// The drawbridge piece type.
@@ -307,7 +339,8 @@ pub async fn drawbridge(ux: Ux<'_>, obj: Slot) {
         c
     };
     if found == -1 {
-        ux.print(STR_NO_BRIDGE, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NO_BRIDGE), &[])
+            .await;
         return;
     }
     {
@@ -322,7 +355,20 @@ pub async fn drawbridge(ux: Ux<'_>, obj: Slot) {
         crate::gfx::refresh_view(&mut ux.s(), ux.io);
     }
     let result = bridge(&mut ux.s(), ux.io, found);
-    ux.print(STR_BRIDGE[usize::from(result)], &[]).await;
+    ux.print(
+        crate::string_registry::choose(
+            (STR_BRIDGE[usize::from(result)]) as i64,
+            &[
+                crate::string_registry::text!(0x0012ca48),
+                crate::string_registry::text!(0x0012ca66),
+                crate::string_registry::text!(0x0012ca7e),
+                crate::string_registry::text!(0x0012ca96),
+                crate::string_registry::text!(0x0012cab4),
+            ],
+        ),
+        &[],
+    )
+    .await;
     let mut s = ux.s();
     for tile in CRANK_TILES {
         crate::main_loop::set_tile_animation(&mut s, tile, 0);
@@ -525,7 +571,8 @@ fn place(s: &mut State, x: u16, y: u16, frame: u16) -> Slot {
 /// fountain (0xea), else 1 in 10 a gold nugget (0x59), else the failed message; anywhere else
 /// the no-effect message.
 pub async fn dig(ux: Ux<'_>) {
-    ux.print(STR_DIRECTION, &[]).await;
+    ux.print(crate::string_registry::text!(STR_DIRECTION), &[])
+        .await;
     {
         let mut s = ux.s();
         s.ui.input.target_pending = 0;
@@ -535,15 +582,19 @@ pub async fn dig(ux: Ux<'_>) {
         }
     }
     if ux.key().await != 0x80 {
-        ux.print(STR_NOWHERE, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NOWHERE), &[])
+            .await;
         return;
     }
     let dir = ux.s().ui.input.direction;
     // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of it
     // when it has one ([`crate::magic::LABELS`], [`crate::locale::shown`]).
     let name = crate::locale::shown(&ux.s(), defs::direction_name(ux.io, dir));
-    ux.print(FMT_DIR, &[crate::ui::printf::Arg::Str(&name)])
-        .await;
+    ux.print(
+        crate::string_registry::text!(FMT_DIR),
+        &[crate::ui::printf::Arg::Str(&name)],
+    )
+    .await;
     let (dx, dy) = defs::direction(ux.io, dir);
     let (x, y, z, tile) = {
         let s = ux.s();
@@ -565,11 +616,15 @@ pub async fn dig(ux: Ux<'_>) {
             let h = crate::objects::create_on_map(&mut s.objects, 0x134, 0, 0, x, y, z);
             super::set_quality(&mut s, h, 0x13);
         }
-        ux.print(STR_HOLE, &[]).await;
+        ux.print(crate::string_registry::text!(STR_HOLE), &[]).await;
         return;
     }
     if !(1..=4).contains(&z) || !(0x6c..=0x6f).contains(&tile) {
-        ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_NO_EFFECT),
+        )
+        .await;
         return;
     }
     let found = {
@@ -585,7 +640,28 @@ pub async fn dig(ux: Ux<'_>) {
         }
     };
     match found {
-        Some(msg) => ux.print(msg, &[]).await,
-        None => ux.say(FMT_NL_LINE, MSG_FAILED).await,
+        Some(msg) => {
+            ux.print(
+                crate::string_registry::choose(
+                    (msg) as i64,
+                    &[
+                        crate::string_registry::text!(STR_STRANGE),
+                        crate::string_registry::text!(STR_NOISE),
+                        crate::string_registry::text!(STR_CANT_CLOSE),
+                        crate::string_registry::text!(STR_FOUNTAIN),
+                        crate::string_registry::text!(STR_NUGGET),
+                    ],
+                ),
+                &[],
+            )
+            .await
+        }
+        None => {
+            ux.say(
+                crate::string_registry::text!(FMT_NL_LINE),
+                crate::string_registry::pointer!(MSG_FAILED),
+            )
+            .await
+        }
     }
 }

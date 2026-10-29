@@ -27,7 +27,7 @@ const RUNS = Number(process.env.U6_PACE_RUNS || 3);
 const CELLS = (process.env.U6_PACE_CELLS || '0,3;0,-3;3,0;-3,0;0,2;2,0')
   .split(';').map((c) => c.split(',').map(Number));
 const ADF = process.env.U6_ADF_DIR || join(o.ORACLE_HOME, 'adf-gamefirst');
-const GAME_BIN = process.env.U6_GAME_BIN || '/Users/zhugehyuk/Games/ultima6/re/game.bin';
+import { GAME_BIN } from '../data-paths.mjs';
 mkdirSync(out, { recursive: true });
 const LOG = join(out, 'pace.log');
 const log = (s) => { appendFileSync(LOG, `${new Date().toISOString()} ${s}\n`); console.log(s); };

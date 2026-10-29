@@ -1,7 +1,7 @@
 //! Tables the MED player and the music code read, taken from the user's `game` at run time
 //! (spec 03 §5): image addresses are hunk 0 (the MED routine) and hunks 7, 28 and 33.
 
-use crate::image::{A4, GameImage};
+use crate::image::GameImage;
 use u6_formats::FormatError;
 
 /// 0x101248: the synth note → period table (96 words); the sample table 0x101278 is the same
@@ -105,8 +105,10 @@ pub fn effect_module(img: &GameImage) -> Result<Vec<u8>, FormatError> {
 pub fn song_names(img: &GameImage) -> Result<Vec<String>, FormatError> {
     (0..SONGS)
         .map(|n| {
-            let at = A4.wrapping_add_signed(SONG_NAMES) + u32::from(n) * 4;
-            let name = img.cstr(img.pointer(at)?)?;
+            let text = crate::string_registry::text_table!(SONG_NAMES)
+                .get(usize::from(n))
+                .expect("registered song slot");
+            let name = text.image(img)?;
             Ok(String::from_utf8_lossy(&name).into_owned())
         })
         .collect()

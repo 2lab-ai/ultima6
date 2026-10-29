@@ -364,7 +364,7 @@ pub async fn inventory_click(state: &RefCell<State>, io: &Io) -> u16 {
             0
         }
         Inventory::Locked => {
-            let msg = seams::game_string(io, MSG_LOCKED);
+            let msg = seams::game_string(io, crate::string_registry::text!(MSG_LOCKED));
             super::printf(state, io, &msg, &[]).await;
             prompt(state, io).await;
             super::print::put_raw(state, io, -1).await;
@@ -384,7 +384,7 @@ pub async fn inventory_click(state: &RefCell<State>, io: &Io) -> u16 {
 
 /// The prompt 0x10619c prints after a message: newline, the leader's name, the cursor.
 async fn prompt(state: &RefCell<State>, io: &Io) {
-    let fmt = seams::game_string(io, FMT_PROMPT);
+    let fmt = seams::game_string(io, crate::string_registry::text!(FMT_PROMPT));
     let name = crate::main_loop::leader_name(&state.borrow());
     super::printf(state, io, &fmt, &[super::Arg::Str(&name)]).await;
 }

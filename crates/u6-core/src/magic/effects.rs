@@ -44,7 +44,12 @@ pub struct Target {
     pub chosen: bool,
 }
 
-pub(super) async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+pub(super) async fn print_at(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     settle(state, io).await;
     let fmt = game_string(io, addr);
     printf(state, io, &fmt, args).await;
@@ -61,7 +66,12 @@ pub(super) async fn settle(state: &RefCell<State>, io: &Io) {
 /// Prints result message `m` with format `fmt` (`%s`, `\n%s\n` or `\n%s!\n`). Port (spec 08,
 /// slice K2; 2026-10-24): the message is read for display, so the locale pack's label of it when
 /// it has one ([`super::tables::LABELS`], [`crate::locale::shown`]).
-pub(super) async fn say(state: &RefCell<State>, io: &Io, fmt: u32, m: Msg) {
+pub(super) async fn say(
+    state: &RefCell<State>,
+    io: &Io,
+    fmt: crate::string_registry::Text,
+    m: Msg,
+) {
     let text = {
         let s = state.borrow();
         crate::locale::shown(&s, s.magic.tables.message(m).to_vec())
@@ -79,7 +89,7 @@ pub(super) async fn report(state: &RefCell<State>, io: &Io) {
         2 => Msg::NoEffect,
         _ => return,
     };
-    say(state, io, FMT_NL_S_NL, m).await;
+    say(state, io, crate::string_registry::text!(FMT_NL_S_NL), m).await;
 }
 
 /// The display name of `obj` (0x10eef8), printed as a format. Port (spec 08, slice K3): the
@@ -106,7 +116,7 @@ pub(super) async fn prompt_target(
     };
     if member {
         let m = if kind == 1 { Msg::OnWhom } else { Msg::OnWhat };
-        say(state, io, FMT_S, m).await;
+        say(state, io, crate::string_registry::text!(FMT_S), m).await;
     }
     if !chosen {
         {
@@ -169,11 +179,17 @@ pub async fn on_target(state: &RefCell<State>, io: &Io, spell: u16, t: Target) {
         (no_target(&s), super::cast::caster(&s))
     };
     if missing {
-        say(state, io, FMT_S_NL, Msg::Nothing).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_S_NL),
+            Msg::Nothing,
+        )
+        .await;
     } else {
         let sel = state.borrow().ui.input.selection;
         print_name(state, io, sel).await;
-        print_at(state, io, NEWLINE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     }
     seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
     let mut reached = 0;
@@ -183,7 +199,13 @@ pub async fn on_target(state: &RefCell<State>, io: &Io, spell: u16, t: Target) {
         state.borrow_mut().ui.input.target = target;
     }
     if no_target(&state.borrow()) {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     if reached == 0 {
@@ -197,12 +219,18 @@ pub async fn on_target(state: &RefCell<State>, io: &Io, spell: u16, t: Target) {
             dist(tx, at.x) <= t.range && dist(ty, at.y) <= t.range
         };
         let m = if near { Msg::Blocked } else { Msg::OutOfRange };
-        say(state, io, FMT_NL_S_BANG, m).await;
+        say(state, io, crate::string_registry::text!(FMT_NL_S_BANG), m).await;
         return;
     }
     let sel = state.borrow().ui.input.selection;
     if (t.kind == 1 && sel >= 0x100) || (t.kind == -1 && sel < 0x100 && spell != 0x21) {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     {
@@ -298,7 +326,7 @@ async fn effect(state: &RefCell<State>, io: &Io, spell: u16, caster: u16) {
                 seams::hurt(&mut s, target, d)
             };
             seams::add_experience(&mut state.borrow_mut(), caster, exp);
-            print_at(state, io, NEWLINE, &[]).await;
+            print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
             seams::wound_line(state, io, target).await;
             seams::provoke(&mut state.borrow_mut(), target, caster, 1);
             set_result(state, 0xff);
@@ -309,9 +337,9 @@ async fn effect(state: &RefCell<State>, io: &Io, spell: u16, caster: u16) {
                 s.actors.attrs.status[usize::from(target)] |= 2;
                 seams::hit_flash(&mut s, target);
             }
-            print_at(state, io, NEWLINE, &[]).await;
+            print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
             print_name(state, io, sel).await;
-            print_at(state, io, MSG_PARALYZED, &[]).await;
+            print_at(state, io, crate::string_registry::text!(MSG_PARALYZED), &[]).await;
         }
         0x50 => charm(state, io, caster, target).await,
         0x51 => clone(&mut state.borrow_mut(), io, Slot::from(sel)),
@@ -428,7 +456,7 @@ async fn hit_then_line(state: &RefCell<State>, io: &Io, caster: u16, target: u16
         seams::add_experience(&mut s, caster, exp);
         seams::provoke(&mut s, target, caster, d);
     }
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     seams::wound_line(state, io, target).await;
 }
 
@@ -466,7 +494,7 @@ pub async fn harm(state: &RefCell<State>, io: &Io, spell: u16) {
         };
         (caster, target, d)
     };
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     {
         let mut s = state.borrow_mut();
         let exp = seams::hurt(&mut s, target, d);
@@ -527,7 +555,7 @@ pub async fn fireball(state: &RefCell<State>, io: &Io, target: u16) -> bool {
         seams::add_experience(&mut s, caster, exp);
         caster
     };
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     seams::provoke(&mut state.borrow_mut(), target, caster, 1);
     seams::wound_line(state, io, target).await;
     true
@@ -581,9 +609,9 @@ pub async fn charm(state: &RefCell<State>, io: &Io, caster: u16, target: u16) {
         }
     };
     if charmed {
-        print_at(state, io, NEWLINE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
         print_name(state, io, target as i16).await;
-        print_at(state, io, MSG_CHARMED, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_CHARMED), &[]).await;
         set_result(state, 0xfe);
     }
 }
@@ -629,8 +657,8 @@ pub async fn douse_ignite(state: &RefCell<State>, io: &Io, obj: Slot, spell: u16
         out
     };
     if burned_out {
-        print_at(state, io, NEWLINE, &[]).await;
-        let msg = crate::main_loop::a4_string(io, MSG_TORCH_OUT);
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
+        let msg = crate::main_loop::a4_string(io, crate::string_registry::text!(MSG_TORCH_OUT));
         printf(state, io, &msg, &[]).await;
     }
     crate::map::view::update_view(&mut state.borrow_mut());
@@ -800,7 +828,7 @@ pub async fn chain_bolt(state: &RefCell<State>, io: &Io, target: u16) {
         let d = s.rng.range(1, 0x1e) as i16;
         seams::hurt(&mut s, target, d)
     };
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     {
         let mut s = state.borrow_mut();
         seams::add_experience(&mut s, caster, exp);
@@ -827,7 +855,7 @@ pub async fn chain_bolt(state: &RefCell<State>, io: &Io, target: u16) {
             let exp = seams::hurt(&mut s, from, d);
             seams::add_experience(&mut s, caster, exp);
         }
-        print_at(state, io, NEWLINE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
         seams::wound_line(state, io, from).await;
     }
 }

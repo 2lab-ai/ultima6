@@ -1,14 +1,15 @@
 ---
-title: ultima6 — 22 conversation by click (Job and Name buttons, red keywords)
+title: ultima6 — 22 conversation choices and keyword clicks
 type: spec
 tags: [ultima6, ui, input, converse]
 ---
 
 # 22 — Conversation by click
 
-Status: shipped (2026-10-28, deploy 35, main 17c09b6). The contract below is the implemented one, not a future target
-(unit T1, worktree `feat/talk-clicks`; round 5, tests and wording only, follows). The message scrollback of the same message is spec 23
-(unit T2).
+Status: original click support shipped (2026-10-28, deploy 35, main 17c09b6). The 2026-10-29 owner update
+extends the contract with conversation-local choices and restricted y/n clicks. The engine implementation and
+Original/Wide archive checks are local; integration browser checks remain a separate gate. No deployment is implied.
+The independent #7/#8 follow-up snapshot precedes this UI update. Message history is specified in spec 23.
 
 Owner, 2026-10-28, verbatim: "그리고 대화시 나오는 사람패널 밑에 job 대화랑 name 대화 버튼 만들고 (인게임 ui로) 클릭시 해당
 대사 입력 그리고 대화창에서 빨간색 키워드 클릭시 해당 대사 하도록해줘." The same message corrected that deploy 30's context
@@ -53,23 +54,33 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
 
 ## Contract
 
-1. **When.** Only while the conversation reads the player's words at op f7 (the "you say" prompt). The answers of f9
-   and fb, every other read and every other moment are unchanged: no button, and a press on a keyword does nothing.
-2. **The buttons.** Two, Job then Name, on row 11 of the Status window, below the portrait and its name, inside the
-   panel area. Each is its word between two blank cells, drawn with 0x105228 in the game's font: the word in the paper
-   colour on cells of the command colour A4-0x6572 (the colour of 0x106506's mark), a key cap. The pair is centred in
-   the window's 17 cells, one blank cell between them; were they wider than the row, the blank cells at their ends go,
-   and were they wider still, there are none (no cell is ever drawn outside the row). Main's row never takes the last
-   step: two words of at most 8 cells and the cell between fill its 17 exactly; only a narrower window would. They are
-   drawn when the read begins, only if every pixel of that row is the paper colour then (the portrait panel leaves it
-   so; the inventory panel of op 0xbe does not, and then there are no buttons for that read), and the row is filled with
-   the paper again (0x1521f4 with the paper, as the portrait panel's clear) when it ends, so the frame after the read is
-   the frame without the feature.
-3. **The buttons' words.** English: the script's keywords `job` and `name`. With a locale pack: the first word the pack
-   gives that keyword of the script loaded (`locale::Pack::aliases`), else the English. Each is typed as it is and shown
-   with its first letter a capital when that is a lower-case ASCII letter (so the identity pack, whose alias of a keyword
-   is the keyword, shows what English shows); a word is shown in at most 8 cells. Each word is the one the script
-   matches: an alias matches through `keywords()` (spec 08 Design 4), the English keyword always.
+1. **When.** The choice grid and inline keywords accept clicks only during the f7 word reader.
+   The actual f8 reader additionally shows clickable Yes / No (예 / 아니오 with a Korean pack) when its
+   non-NUL allowed set contains both `y` and `n` and no other key, case-insensitively. The overlay sends
+   exactly `Key::Char('y')` or `Key::Char('n')` through the ordinary key map; no Enter or edited line.
+   The prompt is flushed first; a question on the bottom row gets its own line before the answer row
+   is drawn, so no question text is obscured. This presentation-only line does not spend the script's
+   paging budget or open a more prompt. The overlay is restored and published when the reader accepts an answer. f9, fb, fc, unrestricted fa and other f8 sets are
+   unchanged even if the surrounding message happens to contain `(y/n)`.
+2. **The grid (owner update, 2026-10-29).** Three columns, up to three rows of five-cell buttons in the
+   17-cell Status panel. The portrait is reduced to 42 × 48 pixels above its name; the grid occupies
+   screen rows 9–11 and optional previous/next arrows occupy the bottom corners of row 12. Each page
+   contains the fixed End / 대화 종료 button and up to eight other choices. Arrows appear only for overflow.
+   The read snapshots and restores the underlying panel, including source metadata, so the original
+   portrait or inventory is intact outside the read. The former nonblank-row guard is removed: f7
+   always offers End even when a script temporarily shows inventory. Narrow test windows fit three equal
+   columns; an unusably small window draws none. All UI remains engine-drawn glyph cells.
+3. **Session choices.** A successful conversation starts with End, Name, Job in visual order. Job and Name
+   type their first locale alias, or English; Korean labels are 이름 and 직업. End types the first `bye` alias, or `bye`. Newly displayed
+   alert keywords are accumulated once, case-insensitively, including wrapped words and prefixes that
+   leave the scroll before the rest is drawn. Old inline spans remain clickable but do not seed the new
+   conversation's choices. Clicked topics become grey and sort after unused topics; they remain selectable.
+   Sorting happens at the next word read, never between a button's press and release. Stable topic IDs
+   identify a click independently of page and sorting; paging cancels any pending press and submits nothing.
+   Each new conversation resets this presentation state; it is never part of saved game data.
+   "Below the conversation panel" means below the existing portrait and name within their Status area,
+   separate from the message window. Long labels end in `...` and hover replaces the portrait header with the full keyword. Thus equally
+   abbreviated labels can be distinguished before clicking, and the complete word is submitted.
 4. **The keywords.** The cells the line assembler draws in the message window in the alert colour are recorded as spans
    at the moment they are drawn: their window row and first column, their cell codes and ink. Consecutive alert cells on
    a row are one span; a space joins a span but starts none, and a span's word ends at its last other cell (the more
@@ -134,9 +145,9 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
    hover and the press move with them (`talk::scroll`): each becomes its keyword's first part still in the window, a
    row up, so when the first part of a wrapped keyword leaves with the top row the target is its rest, and its cells
    are drawn back where they went; a keyword wholly gone is no target.
-7. **Input only.** Nothing is saved. Besides what typing the word causes, the state keeps only the span record
-   (presentation, as the transcript) and, during a read, that it reads by click, the buttons, the hover and the
-   press, all cleared again when it ends.
+7. **Input only.** Nothing is saved. The span record remains presentation state; choices and used flags
+   last for the conversation, while buttons, hover, press and saved panel pixels last for the reader.
+   The conversation's exit clears its session choices. The next conversation starts fresh.
 8. **Wide and HD.** The same pixels in the same frame places; the page shows them through its windows and the HD
    compositor; the pointer reaches them through the page's map. The page's one change, scoped to the f7 read: a
    cancelled press (`pointercancel`: a touch the browser takes for a scroll or a zoom) with a button held, while the
@@ -172,13 +183,13 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
    last, a press or a release never: Contract 5) → `InputEvent::Pointer {x, y, buttons}` → `Engine::tick` queues it
    (`engine.rs:776-806`) and polls the game.
 2. **Input.** Frame pixel (x, y), buttons bit 0. Valid only in the f7 read (Contract 1), as a click (bit 0 set, then
-   clear, both inside the same target: a button's cells on screen row 12, or a span's cells in the message window).
+   clear, both inside the same target: a button's recorded row and columns, or a span's cells in the message window).
 3. **Layer flow.**
    - 3a `converse::start::input_loop` op f7 → `seams::read_said` → `keyread::read_said` → `edit_line(talk = true)`:
      `talk::begin` draws the buttons (Contract 2) into the panel area and records them.
    - 3b Each pass of the editor's wait, while a pointer event is in front (`Io::pointer_ready`): `talk::pointer` →
      `Io::pointer` (buttons before) → `Io::take_pointer_upto(1)` (one event) → `talk::target_at(x, y)`:
-     `x / 8, y / 8` → screen cell → a button (row 12, its columns) or a span (`TextState.keys`, the message window's row
+     `x / 8, y / 8` → screen cell → a button (its stable ID, row and columns) or a span (`TextState.keys`, the message window's row
      and column) → `talk::hover` draws the change → a press keeps its target (`TalkClicks.pressed`); the release on the
      same target → `talk::keys(typed, word)` → `Io::push_front`.
    - 3c Arrows: release pixel → screen cell → `Target::Button(i)` / `Target::Key {row, col}` → `Button.word` /
@@ -189,23 +200,24 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
      then records an alert cell) → `KeySpans::row_drawn` (a wrap not taken is spent); a wrap inside a keyword →
      `KeySpans::wrapped` (the span holding the row's last drawn cell continued); `end_line`'s and `echo`'s scroll → `talk::scroll` →
      `KeySpans::scroll` and the hover's and the press's rows.
-4. **Side effects.** The panel area's row 11 (drawn at the read's start, filled with the paper at its end); a target's
-   cells drawn inverse and back; `TextState.keys`; `UiState.talk` (buttons, hover) during the read; the injected keys.
+4. **Side effects.** The portrait/name area and choice grid are saved during the reader and restored at its end;
+   a target's cells drawn inverse and back; `TextState.keys`; `UiState.talk` during the read;
+   `UiState.choices` during the conversation; the injected keys.
    No savegame field, no RNG draw, no turn beyond what the typed keys cause.
-5. **Error paths.** No target under a press: nothing. Not the f7 read: the old loop (`Io::take_pointer`) runs. Row 11
-   not blank, or too narrow: no buttons (keywords still work). A span scrolled off or drawn over: gone, no target (a
+5. **Error paths.** No target under a press: nothing. Outside f7 and restricted y/n: the old pointer loop runs.
+   No font or an unusably narrow window: no grid (inline keywords still work). A span scrolled off or drawn over: gone, no target (a
    wrapped keyword whose first part left the window types its rest). A word that types nothing: no click. A word longer
    than the editor's budget: cut as typing it would be. A cancelled press: a release off every target.
 6. **Output.** The frame: the echo of the word, the answer the script gives it, the buttons gone; the same frame and
-   state as typing the word (and moving the pointer to the same place) gives.
+   game state as typing the word gives. During the conversation the clicked run additionally remembers used choices;
+   tests exclude only that presentation state and its panel pixels when comparing it with typing.
 7. **Observability.** Tests print counts and pass/fail only.
 
 ## Tests
 
 - Engine (`converse/tests_talk.rs`, synthetic script, made-up words, no assets; Backspace mapped to 0x10e as the user's
-  keymap maps it): the buttons are drawn only in the f7 read (pixels during it, the row paper again after; none in f9
-  and fb; none over a row not all paper); they fit the row with or without their blank cells or are not drawn, never a
-  cell outside it (narrowed windows, a pack's 8-syllable alias); in f9 and fb a click where Name is in f7 and a click on
+  keymap maps it): the grid is drawn only in f7, including over inventory, and all prior panel pixels and source
+  metadata are restored afterwards; none in f9/fb. Three equal columns stay inside narrowed windows; in f9 and fb a click where Name is in f7 and a click on
   a shown keyword leave the state and frame of the same moves without the clicks, and the read takes exactly what is
   typed; a press on Job and on Name gives the same state and frame as typing the word + Enter (two runs from one
   state); a press on Name with a pack gives its alias; a press moved off before its release types nothing and the read
@@ -249,10 +261,9 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
 - Real data (`ui/tests/pointer_real.rs`, the user's zip; counts and equality only; it prints `ran` or `skipped`): Talk
   to member 1 by the pointer, press Name, type a letter and press Job (the press takes the letter back with the keymap's
   Backspace), press a keyword of the answers; the same run with the pointer moved to the same places and the keys typed
-  in one tick ends each answer with equal words, scroll, frame and state. At each read after the first the two buttons
-  are back and their row (the frame without the pointer sprite) is the first read's, pixel for pixel: the row the
-  read's end filled with the paper on the real paper map is all paper again; after the keyword's answer too. Frames of the buttons and a hovered
-  keyword, Original and Wide, outside the repo (`U6_TALK_FRAMES`).
+  in one tick ends each answer with equal words, scroll, game state and pixels outside the used-choice panel.
+  Each answer returns to the choice grid with used state retained and End fixed in the first slot.
+  Frames of the buttons and a hovered keyword, Original and Wide, outside the repo (`U6_TALK_FRAMES`).
 - Browser (`tools/web/test-web.mjs`, the user's disks, a made-up conversation in place of the user's): at the prompt
   a touch cancelled on the message window is released where it was; the Name button drawn in the frame; a touch
   pressed on it that the browser cancels, the press queued on Name each time (the page's queue read through
@@ -265,11 +276,29 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   press on it in the canvas sends no key and ends the conversation with the same message-window pixels as typing
   `name` + Enter, every cell but the prompt's turning cursor (the one cell that changes from frame to frame there,
   found in each run, the same in both), Original and Wide (frames with `U6_FRAMES_DIR`).
-- RED: each test fails with its part of the feature removed.
+- Owner-update engine cases (`converse/tests_choices.rs`): initial three columns; discovered-word deduplication;
+  overflow paging and fixed End; used sorting and reselection; distinct full previews for equally abbreviated labels;
+  a pending press retains its stable ID even after deliberate reordering; conversation reset; carried wrapped prefixes;
+  exact f8 y/n gating and key-only injection; a question at the message window's bottom remains visible; used grey
+  comes only from the glyph renderer's first sixteen palette entries. Palette and paging-budget regressions
+  have recorded RED→GREEN evidence.
+- Owner-update archive cases (`converse/tests_choices_real.rs`): actual conversation clicks, used choices, overflow,
+  page two, full-label preview, a subsequent conversation reset, y/n and the op-be inventory-panel entry point.
+  The inventory fixture clicks End through the production f7 reader and compares every saved pixel and Src afterwards.
+  `U6_CHOICES_FRAMES` points to an existing private directory outside the repository; frames are never committed.
+  `U6_KO_PACK` optionally installs the owner's Korean pack with the checked-in Hangul font.
+  A paired UI-on/off oracle captures all completed lines before the 64-line transcript limit: every
+  non-whitespace character stays identical and in order, and the conversation VM ends in the same state.
+  Only line breaks separating a bottom-row question from the key echo are added; overlay labels never
+  enter that transcript.
+- The issue #7/#8 follow-up patch and its original D2 baselines are retained independently before the new UI update.
+  The new conversation-frame golden is intentionally updated only after inspecting the new UI; the independent
+  synthetic history golden remains unchanged.
 
 ## Files
 
-`crates/u6-core/src/ui/talk.rs` (new), `ui/mod.rs`, `ui/textstate.rs`, `ui/print.rs`, `ui/keyread.rs`, `engine.rs`
+`crates/u6-core/src/ui/talk.rs`, `ui/talk_choices.rs`, `converse/tests_choices.rs`,
+`converse/tests_choices_real.rs`, `ui/target.rs`, `ui/mod.rs`, `ui/textstate.rs`, `ui/print.rs`, `ui/keyread.rs`, `engine.rs`
 (`Io::push_front`), `converse/seams.rs`, `converse/start.rs`, `converse/mod.rs`, `converse/tests_talk.rs` (new),
 `ui/tests/pointer_real.rs`, `crates/u6-web/src/lib.rs` (`queue_pointer`, `Game::handed`,
 `Game::reading_by_click`, `Game::talk_target`), `site/app.js` (`pointercancel`),

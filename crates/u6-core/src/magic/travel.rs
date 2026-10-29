@@ -40,9 +40,9 @@ const EYE_STEPS: i16 = 0x28;
 /// (the words at A4-0x7b5a plus 6 (n − 1) not 0, 0, 0) sends the party through the moongate to it
 /// (0x10952e); anything else does nothing)
 pub async fn gate_travel(state: &RefCell<State>, io: &Io) {
-    print_at(state, io, MSG_TO_PHASE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_TO_PHASE), &[]).await;
     let (_, text) = crate::ui::keyread::read_line(state, io, 4).await;
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     let caster = super::cast::caster(&state.borrow());
     // The flash is on the screen before the party goes (0x1191a2, then 0x10952e).
     super::spells::flash_actor(state, io, caster, 0).await;
@@ -136,7 +136,13 @@ pub async fn wizard_eye(state: &RefCell<State>, io: &Io, x: i16, y: i16, mode: i
         s.gfx.dissolve = 1;
         crate::gfx::view::refresh_view(&mut s, io);
     }
-    say(state, io, FMT_NL_S_NL, Msg::Done).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Done,
+    )
+    .await;
     let shown = {
         let s = state.borrow();
         let m = crate::ui::panels::member_actor(&s, s.ui.panel.member.max(0));
@@ -162,14 +168,44 @@ pub(super) fn degrees(c: u6_formats::position::Position) -> (i16, i16) {
 /// each with its hemisphere letter (0x115a72 .. 0x115a86))
 pub async fn locate(state: &RefCell<State>, io: &Io) {
     let (lat, long) = degrees(state.borrow().map.centre);
-    print_at(state, io, FMT_LAT, &[Arg::Word(lat.wrapping_abs() as u16)]).await;
-    print_at(state, io, if lat > 0 { MSG_SOUTH } else { MSG_NORTH }, &[]).await;
     print_at(
         state,
         io,
-        FMT_LONG,
+        crate::string_registry::text!(FMT_LAT),
+        &[Arg::Word(lat.wrapping_abs() as u16)],
+    )
+    .await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::choose(
+            (if lat > 0 { MSG_SOUTH } else { MSG_NORTH }) as i64,
+            &[
+                crate::string_registry::text!(0x00115a78),
+                crate::string_registry::text!(0x00115a7a),
+            ],
+        ),
+        &[],
+    )
+    .await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_LONG),
         &[Arg::Word(long.wrapping_abs() as u16)],
     )
     .await;
-    print_at(state, io, if long > 0 { MSG_EAST } else { MSG_WEST }, &[]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::choose(
+            (if long > 0 { MSG_EAST } else { MSG_WEST }) as i64,
+            &[
+                crate::string_registry::text!(0x00115a82),
+                crate::string_registry::text!(0x00115a86),
+            ],
+        ),
+        &[],
+    )
+    .await;
 }

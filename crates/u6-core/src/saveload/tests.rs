@@ -209,6 +209,50 @@ fn with_blocks() -> State {
     s
 }
 
+/// Conversation-local discovery, usage, paging and answers never enter any save file.
+#[test]
+fn conversation_choices_are_absent_from_saved_files_and_fresh_after_restore() {
+    use crate::ui::talk::choices::{self, Topic};
+
+    let mut plain = with_blocks();
+    let mut talking = plain.clone();
+    choices::start(&mut talking);
+    choices::used(&mut talking, b"name");
+    talking.ui.choices.topics.push(Topic {
+        word: b"synthetic-topic".to_vec(),
+        label: b"Synthetic".iter().map(|&c| u16::from(c)).collect(),
+        used: true,
+    });
+    talking.ui.choices.page = 2;
+    talking.ui.choices.yes_no = true;
+    assert!(talking.ui.choices.topics.iter().filter(|t| t.used).count() >= 2);
+
+    save(&mut plain);
+    save(&mut talking);
+    let clean = changed_since(&plain, 0);
+    let saved = changed_since(&talking, 0);
+    assert!(!saved.is_empty(), "the real save path emitted files");
+    assert_eq!(
+        saved, clean,
+        "all saved file names and bytes ignore conversation UI"
+    );
+    assert!(
+        talking.ui.choices.topics.iter().any(|t| t.used),
+        "saving did not erase the live history to hide it"
+    );
+
+    let restored = restored(State::empty(), saved[OBJLIST_FILE].clone(), |state| {
+        assert!(!state.ui.choices.active);
+        assert!(state.ui.choices.topics.is_empty());
+        choices::start(state);
+        assert_eq!(state.ui.choices.topics.len(), 3);
+        assert!(state.ui.choices.topics.iter().all(|t| !t.used));
+        assert_eq!(state.ui.choices.page, 0);
+        assert!(!state.ui.choices.yes_no);
+    });
+    assert!(restored.state().ui.choices.topics.iter().all(|t| !t.used));
+}
+
 #[test]
 fn commit_replaces_flagged_blocks_only() {
     let mut s = with_blocks();
@@ -506,4 +550,69 @@ fn attach_takes_only_the_files_the_game_reads() {
     assert_eq!(files.get("schedule"), Some(&b"s"[..]), "not overlaid");
     assert_eq!(files.get("savegame/objblkHI"), None, "no block 71");
     assert_eq!(files.get("savegame/notes"), None);
+}
+
+/// The save format preserves the wind byte. Display must handle all restored bytes, including
+/// malformed/foreign saves, without trying an unregistered pointer or panicking.
+#[test]
+fn every_saved_wind_byte_reaches_the_clock_display_safely() {
+    use crate::engine::Engine;
+    use crate::image::A4;
+    use crate::main_loop::{Pending, PrintArg};
+    let mut parts = vec![(A4 - 0x7293, b"%d.%d.%d:%s".to_vec())];
+    for (index, &slot) in crate::actors::clock::LABELS.iter().enumerate() {
+        let address = 0x0012_0000 + index as u32 * 16;
+        parts.push((slot, address.to_be_bytes().to_vec()));
+        parts.push((address, format!("Wind{index}").into_bytes()));
+    }
+    let refs: Vec<_> = parts
+        .iter()
+        .map(|(at, bytes)| (*at, bytes.as_slice()))
+        .collect();
+    let game = crate::locale::strings::test_game(&refs);
+    let files = Files::new(BTreeMap::from([("game".to_string(), game)]));
+    for wind in 0..=u8::MAX {
+        let mut saved = State::empty();
+        saved.actors.wind = wind;
+        let bytes = encode(&saved);
+        let mut restored = State::empty();
+        decode(&mut restored, &bytes);
+        assert_eq!(restored.actors.wind, wind, "the saved byte is preserved");
+        restored.ui.text.on = true;
+        let mut engine = Engine::with_game(restored, files.clone(), |state, _| async move {
+            crate::actors::clock::date_line(&mut state.borrow_mut());
+        });
+        for _ in 0..40 {
+            if engine.finished() {
+                break;
+            }
+            engine.tick(&[], 16);
+        }
+        assert!(
+            engine.finished(),
+            "the date line returns for saved wind {wind}"
+        );
+        let state = engine.state();
+        let shown = state
+            .main
+            .pending_print
+            .iter()
+            .find_map(|p| match p {
+                Pending::Print(_, args) => match args.last() {
+                    Some(PrintArg::Str(word)) => Some(word),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("the clock queued its wind field");
+        let expected = match wind {
+            0xff => b"Wind0".to_vec(),
+            0..=7 => format!("Wind{}", wind + 1).into_bytes(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            *shown, expected,
+            "saved wind {wind}: known label or empty field"
+        );
+    }
 }

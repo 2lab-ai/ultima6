@@ -23,7 +23,7 @@ use u6_render::{FLAG_MEMORY, FLAG_OVERLAY, Framebuffer, GREY, Kind, Rgb, Src, gr
 use super::blit::{blit_back, copy_window_rows, plot, set_plot_colour};
 use super::cache::{BOXES, Layer, Shown, SightMemory, WindowKey, cell_box, keeps};
 use super::tables::GameTables;
-use super::{GfxState, anim, cache, seams};
+use super::{GfxState, anim, cache, motion, seams};
 use crate::actors::Calendar;
 use crate::engine::Io;
 use crate::geom::{HALF_H, HALF_W, MAP_X, MAP_Y, SHOWN, VIEW_H, VIEW_W};
@@ -38,7 +38,7 @@ const _: () = assert!(
     "the map's corner on a cell boundary"
 );
 /// Object type whose tile gets clock hands (0x13aa7e = basetile 0x13a940 + 2·0x9f).
-const CLOCK_TYPE: usize = 0x9f;
+pub(super) const CLOCK_TYPE: usize = 0x9f;
 
 /// What 0x102c90 draws: the window tile cache A4-0x1476 (11×11 words in Original, built by
 /// 0x109e74) and per cell the object tile words in draw order (the lists at A4-0x15f0 heads,
@@ -103,15 +103,22 @@ fn load_palette(state: &State, fb: &mut Framebuffer, memory: bool) {
 /// colour bit 3 into the pixels under it that the fade keeps (rows within the cell). A pixel the
 /// fade does not keep is not written. The sources are the blitter's (0x153008, [`blit_back`])
 /// with [`FLAG_MEMORY`]. Every write stays in the cell's box; a map cell is never in the UI's
-/// columns in Wide, so no write is dropped there.
-fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16, u16), fade: u8) {
+/// columns in Wide, so no write is dropped there. The one draw of a remembered layer: the window
+/// render's into the back buffer, and (spec 20) a slide's at any pixel of its canvas
+/// ([`motion::Canvas`]).
+pub(super) fn blit_memory(
+    gfx: &GfxState,
+    fb: &mut impl motion::Canvas,
+    layer: Layer,
+    (x, y): (i32, i32),
+    fade: u8,
+) {
     let r = usize::from(layer.record);
     let (Some((pixels, transparent, id, ver)), Some(overlay)) =
         (layer.image(gfx), gfx.overlays.get(r))
     else {
         return;
     };
-    let (x, y) = (usize::from(x), usize::from(y));
     let src = |c: usize, row: usize, flags: u8| Src {
         ver,
         id,
@@ -120,11 +127,12 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16,
         kind: Kind::Tile,
         flags: flags | FLAG_MEMORY,
     };
+    let at = |c: usize, row: usize| (x + c as i32, y + row as i32);
     let pixels = pixels.iter().zip(transparent).take(TILE_W * TILE_H);
     for (i, (&p, &clear)) in pixels.enumerate() {
         let (row, c) = (i / TILE_W, i % TILE_W);
         if !clear && keeps(fade, c, row) {
-            fb.set_src(x + c, y + row, p | GREY, src(c, row, 0));
+            fb.put(at(c, row), src(c, row, 0), |_| p | GREY);
         }
     }
     if layer.masktype & 4 != 0
@@ -138,13 +146,9 @@ fn blit_memory(gfx: &GfxState, fb: &mut Framebuffer, layer: Layer, (x, y): (u16,
             }
             let drawn = |&c: &usize| bits & (0x8000 >> c) != 0 && keeps(fade, c, row);
             for c in (0..TILE_W).filter(drawn) {
-                let p = fb.get(x + c, y + row).unwrap_or(0);
-                fb.set_src(
-                    x + c,
-                    y + row,
-                    p | 1 << ANIM_PLANE,
-                    src(c, row, FLAG_OVERLAY),
-                );
+                fb.put(at(c, row), src(c, row, FLAG_OVERLAY), |p| {
+                    p | 1 << ANIM_PLANE
+                });
             }
         }
     }
@@ -163,7 +167,7 @@ fn draw_remembered(
     let (fade, layers) = shown;
     blit_back(gfx, fb, tile, at.0, at.1);
     for &layer in layers {
-        blit_memory(gfx, fb, layer, at, fade);
+        blit_memory(gfx, fb, layer, (i32::from(at.0), i32::from(at.1)), fade);
     }
 }
 
@@ -282,7 +286,10 @@ fn border_of_boxes() -> [Option<u16>; BOXES] {
 /// otherwise.
 pub fn render_window(state: &mut State, io: &Io, framed: bool) {
     let inputs = window_inputs(state, io, framed);
-    draw_window(state, io, framed, &inputs);
+    let snap = draw_window(state, io, framed, &inputs);
+    if let Some(snap) = snap {
+        keep_scene(state, io, inputs, snap, false);
+    }
 }
 
 /// What 0x102c90 takes before it draws: the window contents, the clock's tile word, and with
@@ -321,20 +328,31 @@ fn window_inputs(state: &mut State, io: &Io, framed: bool) -> WindowInputs {
 }
 
 /// The rest of 0x102c90: the palettes, the cells into the back buffer, the sparkle, with
-/// `framed` the cursor, the border and the present.
-fn draw_window(state: &mut State, io: &Io, framed: bool, inputs: &WindowInputs) {
+/// `framed` the cursor, the border and the present. Port (spec 20): framed, whether its scene can
+/// slide for smooth motion ([`keep_scene`]): not dissolved, nor with the sparkle's XOR plots.
+fn draw_window(state: &mut State, io: &Io, framed: bool, inputs: &WindowInputs) -> Option<bool> {
     let memory = io.sight_memory();
     io.draw(|fb| load_palette(state, fb, memory));
     io.draw_back(|fb| load_palette(state, fb, memory));
+    let sparkle = state.gfx.sparkle != 0;
     draw_boxes(state, io, framed, inputs, None);
-    if framed {
-        let gfx = &mut state.gfx;
-        let dissolve = gfx.dissolve != 0;
-        seams::present_window(io, gfx, dissolve);
-        if dissolve {
-            gfx.dissolve = 0;
-        }
+    if !framed {
+        return None;
     }
+    let gfx = &mut state.gfx;
+    let dissolve = gfx.dissolve != 0;
+    seams::present_window(io, gfx, dissolve);
+    if dissolve {
+        gfx.dissolve = 0;
+    }
+    Some(dissolve || sparkle)
+}
+
+/// Port (spec 20): the framed render of `inputs` just presented keeps its scene for smooth motion
+/// ([`motion::record`]), `snap` when it cannot slide; `same` when the window cache drew no box.
+fn keep_scene(state: &State, io: &Io, inputs: WindowInputs, snap: bool, same: bool) {
+    let cursor = (inputs.cursor, inputs.clock);
+    motion::record(state, io, inputs.memory, cursor, snap, same);
 }
 
 /// The back-buffer draws of 0x102c90: the cells (rows, then columns), the sparkle, with `framed`
@@ -473,14 +491,20 @@ fn render_window_cached(state: &mut State, io: &Io) {
             }
             io.with_buffers(copy_window_rows);
             io.present();
+            let gfx = &mut state.gfx;
             if redrawn == 0 {
                 gfx.cache.window_skips += 1;
             } else {
                 gfx.cache.window_partial += 1;
                 gfx.cache.boxes_redrawn += redrawn as u64;
             }
+            keep_scene(state, io, inputs, false, redrawn == 0);
         }
-        _ => draw_window(state, io, true, &inputs),
+        _ => {
+            if let Some(snap) = draw_window(state, io, true, &inputs) {
+                keep_scene(state, io, inputs, snap, false);
+            }
+        }
     }
     let memo = key.map(|key| (key, io.back_mark()));
     cache::remember_window(&mut state.gfx, memo);
@@ -548,8 +572,6 @@ pub fn flash_actor(state: &mut State, io: &Io, actor: u16, bright: bool) {
 mod sight_memory_tests {
     #![allow(clippy::disallowed_methods)] // tests may read files
 
-    use std::path::Path;
-
     use u6_render::{FLAG_MEMORY, Framebuffer, GREY, Kind, Rgb};
     use u6_testkit::{Quiet, assert_same};
 
@@ -561,14 +583,12 @@ mod sight_memory_tests {
     use crate::gfx::blit::blit_back;
     use crate::state::State;
 
-    const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
     fn files() -> Option<Files> {
-        if !Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
+        if !u6_testkit::archive().exists() {
+            eprintln!("skipped: the archive (U6_ARCHIVE) not present");
             return None;
         }
-        let data = std::fs::read(ZIP).quiet();
+        let data = std::fs::read(u6_testkit::archive()).quiet();
         let r = u6_intake::intake(vec![u6_intake::InputFile {
             name: "ultima-vi.zip".into(),
             data,

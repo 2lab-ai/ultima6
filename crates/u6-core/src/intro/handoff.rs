@@ -68,9 +68,13 @@ pub fn write_objlist(st: &IntroState) -> Result<Vec<u8>, WriteError> {
 /// The objlist `u` wrote, into the save path and the game state: it becomes the session's
 /// `savegame/objlist` ([`crate::saveload::SaveLoad::objlist`], a new save generation, so the
 /// platform stores it as it stores a Save), and the tables are read from it as 0x105350 reads
-/// them (the 25 tables, then the party's position), so `game` starts with that character.
+/// them (the 25 tables, then the party's position), so `game` starts with that character. Port
+/// (spec 18, saved with the game): the remembered sight a Save of this session wrote is let go
+/// ([`crate::saveload::SaveLoad::sight`]): it was bound to the objlist this one replaces, so no
+/// load reads it again and no list of the save hands it on.
 pub fn apply(s: &mut State, objlist: &[u8]) {
     s.saveload.objlist = Some(objlist.to_vec());
+    s.saveload.sight = None;
     s.saveload.generation += 1;
     crate::saveload::objlist::decode(s, objlist);
     s.place_party();

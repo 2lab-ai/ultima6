@@ -16,7 +16,9 @@ use u6_intake::{ADF_SIZE, InputFile, intake, read_ofs};
 use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
-const GAME: &str = "/Users/zhugehyuk/Games/ultima6";
+fn game() -> std::path::PathBuf {
+    u6_testkit::data_path("")
+}
 const SIDE_CARS: [&str; 3] = [".blkdev", ".bootcode", ".xdfmeta"];
 
 fn sha256(data: &[u8]) -> String {
@@ -76,8 +78,8 @@ fn hfe_line(label: &str, hfe: &[u8]) -> String {
 
 #[test]
 fn intake_on_the_real_ultima_vi_zip() {
-    let game = Path::new(GAME);
-    let zip = game.join("original/ultima-vi.zip");
+    let game = game();
+    let zip = u6_testkit::archive();
     if !zip.exists() {
         eprintln!("skipped: {} not present", zip.display());
         return;

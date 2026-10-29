@@ -105,7 +105,7 @@ pub async fn how_many(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
         let s = state.borrow();
         (s.ui.input.selection, s.ui.text.win().row)
     };
-    print_at(state, io, S_HOW_MANY, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_HOW_MANY), &[]).await;
     let mode = {
         let mut s = state.borrow_mut();
         let mode = s.ui.input.targeting;
@@ -122,12 +122,18 @@ pub async fn how_many(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
     let v = super::parse_answer(&state.borrow(), &line, 0);
     if v == -1 {
         crate::ui::panels::set_cursor(state, io, 10, i16::from(row)).await;
-        print_at(state, io, S_COUNT_LINE, &[Arg::Word(n as u16)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_COUNT_LINE),
+            &[Arg::Word(n as u16)],
+        )
+        .await;
         return n;
     }
     if v > n || v == 0 || v == -2 {
         crate::ui::panels::set_cursor(state, io, 10, i16::from(row)).await;
-        print_at(state, io, S_ZERO, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_ZERO), &[]).await;
         return 0;
     }
     putc(state, io, b'\n').await;
@@ -164,8 +170,14 @@ pub(crate) fn nothing_to_drop(s: &State, sel: Slot) -> bool {
 pub async fn drop_object(state: &RefCell<State>, io: &Io) {
     let sel = state.borrow().ui.input.selection;
     if nothing_to_drop(&state.borrow(), sel) {
-        let msg = message(&state.borrow(), P_NOTHING);
-        print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(&state.borrow(), crate::string_registry::pointer!(P_NOTHING));
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let name = shown_name(&state.borrow(), sel).into_bytes();
@@ -186,7 +198,7 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
     if n == 0 {
         return;
     }
-    print_at(state, io, S_LOCATION, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_LOCATION), &[]).await;
     {
         let mut s = state.borrow_mut();
         s.ui.input.target_pending = 1;
@@ -202,8 +214,17 @@ pub async fn drop_object(state: &RefCell<State>, io: &Io) {
         place_ok(&mut s, o, owner)
     };
     let Some(here) = spot else {
-        let msg = message(&state.borrow(), P_NOT_POSSIBLE);
-        print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_NOT_POSSIBLE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL_LINE_NL),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     };
     land(&mut state.borrow_mut(), io, o, owner, here, kind, sk, n);
@@ -263,7 +284,7 @@ pub(super) fn land(
         } else {
             remove(s, o);
         }
-        queue_at(s, S_IT_BROKE, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_IT_BROKE), Vec::new());
     } else {
         if fits_in(s, here, o) && !surface_at(s, tx as u16, ty as u16) {
             if sk != 0 {

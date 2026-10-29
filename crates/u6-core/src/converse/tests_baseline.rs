@@ -1,13 +1,12 @@
-//! Spec 23's independent baseline on real data: with the message history never scrolled back,
-//! three conversations near the start, on the boot's paper, show the shown, published and HD
-//! frames of the tree without the feature. The digests below were recorded by this same file at
-//! 17c09b6 (the parent: integ/r1027 without spec 23, through `git archive` of it with this file
-//! added; not 52cc339's digests: integ merged K2, C2, M4 and spec 22 between the two), so the
-//! oracle shares none of the feature's code. Each frame digest takes the colour
-//! indices, the sources and the palette; the HD frames at 2× and 4×, with the HD font off and on
-//! (then the cells the frame lists for the page's text too). Prints whether it ran; skips where
-//! the zip is missing, and fails then with `U6_REQUIRE_ARCHIVE=1` (a gate that requires the real
-//! data); prints digests and actor slots only, never the dialogue (FNV-1a 64, no pixels).
+//! Conversation frame golden for the owner's 2026-10-29 choices update (spec 22).
+//! The original spec 23 D2 hashes at 17c09b6 were first verified unchanged by the #7/#8-only
+//! follow-up snapshot. The choice grid, compact portrait and restricted-answer row deliberately
+//! change visible frames; these hashes were recorded after inspecting Original/Wide and Korean
+//! private captures and validating click, page, used, reset, full preview and answer behavior.
+//! The synthetic history baseline in ui/tests/scrollback_baseline.rs remains unchanged.
+//! Each digest covers colour indices, sources, palette and HD frames at 2×/4× with HD font
+//! off/on. Only counts and digests are printed; no game text or images enter repository/logs.
+//! Missing archive skips unless U6_REQUIRE_ARCHIVE=1, which fails closed.
 
 use u6_render::hd::Scale;
 use u6_render::{Framebuffer, Src};
@@ -22,26 +21,26 @@ use crate::objects::ObjectId;
 use crate::state::State;
 use u6_testkit::Quiet;
 
-/// The digests of the parent's run ([`digests`]): the shown frame, the published frame, the HD
+/// The visually checked choice UI digests ([`digests`]): the shown frame, the published frame, the HD
 /// frames at 2× and 4× ([`HD`]), each over every tick of the three conversations, and the ticks.
 #[cfg(not(feature = "wide"))]
-const PARENT: [u64; 7] = [
-    0xe846_def2_63dd_1ff9,
-    0xe846_def2_63dd_1ff9,
-    0xbf86_44e7_884b_9db5,
-    0xba5c_a1e0_6f6f_4b75,
-    0x9fad_7c42_428b_0509,
-    0x6c04_c23f_6561_9955,
+const CHOICES: [u64; 7] = [
+    0xca87841d744767c1,
+    0xca87841d744767c1,
+    0xd927294d4ed15cc3,
+    0x9c6f11510ca4d641,
+    0xef43974394c87ad3,
+    0xe22cfa9ba8ed12b5,
     54,
 ];
 #[cfg(feature = "wide")]
-const PARENT: [u64; 7] = [
-    0x183d_67cf_3b95_5bb1,
-    0x183d_67cf_3b95_5bb1,
-    0xd076_5f89_6556_8877,
-    0x6a0b_345b_99ae_7d16,
-    0xbe7c_2b75_ba43_3acb,
-    0xb75a_db9b_e0f8_1e86,
+const CHOICES: [u64; 7] = [
+    0x6a7941ae8515ff99,
+    0x6a7941ae8515ff99,
+    0x7f52d73fd5108331,
+    0xac7e4af1b202c7a9,
+    0x0d919e205dffca85,
+    0x3d3a8b3bfafd1c2d,
     54,
 ];
 
@@ -184,7 +183,7 @@ fn converse(state: &State, files: &crate::files::Files, npc: i16, each: &mut imp
     }
 }
 
-/// The digests of the three conversations ([`PARENT`]'s order); `None` without the zip.
+/// The digests of the three conversations ([`CHOICES`]'s order); `None` without the zip.
 fn digests() -> Option<[u64; 7]> {
     let files = files()?;
     let base = with_text(&files);
@@ -228,7 +227,7 @@ fn digests() -> Option<[u64; 7]> {
 
 #[test]
 #[allow(clippy::disallowed_methods)] // a test may read the environment
-fn with_no_scroll_three_conversations_show_the_parents_frames() {
+fn with_no_scroll_three_conversations_show_choice_ui_frames() {
     let Some(got) = digests() else {
         let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
         assert!(
@@ -241,7 +240,7 @@ fn with_no_scroll_three_conversations_show_the_parents_frames() {
     println!("converse baseline: ran ({} ticks)", got[6]);
     println!("{got:#018x?}");
     assert_eq!(
-        got, PARENT,
+        got, CHOICES,
         "shown, published, HD 2×, HD 4×, HD 2× and 4× with the HD font, ticks"
     );
 }

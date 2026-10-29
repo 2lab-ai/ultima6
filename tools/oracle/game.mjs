@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as o from './lib.mjs';
 
-const GAME_BIN = process.env.U6_GAME_BIN || '/Users/zhugehyuk/Games/ultima6/re/game.bin';
+import { GAME_BIN } from '../data-paths.mjs';
 
 // Image base of each of the 35 hunks of `game` (re/notes/game-layout.md); their lengths come from
 // the hunk headers at run time (tools/hunk2raw.py's JSON beside the image, its bases checked).

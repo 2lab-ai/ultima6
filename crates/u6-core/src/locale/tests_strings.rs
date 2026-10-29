@@ -1056,7 +1056,11 @@ fn a_line_after_attacks_held_newline_shows_the_packs_form_without_its_newline() 
     use crate::combat::present::Text;
     assert!(crate::combat::attack::PRINTED.contains(&NEXT_WEAPON));
     let next: fn(&mut State) = |s| {
-        crate::combat::present::say(s, NEXT_WEAPON, vec![Text::Str(b"Zb".to_vec())]);
+        crate::combat::present::say(
+            s,
+            crate::string_registry::fixture((NEXT_WEAPON) as i64, false),
+            vec![Text::Str(b"Zb".to_vec())],
+        );
     };
     // Attack's newline held: the line is looked up whole, its pack form put without its
     // newline, and the newline is no longer held.
@@ -1116,7 +1120,11 @@ fn said_after_a_held_newline(lines: &[&[u8]], old: bool) -> (String, Vec<bool>) 
                     }
                     crate::main_loop::queue_print(&mut s, fmt, Vec::new());
                 } else {
-                    crate::combat::present::say(&mut s, at(i), Vec::new());
+                    crate::combat::present::say(
+                        &mut s,
+                        crate::string_registry::fixture((at(i)) as i64, false),
+                        Vec::new(),
+                    );
                 }
                 out.borrow_mut().push(s.combat.swallow);
             }
@@ -3557,6 +3565,7 @@ fn the_display_name_of_no_object_prints_the_packs_form_where_use_prints_it() {
 /// wand's) as labels with no cells. Skips when the zip is absent; prints counts and pass/fail
 /// only, a failure an address, never a text.
 #[test]
+#[allow(clippy::disallowed_methods)] // Independent local-data oracle, test-only.
 fn the_object_lines_are_catalogued_on_the_owners_game() {
     use crate::image::A4;
     use crate::locale::strings::{Kind, MIN_BYTES, has_words, pointed, printed, shown_at};
@@ -3587,7 +3596,7 @@ fn the_object_lines_are_catalogued_on_the_owners_game() {
     ];
     const WEIGHTS: u32 = 0x0011_0c04;
     const ITEM_WORDS: [u32; 3] = [0x0010_1ef6, 0x0010_1efc, 0x0012_1b8e];
-    let Some(game) = super::tests_scan::owner_game() else {
+    let Some(game) = super::tests_registry::owner_game() else {
         return;
     };
     let img = crate::image::GameImage::parse(&game).quiet();

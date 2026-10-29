@@ -14,7 +14,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ORACLE_HOME="${U6_ORACLE_HOME:-/Users/zhugehyuk/Games/ultima6/oracle}"
+DATA_ROOT="${U6_DATA_ROOT:-$HOME/Games/ultima6}"
+ORACLE_HOME="${U6_ORACLE_HOME:-$DATA_ROOT/oracle}"
 VAW_DIR="${U6_VAW_DIR:-$ORACLE_HOME/vamigaweb}"
 VAW_URL="https://github.com/vAmigaWeb/vAmigaWeb.github.io.git"
 VAW_COMMIT="bd0d2e9519c81af0a032d656723d56f7c4b36d81"

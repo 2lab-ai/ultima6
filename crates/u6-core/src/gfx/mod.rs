@@ -67,6 +67,9 @@ pub mod blit;
 pub mod cache;
 pub(crate) mod idle;
 mod load;
+pub mod motion;
+#[cfg(test)]
+mod motion_real;
 pub mod seams;
 pub mod sprite;
 pub mod tables;

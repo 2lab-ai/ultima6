@@ -73,8 +73,14 @@ pub(crate) const PRINTED: &[u32] = &[A4.wrapping_add_signed(BARRED)];
 /// traced and waits nothing. Nothing is drawn meanwhile: the world turn's refresh draws the view
 /// the step left. A line the step queues (the hiccup, the refused move's) plays after this
 /// wait, up to [`STEP_MS`] + [`FOLLOW_MS`] later than the original prints it.
+///
+/// Port (spec 20 Design 4): a step that moved makes the early picture of smooth motion, on a copy
+/// of the state ([`crate::gfx::motion::preview`]; nothing with it off or in combat mode).
 pub async fn paced_player_step(state: &RefCell<State>, io: &Io, dir: u16) -> StepResult {
     let result = super::party::player_step(&mut state.borrow_mut(), dir);
+    if result == StepResult::Moved {
+        crate::gfx::motion::preview(&state.borrow(), io);
+    }
     if matches!(result, StepResult::Moved | StepResult::Mismatch) {
         let follow = if super::party::has_followers(&state.borrow()) {
             FOLLOW_MS
@@ -358,7 +364,7 @@ pub fn can_move_to(s: &mut State, actor: u16, x: u16, y: u16) -> bool {
         let other = obj_type(s, id);
         if other == 0x1a0 && s.actors.quest_flag_copy == 0 {
             if s.actors.work.hic != 0 {
-                seams::print(s, BARRED, &[]);
+                seams::print(s, crate::string_registry::text!(BARRED), &[]);
                 s.actors.work.hic = 0;
                 s.actors.work.prompt = 1;
             }

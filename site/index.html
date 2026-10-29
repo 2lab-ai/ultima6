@@ -232,6 +232,14 @@
           aria-label="Faster" data-i18n-label="faster">+</button>
         <span id="behind" hidden data-i18n="behind">behind</span>
       </span>
+      <label id="turns-group"><span data-i18n="turns">Turns</span>
+        <select id="turns" aria-label="Turn playback" data-i18n-label="turnsLabel" data-i18n-title="turnsTitle">
+          <option value="1" data-i18n="turnsOriginal">Original</option>
+          <option value="2" data-i18n="turnsQuick">Quick</option>
+          <option value="4" data-i18n="turnsFast">Fast</option>
+          <option value="0" data-i18n="turnsInstant">Instant</option>
+        </select>
+      </label>
       <button id="settings" type="button" data-i18n="settings">Settings</button>
     </div>
     <section id="voice-terms" hidden aria-labelledby="voice-terms-title">
@@ -265,6 +273,7 @@
         <li data-i18n="keyPass">Space: pass a turn</li>
         <li data-i18n="keySave">Ctrl-S save, Ctrl-R restore</li>
         <li data-i18n="keySpeed">- and +: slower and faster</li>
+        <li data-i18n="keyTurnSkip">Space or Escape during a turn skips its remaining playback</li>
         <li data-i18n="keyOpening">Escape skips the opening</li>
       </ul>
     </details>

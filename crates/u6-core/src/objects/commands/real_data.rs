@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::future::Future;
-use std::path::Path;
+
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -17,14 +17,12 @@ use crate::objects::{ACTOR_SLOTS, FIRST_TEMP_ACTOR, Slot};
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 pub(super) fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -125,10 +123,14 @@ fn own(ms: Vec<(Slot, u16, u16, u16, u8)>, at: (u16, u16)) -> Vec<(Slot, u16, u1
 /// oracle directory, the way the saveload tests find the original's saves. The oracle is the
 /// original's view: its comparisons run in Original only.
 #[cfg(not(feature = "wide"))]
-const ORACLE_CELLS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-cells.txt";
-/// Where the seed search writes the seeds it found, next to [`ORACLE_CELLS`].
+fn oracle_cells_path() -> std::path::PathBuf {
+    u6_testkit::data_path_with("U6_ORACLE_HOME", "oracle").join("hatch/start-gargoyle-cells.txt")
+}
+/// Where the seed search writes the seeds it found, next to [`oracle_cells_path`].
 #[cfg(not(feature = "wide"))]
-const ORACLE_SEEDS: &str = "/Users/zhugehyuk/Games/ultima6/oracle/hatch/start-gargoyle-seeds.txt";
+fn oracle_seeds() -> std::path::PathBuf {
+    u6_testkit::data_path_with("U6_ORACLE_HOME", "oracle").join("hatch/start-gargoyle-seeds.txt")
+}
 
 /// `col,row` pairs separated by white space (`#` lines are comments), sorted.
 #[cfg(not(feature = "wide"))]
@@ -147,15 +149,15 @@ fn parse_cells(text: &str) -> Vec<(i16, i16)> {
 }
 
 /// The oracle's cells: `U6_ORACLE_GARGOYLE_CELLS="c,r c,r ..."` when set (an override), else
-/// [`ORACLE_CELLS`] when present, else `None`.
+/// [`oracle_cells_path`] when present, else `None`.
 #[cfg(not(feature = "wide"))]
 fn oracle_cells() -> Option<Vec<(i16, i16)>> {
     if let Ok(text) = std::env::var("U6_ORACLE_GARGOYLE_CELLS") {
         return Some(parse_cells(&text));
     }
-    std::fs::read_to_string(ORACLE_CELLS)
-        .ok()
-        .map(|t| parse_cells(&t))
+    let text = std::fs::read_to_string(oracle_cells_path());
+    u6_testkit::available(text.is_ok(), "U6_ORACLE_HOME hatch reference");
+    text.ok().map(|t| parse_cells(&t))
 }
 
 #[test]
@@ -222,7 +224,7 @@ fn the_start_egg_hatches_its_gargoyles() {
 /// Seed search (run by hand with `--ignored`): every seed word whose start hatch puts the
 /// monsters on the view cells an oracle frame shows ([`oracle_cells`]: read off the frame; the
 /// cells are the user's world, so they stay out of the repo). The seeds follow from the user's
-/// files too: they go to [`ORACLE_SEEDS`] (or `U6_ORACLE_SEEDS_OUT`), and the output says only
+/// files too: they go to [`oracle_seeds`] (or `U6_ORACLE_SEEDS_OUT`), and the output says only
 /// whether there are any and where they went.
 #[cfg(not(feature = "wide"))]
 #[test]
@@ -244,10 +246,15 @@ fn search_seeds_for_the_oracle_gargoyles() {
             hits.push(seed);
         }
     }
-    let out = std::env::var("U6_ORACLE_SEEDS_OUT").unwrap_or_else(|_| ORACLE_SEEDS.to_string());
+    let out =
+        std::env::var_os("U6_ORACLE_SEEDS_OUT").map_or_else(oracle_seeds, std::path::PathBuf::from);
     let text: String = hits.iter().map(|s| format!("{s:#06x}\n")).collect();
     std::fs::write(&out, text).quiet();
-    eprintln!("seeds found: {}; written to {out}", !hits.is_empty());
+    eprintln!(
+        "seeds found: {}; written to {}",
+        !hits.is_empty(),
+        out.display()
+    );
 }
 
 /// The start state with the message scroll set up as main leaves it.
@@ -452,7 +459,7 @@ fn look_at_six_things_near_the_start() {
     }
     // Shape only (the words are the user's game text): every Look starts with its lead-in,
     // the weapon line has a weight and a damage figure, the clock a time.
-    let lead = super::text::string(&s0, 0x0012_8444);
+    let lead = super::text::string(&s0, crate::string_registry::fixture(0x0012_8444, false));
     let lead = String::from_utf8_lossy(&lead).to_string();
     assert!(all.iter().all(|t| t.contains(lead.trim_end())));
     assert!(all[4].chars().filter(|c| c.is_ascii_digit()).count() >= 3);
@@ -764,11 +771,11 @@ fn the_string_export_of_the_owners_game_lists_its_catalogued_strings() {
         let h = crate::converse::disasm::catalog::hash64(b);
         export.strings.iter().any(|e| e.hash == h)
     };
-    let lead = super::text::string(&s, 0x0012_8444);
-    let talk = s
-        .objcmds
-        .data
-        .pointed(crate::image::A4.wrapping_sub(0x7c8e) + 4 * 0x83);
+    let lead = super::text::string(&s, crate::string_registry::fixture(0x0012_8444, false));
+    let talk = s.objcmds.data.pointed(crate::string_registry::fixture(
+        (crate::image::A4.wrapping_sub(0x7c8e) + 4 * 0x83) as i64,
+        true,
+    ));
     let mut hashes: Vec<u64> = export.strings.iter().map(|e| e.hash).collect();
     hashes.sort_unstable();
     hashes.dedup();
@@ -1490,7 +1497,10 @@ const TAB_RETURN: [InputEvent; 2] = [
 /// wraps a line where it likes).
 fn printed(s: &State, lines: &[String], addr: u32) -> bool {
     let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
-    let want = words(&String::from_utf8_lossy(&super::text::string(s, addr)));
+    let want = words(&String::from_utf8_lossy(&super::text::string(
+        s,
+        crate::string_registry::fixture((addr) as i64, false),
+    )));
     !want.is_empty() && words(&lines.join(" ")).contains(&want)
 }
 
@@ -2093,6 +2103,24 @@ fn choose(e: &mut Engine, code: u16, at: (i16, i16)) -> bool {
 /// [`choose`], the command's later prompts answered with `then` first, one event list each
 /// (a direction key, a press on a map cell), then Escape.
 fn choose_then(e: &mut Engine, code: u16, at: (i16, i16), then: &[&[InputEvent]]) -> bool {
+    choose_until(e, code, at, then, CommandEnd::Prompt)
+}
+
+/// The command loop normally returns to its prompt. A successful cube instead ends this
+/// task with a launcher request; this harness does not run the separate End program.
+#[derive(Clone, Copy, Debug)]
+enum CommandEnd {
+    Prompt,
+    EndingRequest,
+}
+
+fn choose_until(
+    e: &mut Engine,
+    code: u16,
+    at: (i16, i16),
+    then: &[&[InputEvent]],
+    end: CommandEnd,
+) -> bool {
     let (icon, run) = Run::start(&e.state(), code, at).expect("a command with a target");
     let (mut queued, mut run) = (icon.to_vec(), Some(run));
     let mut then = then.iter();
@@ -2106,14 +2134,24 @@ fn choose_then(e: &mut Engine, code: u16, at: (i16, i16), then: &[&[InputEvent]]
             }
         }
         released |= page_step(e, &mut queued, &mut run);
-        if run.is_none() && at_prompt(e, &queued) {
+        let arrived = match end {
+            CommandEnd::Prompt => at_prompt(e, &queued),
+            CommandEnd::EndingRequest => {
+                e.finished()
+                    && e.state().main.ending.is_some()
+                    && e.state().main.reading == 0
+                    && e.io().pending_events() == 0
+                    && queued.is_empty()
+            }
+        };
+        if run.is_none() && arrived {
             return released;
         }
     }
     let st = e.state();
     let i = &st.ui.input;
     panic!(
-        "the command did not come back to the prompt: reading {} wait {} pending {} cmd {:#x} accept {} queued {} released {released}",
+        "the command did not reach {end:?}: reading {} wait {} pending {} cmd {:#x} accept {} queued {} released {released}",
         st.main.reading,
         i.in_wait,
         i.target_pending,
@@ -2640,10 +2678,15 @@ fn a_locked_door_or_chest_disables_use_as_locked_and_use_still_gives_its_line() 
     let (door, (bx, by)) = closed_door(&s);
     stand_at(&mut s, bx, by);
     let io = Io::new(files.clone());
-    let no_effect =
-        crate::main_loop::pointed_string(&io, crate::image::A4.wrapping_sub(defs::MSG_NO_EFFECT));
-    let locked_line = super::text::string(&s, 0x0012_8854);
-    let magic_line = super::text::string(&s, 0x0012_882a);
+    let no_effect = crate::main_loop::pointed_string(
+        &io,
+        crate::string_registry::fixture(
+            (crate::image::A4.wrapping_sub(defs::MSG_NO_EFFECT)) as i64,
+            true,
+        ),
+    );
+    let locked_line = super::text::string(&s, crate::string_registry::fixture(0x0012_8854, false));
+    let magic_line = super::text::string(&s, crate::string_registry::fixture(0x0012_882a, false));
     let (lx, ly) = leader_at(&s);
     let (cx, cy) = beside_tile(&s, lx, ly).expect("a free tile by the leader");
     let z = u16::from(s.map.centre.z);
@@ -2922,7 +2965,7 @@ fn cast_with_the_same_book_runs_on_foot_and_is_refused_aboard() {
     let mut foot = s.clone();
     with_book(&mut foot, spell);
     let on_board = aboard(&foot);
-    let aboard_line = super::text::a4_string(&s, -0x744d);
+    let aboard_line = super::text::a4_string(&s, crate::string_registry::fixture(-0x744d, false));
     let magic = move |st: &State| st.actors.attrs.magic[hero as usize];
     for (label, st, want) in [
         ("on foot", foot, None),
@@ -3475,7 +3518,11 @@ fn said_queue(ats: &[u32]) -> State {
     let mut s = State::default();
     s.ui.text.on = true;
     for &at in ats {
-        crate::combat::present::say(&mut s, at, Vec::new());
+        crate::combat::present::say(
+            &mut s,
+            crate::string_registry::fixture((at) as i64, false),
+            Vec::new(),
+        );
     }
     s
 }
@@ -4438,6 +4485,7 @@ struct UseCase {
     obj: Slot,
     want: Option<Reason>,
     line: Vec<u8>,
+    end: CommandEnd,
 }
 
 /// Spec 17 rounds 2, 3 and 5, items 4b, 7, 20, 5 and 12: every refusal of Use's case switch
@@ -4445,7 +4493,9 @@ struct UseCase {
 /// refused one has its exact reason (Case, or Solo for the ladder) and the handler gives its
 /// refusal line and never its action; the allowed one is enabled and the handler reaches the
 /// action, shown by the action's own checkpoint: the cube (flag clear, its eight moonstones, both
-/// lenses and the Codex placed, the party near) reaches the ending's unported step (its stub hit);
+/// lenses and the Codex placed, the party near) removes the Codex and ends the command loop with
+/// an ending request without spending movement points or taking another turn. The launcher and
+/// actual End completion are covered by `ending::tests` separately;
 /// a readied wand with one charge spends it; a carried orb says it cannot be worked out (the talk
 /// flag clear); a sextant prints exactly what Locate (0x11a470) alone prints there, its print
 /// sites in order ([`locate_says`]); a balloon basket is inflated (it goes); a chest on the map
@@ -4460,13 +4510,18 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
     stand_at(&mut s, bx, by);
     let hero = leader_slot(&s);
     let io = Io::new(files.clone());
-    let a4 = |off: u32| crate::main_loop::pointed_string(&io, crate::image::A4.wrapping_sub(off));
+    let a4 = |off: u32| {
+        crate::main_loop::pointed_string(
+            &io,
+            crate::string_registry::fixture((crate::image::A4.wrapping_sub(off)) as i64, true),
+        )
+    };
     let not_usable = a4(defs::MSG_NOT_USABLE);
     let no_effect = a4(defs::MSG_NO_EFFECT);
-    let not_readied = super::text::string(&s, 0x0012_cfd4);
-    let not_solo = super::text::string(&s, 0x0012_cfc0);
-    let cant_figure = super::text::string(&s, 0x0012_ce42);
-    let direction = super::text::string(&s, 0x0012_cd00);
+    let not_readied = super::text::string(&s, crate::string_registry::fixture(0x0012_cfd4, false));
+    let not_solo = super::text::string(&s, crate::string_registry::fixture(0x0012_cfc0, false));
+    let cant_figure = super::text::string(&s, crate::string_registry::fixture(0x0012_ce42, false));
+    let direction = super::text::string(&s, crate::string_registry::fixture(0x0012_cd00, false));
     let refusals = [&not_usable, &not_readied, &not_solo];
     let (lx, ly) = leader_at(&s);
     let (cx, cy) = beside_tile(&s, lx, ly).expect("a free tile by the leader");
@@ -4490,6 +4545,7 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
         obj,
         want: Some(want),
         line: line.to_vec(),
+        end: CommandEnd::Prompt,
     };
     let allowed = |label, (state, obj): (State, Slot)| UseCase {
         label,
@@ -4497,6 +4553,7 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
         obj,
         want: None,
         line: Vec::new(),
+        end: CommandEnd::Prompt,
     };
     let said =
         |text: Vec<u8>| -> Reached { Box::new(move |_, _, _, lines| said_line(lines, &text)) };
@@ -4524,9 +4581,14 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
         );
     }
     shrine.map.flag_7afb = 0;
+    shrine.main.program = crate::main_loop::Program::Game;
     crate::map::view::update_view(&mut shrine);
+    let codex = crate::objects::object_of_kind_at(&mut shrine, 0x39b, 0x353, 0, 0x3b);
+    assert!(codex >= 0, "the shrine has its target");
     let mut flagged = shrine.clone();
     flagged.map.flag_7afb = 1;
+    let mut complete_cube = allowed("the cube at the Codex, flag clear", (shrine, cube));
+    complete_cube.end = CommandEnd::EndingRequest;
     families.push((
         vec![
             refused(
@@ -4535,9 +4597,44 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
                 Reason::Case,
                 &no_effect,
             ),
-            allowed("the cube at the Codex, flag clear", (shrine, cube)),
+            complete_cube,
         ],
-        Box::new(|e, _, _, _| e.stub_hits().keys().any(|k| k.starts_with("0x13513a"))),
+        Box::new(move |e, before, _, _| {
+            let after = e.state();
+            assert_eq!(after.main.program, crate::main_loop::Program::Game);
+            if after.main.ending.is_none() {
+                assert!(!e.finished(), "refusal keeps the command loop running");
+                assert_eq!(after.objects.kind(codex), 0x3b, "refusal keeps the shrine");
+                return false;
+            }
+            assert!(e.finished(), "the command loop returned to the launcher");
+            assert!(e.stub_hits().is_empty(), "the handoff has no stub");
+            assert_eq!(
+                after.objects.kind(codex),
+                0,
+                "the successful action removes it"
+            );
+            u6_testkit::assert_same!(
+                [after.main.ending],
+                [Some(crate::ending::Elapsed::from_calendar(
+                    before.actors.calendar
+                ))],
+                "the launcher request carries the elapsed date"
+            );
+            u6_testkit::assert_same!(
+                after.actors.movement_points,
+                before.actors.movement_points,
+                "ending spends no movement points"
+            );
+            u6_testkit::assert_same!(
+                [after.actors.calendar],
+                [before.actors.calendar],
+                "ending starts no next game turn"
+            );
+            // Menu target/key waits render the live map, whose idle animation draws RNG.
+            // Movement points and calendar, not that renderer RNG, measure turn cost here.
+            true
+        }),
     ));
     // The wand (0x4e), each with one charge (0x150, quality 0x09): on the map not usable, carried
     // not readied; readied, 0x12d204 casts the charge's spell and takes the charge (0x10d16e).
@@ -4731,6 +4828,7 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
                 obj,
                 want,
                 line,
+                end,
             } = case;
             let mut st = state.clone();
             let at = if st.objects.place(*obj) == 0 {
@@ -4742,10 +4840,14 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
             let r = reason(&m, *obj, menu::USE).expect("Use shown");
             let mut e = prompt_engine(st.clone(), &files);
             let before = lines_of(&e.state()).len();
-            choose(&mut e, menu::USE, at);
+            let action_start = e.state().clone();
+            assert!(
+                choose_until(&mut e, menu::USE, at, &[], *end),
+                "target released"
+            );
             let lines = lines_of(&e.state());
             let new = &lines[before.saturating_sub(1).min(lines.len())..];
-            let did = reached(&e, &st, *obj, new);
+            let did = reached(&e, &action_start, *obj, new);
             let refusal = refusals.iter().any(|l| said_line(new, l));
             let its_line = !line.is_empty() && said_line(new, line);
             eprintln!(
@@ -4758,6 +4860,10 @@ fn every_use_case_family_refuses_and_reaches_its_action_as_use_does() {
             assert_eq!(did, want.is_none(), "{label}: the handler's action");
             if want.is_some() {
                 assert!(its_line, "{label}: its refusal line");
+                assert!(
+                    e.state().main.ending.is_none(),
+                    "{label}: refusal never exits"
+                );
             } else {
                 assert!(!refusal, "{label}: no refusal line");
             }
