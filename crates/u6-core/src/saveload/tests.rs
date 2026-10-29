@@ -265,6 +265,65 @@ fn changed_since_lists_objlist_and_the_blocks_of_later_saves() {
     assert!(changed_since(&s, 2).is_empty());
 }
 
+/// Spec 18 (saved with the game): the remembered sight a Save wrote is listed after that Save's
+/// generation only: a later generation of `u`'s (its objlist) does not list it again, and a list
+/// from that Save on holds the objlist alone.
+#[test]
+fn changed_since_lists_the_sight_file_of_the_save_that_wrote_it() {
+    let mut s = with_blocks();
+    s.saveload.generation = 3;
+    s.saveload.objlist = Some(vec![1, 2, 3]);
+    s.saveload.sight = Some(SavedSight::new(vec![9, 8]));
+    s.saveload.sight_gen = 2;
+    for since in [0, 1] {
+        let got = changed_since(&s, since);
+        assert_eq!(
+            got.get(SIGHT_FILE).map(Vec::as_slice),
+            Some(&[9, 8][..]),
+            "{since}"
+        );
+    }
+    let later: Vec<String> = changed_since(&s, 2).into_keys().collect();
+    assert_eq!(
+        later,
+        [OBJLIST_FILE],
+        "after the Save that wrote it: not again"
+    );
+    s.saveload.sight = None;
+    assert!(
+        !changed_since(&s, 0).contains_key(SIGHT_FILE),
+        "a Save that wrote none"
+    );
+    assert_eq!(
+        format!("{:?}", SavedSight::new(vec![0; 70])),
+        "SavedSight(70 bytes)",
+        "shown by its length only"
+    );
+}
+
+/// Spec 18: the save state's equality leaves the remembered sight's file out, as the game
+/// state's leaves the memory out (it lives in the render cache); every other field counts.
+#[test]
+fn the_save_states_equality_leaves_the_sight_file_out() {
+    let plain = SaveLoad::default();
+    let mut with = plain.clone();
+    with.sight = Some(SavedSight::new(vec![1, 2, 3]));
+    assert_eq!(with, plain, "the file left out");
+    let changed: [fn(&mut SaveLoad); 6] = [
+        |s| s.generation = 1,
+        |s| s.block_gen[68] = 1,
+        |s| s.objlist = Some(Vec::new()),
+        |s| s.names_raw = vec![0],
+        |s| s.restores = 1,
+        |s| s.sight_gen = 1,
+    ];
+    for (n, change) in changed.into_iter().enumerate() {
+        let mut other = with.clone();
+        change(&mut other);
+        assert_ne!(other, with, "field {n} counts");
+    }
+}
+
 #[test]
 fn mem_store_replaces_names_without_regard_to_case() {
     let mut store = MemStore::default();
@@ -429,13 +488,21 @@ fn attach_takes_only_the_files_the_game_reads() {
         ("savegame/objblkAA.tmp", b"tmp"),
         ("schedule", b"stray"),
         ("savegame/notes", b"n"),
+        ("SaveGame/U6Sight", b"sight"),
+        ("savegame/u6sight.part", b"left over"),
     ] {
         store.files.insert(name.into(), bytes.to_vec());
     }
     let mut files = Files::new(base);
-    assert_eq!(attach(&mut files, &store), Ok(2), "objlist and objblkEI");
+    assert_eq!(
+        attach(&mut files, &store),
+        Ok(3),
+        "objlist, objblkEI and the port's remembered sight (spec 18)"
+    );
     assert_eq!(files.get("savegame/objlist"), Some(&b"saved"[..]));
     assert_eq!(files.get("savegame/objblkei"), Some(&b"EI"[..]));
+    assert_eq!(files.get(SIGHT_FILE), Some(&b"sight"[..]));
+    assert_eq!(files.get("savegame/u6sight.part"), None);
     assert_eq!(files.get("schedule"), Some(&b"s"[..]), "not overlaid");
     assert_eq!(files.get("savegame/objblkHI"), None, "no block 71");
     assert_eq!(files.get("savegame/notes"), None);

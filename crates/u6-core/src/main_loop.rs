@@ -344,6 +344,8 @@ async fn game_main(state: &RefCell<State>, io: &Io, launched: bool) -> u16 {
         s.main.flag_64ce = 1;
         // A4-0x637a starts at its data-hunk value (Restore sets play before load state).
         s.objects.save_mode = s.objects.defs.save_mode;
+        // Port (spec 18): load state's read of the remembered sight saved with this save.
+        crate::saveload::boot_sight(&mut s, io.files());
         finish_load_state(&mut s, io);
         let anim = s.tables.anim.clone();
         for slot in anim.slots.iter().take(usize::from(anim.count)) {

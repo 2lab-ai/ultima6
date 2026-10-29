@@ -46,8 +46,8 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
   "you say", `converse/start.rs:342-349`), f9 (a string answer) and fb (a number), through `seams::read_line`
   (`converse/seams.rs:72-78`). It takes keys and text in order from the engine's queue and applies the pointer events in
   front of them (`ui/keyread.rs:344-347`, `engine.rs:303-308`); nothing in it reads the pointer.
-- **The page** sends every pointer move, press and release on the canvas, buttons or none (`site/app.js:3906-3937`,
-  through the HD and Wide layouts' map back to frame pixels), to `Game::pointer` (`crates/u6-web/src/lib.rs:1353-1360`),
+- **The page** sends every pointer move, press and release on the canvas, buttons or none (`sendPointer` and `pointerPixel` in `site/app.js`,
+  through the HD and Wide layouts' map back to frame pixels), to `Game::pointer` (`crates/u6-web/src/lib.rs`),
   which queues `InputEvent::Pointer`. In Wide, while a conversation runs, the panel area shows in its own window
   (spec 14 Design 6) and the message scroll in 메시지.
 
@@ -168,7 +168,7 @@ font and colours, and is the same in Original, HD and Wide. No DOM element.
 0. **Client surface.** `site/app.js` `pointerdown` → `sendPointer` → `pointerPixel` (Original: the canvas box onto the
    frame; HD and Wide: `layoutToGame`) → `game.pointer(x, y, 1)`; the release `game.pointer(x, y, 0)`. Moves without a
    button go the same way (hover). No DOM element is drawn or read.
-1. **Entry.** `Game::pointer` (`crates/u6-web/src/lib.rs:1397`) → `queue_pointer` (a move replaces the move queued
+1. **Entry.** `Game::pointer` (`crates/u6-web/src/lib.rs`) → `queue_pointer` (a move replaces the move queued
    last, a press or a release never: Contract 5) → `InputEvent::Pointer {x, y, buttons}` → `Engine::tick` queues it
    (`engine.rs:776-806`) and polls the game.
 2. **Input.** Frame pixel (x, y), buttons bit 0. Valid only in the f7 read (Contract 1), as a click (bit 0 set, then

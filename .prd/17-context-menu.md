@@ -18,8 +18,8 @@ Owner, 2026-10-28, verbatim: "문맥 메뉴 인게임 ui로 해줘 시발 왜 �
 
 ## Measured facts (main 88eb5b0, re-read at 587d973)
 
-- The page sends the right button to the engine (`site/app.js:3870`, `buttons & 3`) and suppresses the browser menu
-  on the canvas (`:3896-3898`).
+- The page sends the right button to the engine (`sendPointer` in `site/app.js`, `buttons & 3`) and suppresses the browser menu
+  on the canvas (its `contextmenu` listener).
 - In the original a right press on the map with a command underlined repeats that command on the cell (0xa9); with
   none it walks like the left button (`crates/u6-core/src/ui/click.rs:116-148`). On the command bar a right press only
   underlines (`:167-179`); on the panels it repeats the underlined command on the object under the pointer

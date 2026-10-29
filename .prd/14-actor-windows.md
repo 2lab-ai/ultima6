@@ -36,7 +36,7 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
 
 ## Today (main 7cc8d5d)
 
-- **One panel area, one mode at a time.** The side panel is one 144 × 98 area (`ui/panels.rs:16` `PANEL` = (0xa8, 6)..(0x138, 0x67); page region `[168, 6, 144, 98]`, `site/app.js:1519`). `redraw_panel` (`ui/panels.rs:112-139`) draws one mode of it, and only when `dirty`. The modes are:
+- **One panel area, one mode at a time.** The side panel is one 144 × 98 area (`ui/panels.rs:16` `PANEL` = (0xa8, 6)..(0x138, 0x67); page region `[168, 6, 144, 98]`, `LAYOUT_REGIONS` in `site/app.js`). `redraw_panel` (`ui/panels.rs:112-139`) draws one mode of it, and only when `dirty`. The modes are:
   - 0x91 roster;
   - 0x90 stats;
   - 0x92 inventory;
@@ -65,7 +65,7 @@ This spec builds on spec 13 (Wide mode). Original mode is unchanged. The owner's
 - **Wide's frame and copies.** The Wide frame is 912 × 336 (`u6-render/src/lib.rs:28-33`), with the UI's 320 × 200 at its top left.
   - `copy_rect` keeps a copy into the UI's columns inside 320 × 200 (`gfx/blit.rs` `stays`).
   - `Framebuffer::copy_px_within` (`u6-render/src/lib.rs:373-383`) moves a pixel and its source within one buffer.
-  - In Wide, the page shows the one panel area as the 파티 window (`site/app.js:1937-1947`).
+  - In Wide, the page shows the one panel area as the 파티 window (`WIDE_WINDOWS` in `site/app.js`).
 
 ## Design
 

@@ -5,17 +5,19 @@
 //! and the window rendered framed with the remembered sight on after each (0x102c90). The cells
 //! come to the cap, the cap acts again and again, and the cells' table grows once from 2^18 to
 //! 2^19 buckets. What the memory retains is under 16 MiB (`the_bounds_hold_the_heap_under_16_mib`);
-//! the growth is the peak: for a moment the old table and the new live together. Prints counts
-//! only; one test, so nothing else allocates while it measures. Runs only where the owner's zip
-//! exists (never in CI: the data is not ours to ship); without it the test skips, unless
-//! `U6_REQUIRE_ARCHIVE=1` (the release receipt), which fails it instead. It prints
-//! `sight_memory_peak: ran` or `sight_memory_peak: skipped`, which a gate log shows when the test
-//! runs with `--nocapture`.
+//! the growth is the peak: for a moment the old table and the new live together. Then the file the
+//! memory is saved as (spec 18, saved with the game): a Save, a second Save and a Restore of a
+//! memory at the cap. Prints counts only; the tests take one lock ([`serial`]), so nothing else
+//! allocates while one measures. Runs only where the owner's zip exists (never in CI: the data is
+//! not ours to ship); without it each test skips, unless `U6_REQUIRE_ARCHIVE=1` (the release
+//! receipt), which fails it instead. Each prints `sight_memory_peak: ran` or
+//! `sight_memory_peak: skipped`, which a gate log shows when the tests run with `--nocapture`.
 #![allow(clippy::disallowed_methods)] // reads the owner's zip
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use u6_core::geom::{VIEW_H, VIEW_W};
 use u6_core::{Engine, Files, State};
@@ -59,6 +61,13 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
+/// The counters are the process's: one test measures at a time (a failed one does not stop the
+/// next).
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn files() -> Option<Files> {
     if !Path::new(ZIP).exists() {
         assert_ne!(
@@ -94,16 +103,13 @@ fn is_table(size: usize, buckets: usize) -> bool {
 /// 1 KiB with its index.
 const COPIES: usize = 255 * 1024;
 
-/// Whether std's hashbrown groups its control bytes by 8 on this target (NEON on aarch64, the
-/// generic 64-bit word elsewhere, as on wasm32), as `u6_core::gfx::cache`'s tests define it.
-/// The 2^18 → 2^19 growth under the cap rests on deleted entries piling up; with SSE2's 16-byte
-/// groups they form far less often, and the growth, or a cap and 200 renders after it, may not
-/// come within the walk: there the test asserts only that the table never reaches 2^20 buckets.
-/// Not run with 16-byte groups.
-const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
-    target_feature = "sse2",
-    any(target_arch = "x86", target_arch = "x86_64")
-));
+/// Whether std's hashbrown groups its control bytes by 8 on this target, as on aarch64 (NEON)
+/// and wasm32 (the generic 64-bit word); false on x86 and x86_64 (SSE2's 16 bytes) and on every
+/// target not considered here, as `u6_core::gfx::cache`'s tests define it. The 2^18 → 2^19
+/// growth under the cap rests on deleted entries piling up; with 16-byte groups they form far
+/// less often, and the growth, or a cap and 200 renders after it, may not come before the grid
+/// ends. Not run with other widths than 8.
+const EIGHT_BYTE_GROUPS: bool = cfg!(any(target_arch = "aarch64", target_arch = "wasm32"));
 
 /// Spec 18 (the review's peak): the walk above, until the cells' table has grown to 2^19 buckets,
 /// 200 renders more have passed and the cap has acted after the growth (the cells held fell from
@@ -111,17 +117,21 @@ const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
 /// hold no cap). Measured over the heap at the first render (the game state, the engine's
 /// buffers): the peak and what is retained at the end.
 ///
-/// Only the cap lowers the cells held in this walk:
-/// - the clock stands still (the teleport, 0x1092fc, ticks the clock, 0x10368a, by 0 minutes),
-///   so every sight has one minute, no cell ages and the sweep forgets none: asserted, the
-///   calendar the same after every render;
-/// - every fall in the cells held lands on exactly seven eighths of the cap, 200 704, what the
-///   cap leaves when the sights share one minute (ties go by key): asserted. The cap acts above
-///   229 255 cells in Original (228 599 in Wide), so its drop is far more than a render adds;
-/// - `forget` (a cell's look not kept, the copy store full) never runs, since the store holds 255
-///   copies, a constant of the game data (the test named at [`COPIES`]), far under `MAX_COPIES`
-///   (8 192): a premise, not asserted, because the public API counts no copies; no load state
-///   (which forgets the whole memory) is in the walk.
+/// Only the cap lowers the cells held in this walk, each way of the others asserted:
+/// - the sweep: the clock stands still (the teleport, 0x1092fc, ticks the clock, 0x10368a, by 0
+///   minutes), so no cell ages and the sweep forgets none: the calendar the same after every
+///   render;
+/// - a fall in a render where the cap does not act (a load state's reset among them, which
+///   leaves at most a render's cells): every fall in the cells held lands on exactly seven
+///   eighths of the cap, 200 704, where the cap always lands (the oldest first, ties by key).
+///   The cap acts above 229 255 cells in Original (228 599 in Wide), so its drop is far more than
+///   a render adds;
+/// - `forget` (a cell's look not kept, the copy store full): it needs a full store, 8 192 copies
+///   (`MAX_COPIES`, about 5.4 MB), which the store, never freed, would still hold at the end; the
+///   heap retained at the end is at most the 2^19 table, the copies as in play ([`COPIES`]: 255,
+///   a constant of the game data) and 1 MiB, 12 319 744 bytes [computed], no room for it.
+///
+/// These run with every width of control groups.
 ///
 /// Then:
 /// - The table grew to 2^19 buckets once (one allocation of that table's size) and never to
@@ -132,10 +142,12 @@ const EIGHT_BYTE_GROUPS: bool = !cfg!(all(
 ///   moment both live) and at most those, the copies and 1 MiB (the renders' own and the cap's
 ///   scratch).
 ///
-/// With 16-byte groups, where the walk may not reach the growth or 200 renders past it, only
-/// "never to 2^20" is asserted ([`EIGHT_BYTE_GROUPS`]).
+/// With other widths than 8 ([`EIGHT_BYTE_GROUPS`]), a walk that does not reach the growth, a cap
+/// and 200 renders past it before its grid ends waives the asserts of this list but "never to
+/// 2^20"; one that reaches them asserts them all.
 #[test]
 fn the_remembered_sight_peaks_once_as_its_table_grows() {
+    let _one = serial();
     let Some(files) = files() else { return };
     println!("sight_memory_peak: ran");
     let mut s = State::new_game(&files).quiet();
@@ -186,11 +198,15 @@ fn the_remembered_sight_peaks_once_as_its_table_grows() {
         TABLES_19.load(Ordering::SeqCst),
         TABLES_20.load(Ordering::SeqCst),
     );
+    assert!(
+        retained <= table(1 << 19) + COPIES + (1 << 20),
+        "retained at the end: the 2^19 table, the copies as in play and 1 MiB (no full store)"
+    );
     let reached = grown.is_some_and(|(g, _, _)| capped && renders >= g + 200);
     if !EIGHT_BYTE_GROUPS && !reached {
         println!(
             "{renders} renders, the growth to 2^19 buckets with a cap and 200 renders after it \
-             not reached (16-byte groups: not asserted); peak {peak} bytes over the start"
+             not reached (not 8-byte groups: waived); peak {peak} bytes over the start"
         );
         assert_eq!(larger, 0, "never to 2^20 buckets");
         return;
@@ -221,5 +237,128 @@ fn the_remembered_sight_peaks_once_as_its_table_grows() {
     assert!(
         peak <= high,
         "the peak: at most the tables, the copies and 1 MiB"
+    );
+}
+
+/// Spec 18 (saved with the game): a sight file of version 1 bound to an empty objlist (its
+/// length 0, the FNV-1a 64 digest of no bytes): `copies` copies of record 9 of distinct contents
+/// (pixels 0 and 1 the slot's two bytes, the rest 0, opaque), then `cells` cells of one layer on
+/// the surface, keys 0, 1, .. (x the key's bits 10 on, y its low 10), seen at `minute`, record 1,
+/// every eighth layer drawn from a copy.
+fn sight_file(copies: usize, cells: usize, minute: u32) -> Vec<u8> {
+    const NO_BYTES: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut f = Vec::with_capacity(44 + 290 * copies + 16 * cells);
+    f.extend_from_slice(b"u6sight\0");
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&NO_BYTES.to_le_bytes());
+    f.extend_from_slice(&u64::MAX.to_le_bytes());
+    for n in [copies, cells, cells] {
+        f.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    for i in 0..copies {
+        f.extend_from_slice(&9u16.to_le_bytes());
+        let mut pixels = [0u8; 256];
+        pixels[..2].copy_from_slice(&(i as u16).to_le_bytes());
+        f.extend_from_slice(&pixels);
+        f.extend_from_slice(&[0u8; 32]);
+    }
+    for k in 0..cells as u32 {
+        f.extend_from_slice(&k.to_le_bytes());
+        f.extend_from_slice(&minute.to_le_bytes());
+        f.extend_from_slice(&1u16.to_le_bytes());
+        f.extend_from_slice(&1u16.to_le_bytes());
+        f.extend_from_slice(&[0, 0]);
+        let slot = match k % 8 {
+            0 => (k as usize / 8 % copies) as u16,
+            _ => u16::MAX,
+        };
+        f.extend_from_slice(&slot.to_le_bytes());
+    }
+    f
+}
+
+/// The game clock of `s` in minutes, as the remembered sight keeps it (spec 18: 60 minutes, 24
+/// hours, days 1..=28, months 1..=12), so a cell seen then is of day 0.
+fn minute(s: &State) -> u32 {
+    let c = s.actors.calendar;
+    let months = u64::from(c.year) * 12 + u64::from(c.month.saturating_sub(1));
+    let days = months * 28 + u64::from(c.day.saturating_sub(1));
+    let now = (days * 24 + u64::from(c.hour)) * 60 + u64::from(c.minute);
+    u32::try_from(now).quiet()
+}
+
+/// The peak of `run` on `s` over the heap before it, and the bytes it left held (or let go).
+fn measure(s: &mut State, run: impl FnOnce(&mut State)) -> (usize, isize) {
+    let before = NOW.load(Ordering::SeqCst);
+    PEAK.store(before, Ordering::SeqCst);
+    run(s);
+    let peak = PEAK.load(Ordering::SeqCst) - before;
+    let held = NOW.load(Ordering::SeqCst) as isize - before as isize;
+    (peak, held)
+}
+
+/// Spec 18 (saved with the game, Bounds): a memory at the cap, its most cells after a render
+/// (`MAX_CELLS` less a render's) of one layer each and `MAX_COPIES` copies (the copy store full),
+/// on the owner's game state, saved twice and then restored. Each step's peak over the heap
+/// before it, beside the memory's own heap and its file:
+/// - a Save holds the memory, the file it writes and the keys it writes them in (4 bytes a cell);
+///   the last Save's file is let go first, so a second Save peaks at no more than the first;
+/// - a Restore lets the memory go before it reads the file's (load state forgets it first), so it
+///   peaks at the larger of the two memories, not at both.
+///
+/// Each within 64 KiB of that (the Save's and the Restore's own work: the objlist, the region, 26
+/// KB with nothing remembered).
+#[test]
+fn a_save_and_a_restore_of_a_full_memory_hold_one_memory_and_one_file() {
+    let _one = serial();
+    let Some(files) = files() else { return };
+    println!("sight_memory_peak: ran");
+    let mut s = State::new_game(&files).quiet();
+    u6_core::main_loop::load_state_tail(&mut s);
+    let e = Engine::with_game(State::empty(), files, |_, _| async {});
+    let io = e.io();
+    io.set_sight_memory(true);
+    let (bare_save, _) = measure(&mut s, u6_core::saveload::save);
+    let (bare_restore, _) = measure(&mut s, |s| u6_core::saveload::restore(s, io).quiet());
+    let cells = u6_core::gfx::cache::MAX_CELLS - VIEW_W * VIEW_H;
+    let copies = u6_core::gfx::cache::MAX_COPIES;
+    let start = NOW.load(Ordering::SeqCst);
+    let file = sight_file(copies, cells, minute(&s));
+    let memory = u6_core::gfx::cache::read_sight(&file, &[]).quiet();
+    drop(file);
+    s.gfx.cache.set_sight(memory);
+    let own = NOW.load(Ordering::SeqCst) - start;
+    assert_eq!(s.gfx.cache.sight_cells(), cells, "the memory at the cap");
+    let saved = |s: &State| s.saveload.sight.as_ref().map_or(0, |f| f.bytes().len());
+    let (first, first_held) = measure(&mut s, u6_core::saveload::save);
+    let size = saved(&s);
+    let (second, second_held) = measure(&mut s, u6_core::saveload::save);
+    assert_eq!(saved(&s), size, "the same file again");
+    let (restore, restore_held) = measure(&mut s, |s| u6_core::saveload::restore(s, io).quiet());
+    assert_eq!(
+        s.gfx.cache.sight_cells(),
+        cells,
+        "the Restore reads it back"
+    );
+    let keys = 4 * cells;
+    println!(
+        "a memory of {cells} cells and {copies} copies: {own} bytes its own, a file of {size} \
+         bytes, the keys {keys}; nothing remembered: a Save peaks {bare_save} bytes over the heap \
+         before it, a Restore {bare_restore}; the first Save {first} ({first_held} held after), \
+         the second {second} ({second_held}), the Restore {restore} ({restore_held})"
+    );
+    let slack = 64 << 10;
+    assert!(
+        first <= size + keys + slack,
+        "a Save: the file, its keys and 64 KiB over the heap before it"
+    );
+    assert!(
+        second <= keys + slack,
+        "a second Save: the last Save's file let go first"
+    );
+    assert!(
+        restore <= slack,
+        "a Restore: the old memory let go before the new one is read"
     );
 }

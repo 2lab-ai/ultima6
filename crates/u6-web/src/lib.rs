@@ -33,7 +33,8 @@
 //! lists, then reports the generation committed ([`Game::save_committed`]). The character `u`
 //! makes is such a write too (its `savegame/objlist`). A list holds what the Saves since the
 //! last commit replaced; after the page removed the stored save ([`Game::save_forgotten`]) the
-//! next one holds the whole save.
+//! next one holds the whole save. A Save with something remembered also writes the remembered
+//! sight (spec 18, `saveload::SIGHT_FILE`), stored and laid over as any save file.
 //!
 //! Voices (spec 09): with [`Game::set_voices`] on, the engine's speech tap keeps what NPCs say
 //! in conversations, and the page takes it after each frame with [`Game::take_speech`] for its
@@ -66,7 +67,8 @@
 //! files together as they are copied into wasm (a zip over [`SLICED_ZIP_BYTES`] is read in
 //! slices, [`Game::zip_open`]: only its directory and its disk-image entries are copied in, and
 //! only they count), [`MAX_UNZIPPED_BYTES`] for what the zip entries the intake inflates declare,
-//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces, [`MAX_SAVE_FILE_BYTES`] and
+//! [`MAX_GAME_FILES_BYTES`] for the game files the intake produces, [`MAX_SAVE_FILE_BYTES`]
+//! (the remembered sight's file: `u6_core::gfx::cache::MAX_SIGHT_FILE_BYTES`) and
 //! [`MAX_SAVE_BYTES`] for the stored save (a file over them is left out, and the start's report
 //! says so).
 
@@ -76,10 +78,11 @@ use std::collections::BTreeMap;
 
 use std::rc::Rc;
 
+use u6_core::gfx::cache::MAX_SIGHT_FILE_BYTES;
 use u6_core::hd::{HdView, PackCounts};
 use u6_core::objects::{BLOCK_COUNT, MAX_RECORDS};
 use u6_core::pacer::{self, Pacer, Speed};
-use u6_core::saveload::{MemStore, OBJLIST_FILE, attach, block_file, changed_since};
+use u6_core::saveload::{MemStore, OBJLIST_FILE, SIGHT_FILE, attach, block_file, changed_since};
 use u6_core::sound::AudioDriver;
 use u6_core::{Engine, Files, Framebuffer, InputEvent, Key};
 use u6_intake::{InputFile, intake};
@@ -112,7 +115,25 @@ pub const MAX_GAME_FILES_BYTES: usize = 64 << 20;
 /// 0x1C73 bytes over it), so the objlist is not capped at 0x1C73.
 pub const MAX_SAVE_FILE_BYTES: usize = 2 + MAX_RECORDS * 8;
 /// The stored save together: the objlist and the 69 blocks, each at most [`MAX_SAVE_FILE_BYTES`].
+/// The remembered sight's file (spec 18, [`SIGHT_FILE`]) is beside it, under its own limit
+/// ([`save_file_limit`]), and not counted in it.
 pub const MAX_SAVE_BYTES: usize = (1 + BLOCK_COUNT) * MAX_SAVE_FILE_BYTES;
+
+/// Whether stored save file `path` is the remembered sight's (spec 18, [`SIGHT_FILE`]; any case).
+fn is_sight(path: &str) -> bool {
+    path.eq_ignore_ascii_case(SIGHT_FILE)
+}
+
+/// The most bytes the page takes of stored save file `path`: [`MAX_SAVE_FILE_BYTES`], or for the
+/// remembered sight's file (spec 18) the largest it can be,
+/// `u6_core::gfx::cache::MAX_SIGHT_FILE_BYTES`.
+fn save_file_limit(path: &str) -> usize {
+    if is_sight(path) {
+        MAX_SIGHT_FILE_BYTES
+    } else {
+        MAX_SAVE_FILE_BYTES
+    }
+}
 
 /// The largest HD pack file the page reads (spec 07 HD1): the entries the reader takes
 /// (`u6_hdpack::MAX_FILE_BYTES`) and the largest zip directory it reads
@@ -333,6 +354,20 @@ pub fn max_input_bytes() -> f64 {
 #[wasm_bindgen]
 pub fn max_save_file_bytes() -> f64 {
     MAX_SAVE_FILE_BYTES as f64
+}
+
+/// [`save_file_limit`] of stored save file `path` (`savegame/<name>`) for the page, which leaves a
+/// larger file of a dropped `savegame/` folder out before reading it.
+#[wasm_bindgen]
+pub fn max_save_file_bytes_of(path: &str) -> f64 {
+    save_file_limit(path) as f64
+}
+
+/// Whether stored save file `path` is the remembered sight's (spec 18), which [`MAX_SAVE_BYTES`]
+/// does not count, for the page.
+#[wasm_bindgen]
+pub fn is_sight_file(path: &str) -> bool {
+    is_sight(path)
 }
 
 /// [`MAX_SAVE_BYTES`] for the page.
@@ -764,16 +799,22 @@ impl Game {
     }
 
     /// Collects one stored save file (`savegame/objlist`, `savegame/objblkAA`, ...) for the next
-    /// [`Game::start`], which lays them over the game files. A file over
-    /// [`MAX_SAVE_FILE_BYTES`], or one that would take the files together past
-    /// [`MAX_SAVE_BYTES`], is left out (the start's report names it); a path given again
-    /// replaces its file. Returns whether the file was taken.
+    /// [`Game::start`], which lays them over the game files. A file over its limit
+    /// ([`save_file_limit`]), or one that would take the files together past [`MAX_SAVE_BYTES`]
+    /// (the remembered sight's file not counted), is left out (the start's report names it); a
+    /// path given again replaces its file, and the remembered sight's file in any case replaces
+    /// the one taken before. Returns whether the file was taken.
     pub fn load_save(&mut self, path: &str, bytes: Vec<u8>) -> bool {
+        let sight = is_sight(path);
         let old = self.saves.get(path).map_or(0, Vec::len);
-        let total = self.save_bytes - old + bytes.len();
-        if bytes.len() > MAX_SAVE_FILE_BYTES || total > MAX_SAVE_BYTES {
-            let limit = if bytes.len() > MAX_SAVE_FILE_BYTES {
-                format!("a save file holds at most {MAX_SAVE_FILE_BYTES}")
+        let total = match sight {
+            true => self.save_bytes,
+            false => self.save_bytes - old + bytes.len(),
+        };
+        let most = save_file_limit(path);
+        if bytes.len() > most || total > MAX_SAVE_BYTES {
+            let limit = if bytes.len() > most {
+                format!("a save file holds at most {most}")
             } else {
                 format!("the saved game holds at most {MAX_SAVE_BYTES} together")
             };
@@ -784,6 +825,9 @@ impl Game {
             return false;
         }
         self.save_bytes = total;
+        if sight {
+            self.saves.retain(|p, _| !is_sight(p));
+        }
         self.saves.insert(path.to_string(), bytes);
         true
     }
@@ -2038,8 +2082,9 @@ impl Game {
 
 /// The whole save after a Save since generation `since`: `savegame/objlist` as the last Save (or
 /// `u`'s character) wrote it and every block file as the game holds it (the files a Save
-/// commits; between Saves they do not change), under the original's names. Empty when nothing
-/// was saved since `since`.
+/// commits; between Saves they do not change), under the original's names, and the remembered
+/// sight the last Save wrote (spec 18, [`SIGHT_FILE`]), if it wrote one. Empty when nothing was
+/// saved since `since`.
 fn whole_save(s: &u6_core::State, since: u32) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     if s.saveload.generation <= since {
@@ -2047,6 +2092,9 @@ fn whole_save(s: &u6_core::State, since: u32) -> BTreeMap<String, Vec<u8>> {
     }
     if let Some(objlist) = &s.saveload.objlist {
         out.insert(OBJLIST_FILE.to_string(), objlist.clone());
+    }
+    if let Some(sight) = &s.saveload.sight {
+        out.insert(SIGHT_FILE.to_string(), sight.bytes().to_vec());
     }
     for (i, (_, block)) in s.objects.blocks.iter().enumerate() {
         out.insert(block_file(i), block.to_bytes());
@@ -2645,6 +2693,53 @@ mod tests {
         let notes = report.lines().filter(|l| l.contains("left out")).count();
         assert_eq!(notes, 1 + 102 - taken, "{report}");
         assert!(report.contains("savegame/objblkAA"), "{report}");
+    }
+
+    /// Spec 18 (saved with the game): the remembered sight's stored file is taken up to the
+    /// largest it can be (`MAX_SIGHT_FILE_BYTES`), past a block's limit, and not counted in the
+    /// save's total: with the total used up it is still taken; one byte more is left out; in
+    /// another case of its name it replaces the one taken. The page reads the same limits
+    /// (synthetic bytes).
+    #[test]
+    fn the_sight_file_has_its_own_limit_beside_the_saves() {
+        let mut game = Game::new();
+        for i in 0..80 {
+            game.load_save(&format!("savegame/x{i:03}"), vec![0; MAX_SAVE_FILE_BYTES]);
+        }
+        let used = game.save_bytes;
+        assert!(
+            used + MAX_SAVE_FILE_BYTES > MAX_SAVE_BYTES,
+            "the total used up"
+        );
+        assert!(game.load_save("savegame/u6sight", vec![1; MAX_SIGHT_FILE_BYTES]));
+        assert!(game.save_bytes == used, "not counted in the total");
+        assert!(!game.load_save("savegame/u6sight", vec![2; MAX_SIGHT_FILE_BYTES + 1]));
+        assert!(game.saves[SIGHT_FILE][0] == 1, "the one taken stays");
+        assert!(game.load_save("SAVEGAME/U6SIGHT", vec![3; 10]));
+        let sights: Vec<&String> = game.saves.keys().filter(|p| is_sight(p)).collect();
+        assert!(sights == ["SAVEGAME/U6SIGHT"], "one sight file");
+        assert!(max_save_file_bytes_of("savegame/U6Sight") == MAX_SIGHT_FILE_BYTES as f64);
+        assert!(max_save_file_bytes_of("savegame/objblkAA") == MAX_SAVE_FILE_BYTES as f64);
+        assert!(is_sight_file("savegame/u6sight") && !is_sight_file("savegame/objlist"));
+    }
+
+    /// Spec 18 (saved with the game): after the stored save was removed, the whole save a Save
+    /// lists holds the remembered sight the last Save wrote, beside the objlist (synthetic state).
+    #[test]
+    fn the_whole_save_holds_the_sight_file_the_last_save_wrote() {
+        let mut s = u6_core::State::empty();
+        s.saveload.generation = 1;
+        s.saveload.objlist = Some(vec![1; 4]);
+        assert!(
+            !whole_save(&s, 0).contains_key(SIGHT_FILE),
+            "none written: none listed"
+        );
+        s.saveload.sight = Some(u6_core::saveload::SavedSight::new(vec![5; 3]));
+        s.saveload.sight_gen = 1;
+        let whole = whole_save(&s, 0);
+        assert!(whole.get(SIGHT_FILE).is_some_and(|b| b == &[5; 3]));
+        assert!(whole.contains_key(OBJLIST_FILE));
+        assert!(whole_save(&s, 1).is_empty(), "nothing saved since");
     }
 
     /// A game on synthetic state and no files: palette entry v = (v, 3v, 255 - v), then each step

@@ -22,7 +22,7 @@ Status: shipped (2026-10-16, production 9f831837 at main bf93585; T1–T6 in `hd
 - The page caps a frame at 100 ms of wall time and drops the rest (`app.js:43,261`). Native does the same (`u6-native/src/main.rs:450`). Native headless steps 16 ms (`main.rs:54`).
 - **The keys `-` and `+` collide with the game in four places:**
   - the stats/inventory panel's next/previous member, modes 0x90/0x92 (`ui/target.rs:361-362`);
-  - the roster scroll, mode 0x91 (`:373-374`): `+` while `first < size − 5`, `-` while `first ≠ 0`. The roster is the default panel (`saveload/restore.rs:121`) and a party holds up to 8 (`converse/party.rs:13`), so with 6 or more members `+` belongs to the game at the ordinary prompt;
+  - the roster scroll, mode 0x91 (`:373-374`): `+` while `first < size − 5`, `-` while `first ≠ 0`. The roster is the default panel (`PANEL_ROSTER`, set by `saveload::restore`) and a party holds up to 8 (`converse/party.rs:13`), so with 6 or more members `+` belongs to the game at the ordinary prompt;
   - a typed line: in `game` while `ui.input.line_input` is set (`ui/keyread.rs:161,217`); in `u`, the name entry accepts `-` (`intro/create.rs:145`);
   - the `u` main menu, where `-` and `=` pick songs 0xb and 0xc, the original's music-test keys (`intro/mod.rs:311,314`).
 

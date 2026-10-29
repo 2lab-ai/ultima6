@@ -6,10 +6,11 @@ use u6_formats::basetile::BaseTiles;
 use u6_formats::schedule::Schedules as ScheduleFile;
 
 use super::save::MODE_PLAY;
-use super::{OBJLIST_FILE, objlist, seams};
+use super::{OBJLIST_FILE, SIGHT_FILE, SavedSight, objlist, seams};
 use crate::actors::Schedules;
 use crate::engine::Io;
 use crate::files::Files;
+use crate::gfx::cache::SightMemory;
 use crate::state::{LoadError, State};
 
 /// Combat-mode byte of the A4-0x7b84 block (A4-0x7b0c).
@@ -60,7 +61,8 @@ pub struct StateFiles {
 }
 
 /// 0x105350's reads: `schedule` (0x202 bytes, then 5 per entry), `basetile` (0x800) and
-/// `savegame/objlist`: the one the last Save wrote, else the platform's file.
+/// `savegame/objlist`: the one the last Save wrote, else the platform's file. The remembered sight
+/// saved with that objlist is read by [`load_state`] (spec 18).
 pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadError> {
     let schedule = parse(files, "schedule", ScheduleFile::parse)?;
     let basetile = parse(files, "basetile", BaseTiles::parse)?;
@@ -75,6 +77,34 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
     })
 }
 
+/// Port-only (spec 18, saved with the game): the remembered sight saved with `objlist`, the
+/// objlist load state reads. The file goes with the objlist: once this session wrote the objlist
+/// (a Save, or the character `u`), the one the last Save wrote ([`super::SaveLoad::sight`]; none
+/// after a Save that wrote none, and after `u` still the Save's, of another objlist), else the
+/// platform's [`SIGHT_FILE`]. Read only when it was written with these objlist bytes and is well
+/// formed ([`crate::gfx::cache::read_sight`]); otherwise none, and the memory stays empty.
+fn saved_sight(s: &State, files: &Files, objlist: &[u8]) -> Option<SightMemory> {
+    let file = match &s.saveload.objlist {
+        Some(_) => s.saveload.sight.as_ref().map(SavedSight::bytes),
+        None => files.get(SIGHT_FILE),
+    };
+    crate::gfx::cache::read_sight(file?, objlist).ok()
+}
+
+/// Port-only (spec 18, saved with the game): load state's read of the remembered sight at the
+/// boot (`game_main`, before the tail of 0x105350 it runs): the sight saved with the objlist the
+/// boot read ([`State::new_game`]'s, or `u`'s character this run: [`saved_sight`]). A boot
+/// without one keeps the empty memory it starts with.
+pub fn boot_sight(s: &mut State, files: &Files) {
+    let objlist = match &s.saveload.objlist {
+        Some(saved) => Some(saved.as_slice()),
+        None => boot_objlist(files).ok(),
+    };
+    if let Some(m) = objlist.and_then(|o| saved_sight(s, files, o)) {
+        s.gfx.cache.set_sight(m);
+    }
+}
+
 /// Original: 0x105350 (saveload: load state: schedule, base tiles, objlist; place the party)
 ///
 /// The window-cache key cleared (A4-0x7958 .. -0x7954 = -1); the schedules, base tiles and the
@@ -84,10 +114,15 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
 /// 0x108ac4), A4-0x784e = 1, the window cache (0x108f90), the members back into the vehicle
 /// when aboard (0x10cda8) and the view flags (0x109e74) ([`crate::main_loop::finish_load_state`],
 /// which the boot runs too). Port (spec 18): the remembered sight is forgotten
-/// ([`crate::gfx::cache::RenderCache::forget_sight`]).
+/// ([`crate::gfx::cache::RenderCache::forget_sight`]), and the one saved with this objlist read
+/// right after ([`saved_sight`]: the file [`read_state_files`]'s objlist goes with, as the save
+/// state still names it), so the old memory is let go before the new one is made (Bounds).
 pub fn load_state(s: &mut State, io: &Io, files: StateFiles) {
     s.map.window_key = [-1; 3];
     s.gfx.cache.forget_sight();
+    if let Some(m) = saved_sight(s, io.files(), &files.objlist) {
+        s.gfx.cache.set_sight(m);
+    }
     s.actors.schedules = Schedules {
         first: files.schedule.first,
         total: files.schedule.records.len() as u16,

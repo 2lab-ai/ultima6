@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::{OBJLIST_FILE, block_file};
+use super::{OBJLIST_FILE, SIGHT_FILE, block_file};
 use crate::engine::Engine;
 use crate::files::Files;
 use crate::objects::BLOCK_COUNT;
@@ -63,9 +63,11 @@ impl SaveStore for MemStore {
 }
 
 /// A name the game reads from its save: `savegame/objlist` or one of the 69 block files
-/// (0x105350, 0x10e4bc), compared without regard to ASCII case.
+/// (0x105350, 0x10e4bc), or the port's [`SIGHT_FILE`] (spec 18), compared without regard to ASCII
+/// case.
 fn is_save_file(name: &str) -> bool {
     name.eq_ignore_ascii_case(OBJLIST_FILE)
+        || name.eq_ignore_ascii_case(SIGHT_FILE)
         || (0..BLOCK_COUNT).any(|i| name.eq_ignore_ascii_case(&block_file(i)))
 }
 
@@ -84,7 +86,8 @@ pub fn attach(files: &mut Files, store: &dyn SaveStore) -> Result<usize, StoreEr
 }
 
 /// The files Saves committed after generation `since`: `savegame/objlist` and each block whose
-/// file a Save replaced, under the original's names.
+/// file a Save replaced, under the original's names, and the port's [`SIGHT_FILE`] when a Save
+/// after `since` wrote it (spec 18; the character `u`'s generation writes none).
 pub fn changed_since(s: &State, since: u32) -> BTreeMap<String, Vec<u8>> {
     let sl = &s.saveload;
     let mut out = BTreeMap::new();
@@ -93,6 +96,11 @@ pub fn changed_since(s: &State, since: u32) -> BTreeMap<String, Vec<u8>> {
     }
     if let Some(objlist) = &sl.objlist {
         out.insert(OBJLIST_FILE.to_string(), objlist.clone());
+    }
+    if sl.sight_gen > since
+        && let Some(sight) = &sl.sight
+    {
+        out.insert(SIGHT_FILE.to_string(), sight.bytes().to_vec());
     }
     for (i, &g) in sl.block_gen.iter().enumerate() {
         if g > since

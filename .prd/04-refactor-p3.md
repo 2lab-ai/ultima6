@@ -33,7 +33,7 @@ extraction, the NPC seam, codec unification) land only behind that gate.
   ~150 scalar IDs).
 - `Files` is a layer stack (`overlay` `files.rs:84`, top-down `get`); layers precede boot
   (`engine.rs:297`). `saveload::attach` puts `savegame/objlist` and `objblk??` on top
-  (`saveload/store.rs:67-72`), so a save shadows any mod edit of actors or object placement.
+  (`is_save_file`, `saveload/store.rs`), so a save shadows any mod edit of actors or object placement.
 - Writers: objblk (byte-identical on all 69 real blocks); objlist in two profiles — the shipped
   file is 0x1D73 bytes (`u6-formats/src/objlist.rs:14`), the game's save writes 0x1C73
   (`u6-core/src/saveload/objlist.rs`); single schedule records. The existing `lzw::encode`
