@@ -6,7 +6,7 @@ tags: [ultima6, render, hd]
 
 # 18 — Remembered sight
 
-Status: shipped (2026-10-27, deploy 27); the owner's follow-up (kept off screen, fading by game days, unit C2) shipped 2026-10-28 in deploy 31 (main 234fc39); its memory cap (rounds 3–6) shipped in deploy 34 (main 97d437b). Saving the memory with the savegame is unit C3, in progress on branch `feat/sight-save` (Saved with the game: planned until it ships). Item 3 of `objects-menu-fog-motion/ssot.md`. Round-1 findings come from unit S1; the first build is unit C1 (branch `feat/remembered-sight`). This document describes the implemented contract. It is not a future target.
+Status: shipped (2026-10-27, deploy 27); the owner's follow-up (kept off screen, fading by game days, unit C2) shipped 2026-10-28 in deploy 31 (main 234fc39); its memory cap (rounds 3–6) shipped in deploy 34 (main 97d437b). Saving the memory with the savegame (unit C3, branch `feat/sight-save`) shipped 2026-10-29 in deploy 38 (main 984afab; round 2 e54ecac); its review follow-ups (rounds 3–4) are GitHub issue #3. Item 3 of `objects-menu-fog-motion/ssot.md`. Round-1 findings come from unit S1; the first build is unit C1 (branch `feat/remembered-sight`). This document describes the implemented contract. It is not a future target.
 
 Owner's words (item 3, verbatim): "보이다가 시야에서 안보이면 지금 안보이는 부분이 그냥 사라지는데, 회색 표시로 전환해줘. (움직이는건 안보이고 안보이게 됐을때의 모습으로 b/w 어둡게 표시하도록 개선. (화면 밖으로 나가면 당연히 렌더링에서 제거."
 
@@ -70,7 +70,7 @@ Owner's follow-up (2026-10-27, verbatim): "화면에 안보이면 바로 없는�
 - **In sight is unchanged.** A cell in sight draws exactly as it did before, whether the switch is on or off (`real_a_cell_in_sight_is_the_same_with_the_switch_on_and_off`, both builds).
 - **The switch.** `Io::set_sight_memory` defaults to off, so tests, oracle comparisons and receipts see the original's frames. The page turns it on for each game. A visitor who stores `localStorage['u6.memory'] = 'off'` keeps it off.
 
-## Saved with the game (unit C3; planned until it ships)
+## Saved with the game (unit C3; shipped in deploy 38)
 
 The owner's follow-up asks that terrain seen once stays remembered ("한번이라도 본 지형은 계속 기억"). Until C3 a reload forgot it all. From C3 on, a Save writes the memory beside the savegame as one port-only file, and load state reads it back with the save it belongs to.
 
