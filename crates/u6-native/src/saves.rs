@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use u6_core::gfx::cache::MAX_SIGHT_FILE_BYTES;
@@ -15,12 +16,33 @@ use u6_core::saveload::{SIGHT_FILE, SaveStore, StoreError};
 /// Directory part every save name starts with.
 const DIR: &str = "savegame";
 
+#[cfg(test)]
+thread_local! {
+    /// The bytes [`DirStore::load`] read on this thread (the tests read it).
+    static READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub struct DirStore {
     root: PathBuf,
 }
 
 fn err(path: &Path, e: std::io::Error) -> StoreError {
     StoreError(format!("{}: {e}", path.display()))
+}
+
+/// The file at `path` through one open handle: none when the file it opens (a link followed)
+/// holds more than `most` bytes, and then nothing of it is read; else its bytes, read through
+/// that handle, at most `most` and one more (none when there was one more: it grew since).
+fn read_within(path: &Path, most: u64) -> Result<Option<Vec<u8>>, StoreError> {
+    let file = fs::File::open(path).map_err(|e| err(path, e))?;
+    if file.metadata().map_err(|e| err(path, e))?.len() > most {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    (file.take(most + 1).read_to_end(&mut bytes)).map_err(|e| err(path, e))?;
+    #[cfg(test)]
+    READ.with(|r| r.set(r.get() + bytes.len()));
+    Ok((bytes.len() as u64 <= most).then_some(bytes))
 }
 
 impl DirStore {
@@ -46,7 +68,8 @@ impl DirStore {
 impl SaveStore for DirStore {
     /// Every file of the directory (none when it is missing), but the leftovers of an interrupted
     /// write and a remembered sight's file larger than one can be (spec 18,
-    /// `MAX_SIGHT_FILE_BYTES`), which is left unread: the save loads with nothing remembered.
+    /// `MAX_SIGHT_FILE_BYTES`: the size of the file a link names, taken from the handle it would
+    /// be read through), which is left unread: the save loads with nothing remembered.
     fn load(&self) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
         let dir = self.dir();
         let mut out = BTreeMap::new();
@@ -64,13 +87,17 @@ impl SaveStore for DirStore {
                 continue;
             }
             let file = format!("{DIR}/{name}");
-            if file.eq_ignore_ascii_case(SIGHT_FILE) {
-                let size = entry.metadata().map_err(|e| err(&path, e))?.len();
-                if size > MAX_SIGHT_FILE_BYTES as u64 {
-                    continue;
+            let bytes = if file.eq_ignore_ascii_case(SIGHT_FILE) {
+                match read_within(&path, MAX_SIGHT_FILE_BYTES as u64)? {
+                    Some(bytes) => bytes,
+                    None => continue,
                 }
-            }
-            let bytes = fs::read(&path).map_err(|e| err(&path, e))?;
+            } else {
+                let bytes = fs::read(&path).map_err(|e| err(&path, e))?;
+                #[cfg(test)]
+                READ.with(|r| r.set(r.get() + bytes.len()));
+                bytes
+            };
             out.insert(file, bytes);
         }
         Ok(out)
@@ -138,26 +165,51 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// What [`DirStore::load`] of `store` returns, and the bytes it read ([`READ`]).
+    fn load_counted(store: &DirStore) -> (BTreeMap<String, Vec<u8>>, usize) {
+        let before = READ.with(std::cell::Cell::get);
+        let got = store.load().unwrap();
+        (got, READ.with(std::cell::Cell::get) - before)
+    }
+
     /// Spec 18 (saved with the game): a remembered sight's file larger than one can be
-    /// (`MAX_SIGHT_FILE_BYTES`) is not read, in any case of its name, while another file past
-    /// that size is; a sight file of that size is read.
+    /// (`MAX_SIGHT_FILE_BYTES`) is left out and not read (the bytes the load read are the other
+    /// files' alone), in any case of its name, and so is a link to such a file (outside the
+    /// directory; the link itself is small), while another file past that size is read; a sight
+    /// file of that size is read.
     #[test]
     fn a_sight_file_past_its_limit_is_not_read() {
         let root = scratch("sight-limit");
         let dir = root.join(DIR);
         fs::create_dir_all(&dir).unwrap();
         let store = DirStore::new(&root);
-        fs::write(dir.join("objlist"), vec![0; MAX_SIGHT_FILE_BYTES + 1]).unwrap();
-        fs::write(dir.join("U6Sight"), vec![0; MAX_SIGHT_FILE_BYTES + 1]).unwrap();
-        let got = store.load().unwrap();
+        let past = MAX_SIGHT_FILE_BYTES + 1;
+        fs::write(dir.join("objlist"), vec![0; past]).unwrap();
+        fs::write(dir.join("U6Sight"), vec![0; past]).unwrap();
+        let (got, read) = load_counted(&store);
         assert!(
             got.keys().eq(["savegame/objlist"]),
-            "the sight file past its limit left unread"
+            "the sight file past its limit left out"
         );
+        assert!(read == past, "and not read: the objlist's bytes alone");
+        fs::remove_file(dir.join("U6Sight")).unwrap();
+        #[cfg(unix)]
+        {
+            let far = root.join("far");
+            fs::write(&far, vec![0; past]).unwrap();
+            std::os::unix::fs::symlink(&far, dir.join("u6sight")).unwrap();
+            let (got, read) = load_counted(&store);
+            assert!(
+                got.keys().eq(["savegame/objlist"]) && read == past,
+                "a link to a sight file past its limit: left out, not read"
+            );
+            fs::remove_file(dir.join("u6sight")).unwrap();
+        }
         fs::write(dir.join("U6Sight"), vec![0; MAX_SIGHT_FILE_BYTES]).unwrap();
-        let got = store.load().unwrap();
+        let (got, read) = load_counted(&store);
         assert!(
-            got["savegame/U6Sight"].len() == MAX_SIGHT_FILE_BYTES,
+            got["savegame/U6Sight"].len() == MAX_SIGHT_FILE_BYTES
+                && read == past + MAX_SIGHT_FILE_BYTES,
             "at its limit: read"
         );
         fs::remove_dir_all(&root).unwrap();
