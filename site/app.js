@@ -277,7 +277,6 @@ const voiceAccept = document.getElementById('voice-accept');
 const voiceDecline = document.getElementById('voice-decline');
 const forgetVoices = document.getElementById('forget-voices');
 const screenBox = document.getElementById('screen-box');
-const contextMenu = document.getElementById('context-menu');
 const fullscreenButton = document.getElementById('fullscreen');
 const fullscreenExit = document.getElementById('fullscreen-exit');
 
@@ -2091,6 +2090,20 @@ globalThis.__u6Layout = {
   get rest() {
     return [...(WIDE ? WIDE_REST : LAYOUT_REST)];
   },
+  // Spec 17: the frame rects the canvas does not show now (`hiddenFrameRects`, computed afresh:
+  // what the engine has is `Game.menu_hidden`), the canvas's parts outside the viewport
+  // (`offViewport`) and under the page's elements over it (`overCanvas`), and the pure rule of
+  // the former (`offViewportOf`).
+  get hidden() {
+    return hiddenFrameRects();
+  },
+  get offViewport() {
+    return offViewport();
+  },
+  get overCanvas() {
+    return overCanvas();
+  },
+  offViewportOf: (box, size, view) => offViewportOf(box, size, view),
   get size() {
     return WIDE ? [WIDE_W, WIDE_H] : [LAYOUT_W, LAYOUT_H];
   },
@@ -2665,6 +2678,115 @@ function wideToCanvas(gx, gy) {
   return before.some(({ outer }) => inRect(cx, cy, outer)) ? null : [cx, cy];
 }
 
+// Spec 17 Presentation: the frame rects the canvas does not show the player now, as [x, y, w, h]
+// in frame pixels, in every view: the canvas's parts outside the viewport (a phone held sideways
+// scrolls the page past the canvas's bottom; none while it fits, as in fullscreen) through each
+// region of the frame the canvas shows (`shownRegions`); in Wide's game view also the map under
+// each window shown (its frame and title strip included, mapped back through the map's region)
+// and the map's parts off the canvas (it covers the canvas, so it can overflow two sides); and the
+// canvas's parts under the page's elements over it (`overCanvas`: the Exit button, a press on
+// which leaves fullscreen, and the speed badge). The engine keeps its context menu off them where
+// it can (`Game.set_menu_hidden`), and lays an open one out again when they change.
+function hiddenFrameRects() {
+  const toFrame = ({ from: [fx, fy, fw, fh], to: [mx, my, mw, mh] }, [x, y, w, h]) => {
+    const x0 = Math.max(fx, Math.floor(fx + ((x - mx) * fw) / mw));
+    const y0 = Math.max(fy, Math.floor(fy + ((y - my) * fh) / mh));
+    const x1 = Math.min(fx + fw, Math.ceil(fx + ((x + w - mx) * fw) / mw));
+    const y1 = Math.min(fy + fh, Math.ceil(fy + ((y + h - my) * fh) / mh));
+    return [x0, y0, x1 - x0, y1 - y0];
+  };
+  const hidden = [];
+  const off = [...offViewport(), ...overCanvas()];
+  for (const region of shownRegions()) {
+    for (const rect of off) {
+      const cut = intersect(rect, region.to);
+      if (cut) hidden.push(toFrame(region, cut));
+    }
+  }
+  if (WIDE && shownView === REGIONS_VIEW && wideMap) {
+    const [mx, my, mw, mh] = wideMap.to;
+    const past = [[mx, my, -mx, mh], [WIDE_W, my, mx + mw - WIDE_W, mh], [mx, my, mw, -my], [mx, WIDE_H, mw, my + mh - WIDE_H]]
+      .filter(([, , w, h]) => w > 0 && h > 0);
+    hidden.push(...[...shownWindows().map(({ outer }) => outer), ...past].map((r) => toFrame(wideMap, r)));
+  }
+  return hidden.filter(([, , w, h]) => w > 0 && h > 0);
+}
+// The regions of the frame the canvas shows now, each { from, to } (the frame rect, the canvas
+// rect it is drawn on): the frame whole (FRAME), the screen letterboxed (WHOLE_VIEW), the HD
+// layout's regions, or Wide's map and windows shown.
+function shownRegions() {
+  if (shownView === FRAME) return [{ from: [0, 0, game.width(), game.height()], to: [0, 0, canvas.width, canvas.height] }];
+  if (shownView === WHOLE_VIEW) return [{ from: [0, 0, SCREEN_W, SCREEN_H], to: WIDE ? WIDE_WHOLE : LAYOUT_WHOLE }];
+  if (!WIDE) return LAYOUT_REGIONS;
+  return [...(wideMap ? [wideMap] : []), ...shownWindows()];
+}
+// The canvas's parts outside the part of the viewport the player sees (`offViewportOf`): the
+// visual viewport (pinch-zoom shows only part of the layout viewport, `visualViewport`, where the
+// browser has one) within the document's client box (without its scroll bars).
+function offViewport() {
+  const doc = document.documentElement;
+  const vv = globalThis.visualViewport;
+  const [w, h] = [doc.clientWidth, doc.clientHeight];
+  const view = vv
+    ? [Math.max(vv.offsetLeft, 0), Math.max(vv.offsetTop, 0),
+      Math.min(vv.offsetLeft + vv.width, w), Math.min(vv.offsetTop + vv.height, h)]
+    : [0, 0, w, h];
+  return offViewportOf(canvas.getBoundingClientRect(), [canvas.width, canvas.height], view);
+}
+// Of a canvas `size` [w, h] pixels whose box is `box` ({left, top, width, height}, client
+// pixels), the parts outside the client rect `view` [left, top, right, bottom], as [x, y, w, h]
+// in canvas pixels: at most one each left, right, above and below the part it shows, whose limits
+// are rounded inward (a canvas pixel partly outside the view is outside: the menu keeps off it);
+// none for a box with no area. Pure (the page's tests feed it fractional boxes and views).
+function offViewportOf(box, [cw, ch], [vl, vt, vr, vb]) {
+  if (!(box.width > 0 && box.height > 0)) return [];
+  // Each limit in canvas pixels, the product taken before the quotient (a box the view's size
+  // exactly maps to whole pixels), within a millionth of a pixel of a whole one taken as it.
+  const px = (v, from, size, n) => ((v - from) * n) / size;
+  const up = (v) => Math.ceil(v - 1e-6);
+  const down = (v) => Math.floor(v + 1e-6);
+  const x0 = clamp(up(px(vl, box.left, box.width, cw)), 0, cw);
+  const x1 = clamp(down(px(vr, box.left, box.width, cw)), x0, cw);
+  const y0 = clamp(up(px(vt, box.top, box.height, ch)), 0, ch);
+  const y1 = clamp(down(px(vb, box.top, box.height, ch)), y0, ch);
+  return [[0, 0, x0, ch], [x1, 0, cw - x1, ch], [x0, 0, x1 - x0, y0], [x0, y1, x1 - x0, ch - y1]]
+    .filter(([, , w, h]) => w > 0 && h > 0);
+}
+// The canvas pixels under the page's elements over the canvas (`OVER_CANVAS`), as [x, y, w, h],
+// rounded outward (a pixel partly under one is under it): in fullscreen both, shown or not (the
+// stylesheet keeps a hidden one's box there, unseen: the Exit button shows at any move of the
+// pointer, the badge at a change of speed, either over a row the menu drew under it); else each
+// while it shows.
+function overCanvas() {
+  const box = canvas.getBoundingClientRect();
+  if (!(box.width > 0 && box.height > 0)) return [];
+  const [cw, ch] = [canvas.width, canvas.height];
+  const full = fullNow();
+  return OVER_CANVAS.filter((el) => full || !el.hidden).map((el) => {
+    const r = el.getBoundingClientRect();
+    const x0 = clamp(Math.floor(((r.left - box.left) * cw) / box.width), 0, cw);
+    const x1 = clamp(Math.ceil(((r.right - box.left) * cw) / box.width), x0, cw);
+    const y0 = clamp(Math.floor(((r.top - box.top) * ch) / box.height), 0, ch);
+    const y1 = clamp(Math.ceil(((r.bottom - box.top) * ch) / box.height), y0, ch);
+    return [x0, y0, x1 - x0, y1 - y0];
+  }).filter(([, , w, h]) => w > 0 && h > 0);
+}
+// The common part of two rects ([x, y, w, h]), or null for none.
+function intersect([ax, ay, aw, ah], [bx, by, bw, bh]) {
+  const [x0, y0] = [Math.max(ax, bx), Math.max(ay, by)];
+  const [x1, y1] = [Math.min(ax + aw, bx + bw), Math.min(ay + ah, by + bh)];
+  return x1 > x0 && y1 > y0 ? [x0, y0, x1 - x0, y1 - y0] : null;
+}
+// The hidden rects last given to the game (a JSON key), so a frame gives them only when they moved.
+let hiddenGiven = null;
+function giveHiddenRects() {
+  const rects = hiddenFrameRects();
+  const key = JSON.stringify(rects);
+  if (key === hiddenGiven) return;
+  hiddenGiven = key;
+  game.set_menu_hidden(Int32Array.from(rects.flat()));
+}
+
 // --- the HD font (spec 11) ---------------------------------------------------------------------
 
 const FONT_KEY = 'u6.font'; // localStorage: 'pixel' when the viewer chose the pixel font
@@ -2673,6 +2795,9 @@ const GLYPH_CELL = 8; // a character's cell, in game pixels
 const GLYPH_SPACE = 0x20; // a listed space: no ink, it joins the words beside it (Design 3)
 const GLYPH_SYMBOL = 0x10000; // | its glyph: a listed symbol, drawn from its rows (Design 2 rev 3)
 const GLYPH_TYPED = 0x20000; // | 0x20: a listed space the player typed, never ending a run (rev 3)
+// | a letter's or a space's code: the cell drawn half-toned (spec 17: a disabled entry of the
+// context menu), its glyph painted as a checker at the canvas's pixel grid (`paintHalftone`).
+const GLYPH_HALFTONE = 0x40000;
 const FONT_EM = 0.85; // the font's size: of the height the cell has on the canvas
 // A run's ink keeps this far inside its cells at either end, in canvas pixels (it starts this far
 // in, and a run is narrowed to its cells less this either side): the rasteriser's anti-aliased
@@ -2755,8 +2880,9 @@ function listedGlyphs() {
 // one's left neighbour, of one paper; one listed space joins the cells either side of it, two or
 // more end the run (a space the player typed, GLYPH_TYPED, joins them whatever the spaces beside
 // it: rev 3), and so does a cell not listed; a run's spaces at either end are left out. Each run:
-// its row `y` and its cells [x, code, ink] left to right (a space's ink null: it goes with the
-// text it stands in). A listed symbol (GLYPH_SYMBOL: Design 2 rev 3) ends the cells before it:
+// its row `y`, its `paper` and its cells [x, code, ink, half] left to right (a space's ink null:
+// it goes with the text it stands in; `half`: drawn half-toned, GLYPH_HALFTONE, the code without
+// it). A listed symbol (GLYPH_SYMBOL: Design 2 rev 3) ends the cells before it:
 // after a run of them (directly, or after the spaces that follow it) it is that run's `caret`,
 // else one of the returned list's `symbols`; each { x, y, ink, rows (its 8 rows from
 // `symbolRows`, bit 7 leftmost), spaces (those between it and the run) }.
@@ -2773,7 +2899,9 @@ function glyphRuns(glyphs, from) {
     if (chain) chain.run = null;
   };
   for (let i = 0; i < glyphs.length; i += 5) {
-    const [x, y, code, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
+    const [x, y, listed, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
+    const half = (listed & GLYPH_HALFTONE) !== 0;
+    const code = listed & ~GLYPH_HALFTONE;
     const symbol = code >= GLYPH_SYMBOL && code < GLYPH_TYPED;
     const at = symbol ? 8 * symbols : 0;
     if (symbol) symbols += 1;
@@ -2799,14 +2927,14 @@ function glyphRuns(glyphs, from) {
       continue;
     }
     if (!chain.run) {
-      chain.run = { y, cells: [], caret: null };
+      chain.run = { y, paper, cells: [], caret: null };
       chain.last = chain.run;
     } else {
-      for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push([x - k * GLYPH_CELL, GLYPH_SPACE, null]);
+      for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push([x - k * GLYPH_CELL, GLYPH_SPACE, null, half]);
     }
     chain.spaces = 0;
     chain.gap = 0;
-    chain.run.cells.push([x, code, ink]);
+    chain.run.cells.push([x, code, ink, half]);
   }
   end();
   return runs;
@@ -2829,6 +2957,36 @@ function paintSymbol(ctx, { rows, ink }, x, y, sx, sy) {
   ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
   ctx.fill();
 }
+
+// The half-toned cells of a run (`cells` as `glyphRuns` gives them, `half` set), their text drawn
+// already: every second canvas pixel of their places, in a checker at the canvas's pixel grid
+// (each place's pixels whose x + y is even), the run's `paper` again, as the game draws a
+// disabled entry with every second pixel of its letters left out. A place is its cell's rect on
+// the canvas (`x0`: where game pixel column 0 would lie, `top` the run's top, `sx` canvas pixels
+// per game pixel across, `h` the cell's height), its edges on whole pixels outward; the clip
+// keeps the checker on the pixels copied again.
+function paintHalftone(ctx, cells, paper, [x0, top], sx, h) {
+  checkerTile ??= document.createElement('canvas');
+  if (checkerTile.width !== 2) {
+    checkerTile.width = 2;
+    checkerTile.height = 2;
+  }
+  const t = checkerTile.getContext('2d');
+  t.clearRect(0, 0, 2, 2);
+  t.fillStyle = `#${paper.toString(16).padStart(6, '0')}`;
+  t.fillRect(0, 0, 1, 1);
+  t.fillRect(1, 1, 1, 1);
+  ctx.fillStyle = ctx.createPattern(checkerTile, 'repeat');
+  ctx.beginPath();
+  for (const [x, , , half] of cells) {
+    if (!half) continue;
+    const left = Math.floor(x0 + x * sx);
+    const right = Math.ceil(x0 + (x + GLYPH_CELL) * sx);
+    ctx.rect(left, Math.floor(top), right - left, Math.ceil(top + h) - Math.floor(top));
+  }
+  ctx.fill();
+}
+let checkerTile = null; // the 2 × 2 tile `paintHalftone` repeats
 
 // The runs of `glyphs` (`glyphRuns`) in the classic rect `from` that the canvas rect `to` shows,
 // drawn there over the canvas rect `copied` alone (the part just copied from the ×4 frame, where
@@ -2862,7 +3020,7 @@ function paintGlyphs(ctx, glyphs, from, to, copied) {
     ready = true;
   };
   const runs = glyphRuns(glyphs, from);
-  for (const { y, cells, caret } of runs) {
+  for (const { y, paper, cells, caret } of runs) {
     const left = to[0] + (cells[0][0] - from[0]) * sx;
     const top = to[1] + (y - from[1]) * sy;
     const span = (cells.at(-1)[0] + GLYPH_CELL - cells[0][0]) * sx;
@@ -2889,6 +3047,10 @@ function paintGlyphs(ctx, glyphs, from, to, copied) {
       ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
       ctx.fillText(text.slice(a, b), a === 0 ? 0 : ctx.measureText(text.slice(0, a)).width, 0);
       a = b;
+    }
+    if (cells.some(([, , , half]) => half)) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      paintHalftone(ctx, cells, paper, [to[0] - from[0] * sx, top], sx, h);
     }
     if (caret) {
       const at = pen + ctx.measureText(text + ' '.repeat(caret.spaces)).width * k;
@@ -3097,6 +3259,9 @@ function frame(now) {
   last = now;
   if (dt > 0 && dt <= LONG_FRAME_MS) interval += (dt - interval) / 8;
   try {
+    // The rects the canvas hides now, before the steps (a right press among their events opens
+    // the menu where the player sees it).
+    giveHiddenRects();
     game.set_clock(now);
     const due = game.pace(dt);
     const budget = budget_ms(interval);
@@ -3180,6 +3345,7 @@ async function boot(next, origin) {
   }
   const old = game;
   game = next;
+  hiddenGiven = null; // the new game has none until the next frame gives them
   owner = next;
   next.set_voices(voice.ready);
   next.set_sight_memory(storedMemory());
@@ -4063,10 +4229,15 @@ faster.addEventListener('click', () => changeSpeed(1));
 // down in the event sent last: a press, a release, a move with a button held); in Wide a press
 // on a title strip also drags its window (`dragWindow`). The canvas captures a press so the
 // release reaches
-// the game even off the canvas; the context menu stays off it while a game runs. A press is, in
-// this order, the focus, the game's pointer event (queued for the next step, exactly once) and
-// the gesture that starts the sound (the AudioContext is created before its first await, inside
-// the press's user activation); the sound starting never delays or drops the event.
+// the game even off the canvas; the browser's context menu stays off it while a game runs. A
+// press is, in this order, the focus, the game's pointer event (queued for the next step, exactly
+// once) and the gesture that starts the sound (the AudioContext is created before its first
+// await, inside the press's user activation); the sound starting never delays or drops the
+// event. A press that reaches no frame pixel (the canvas with no box) or lies off the canvas (on
+// the page round it, on fullscreen's black sides) closes the game's context menu, as a press
+// outside it in the frame does (`Game.dismiss_menu`), and gives the game nothing; a press in the
+// HD layout's gaps or on a Wide window's frame reaches the rest of the screen (LAYOUT_REST,
+// WIDE_REST), outside the menu, which closes it in the engine.
 // The game pixel client point (x, y) reaches through the canvas's CSS box `box` (whatever the
 // canvas's own size), `held` as `layoutToGame`, which sets `pointerGap` (here too for the frame
 // as it is: never a gap).
@@ -4101,7 +4272,9 @@ function pointerPixel(e) {
 // shows over them: the speed badge, which lets the pointer through to the canvas, and the Exit
 // button, under which a press held on the canvas (captured: every press is, `pointerdown`) moves
 // on, the canvas's cursor shown and the game given each move (the hidden input never covers it:
-// opacity 0; the context menu takes the pointer, a press on the canvas closes it first).
+// opacity 0). The context menu is the engine's, drawn in the frame like the rest of the game, its
+// arrow the game's pointer while it holds the pointer (`Game.game_pointer`); the page keeps it off
+// these elements (`hiddenFrameRects`).
 const OVER_CANVAS = [badge, fullscreenExit];
 for (const kind of ['pointerdown', 'pointermove', 'pointerup']) {
   window.addEventListener(kind, (e) => {
@@ -4121,20 +4294,21 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Where the game's pointer is against the system's at client point (x, y), as the page and the
-// engine show now: `game`, the engine's sprite drawn (Game.game_pointer: shown) at the very game
-// pixel the point reaches, the point on the canvas, under none of OVER_CANVAS, in a part of the
-// game (not a gap or a margin of the HD layout, a letterbox side, a Wide window's frame or title
-// strip: `pointerGap`), and no press the context menu takes held; `hold`, the same but for a
-// pointer event at that pixel queued for the next step (the mouse's own move, which the sprite
-// takes at that step: the cursor stays as it is, so a move never flickers it), for one frame at
-// most: the frame's end decides again from where the step put the sprite (where a context-menu
-// entry's target press, queued at that step after the move, put it elsewhere, `page` from
-// then; the cursor was hidden over the sprite's old place for that one frame); else `page`. The
-// engine decides where the sprite is, whatever moved it (the page's moves, a context-menu entry's
-// presses, a window dragged: the rest of the screen), so a layout, a view or a box changed under
-// a still mouse shows the system's pointer until the mouse moves again.
+// engine show now: `game`, the engine's sprite drawn (Game.game_pointer: shown; the context
+// menu's arrow while it holds the pointer) at the very game pixel the point reaches, the point on
+// the canvas, under none of OVER_CANVAS, in a part of the game (not a gap or a margin of the HD
+// layout, a letterbox side, a Wide window's frame or title strip: `pointerGap`); `hold`, the
+// same but for a pointer event at that pixel queued for the next step (the mouse's own move,
+// which the sprite takes at that step: the cursor stays as it is, so a move never flickers it),
+// for one frame at most: the frame's end decides again from where the step put the sprite (where
+// the engine moved it at that step itself, a context-menu entry's target press among the events
+// it gave the game, `page` from then; the cursor was hidden over the sprite's old place for that
+// one frame); else `page`. The engine decides where the sprite is, whatever moved it (the page's
+// moves, the context menu's arrow while it holds the pointer, a chosen entry's presses, a window
+// dragged: the rest of the screen), so a layout, a view or a box changed under a still mouse
+// shows the system's pointer until the mouse moves again.
 function gameUnder(x, y) {
-  if (!game || crashed || leaving || swallowing) return 'page';
+  if (!game || crashed || leaving) return 'page';
   const inside = (r) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
   const box = canvas.getBoundingClientRect();
   if (!inside(box)) return 'page';
@@ -4160,20 +4334,28 @@ function showGamePointer() {
 
 function sendPointer(e) {
   if (!game || crashed) return;
-  if (swallowing) {
-    // The press that opened the context menu, or the outside press that closed it: none of it
-    // reaches the game, up to its release.
-    if ((e.buttons & 3) === 0) swallowing = false;
-    showGamePointer();
-    return;
-  }
+  const id = e.pointerId;
   if (releasedHeld) {
     releasedHeld &= e.buttons & 3;
     e = { type: e.type, clientX: e.clientX, clientY: e.clientY, buttons: e.buttons & 3 & ~releasedHeld };
   }
   const at = pointerPixel(e);
-  if (!at) return;
+  if (!at) {
+    if (e.type === 'pointerdown') closeMenu();
+    return;
+  }
   const buttons = e.buttons & 3;
+  // A button a move adds (a chorded press, which never comes as a pointerdown) while the canvas
+  // holds no capture (lost with a button down): the canvas takes it, so the release reaches the
+  // game wherever it happens (D2 r5 S2; a pointer the browser no longer has throws, and nothing is
+  // taken).
+  if (e.type === 'pointermove' && (buttons & ~sentButtons) !== 0 && id !== undefined && !canvas.hasPointerCapture(id)) {
+    try {
+      canvas.setPointerCapture(id);
+    } catch {
+      // No active pointer of that id: the moves stay the canvas's while over it.
+    }
+  }
   sentButtons = buttons;
   game.pointer(at[0], at[1], buttons);
   showGamePointer();
@@ -4183,7 +4365,7 @@ canvas.addEventListener('pointerdown', (e) => {
   keepCanvas = false; // a press on the canvas gives a line being read the hidden input again
   releasedHeld = 0;
   if (game && !crashed) canvas.setPointerCapture(e.pointerId);
-  if (!openContextMenu(e)) sendPointer(e);
+  sendPointer(e);
   gesture();
 });
 canvas.addEventListener('pointermove', sendPointer);
@@ -4273,233 +4455,28 @@ window.addEventListener('keydown', () => {
   wheelCarry = 0;
 }, true);
 
-// --- the context menu (spec 17) -----------------------------------------------------------------
-// A right press (the left button up) at the game's prompt on the map, or on an inventory or
-// equipment slot, opens a menu of what the commands can do with what is there
-// (Game.context_menu, at the press's game pixel); anywhere else, or with no prompt, the press
-// goes to the game as before. The menu lies in the screen box at the press, flipped and kept
-// inside it, and has the focus: arrows, Home and End move, Enter or Space chooses, a command's
-// letter chooses its first entry that can run, Escape or a press outside closes it; none of
-// these reach the game, nor does the press that opened it, held and moved, up to its release.
-// A choice runs as the original's mouse does (Game.command_at: its icon, then the target once the
-// command asks for it); an inventory slot's own action (ready, open, take off) is a left click
-// there. The words are the page's; the names are the game's, given at run time.
-const COMMAND_WORDS = {
-  0x81: 'cmdAttack', 0x82: 'cmdCast', 0x83: 'cmdTalk', 0x84: 'cmdLook', 0x85: 'cmdGet', 0x86: 'cmdDrop',
-  0x87: 'cmdMove', 0x88: 'cmdUse', 0x89: 'cmdRest', 0x8a: 'cmdCombat', 0xa0: 'cmdOpen', 0xa7: 'cmdReady',
-  0xa8: 'cmdUnready',
-};
-const COMMAND_LETTERS = { a: 0x81, c: 0x82, t: 0x83, l: 0x84, g: 0x85, d: 0x86, m: 0x87, u: 0x88 };
-// An inventory slot's own left-press actions: open, ready, take off.
-const SLOT_ACTIONS = new Set([0xa0, 0xa7, 0xa8]);
-let swallowing = false; // the pointer's events up to its release are the menu's
-let menuAt = null; // the game pixel the open menu is for, null while it is closed
-
-// The reason a disabled entry shows: its code's line ('far' → whyFar).
-const reasonLine = (code) => t(`why${code[0].toUpperCase()}${code.slice(1)}`);
-
-function menuItem(entry, name) {
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.setAttribute('role', 'menuitem');
-  item.dataset.code = String(entry.code);
-  const label = document.createElement('span');
-  label.className = 'label';
-  label.textContent = t(COMMAND_WORDS[entry.code]);
-  item.append(label);
-  if (name) {
-    const of = document.createElement('span');
-    of.className = 'of';
-    of.textContent = name;
-    item.append(of);
+// A press anywhere off the canvas (capture: before the page's own controls take it).
+document.addEventListener('pointerdown', (e) => {
+  if (e.target === canvas || !game || crashed) return;
+  closeMenu();
+}, true);
+// The game's context menu closed by a press of the page's (`Game.dismiss_menu`): in order with
+// the events queued for the next step (a right press on the canvas just before opens the menu at
+// that step, which this then closes there; till that step, one or two frames, the frame shows
+// it still: the close is in order, and the events before it are not run yet), else at once, the
+// frame without it shown at once; then the system's pointer where the game's is no longer
+// (`showGamePointer`).
+function closeMenu() {
+  if (game.dismiss_menu()) {
+    game.present();
+    draw();
   }
-  if (entry.theft) {
-    const theft = document.createElement('span');
-    theft.className = 'theft';
-    theft.textContent = t('theft');
-    item.append(theft);
-  }
-  if (!entry.enabled) {
-    item.setAttribute('aria-disabled', 'true');
-    const why = document.createElement('span');
-    why.className = 'why';
-    why.textContent = entry.reason ? reasonLine(entry.reason) : '';
-    item.append(why);
-  }
-  item.addEventListener('click', () => chooseEntry(item));
-  return item;
-}
-
-// Opens the menu for pointer event `e` when it is a right press the game has a menu for; false
-// otherwise (the press then goes to the game).
-function openContextMenu(e) {
-  if (!game || crashed || (e.buttons & 3) !== 2) return false;
-  const at = pointerPixel(e);
-  if (!at) return false;
-  const json = game.context_menu(at[0], at[1]);
-  if (!json) return false;
-  const menu = JSON.parse(json);
-  contextMenu.replaceChildren();
-  // The underlined command first: Rest and Combat only there, any other as its first entry.
-  let first = null;
-  if (menu.underlined !== null) {
-    if (menu.underlined === 0x89 || menu.underlined === 0x8a) {
-      first = { code: menu.underlined, enabled: true, reason: null, theft: false };
-      contextMenu.append(menuItem(first, ''));
-    } else {
-      for (const section of menu.sections) {
-        const entry = section.entries.find((x) => x.code === menu.underlined);
-        if (entry) {
-          first = entry;
-          contextMenu.append(menuItem(entry, section.name));
-          break;
-        }
-      }
-    }
-  }
-  for (const section of menu.sections) {
-    const entries = section.entries.filter((x) => x !== first);
-    if (entries.length === 0) continue;
-    const head = document.createElement('div');
-    head.className = 'head';
-    head.setAttribute('role', 'presentation');
-    head.textContent = section.name;
-    contextMenu.append(head);
-    for (const entry of entries) contextMenu.append(menuItem(entry, ''));
-  }
-  menuAt = at;
-  swallowing = true;
   showGamePointer();
-  contextMenu.hidden = false;
-  placeMenu(e.clientX, e.clientY);
-  // No focus for the canvas from the press (its mouse default), the menu takes it, again once the
-  // press's own handling is over.
-  e.preventDefault();
-  focusMenu();
-  setTimeout(focusMenu, 0);
-  return true;
 }
 
-// The open menu's first entry that can run (else its first) has the focus.
-function focusMenu() {
-  if (menuAt === null || contextMenu.contains(document.activeElement)) return;
-  const items = menuItems();
-  (items.find((x) => x.getAttribute('aria-disabled') !== 'true') ?? items[0])?.focus({ preventScroll: true });
-}
-
-// The menu at client point (x, y): to the right of and below the point, or flipped to the other
-// side where it would not fit, kept inside the part of the screen box the viewport shows; at most
-// that part's size, scrolling inside when its entries need more. Its style's minimum width gives
-// way where that part is narrower (a minimum outweighs a maximum), and it is sized at the box's
-// corner before its rect is read, so the width it gets is not the room left where it was last.
-function placeMenu(x, y) {
-  const box = screenBox.getBoundingClientRect();
-  const view = {
-    left: Math.max(box.left, 0),
-    top: Math.max(box.top, 0),
-    right: Math.min(box.right, window.innerWidth),
-    bottom: Math.min(box.bottom, window.innerHeight),
-  };
-  const [vw, vh] = [Math.max(0, view.right - view.left), Math.max(0, view.bottom - view.top)];
-  contextMenu.style.left = '0px';
-  contextMenu.style.top = '0px';
-  contextMenu.style.minWidth = `min(10em, ${vw}px)`;
-  contextMenu.style.maxWidth = `${vw}px`;
-  contextMenu.style.maxHeight = `${vh}px`;
-  const size = contextMenu.getBoundingClientRect();
-  const [w, h] = [size.width, size.height];
-  let left = x;
-  let top = y;
-  if (left + w > view.right) left -= w;
-  if (top + h > view.bottom) top -= h;
-  left = clamp(left, view.left, Math.max(view.left, view.right - w));
-  top = clamp(top, view.top, Math.max(view.top, view.bottom - h));
-  contextMenu.style.left = `${left - box.left}px`;
-  contextMenu.style.top = `${top - box.top}px`;
-}
-
-const menuItems = () => [...contextMenu.querySelectorAll('[role="menuitem"]')];
-
-// Closes the menu; the canvas has the focus again unless `refocus` is false. A key that closes it
-// (`code`, its DOM `code`) gives the canvas the focus only at its release, so the release never
-// reaches the game; a blur of the window forgets it.
-let refocusAt = null; // the physical key whose release gives the canvas the focus back
-function closeContextMenu(refocus = true, code = null) {
-  if (menuAt === null) return;
-  menuAt = null;
-  contextMenu.hidden = true;
-  contextMenu.replaceChildren();
-  if (refocus && code !== null) refocusAt = code;
-  else if (refocus) canvas.focus({ preventScroll: true });
-}
-window.addEventListener('keyup', (e) => {
-  if (refocusAt === null || e.code !== refocusAt) return;
-  refocusAt = null;
-  e.stopPropagation();
-  canvas.focus({ preventScroll: true });
-}, { capture: true });
-window.addEventListener('blur', () => {
-  refocusAt = null;
-});
-
-function chooseEntry(item, key = null) {
-  if (menuAt === null || item.getAttribute('aria-disabled') === 'true') return;
-  const code = Number(item.dataset.code);
-  const [x, y] = menuAt;
-  closeContextMenu(true, key);
-  if (!game || crashed) return;
-  if (SLOT_ACTIONS.has(code)) {
-    game.pointer(x, y, 1);
-    game.pointer(x, y, 0);
-    sentButtons = 0;
-  } else {
-    game.command_at(code, x, y);
-  }
-}
-
-contextMenu.addEventListener('keydown', (e) => {
-  const items = menuItems();
-  const at = items.indexOf(document.activeElement);
-  const focus = (i) => items[(i + items.length) % items.length]?.focus({ preventScroll: true });
-  const letter = e.key.length === 1 ? COMMAND_LETTERS[e.key.toLowerCase()] : undefined;
-  if (e.key === 'ArrowDown') focus(at + 1);
-  else if (e.key === 'ArrowUp') focus(at < 0 ? -1 : at - 1);
-  else if (e.key === 'Home') focus(0);
-  else if (e.key === 'End') focus(-1);
-  else if (e.key === 'Escape') closeContextMenu(true, e.code);
-  else if (e.key === 'Enter' || e.key === ' ') {
-    if (at >= 0) chooseEntry(items[at], e.code);
-  } else if (letter !== undefined) {
-    const item = items.find((x) => Number(x.dataset.code) === letter && x.getAttribute('aria-disabled') !== 'true');
-    if (item) chooseEntry(item, e.code);
-  } else if (e.key !== 'Tab') return;
-  if (e.key !== 'Tab') {
-    e.preventDefault();
-    e.stopPropagation();
-  }
-});
-contextMenu.addEventListener('focusout', (e) => {
-  if (menuAt !== null && !swallowing && !contextMenu.contains(e.relatedTarget)) closeContextMenu(false);
-});
-contextMenu.addEventListener('contextmenu', (e) => e.preventDefault());
-// A press outside the open menu closes it and goes nowhere else: not to the game, up to its
-// release, which the window sees wherever it happens (the press need not be the canvas's).
-window.addEventListener('pointerdown', (e) => {
-  if (menuAt === null || contextMenu.contains(e.target)) return;
-  e.preventDefault();
-  e.stopPropagation();
-  swallowing = true;
-  showGamePointer();
-  closeContextMenu();
-}, { capture: true });
-for (const kind of ['pointerup', 'pointercancel']) {
-  window.addEventListener(kind, (e) => {
-    if (!swallowing || (kind === 'pointerup' && (e.buttons & 3) !== 0)) return;
-    swallowing = false;
-    showGamePointer();
-    if (e.target === canvas) e.stopPropagation();
-  }, { capture: true });
-}
+// The context menu (spec 17) is the game's: a right press goes to the engine like any other
+// press, and the engine opens, draws and runs the menu in the frame (`Engine::tick`,
+// `ui/popup.rs`); the page has none.
 
 // The whole page accepts drops so a near miss does not open the file in the tab.
 window.addEventListener('dragover', (e) => {

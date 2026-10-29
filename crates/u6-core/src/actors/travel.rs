@@ -474,14 +474,23 @@ pub struct Polled<'a> {
     /// One of them is not the travel's own last press: a key queued before the travel started
     /// or past its input.
     pub foreign: bool,
+    /// Spec 21's merge contract with the context menu (spec 17): the menu took new input in this
+    /// tick (its [`crate::ui::popup::Popup::took_new_input`]; `input` is then what the menu passed
+    /// on, without what it took): a stop, as the player's input is.
+    pub menu: bool,
+    /// Spec 21 S3: a step is due on the platform's clock
+    /// ([`crate::engine::Engine::set_travel_due`]: [`crate::engine::MIN_STEP_MS`] since the prompt
+    /// last took a press). Read only where the travel would press, after the stops; true at every
+    /// prompt by default.
+    pub due: bool,
 }
 
 impl Polled<'_> {
-    /// A key, a repeat or text, a pointer button that was up before going down, or a key in the
-    /// queue the travel did not press. No wildcard arm: an event kind added later (K2's `Paced`)
-    /// is decided here (spec 21 Stops 5).
+    /// A key, a repeat or text, a pointer button that was up before going down, a key in the
+    /// queue the travel did not press, or new input the context menu took. No wildcard arm: an
+    /// event kind added later (K2's `Paced`) is decided here (spec 21 Stops 5).
     fn stops(&self) -> bool {
-        if self.foreign {
+        if self.foreign || self.menu {
             return true;
         }
         let mut buttons = self.buttons;
@@ -623,7 +632,9 @@ impl Travel {
         if other_prompt(s) {
             return Next::Stop(End::Prompt);
         }
-        if !command_prompt(s) || polled.queued {
+        // Spec 21 S3: at most one step a MIN_STEP_MS of the platform's clock, tested here, after
+        // the stops and before the last press is read back (which would pop the path).
+        if !command_prompt(s) || polled.queued || !polled.due {
             return Next::Hold;
         }
         let Some(leader) = s.actors.party.leader().map(|l| l.0) else {

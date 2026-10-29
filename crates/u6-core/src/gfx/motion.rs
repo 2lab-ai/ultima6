@@ -669,7 +669,9 @@ mod tests {
     /// such a copy, shows the live state's remembered cells as the engine's picture does
     /// ([`preview`], `SightMemory::shown_in`) is the real-data receipt
     /// `remembered_cells_slide_with_their_fade_and_the_early_picture_shows_them` (its
-    /// `early_bad`, `gfx/motion_real.rs`), which a copy keeping the store does not fail.
+    /// `early_bad`, `gfx/motion_real.rs`), which a copy keeping the store does not fail (seen in
+    /// round 12: with `RenderCache::clone` keeping the store, this test fails and that receipt
+    /// passes, every early picture's out-of-sight pixels as the engine's picture).
     #[test]
     fn a_copy_of_the_state_holds_no_remembered_sight() {
         let mut state = State::empty();

@@ -935,6 +935,7 @@ fn the_key_wait_symbol_names_the_paper_under_it() {
         code: SYMBOL + 5,
         ink: fb.palette[1],
         paper: fb.palette[2],
+        halftone: false,
     };
     assert_eq!(
         listed(&fb),

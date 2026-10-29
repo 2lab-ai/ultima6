@@ -360,6 +360,9 @@ const SYMBOL: u32 = 0x1_0000;
 /// Spec 11 Design 3 (rev 3), [`Game::hd_glyphs`]: the code of a space the player typed is this |
 /// 0x20.
 const TYPED: u32 = 0x2_0000;
+/// Spec 17 Presentation, [`Game::hd_glyphs`]: the code of a cell drawn half-toned (a disabled
+/// entry of the context menu) is this | its code ([`u6_render::hd::HdGlyph::halftone`]).
+const HALFTONE: u32 = 0x4_0000;
 
 /// A listed cell's code as [`Game::hd_glyphs`] gives it, from the compositor's
 /// ([`u6_render::hd::HdGlyph::code`]): a symbol's and a typed space's in their own ranges
@@ -545,9 +548,6 @@ pub struct Game {
     pointer_version: u64,
     /// Voices on ([`Game::set_voices`]): the engine's speech tap keeps what NPCs say.
     voices: bool,
-    /// Spec 17: the context-menu choice whose target press waits for its command to read the
-    /// target ([`Game::command_at`]).
-    run: Option<u6_core::ui::menu::Run>,
     /// Spec 19 O1b: per physical key held (its DOM `code`), each engine key its presses and
     /// repeats were queued as, so its release takes back those ([`Game::key_up`]); spec 19 O1c:
     /// with its first event's time and whether it walks.
@@ -563,6 +563,15 @@ pub struct Game {
     modifiers: bool,
     /// Spec 18: the remembered sight on ([`Game::set_sight_memory`]).
     sight_memory: bool,
+    /// Spec 17 Presentation: the frame rects the page shows something else over
+    /// ([`Game::set_menu_hidden`]).
+    menu_hidden: Vec<(i32, i32, i32, i32)>,
+    /// Spec 17: the page's presses that reached no frame pixel while events waited for the next
+    /// step ([`Game::dismiss_menu`]), each the index in `pending` it stands before.
+    dismissals: Vec<usize>,
+    /// Spec 17: the page's clock as a whole millisecond once the page gave one
+    /// ([`Game::set_clock`]), the context menu's double-click clock ([`Engine::set_wall_clock`]).
+    wall: Option<u64>,
     /// Spec 20: smooth motion ([`Game::set_motion`]).
     motion: Motion<Shot>,
     /// Spec 20 Design 5: the slide's layers over the HD frame ([`Game::slide`]).
@@ -609,12 +618,14 @@ impl Game {
             pointer_rgba: Vec::new(),
             pointer_version: 0,
             voices: false,
-            run: None,
             held: Vec::new(),
             last_step: None,
             clock: 0.0,
             modifiers: false,
             sight_memory: false,
+            menu_hidden: Vec::new(),
+            dismissals: Vec::new(),
+            wall: None,
             motion: Motion::new(),
             layers: SlideImages::default(),
         };
@@ -867,25 +878,33 @@ impl Game {
     }
 
     /// True while the command loop waits for a command key with nothing queued (A4-0x7a2c set,
-    /// no key pending): the prompt is up.
+    /// no key pending): the prompt is up. Not the context menu's gate (spec 17 round 4, opus N1:
+    /// kept apart, the page's `data-prompt` and its tests' waits read this): that one is spec 19's
+    /// command prompt ([`u6_core::engine::command_prompt`]: keys taken as commands, no
+    /// cross-hair or panel cursor up), so with the more prompt up or a cursor up this is true
+    /// while [`Game::context_menu`] gives `""` and a right press opens no menu.
     pub fn at_prompt(&self) -> bool {
         self.engine.as_ref().is_some_and(|e| {
             e.state().main.reading == 1 && e.io().pending_events() == 0 && self.pending.is_empty()
         })
     }
 
-    /// Spec 17: the context menu of a right press at frame pixel (x, y): `""` unless the prompt
-    /// is up ([`Game::at_prompt`], pointer moves queued since the last step let through) and the
-    /// pixel is on the map or on an inventory or equipment slot (Wide's included); else JSON
-    /// `{kind: "map"|"panel", cell: [x, y] | null, underlined: code | null, sections: [{object,
-    /// kind: [type, frame] | null, name, entries: [{code, enabled, reason, theft}]}]}`.
-    /// The name is the game's display name (the user's game text, for the page's menu only:
-    /// never logged or kept). Reads the game only ([`u6_core::ui::menu::query`]).
+    /// Spec 17: the context menu a right press at frame pixel (x, y) would open now: `""` unless
+    /// the engine's gate lets a right press after the page's queued events open one
+    /// ([`Engine::context_menu_gate`]: the command prompt up, nothing queued for the game but the
+    /// repeats it takes back, the events queued since the last step inert) and the pixel is on
+    /// the map or on an inventory or equipment slot (Wide's included); else JSON `{kind:
+    /// "map"|"panel", cell: [x, y] | null, underlined: code | null, sections: [{object, kind:
+    /// [type, frame] | null, entries: [{code, enabled, reason, theft}]}], go_here: {code,
+    /// enabled, reason, theft} | null}`: codes only, no names (the engine draws
+    /// the menu itself, `u6_core::ui::popup`). Reads the game only
+    /// ([`u6_core::ui::menu::query`]); the page's tests use it.
     pub fn context_menu(&self, x: i32, y: i32) -> String {
-        if !self.prompt_up() {
-            return String::new();
-        }
-        let Some(e) = &self.engine else {
+        let Some(e) = self
+            .engine
+            .as_ref()
+            .filter(|e| e.context_menu_gate(&self.pending))
+        else {
             return String::new();
         };
         let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
@@ -893,30 +912,118 @@ impl Game {
             .map_or_else(String::new, |m| menu_json(&m))
     }
 
-    /// Spec 17: runs context-menu entry `code` on the target at frame pixel (x, y) as the
-    /// original's mouse does: a left press and release on the command's icon now, and for a
-    /// command that reads a target (0x81..0x88) a left press and release at (x, y) once it reads
-    /// it ([`Game::step`]; dropped if the prompt comes back first). Rest and Combat (0x89, 0x8a)
-    /// are the icon press alone. No underline is written. False (nothing queued) unless the
-    /// prompt is up and `code` is one of those.
-    pub fn command_at(&mut self, code: u16, x: i32, y: i32) -> bool {
-        if !self.prompt_up() || !(0x81..=0x8a).contains(&code) {
-            return false;
+    /// Spec 17 Presentation: the context menu the engine has open and drawn in the frame, `""`
+    /// while none is: JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover, colours: [paper,
+    /// ink, heading], rows: [{kind: "head"|"entry"|"note", code: code | null, enabled, reason:
+    /// code | null, theft, y}]}`, the box with its frame and the text area in frame pixels, the
+    /// highlighted row's index, the colours its text area is drawn in (0xRRGGBB, the game's
+    /// palette now: the page's tests compare pixels with them and report counts), each row's
+    /// top pixel row; codes only ([`u6_core::Engine::context_menu`]).
+    pub fn menu_view(&self) -> String {
+        let Some(e) = self.engine.as_ref() else {
+            return String::new();
+        };
+        let Some(v) = e.context_menu() else {
+            return String::new();
+        };
+        let c = e.state().ui.tables.colours;
+        let palette = &e.screen_frame().palette;
+        let rgb = |i: u8| {
+            let c = palette[usize::from(i)];
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        };
+        view_json(&v, [rgb(c.paper), rgb(c.text), rgb(c.alert)])
+    }
+
+    /// Spec 17 Presentation: the frame rects the page shows something else over (in Wide its
+    /// windows over the map and the map's parts off the canvas; the canvas's parts off the
+    /// viewport and under the page's elements over it), as `rects` x, y, width, height in turn
+    /// (frame pixels; a rect with no area or a trailing part is left out): the engine's context
+    /// menu keeps off them where it can, one opened from then and one open now (laid out again at
+    /// once, [`Engine::set_context_menu_hidden`]). Kept for every game started after
+    /// ([`Game::menu_hidden`]).
+    pub fn set_menu_hidden(&mut self, rects: Vec<i32>) {
+        self.menu_hidden = rects
+            .chunks_exact(4)
+            .filter(|r| r[2] > 0 && r[3] > 0)
+            .map(|r| (r[0], r[1], r[0] + r[2] - 1, r[1] + r[3] - 1))
+            .collect();
+        if let Some(engine) = &mut self.engine {
+            engine.set_context_menu_hidden(self.menu_hidden.clone());
         }
-        let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        let Some(e) = &self.engine else {
+    }
+
+    /// Spec 17 Presentation: a press of the page's that reaches no frame pixel (off the canvas,
+    /// in the HD layout's gaps, on the letterbox) closes an open context menu, as a press outside
+    /// it in the frame does, in order with the events queued before it: while some wait for the
+    /// next step it closes the menu there, after them ([`Engine::tick_dismissing`]; a right press
+    /// queued just before opens the menu at that step, which it then closes), and returns false;
+    /// else at once, true when one was open (the frame without it composed). Nothing reaches the
+    /// game.
+    pub fn dismiss_menu(&mut self) -> bool {
+        let Some(engine) = &mut self.engine else {
             return false;
         };
-        let start = u6_core::ui::menu::Run::start(&e.state(), code, (word(x), word(y)));
-        let icon = match start {
-            Some((icon, run)) => {
-                self.run = Some(run);
-                icon
-            }
-            None => u6_core::ui::menu::icon_press(code),
-        };
-        self.pending.extend(icon);
-        true
+        if self.pending.is_empty() {
+            return engine.dismiss_context_menu();
+        }
+        self.dismissals.push(self.pending.len());
+        false
+    }
+
+    /// Spec 17 Presentation: the frame rects the engine keeps its context menu off now
+    /// ([`Engine::context_menu_hidden`], as the page last gave them, [`Game::set_menu_hidden`]),
+    /// x, y, width, height in turn: what reached the engine, for the page's tests (the page's own
+    /// `__u6Layout.hidden` is computed afresh); none without a game.
+    pub fn menu_hidden(&self) -> Vec<i32> {
+        self.engine.as_ref().map_or_else(Vec::new, |e| {
+            e.context_menu_hidden()
+                .iter()
+                .flat_map(|&(x0, y0, x1, y1)| [x0, y0, x1 - x0 + 1, y1 - y0 + 1])
+                .collect()
+        })
+    }
+
+    /// Spec 17: how many times "Go here" asked travel ([`Engine::travel_to`], spec 21), counted
+    /// from the start; 0 before one (counts only: no cell).
+    pub fn go_here_asked(&self) -> u32 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| e.go_here_asked().asked.len() as u32)
+    }
+
+    /// Spec 17 (round 2): the presses the engine let through to the game (button-down edges of
+    /// the pointer events it queued for it, the context menu's own and those the message history
+    /// takes left out, [`Engine::game_presses`]), counted from the start; 0 before one. With
+    /// [`Game::game_buttons`] the page's tests see a press and its release within one step.
+    pub fn game_presses(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.game_presses() as f64)
+    }
+
+    /// Spec 17 (round 2): the key events (presses, repeats, releases) the engine let through to
+    /// the game, the context menu's own left out, counted from the start; 0 before one.
+    pub fn game_keys(&self) -> f64 {
+        self.engine.as_ref().map_or(0.0, |e| e.game_keys() as f64)
+    }
+
+    /// Spec 17 (round 2): the lines the game's message scroll holds now (a count; a command
+    /// that prints, as Look, adds to it); 0 before a start.
+    pub fn message_lines(&self) -> f64 {
+        self.engine
+            .as_ref()
+            .map_or(0.0, |e| e.state().ui.messages.len() as f64)
+    }
+
+    /// The pointer's buttons as the game's input handler has them (bit 0 left, bit 1 right): the
+    /// last pointer event the engine queued for the game ([`u6_core::Io::handler_pointer`]),
+    /// which the context menu's own presses never reach; 0 before a start. The page's tests read
+    /// what the game took with it.
+    pub fn game_buttons(&self) -> u8 {
+        self.engine
+            .as_ref()
+            .map_or(0, |e| e.io().handler_pointer().buttons & 3)
     }
 
     /// Port (spec 21): the travel of a right press's "move here": the party walks to map cell
@@ -1031,7 +1138,6 @@ impl Game {
     /// the previous one: the engine's log taken, the sound machine given the game's calls, the
     /// queue emptied. The RGBA frame is left as it was ([`Game::present`]).
     pub fn step(&mut self, ms: u32) {
-        self.step_run();
         let due = self.held_due();
         if let Some(engine) = &mut self.engine {
             // Spec 19 O1c: a held direction key is pressed again at the command prompt, at most
@@ -1042,7 +1148,16 @@ impl Game {
                 self.pending.push(press);
             }
             let takes = engine.prompt_takes();
-            engine.tick(&self.pending, ms);
+            if let Some(wall) = self.wall {
+                engine.set_wall_clock(wall);
+            }
+            // Spec 21 S3: a travel steps as a held arrow does, at most once a `MIN_STEP_MS` on the
+            // page's clock from the press the prompt last took (its own key is one); until the
+            // page gives a clock ([`Game::set_clock`]), at every prompt, as a headless run.
+            let min = f64::from(u6_core::engine::MIN_STEP_MS);
+            let paced = self.wall.is_some();
+            engine.set_travel_due(!paced || self.last_step.is_none_or(|t| self.clock - t >= min));
+            engine.tick_dismissing(&self.pending, &self.dismissals, ms);
             if engine.prompt_takes() != takes {
                 self.last_step = Some(self.clock);
             }
@@ -1053,6 +1168,7 @@ impl Game {
             self.handed = last_buttons(&self.pending).unwrap_or(self.handed);
         }
         self.pending.clear();
+        self.dismissals.clear();
     }
 
     /// Converts the engine's frame into the RGBA frame ([`Game::frame_ptr`]) when it changed
@@ -1146,7 +1262,10 @@ impl Game {
     /// the player typed (a run goes on across it whatever the spaces beside it); [`SYMBOL`] | its
     /// glyph (a code of the game's font), a symbol the game drew over the paper (the key wait's
     /// cursor, the more prompt's mark), its cell the paper in the HD frame and its pixels in
-    /// [`Game::hd_symbol_rows`]. Empty while HD or the HD font is off. The list changes only
+    /// [`Game::hd_symbol_rows`]; spec 17, [`HALFTONE`] | a letter's or a space's code, the cell
+    /// drawn half-toned (a disabled entry of the context menu: the page draws its HD glyph as a
+    /// checker at the HD pixel grid, half its pixels the paper). Empty while HD or the HD font is
+    /// off. The list changes only
     /// with every block of the cells it adds, drops or changes written, so with
     /// [`Game::frame_version`] moved and those cells in the rect of [`Game::hd_take_dirty`].
     pub fn hd_glyphs(&self) -> Vec<u32> {
@@ -1158,7 +1277,7 @@ impl Game {
                 [
                     u32::from(g.x),
                     u32::from(g.y),
-                    listed_code(g.code),
+                    listed_code(g.code) | if g.halftone { HALFTONE } else { 0 },
                     rgb(g.ink),
                     rgb(g.paper),
                 ]
@@ -1206,21 +1325,22 @@ impl Game {
 
     /// The game's pointer, for the page to tell whether it lies under the system's (index.html
     /// hides the system's there): `[x, y, shown, queued, qx, qy]`. (x, y), the frame pixel the
-    /// engine placed its sprite at in the last step: the input handler's pointer
-    /// ([`u6_core::Io::handler_pointer`], the VBlank server's, which no other call moves);
-    /// `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the pointer not hidden:
-    /// 0x1622d6 parks a hidden one below the frame), else 0, in any program and with HD on or
-    /// off. `queued` 1 while a pointer event waits for the next step (the page's
-    /// [`Game::pointer`], a context-menu entry's [`Game::command_at`]), (qx, qy) the last one's
-    /// pixel as queued; else 0, 0, 0. The queue is as of now: a context-menu entry's target
-    /// press joins it only at the step that runs it ([`Game::step`]), after what was queued
-    /// before, so (qx, qy) is where the sprite goes at the next step but for that press, which
-    /// the next read after that step shows. All 0 before a start.
+    /// engine placed its sprite at in the last step or since ([`Engine::pointer_at`]): the
+    /// context menu's while it takes the pointer's events (spec 17: its arrow over the open menu),
+    /// else the input handler's ([`u6_core::Io::handler_pointer`], the VBlank server's, which no
+    /// other call moves); `shown` 1 while the sprite is drawn there ([`Engine::sprite`], the
+    /// pointer not hidden: 0x1622d6 parks a hidden one below the frame), else 0, in any program
+    /// and with HD on or off. `queued` 1 while a pointer event of the page's waits for the next
+    /// step ([`Game::pointer`]), (qx, qy) the last one's pixel as queued; else 0, 0, 0. The queue
+    /// is as of now: the presses of a context-menu entry chosen at the next step are the engine's
+    /// own, given the game at that step after what was queued before, so (qx, qy) is where the
+    /// sprite goes at the next step but for them, which the next read after that step shows. All
+    /// 0 before a start.
     pub fn game_pointer(&self) -> Vec<i32> {
         let Some(e) = &self.engine else {
             return vec![0; 6];
         };
-        let at = e.io().handler_pointer();
+        let at = e.pointer_at();
         let shown = e.sprite().is_some() && e.state().ui.pointer.shown;
         let queued = self.pending.iter().rev().find_map(|ev| match *ev {
             InputEvent::Pointer { x, y, .. } => Some((x, y)),
@@ -1496,6 +1616,8 @@ impl Game {
     pub fn set_clock(&mut self, now: f64) {
         if now.is_finite() {
             self.clock = now;
+            // Spec 17: the context menu's double click is timed on the page's clock too.
+            self.wall = Some(now.max(0.0) as u64);
         }
     }
 
@@ -1524,7 +1646,9 @@ impl Game {
     /// as DOM `buttons`. Ignored before the game starts.
     pub fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         if self.engine.is_some() {
-            queue_pointer(&mut self.pending, self.handed, x, y, buttons);
+            // A move after a queued dismissal stays after it.
+            let kept = self.dismissals.last().copied().unwrap_or(0);
+            queue_pointer(&mut self.pending, kept, self.handed, x, y, buttons);
         }
     }
 
@@ -1793,6 +1917,18 @@ impl Game {
         self.rgba.clone()
     }
 
+    /// Spec 17 (round 2, tests): the engine's published frame (the screen as the game drew it:
+    /// no context menu, no pointer sprite) as RGBA8, `width * height * 4` bytes, a copy; empty
+    /// before a start. With [`Game::frame_rgba`] a test tells where the game's own screen changed
+    /// from what the menu left behind.
+    pub fn published_rgba(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.engine {
+            e.published_frame().write_rgba(&mut out);
+        }
+        out
+    }
+
     /// Address of the current RGBA8 frame inside wasm memory. Views over it are
     /// invalidated when memory grows; re-create them every frame.
     pub fn frame_ptr(&self) -> *const u8 {
@@ -1805,51 +1941,6 @@ impl Game {
 }
 
 impl Game {
-    /// Spec 17: the engine's queue is empty and the page's holds nothing the game reads as an
-    /// event: the moves of a button-less pointer change nothing it reads, and a key's release is
-    /// applied where the engine queues the input, never one of its events
-    /// ([`InputEvent::Release`]).
-    fn quiet(&self) -> bool {
-        let inert = |ev: &InputEvent| match ev {
-            InputEvent::Pointer { buttons, .. } => buttons & 3 == 0,
-            InputEvent::Release(_) => true,
-            _ => false,
-        };
-        self.engine
-            .as_ref()
-            .is_some_and(|e| e.io().pending_events() == 0)
-            && self.pending.iter().all(inert)
-    }
-
-    /// Spec 17: [`Game::at_prompt`] with the moves of a button-less pointer and the key releases
-    /// queued since the last step let through ([`Game::quiet`]): a right press just after either
-    /// still gets its menu.
-    fn prompt_up(&self) -> bool {
-        self.quiet()
-            && self
-                .engine
-                .as_ref()
-                .is_some_and(|e| e.state().main.reading == 1)
-    }
-
-    /// Spec 17: the held target press of [`Game::command_at`] before a tick: queued once its
-    /// command reads the target with the queues quiet ([`Game::quiet`]), dropped once a new
-    /// prompt read came, whatever is queued ([`u6_core::ui::menu::Run::step`]).
-    fn step_run(&mut self) {
-        let (Some(run), Some(e)) = (self.run, &self.engine) else {
-            return;
-        };
-        let step = run.step(&e.state(), self.quiet());
-        match step {
-            u6_core::ui::menu::Step::Hold => {}
-            u6_core::ui::menu::Step::Release(press) => {
-                self.pending.extend(press);
-                self.run = None;
-            }
-            u6_core::ui::menu::Step::Drop => self.run = None,
-        }
-    }
-
     /// [`Game::load_file`] without the JS error type.
     fn collect(&mut self, path: &str, data: Vec<u8>) -> Result<(), String> {
         let total = self.input_bytes.saturating_add(data.len());
@@ -2077,6 +2168,9 @@ impl Game {
     /// converted and, with HD on, composed whole (its versions start again at 0).
     fn put_on_screen(&mut self, mut engine: Engine) {
         engine.set_speech(self.voices);
+        // Spec 17: the page's right press opens the engine's context menu.
+        engine.set_context_menu(true);
+        engine.set_context_menu_hidden(self.menu_hidden.clone());
         engine.io().set_sight_memory(self.sight_memory);
         engine.set_motion(self.motion.on);
         self.motion.presenter.clear();
@@ -2090,6 +2184,7 @@ impl Game {
         self.audio = None;
         self.engine = Some(engine);
         self.pending.clear();
+        self.dismissals.clear();
         self.handed = 0;
         self.held.clear();
         self.last_step = None;
@@ -2128,10 +2223,19 @@ impl Game {
     /// Spec 20: hands the presenter the engine's publications since the last present; the slides
     /// as drawn at the presentation clock while one runs. A scene that snaps drops the layers the
     /// page holds as the base of the next changes: the next layers come whole.
+    ///
+    /// Spec 20 with spec 17: while a context menu is open ([`Engine::context_menu_open`]) no slide
+    /// runs. One running when the menu opens, or started under it, ends at once
+    /// ([`Presenter::foreign`]: a snap, not a publication; the presenter keeps the scene it
+    /// shows), so the page shows the engine's frame with the menu: the menu is never drawn over a
+    /// moving map, nor a moving map under it, and nothing slides on once it closes.
     fn slide_view(&mut self) -> Option<View> {
         let engine = self.engine.as_mut()?;
         let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
-        let view = self.motion.take(engine, self.pacer.pace_rate(), t);
+        let mut view = self.motion.take(engine, self.pacer.pace_rate(), t);
+        if engine.context_menu_open() && view.take().is_some() {
+            self.motion.presenter.foreign();
+        }
         // After a scene that snaps no change is made against layers made before it: after a load
         // the remembered sight's copies are forgotten and their sources named again by others. A
         // dissolve's or an XOR plot's snap drops them too, so the next layers come whole.
@@ -2350,7 +2454,8 @@ impl SlideImages {
             .collect();
         self.made += 1;
         self.pending = slide.as_ref().and_then(|s| {
-            let (statics, frame) = (s.parts.first()?, s.parts.get(1)?);
+            let part = |role| s.parts.iter().find(|p| p.role == role);
+            let (statics, frame) = (part(Role::Static)?, part(Role::Frame)?);
             Some(Kept {
                 made: self.made,
                 hd: version,
@@ -2531,8 +2636,16 @@ fn last_buttons(events: &[InputEvent]) -> Option<u8> {
 /// at once anyway): the event queued last is a pointer event with the new one's buttons, and the
 /// pointer had them before it too (the pointer event queued before it, else `handed`, the last
 /// one the engine was handed). A press or a release is never replaced, so it stays where its own
-/// event put it, and the moves after it follow it.
-fn queue_pointer(pending: &mut Vec<InputEvent>, handed: u8, x: i32, y: i32, buttons: u8) {
+/// event put it, and the moves after it follow it. Spec 17: nor is one of the first `kept` (a
+/// dismissal of the menu stands after them, [`Game::dismiss_menu`]).
+fn queue_pointer(
+    pending: &mut Vec<InputEvent>,
+    kept: usize,
+    handed: u8,
+    x: i32,
+    y: i32,
+    buttons: u8,
+) {
     let word = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
     let buttons = buttons & 3;
     let ev = InputEvent::Pointer {
@@ -2540,7 +2653,9 @@ fn queue_pointer(pending: &mut Vec<InputEvent>, handed: u8, x: i32, y: i32, butt
         y: word(y),
         buttons,
     };
-    if let Some((InputEvent::Pointer { buttons: last, .. }, before)) = pending.split_last() {
+    if pending.len() > kept
+        && let Some((InputEvent::Pointer { buttons: last, .. }, before)) = pending.split_last()
+    {
         let before = last_buttons(before).unwrap_or(handed);
         if *last == buttons && before == buttons {
             pending.pop();
@@ -2601,26 +2716,69 @@ fn menu_json(m: &u6_core::ui::menu::Menu) -> String {
             .kind
             .map_or_else(|| "null".to_string(), |(t, f)| format!("[{t},{f}]"));
         out.push_str(&format!(
-            "{{\"object\":{},\"kind\":{kind},\"name\":",
+            "{{\"object\":{},\"kind\":{kind},\"entries\":[",
             section.object
         ));
-        json_string(&mut out, &section.name);
-        out.push_str(",\"entries\":[");
         for (j, e) in section.entries.iter().enumerate() {
             if j > 0 {
                 out.push(',');
             }
-            let reason = e
-                .reason
-                .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
-            out.push_str(&format!(
-                "{{\"code\":{},\"enabled\":{},\"reason\":{reason},\"theft\":{}}}",
-                e.code,
-                e.enabled(),
-                e.theft
-            ));
+            out.push_str(&entry_json(e));
         }
         out.push_str("]}");
+    }
+    let go_here = m
+        .go_here
+        .as_ref()
+        .map_or_else(|| "null".to_string(), entry_json);
+    out.push_str(&format!("],\"go_here\":{go_here}}}"));
+    out
+}
+
+/// One entry of [`menu_json`]: `{code, enabled, reason, theft}`.
+fn entry_json(e: &u6_core::ui::menu::Entry) -> String {
+    let reason = e
+        .reason
+        .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
+    format!(
+        "{{\"code\":{},\"enabled\":{},\"reason\":{reason},\"theft\":{}}}",
+        e.code,
+        e.enabled(),
+        e.theft
+    )
+}
+
+/// [`Game::menu_view`]'s JSON for `v`.
+fn view_json(v: &u6_core::ui::popup::View, [paper, ink, head]: [u32; 3]) -> String {
+    use u6_core::ui::popup::RowKind;
+    let wh = |(x0, y0, x1, y1): (i32, i32, i32, i32)| {
+        format!("[{x0},{y0},{},{}]", x1 - x0 + 1, y1 - y0 + 1)
+    };
+    let mut out = format!(
+        "{{\"rect\":{},\"text\":{},\"hover\":{},\"colours\":[{paper},{ink},{head}],\"rows\":[",
+        wh(v.rect),
+        wh(v.text),
+        v.hover
+    );
+    for (i, r) in v.rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let kind = match r.kind {
+            RowKind::Head => "head",
+            RowKind::Entry => "entry",
+            RowKind::Note => "note",
+        };
+        let code = r.code.map_or_else(|| "null".to_string(), |c| c.to_string());
+        let reason = r
+            .reason
+            .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", r.code()));
+        out.push_str(&format!(
+            "{{\"kind\":\"{kind}\",\"code\":{code},\"enabled\":{},\"reason\":{reason},\"theft\":{},\"y\":{}}}",
+            r.enabled(),
+            r.theft,
+            r.y
+        ));
     }
     out.push_str("]}");
     out
@@ -2654,19 +2812,25 @@ mod tests {
     fn pointer_moves_collapse_and_button_changes_queue() {
         let mut q = Vec::new();
         let p = |x, y, buttons| InputEvent::Pointer { x, y, buttons };
-        queue_pointer(&mut q, 0, 10, 10, 0);
-        queue_pointer(&mut q, 0, 20, 30, 0);
-        queue_pointer(&mut q, 0, 20, 30, 1);
-        queue_pointer(&mut q, 0, 21, 31, 5);
-        queue_pointer(&mut q, 0, 21, 31, 0);
+        queue_pointer(&mut q, 0, 0, 10, 10, 0);
+        queue_pointer(&mut q, 0, 0, 20, 30, 0);
+        queue_pointer(&mut q, 0, 0, 20, 30, 1);
+        queue_pointer(&mut q, 0, 0, 21, 31, 5);
+        queue_pointer(&mut q, 0, 0, 21, 31, 0);
         assert_eq!(q, [p(20, 30, 0), p(20, 30, 1), p(21, 31, 1), p(21, 31, 0)]);
         q.push(InputEvent::Key(Key::Space));
-        queue_pointer(&mut q, 0, 99_999, -99_999, 2);
+        queue_pointer(&mut q, 0, 0, 99_999, -99_999, 2);
         assert_eq!(
             q.last(),
             Some(&p(i16::MAX, i16::MIN, 2)),
             "a key in between keeps both"
         );
+        // A move right after one a dismissal stands after (spec 17: `kept`) is queued after it.
+        let n = q.len();
+        queue_pointer(&mut q, n, 0, 7, 7, 2);
+        assert_eq!(q.len(), n + 1, "kept: not replaced");
+        queue_pointer(&mut q, n, 0, 8, 8, 2);
+        assert_eq!(q[n..], [p(8, 8, 2)], "past it: replaced as before");
         let mut game = Game::new();
         game.pointer(5, 5, 1);
         assert!(game.pending.is_empty(), "no game, nothing queued");
@@ -2681,7 +2845,7 @@ mod tests {
         let queued = |handed: u8, events: &[(i32, i32, u8)]| {
             let mut q = Vec::new();
             for &(x, y, b) in events {
-                queue_pointer(&mut q, handed, x, y, b);
+                queue_pointer(&mut q, 0, handed, x, y, b);
             }
             q
         };
@@ -6312,7 +6476,7 @@ mod tests {
 
     /// A display frame of the page: a step of the engine, the present, the page's take; the hook
     /// `between` runs after the present and before the take.
-    fn page_frame(
+    fn take_frame(
         game: &mut Game,
         page: &mut Page,
         between: &mut dyn FnMut(&mut Game, &mut Page),
@@ -6358,7 +6522,7 @@ mod tests {
             seen.taken_in.push(0);
             for f in 0..frames {
                 let taken = page.held.as_ref().map(|h| h.0);
-                let drawn = page_frame(game, page, &mut |g: &mut Game, p: &mut Page| {
+                let drawn = take_frame(game, page, &mut |g: &mut Game, p: &mut Page| {
                     let before = (g.slide_layers_version(), g.slide_version());
                     act(n, f, g, p);
                     // New layers at the same places (made in the case's present) are a new slide
@@ -7037,22 +7201,26 @@ mod tests {
         );
     }
 
-    /// Spec 17: before a start there is no context menu and no entry runs (nothing queued).
+    /// Spec 17: before a start there is no context menu, none drawn, and the game holds no button.
     #[test]
-    fn before_a_start_there_is_no_context_menu_and_no_entry_runs() {
+    fn before_a_start_there_is_no_context_menu() {
         let mut game = Game::new();
         let (x, y) = hero_point();
         assert_eq!(game.context_menu(x, y), "");
-        assert!(!game.command_at(0x88, x, y));
-        assert!(game.pending.is_empty() && game.run.is_none());
+        game.pointer(x, y, 2);
+        game.step(20);
+        assert_eq!(game.menu_view(), "");
+        assert_eq!(game.game_buttons(), 0);
+        assert!(game.pending.is_empty());
+        assert!(game.published_rgba().is_empty(), "no published frame");
     }
 
     /// Spec 17: the context menu's JSON: its kind, cell, underlined command and sections, each
-    /// entry's code, whether it can run, its reason's code and the theft mark; the name as a JSON
-    /// string (made-up names here).
+    /// entry's code, whether it can run, its reason's code and the theft mark, and Go here; no
+    /// names (the section's name never appears).
     #[test]
     fn the_context_menus_json() {
-        use u6_core::ui::menu::{Entry, Kind, Menu, Reason, Section};
+        use u6_core::ui::menu::{Entry, GO_HERE, Kind, Menu, Reason, Section};
         let entry = |code, reason, theft| Entry {
             code,
             reason,
@@ -7071,69 +7239,219 @@ mod tests {
                     entry(0x85, None, true),
                 ],
             }],
+            go_here: Some(entry(GO_HERE, Some(Reason::Unreachable), false)),
         };
         assert_eq!(
             menu_json(&map),
-            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"kind":[128,2],"name":"a \"b\"","entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}]}"#
+            r#"{"kind":"map","cell":[3,-1],"underlined":136,"sections":[{"object":300,"kind":[128,2],"entries":[{"code":136,"enabled":false,"reason":"far","theft":false},{"code":133,"enabled":true,"reason":null,"theft":true}]}],"go_here":{"code":256,"enabled":false,"reason":"unreachable","theft":false}}"#
         );
         let panel = Menu {
             kind: Kind::Panel,
             cell: None,
             underlined: None,
             sections: Vec::new(),
+            go_here: None,
         };
         assert_eq!(
             menu_json(&panel),
-            r#"{"kind":"panel","cell":null,"underlined":null,"sections":[]}"#
+            r#"{"kind":"panel","cell":null,"underlined":null,"sections":[],"go_here":null}"#
         );
     }
 
-    /// Spec 17, on the user's zip (skipped when absent; read only): at the prompt a right press
-    /// on the hero (the view's centre cell, [`cell_point`], so in either build's layout) has a
-    /// map menu with Look, also with a pointer move queued since the last step;
-    /// `command_at` Look there queues the icon press and,
-    /// once Look reads its target, the press on the hero (Look then shows the portrait and waits
-    /// for a key: no prompt); with no prompt it refuses. A key gets the prompt back.
+    /// Spec 17 Presentation: the drawn menu's JSON: the box and the text area as x, y, width,
+    /// height, the highlighted row, each row's kind, code, whether it runs, reason, theft mark and
+    /// top pixel row.
     #[test]
-    #[allow(clippy::disallowed_methods)] // tests may read files
-    fn command_at_runs_look_on_the_hero_through_the_target_read() {
-        if !std::path::Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
-            return;
-        }
-        let mut game = Game::new();
-        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
-            .quiet();
-        game.boot(1, true).quiet();
-        let prompt = |game: &mut Game| {
-            for _ in 0..3000 {
-                if game.at_prompt() {
-                    return true;
-                }
-                game.step(20);
-            }
-            false
+    fn the_drawn_menus_json() {
+        use u6_core::ui::menu::Reason;
+        use u6_core::ui::popup::{RowKind, RowView, View};
+        let row = |kind, code, reason, theft, y| RowView {
+            kind,
+            code,
+            reason,
+            theft,
+            y,
         };
-        assert!(prompt(&mut game), "the prompt");
+        let v = View {
+            rect: (35, 51, 100, 84),
+            text: (40, 56, 95, 79),
+            hover: 1,
+            rows: vec![
+                row(RowKind::Head, None, None, false, 56),
+                row(RowKind::Entry, Some(0x85), None, true, 64),
+                row(RowKind::Note, None, None, false, 72),
+            ],
+        };
+        assert_eq!(
+            view_json(&v, [0x10_2030, 0x40_5060, 0xff_0001]),
+            r#"{"rect":[35,51,66,34],"text":[40,56,56,24],"hover":1,"colours":[1056816,4214880,16711681],"rows":[{"kind":"head","code":null,"enabled":false,"reason":null,"theft":false,"y":56},{"kind":"entry","code":133,"enabled":true,"reason":null,"theft":true,"y":64},{"kind":"note","code":null,"enabled":false,"reason":null,"theft":false,"y":72}]}"#
+        );
+        let off = View {
+            rows: vec![row(
+                RowKind::Entry,
+                Some(0x88),
+                Some(Reason::Far),
+                false,
+                64,
+            )],
+            ..v
+        };
+        assert!(view_json(&off, [0; 3]).contains(r#""enabled":false,"reason":"far""#));
+    }
+
+    /// Presses the pointer's `buttons` at (x, y) and lets them go, a step after each.
+    fn click(game: &mut Game, (x, y): (i32, i32), buttons: u8) {
+        game.pointer(x, y, buttons);
+        game.step(20);
+        game.pointer(x, y, 0);
+        game.step(20);
+    }
+
+    /// The engine's open context menu, if one is drawn.
+    fn drawn(game: &Game) -> Option<u6_core::ui::popup::View> {
+        game.engine.as_ref()?.context_menu()
+    }
+
+    /// The frame pixel of row `i`'s label (the text area's second column, the row's middle).
+    fn row_point(v: &u6_core::ui::popup::View, i: usize) -> (i32, i32) {
+        (v.text.0 + 12, v.rows[i].y + 4)
+    }
+
+    /// The row of the drawn menu `v` with entry `code`.
+    fn row_of(v: &u6_core::ui::popup::View, code: u16) -> Option<usize> {
+        v.rows.iter().position(|r| r.code == Some(code))
+    }
+
+    /// Spec 17 Acceptance 8, on the user's zip (skipped when absent): at the prompt a right press
+    /// on the hero ([`hero_point`], the view's centre cell, either build's layout) opens the menu
+    /// in the frame: its box's pixels differ from the published frame's, every pixel outside it is
+    /// the published frame's; the game took no button, also with the right button held and
+    /// moved over the map; Look is offered and a left press on it runs it through its target read
+    /// (Look then shows the portrait and waits for a key: no prompt), the menu closed. A key
+    /// gets the prompt back.
+    #[test]
+    fn a_right_press_opens_the_drawn_menu_and_look_runs_through_the_target_read() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
         let (hx, hy) = hero_point();
-        let menu = game.context_menu(hx, hy);
-        assert!(
-            menu.starts_with(r#"{"kind":"map""#) && menu.contains(r#""code":132,"enabled":true"#)
+        let at = game.leader_position();
+        let presses = game.game_presses();
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        let v = drawn(&game).expect("the menu open");
+        let still = |game: &Game, what: &str| {
+            assert_eq!(game.game_buttons(), 0, "{what}: the game holds no button");
+            assert_eq!(
+                game.game_presses(),
+                presses,
+                "{what}: no press reached the game"
+            );
+            assert_eq!(game.leader_position(), at, "{what}: no walk");
+        };
+        still(&game, "the opening step");
+        // Held and moved over the map, the page pacing its steps as it does with a button held
+        // (Game::pace reads it held, spec 06): each step the game holds no button, no walk.
+        for (x, y) in [(hx + 20, hy), (hx + 20, hy + 20), (hx - 30, hy)] {
+            game.pointer(x, y, 2);
+            assert!(game.pointer_held(), "the page's button held");
+            let k = game.pace(40.0).max(1);
+            for _ in 0..k {
+                game.step(20);
+                still(&game, "a held move");
+            }
+            game.ran(k);
+            // K3 merge note 7: the page's game pointer is the menu's while it takes the pointer.
+            let gp = game.game_pointer();
+            assert_eq!(
+                (gp[0], gp[1], gp[2], gp[3]),
+                (x, y, 1, 0),
+                "game_pointer: the menu's, drawn, nothing queued"
+            );
+        }
+        game.pointer(hx - 30, hy, 0);
+        game.step(20);
+        still(&game, "the release");
+        assert_eq!(
+            game.game_buttons(),
+            0,
+            "the held right button gave the game nothing"
         );
-        let (mx, my) = cell_point(HALF_W as i32 + 2, HALF_H as i32 + 2);
-        game.pointer(mx, my, 0);
-        let after_a_move = game.context_menu(hx, hy);
-        assert!(after_a_move == menu, "a pointer move queued: the same menu");
-        assert!(game.command_at(0x84, hx, hy));
         assert!(
-            !game.command_at(0x84, hx, hy),
-            "no prompt with the icon queued"
+            game.at_prompt() && drawn(&game).is_some(),
+            "open, the prompt up"
         );
-        let mut read = false;
+        {
+            let e = game.engine.as_ref().quiet();
+            let (screen, published) = (e.screen_frame(), e.published_frame());
+            let (x0, y0, x1, y1) = v.rect;
+            let (mut inside, mut differ, mut outside) = (0, 0, 0);
+            for y in 0..u6_render::HEIGHT {
+                for x in 0..u6_render::WIDTH {
+                    let (a, b) = (screen.get(x, y), published.get(x, y));
+                    let (xi, yi) = (x as i32, y as i32);
+                    if (x0..=x1).contains(&xi) && (y0..=y1).contains(&yi) {
+                        inside += 1;
+                        differ += usize::from(a != b);
+                    } else {
+                        outside += usize::from(a != b);
+                    }
+                }
+            }
+            println!("box pixels {inside}, differing {differ}; outside differing {outside}");
+            assert!(differ * 2 > inside, "the menu drawn in its box");
+            assert_eq!(outside, 0, "the frame outside the box as published");
+        }
+        game.present();
+        let mut want = Vec::new();
+        game.engine
+            .as_ref()
+            .quiet()
+            .published_frame()
+            .write_rgba(&mut want);
+        assert_eq!(
+            game.published_rgba(),
+            want,
+            "Game::published_rgba: the published frame"
+        );
+        // The menu in the frame only (round 2b, opus NIT 5): the frame differs from the published
+        // one in most of the menu's box, and outside it only under the pointer's sprite.
+        {
+            let (frame, published) = (game.frame_rgba(), game.published_rgba());
+            let sprite = game.engine.as_ref().quiet().sprite().cloned();
+            let under_sprite = |x: i32, y: i32| {
+                sprite.as_ref().is_some_and(|sp| {
+                    let (sx, sy) = (i32::from(sp.x), i32::from(sp.y));
+                    (sx..sx + 16).contains(&x) && (sy..sy + sp.rows.len() as i32).contains(&y)
+                })
+            };
+            let (x0, y0, x1, y1) = v.rect;
+            let (mut boxed, mut differ, mut outside) = (0, 0, 0);
+            for y in 0..u6_render::HEIGHT as i32 {
+                for x in 0..u6_render::WIDTH as i32 {
+                    let i = (y as usize * u6_render::WIDTH + x as usize) * 4;
+                    let d = frame[i..i + 3] != published[i..i + 3];
+                    if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                        boxed += 1;
+                        differ += usize::from(d);
+                    } else if !under_sprite(x, y) {
+                        outside += usize::from(d);
+                    }
+                }
+            }
+            println!(
+                "RGBA frame: {differ} of {boxed} box pixels differ; outside, off the sprite, {outside}"
+            );
+            assert!(differ * 2 > boxed, "the menu in the RGBA frame's box");
+            assert_eq!(outside, 0, "outside the box only the sprite differs");
+        }
+        let look = row_of(&v, 0x84).expect("Look offered");
+        assert!(v.rows[look].enabled(), "Look can run");
+        click(&mut game, row_point(&v, look), 1);
+        assert!(drawn(&game).is_none(), "chosen: closed");
         for _ in 0..200 {
             game.step(20);
-            if game.run.is_none() {
-                read = !game.at_prompt();
+            if !game.at_prompt() {
                 break;
             }
         }
@@ -7141,11 +7459,223 @@ mod tests {
             game.step(20);
         }
         assert!(
-            read && !game.at_prompt(),
+            !game.at_prompt(),
             "Look read its target and waits on the portrait"
         );
+        {
+            let e = game.engine.as_ref().quiet();
+            let input = &e.state().ui.input;
+            assert!(
+                !e.context_menu_waits(),
+                "the target press went in: no run held"
+            );
+            assert_eq!(e.io().pending_events(), 0, "and the game took it: consumed");
+            assert!(input.in_wait, "the portrait's key wait");
+        }
         game.key_down("Space", " ", false, 0.0);
-        assert!(prompt(&mut game), "the prompt again");
+        assert!(steps_to_prompt(&mut game), "the prompt again");
+    }
+
+    /// Spec 17 Acceptance 6, on the user's zip: Escape and a left press outside the box close the
+    /// menu; neither the game's key nor its button sees them, no line is printed and the hero
+    /// stays (no turn passed). The press outside is the menu's to its release.
+    #[test]
+    fn escape_and_a_press_outside_close_the_menu_and_give_the_game_nothing() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        let at = game.leader_position();
+        let lines = |g: &Game| g.engine.as_ref().quiet().state().ui.messages.len();
+        let before = lines(&game);
+        click(&mut game, (hx, hy), 2);
+        assert!(drawn(&game).is_some(), "open");
+        assert!(game.key_down("Escape", "Escape", false, 0.0));
+        game.step(20);
+        assert!(game.key_repeat("Escape", "Escape", false, 0.0));
+        game.step(20);
+        assert!(game.key_up("Escape"));
+        for _ in 0..30 {
+            game.step(20);
+        }
+        assert!(drawn(&game).is_none(), "Escape closed it");
+        assert!(game.at_prompt(), "the prompt still up");
+        click(&mut game, (hx, hy), 2);
+        let v = drawn(&game).expect("open again");
+        let (sx0, sy0, ..) = u6_core::geom::SHOWN;
+        let out = (i32::from(sx0) + 2, i32::from(sy0) + 2);
+        assert!(
+            !(v.rect.0..=v.rect.2).contains(&out.0) || !(v.rect.1..=v.rect.3).contains(&out.1),
+            "the press point outside the box"
+        );
+        game.pointer(out.0, out.1, 1);
+        game.step(20);
+        assert_eq!(game.game_buttons(), 0, "the press outside: not the game's");
+        game.pointer(out.0, out.1, 0);
+        for _ in 0..30 {
+            game.step(20);
+        }
+        assert!(drawn(&game).is_none(), "closed");
+        assert_eq!(lines(&game), before, "no line printed");
+        assert_eq!(game.leader_position(), at, "the hero where he was");
+        assert!(game.at_prompt(), "the prompt up");
+    }
+
+    /// One display frame of the page's loop at its clock `t` (wall ms) after `dt`: the clock
+    /// given, then the steps the pace gives (at most 40: Max's budget here), as `app.js` `frame`
+    /// runs them.
+    fn page_frame(game: &mut Game, t: f64, dt: f64) {
+        game.set_clock(t);
+        let k = game.pace(dt).min(40);
+        for _ in 0..k {
+            game.step(step_ms());
+        }
+        game.ran(k);
+    }
+
+    /// [`page_frame`]s 16 wall ms apart from `t` on until the page's queued events all reached
+    /// the game: a frame with a press held runs at 1× (the pacer's rule), so the first after a
+    /// press may run no step.
+    fn settle(game: &mut Game, t: &mut f64) {
+        for _ in 0..20 {
+            *t += 16.0;
+            page_frame(game, *t, 16.0);
+            if game.pending.is_empty() {
+                return;
+            }
+        }
+        panic!("the queued events given within 20 frames");
+    }
+
+    /// Spec 17 Presentation, Input (round 2b, opus MUST 1), on the user's zip: at 8× and at Max
+    /// a double click on Go here, its second press stepped about 200 page (wall) ms after the
+    /// choosing one, is the menu's: no press reaches the game though the engine's clock ran on
+    /// for far more than the 500 ms window meanwhile; Go here asked once. About 600 page ms
+    /// after it, the press is the game's. Past the castle's fight ([`castle_game`], the menu on
+    /// as the page puts it on): since round 4 Go here is the real travel's, refused while the
+    /// fight is on; the cell is the first two cells from the hero whose Go here can run.
+    #[test]
+    fn a_double_click_at_speed_is_timed_on_the_pages_clock() {
+        for speed in [8.0, 0.0] {
+            for (gap, menus) in [(200.0, true), (600.0, false)] {
+                let Some(mut game) = castle_game() else {
+                    return;
+                };
+                game.engine.as_mut().quiet().set_context_menu(true);
+                game.set_speed(speed);
+                let ms = |g: &Game| g.engine.as_ref().quiet().io().now_ms();
+                let (hx, hy) = hero_point();
+                let at = [(32, 0), (-32, 0), (0, 32), (0, -32), (32, 32), (-32, -32)]
+                    .into_iter()
+                    .map(|(dx, dy)| (hx + dx, hy + dy))
+                    .find(|&(x, y)| {
+                        let e = game.engine.as_ref().quiet();
+                        u6_core::ui::menu::query(&e.state(), e.io(), x as i16, y as i16)
+                            .and_then(|m| m.go_here)
+                            .is_some_and(|g| g.enabled())
+                    })
+                    .expect("a cell two from the hero whose Go here can run");
+                let mut t = 1_000.0;
+                page_frame(&mut game, t, 16.0);
+                game.pointer(at.0, at.1, 2);
+                settle(&mut game, &mut t);
+                game.pointer(at.0, at.1, 0);
+                settle(&mut game, &mut t);
+                let v = drawn(&game).expect("the menu open");
+                let go = row_of(&v, u6_core::ui::menu::GO_HERE).expect("Go here");
+                assert!(v.rows[go].enabled(), "Go here can run");
+                let (gx, gy) = row_point(&v, go);
+                game.pointer(gx, gy, 1);
+                settle(&mut game, &mut t);
+                let (t0, e0) = (t, ms(&game));
+                assert!(drawn(&game).is_none(), "chosen: closed");
+                assert_eq!(game.go_here_asked(), 1, "Go here asked");
+                game.pointer(gx, gy, 0);
+                settle(&mut game, &mut t);
+                while t + 16.0 < t0 + gap {
+                    t += 16.0;
+                    page_frame(&mut game, t, 16.0);
+                }
+                let presses = game.game_presses();
+                game.pointer(gx, gy, 1);
+                settle(&mut game, &mut t);
+                let (wall, ran) = (t - t0, ms(&game) - e0);
+                println!(
+                    "speed {speed}: the second press {wall} page ms on, the engine's clock {ran} ms"
+                );
+                assert!(
+                    (gap..gap + 64.0).contains(&wall),
+                    "precondition: the gap as meant"
+                );
+                assert!(ran > 500, "the engine's clock past the window");
+                assert_eq!(
+                    game.game_presses() - presses,
+                    f64::from(u8::from(!menus)),
+                    "speed {speed}, {wall} page ms: the second press the menu's: {menus}"
+                );
+                game.pointer(gx, gy, 0);
+                settle(&mut game, &mut t);
+                assert_eq!(game.go_here_asked(), 1, "chosen once");
+            }
+        }
+    }
+
+    /// Spec 17 Presentation (round 2b, gpt e MUST), on the user's zip: a right press on the
+    /// canvas and then a press off it (`Game::dismiss_menu`), both before one step: the
+    /// dismissal waits its turn behind the press, so the step opens the menu and closes it,
+    /// and it ends closed; nothing reaches the game. With nothing queued the dismissal acts at
+    /// once.
+    #[test]
+    fn a_press_off_the_canvas_after_a_queued_right_press_leaves_the_menu_closed() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        let presses = game.game_presses();
+        game.pointer(hx, hy, 2);
+        assert!(!game.dismiss_menu(), "queued behind the right press");
+        game.pointer(hx + 3, hy, 2);
+        game.step(20);
+        assert!(drawn(&game).is_none(), "the menu ends closed");
+        assert_eq!(game.game_presses(), presses, "nothing reached the game");
+        game.pointer(hx + 3, hy, 0);
+        game.step(20);
+        assert!(
+            drawn(&game).is_none() && game.at_prompt(),
+            "closed, the prompt up"
+        );
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        game.pointer(hx, hy, 0);
+        game.step(20);
+        assert!(drawn(&game).is_some(), "opened by a right press alone");
+        assert!(game.dismiss_menu(), "nothing queued: closed at once");
+        assert!(drawn(&game).is_none(), "closed");
+        assert_eq!(game.game_presses(), presses, "nothing reached the game");
+    }
+
+    /// Spec 17 Presentation (round 2b, gpt f SHOULD; round 3, gpt c SHOULD): `menu_hidden` reads
+    /// the rects the engine holds, not the page's copy: none without a game; the rects given
+    /// before a game starts reach its engine when it goes on screen, and those given while it
+    /// runs at once; rects with no area are left out.
+    #[test]
+    fn menu_hidden_reads_back_the_rects_the_engine_holds() {
+        let mut game = Game::new();
+        game.set_menu_hidden(vec![10, 20, 30, 40, 5, 5, 0, 9, 1, 2, 3]);
+        assert!(game.menu_hidden().is_empty(), "no game: none held");
+        game.put_on_screen(synthetic_engine());
+        assert_eq!(
+            game.engine.as_ref().quiet().context_menu_hidden(),
+            [(10, 20, 39, 59)],
+            "given before the game: its engine holds the rect with area"
+        );
+        assert_eq!(game.menu_hidden(), [10, 20, 30, 40], "read from the engine");
+        game.set_menu_hidden(vec![0, 0, 8, 8]);
+        assert_eq!(
+            game.menu_hidden(),
+            [0, 0, 8, 8],
+            "given while it runs: the engine holds it at once"
+        );
     }
 
     /// Spec 21: `travel_to` starts the engine's travel exactly when
@@ -7247,13 +7777,73 @@ mod tests {
         );
     }
 
+    /// Spec 21 S3 (K2 r6 opus SHOULD 1, the merge round): at Max, where the page runs up to 40
+    /// steps a frame on one clock, a travel past the castle's fight steps at most once a
+    /// `MIN_STEP_MS` of the page's clock, as a held arrow does: the page clock at each step the
+    /// prompt took is at least 150 ms after the one before, and the travel still arrives.
+    #[test]
+    fn at_max_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock() {
+        use u6_core::actors::travel::{End, reachable};
+        let Some(mut game) = castle_game() else {
+            return;
+        };
+        game.set_speed(0.0);
+        let p = game.leader_position();
+        let to = [(3i16, 0i16), (-3, 0), (0, 3), (0, -3), (2, 2), (-2, -2)]
+            .into_iter()
+            .map(|(dx, dy)| (p[0].wrapping_add_signed(dx), p[1].wrapping_add_signed(dy)))
+            .find(|&c| reachable(&game.engine.as_ref().quiet().state(), c).is_none())
+            .quiet();
+        assert!(game.travel_to(to.0, to.1), "a reachable cell starts");
+        let (mut t, mut at, mut steps) = (10_000.0, Vec::new(), 0u32);
+        for _ in 0..2000 {
+            if !game.travel_active() {
+                break;
+            }
+            t += 16.0;
+            game.set_clock(t);
+            let k = game.pace(16.0).min(40);
+            for _ in 0..k {
+                let takes = game.prompt_takes();
+                game.step(step_ms());
+                steps += 1;
+                if game.prompt_takes() != takes {
+                    at.push(t);
+                }
+            }
+            game.ran(k);
+        }
+        let gaps: Vec<f64> = at.windows(2).map(|w| w[1] - w[0]).collect();
+        let least = gaps.iter().copied().fold(f64::INFINITY, f64::min);
+        println!(
+            "speed 0: {} travel steps over {steps} engine steps, the least gap {least} page ms",
+            at.len()
+        );
+        assert_eq!(
+            game.engine.as_ref().quiet().travel_end(),
+            Some(End::Arrived),
+            "the travel arrived"
+        );
+        assert!(at.len() >= 3, "three or more steps: {}", at.len());
+        assert!(
+            gaps.iter()
+                .all(|&g| g >= f64::from(u6_core::engine::MIN_STEP_MS)),
+            "each step 150 page ms or more after the one before: {gaps:?}"
+        );
+    }
+
     /// The castle start of spec 19's held-key tests in a `Game` (as `u6-core`'s travel receipt):
     /// `game` at once with seed 0 round the shared state, the actors in the assault worktype 8
     /// passed over (status bit 0x10), the fight broken off with `b`, at the prompt. Skipped when
-    /// the user's zip is absent.
+    /// the user's zip is absent, unless `U6_REQUIRE_ARCHIVE=1`, which fails the test instead.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn castle_game() -> Option<Game> {
         if !std::path::Path::new(ZIP).exists() {
+            assert_ne!(
+                std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+                Ok("1"),
+                "U6_REQUIRE_ARCHIVE=1 and {ZIP} is missing"
+            );
             eprintln!("skipped: {ZIP} not present");
             return None;
         }
@@ -7289,10 +7879,17 @@ mod tests {
         Some(game)
     }
 
-    /// The user's zip booted `game` first, stepped to its prompt (skipped when absent).
+    /// The user's zip booted `game` first, stepped to its prompt; none (the test skips, saying
+    /// so) without it, unless `U6_REQUIRE_ARCHIVE=1` (the release receipt), which fails the test
+    /// instead.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn at_the_prompt() -> Option<Game> {
         if !std::path::Path::new(ZIP).exists() {
+            assert_ne!(
+                std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
+                Ok("1"),
+                "U6_REQUIRE_ARCHIVE=1 and {ZIP} is missing"
+            );
             eprintln!("skipped: {ZIP} not present");
             return None;
         }
@@ -7304,7 +7901,9 @@ mod tests {
         Some(game)
     }
 
-    /// Steps `game` (20 ms each, at most 3000) until the prompt is up; false if it never is.
+    /// Steps `game` (20 ms each, at most 3000) until the prompt is up; false if it never is. The
+    /// prompt is [`Game::at_prompt`]'s (A4-0x7a2c, nothing queued), not the context menu's gate,
+    /// which also needs keys taken as commands and no cursor up ([`Engine::context_menu_gate`]).
     fn steps_to_prompt(game: &mut Game) -> bool {
         steps_to_prompt_within(game, 3000)
     }
@@ -7442,21 +8041,18 @@ mod tests {
         assert!(held >= 1, "a slot holds something");
     }
 
-    /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip, through `Game::command_at` and
-    /// `Game::step`: the leader starts without a readied spellbook, so the menu shows Cast disabled
-    /// as book; forced anyway on a cell two to five steps off that shows it ([`cell_point`],
-    /// either build's layout), Cast runs its own refusal before any target
-    /// read (its line printed, the prompt back), the held press is dropped, and the leader has not
-    /// moved.
+    /// Spec 17 Acceptance 5 (round 2, item 10), on the user's zip: the leader starts without a
+    /// readied spellbook, so on a cell two to five steps off that shows it ([`cell_point`],
+    /// either build's layout) the drawn menu has Cast disabled as book; a left press on it, its
+    /// letter and Enter with it highlighted run nothing (the menu stays open, no button and no
+    /// line reach the game, the leader stays); Escape closes it. (The run of a Cast forced through
+    /// the engine anyway, its target press dropped: u6-core's `objects/commands/real_data.rs`,
+    /// `cast_without_a_book_is_disabled_and_forced_its_target_press_is_dropped`.)
     #[test]
-    fn cast_forced_without_a_book_refuses_and_drops_its_target_press() {
+    fn a_disabled_entry_runs_nothing() {
         let Some(mut game) = at_the_prompt() else {
             return;
         };
-        // Cast is offered on a cell with an object (a bare tile gives Look alone), so the cell is
-        // the first one whose menu shows Cast disabled as book two to five steps from the hero
-        // (inside the original's targeting box in both builds), two east first: what shows Cast
-        // two east differs between the builds.
         const BOOK: &str = r#""code":130,"enabled":false,"reason":"book""#;
         let near = (-5..=5i32).flat_map(|r| (-5..=5i32).map(move |c| (c, r)));
         let (dx, dy) = std::iter::once((2, 0))
@@ -7468,34 +8064,132 @@ mod tests {
             .expect("a cell two to five steps off whose menu shows Cast disabled as book once");
         let (x, y) = cell_point(HALF_W as i32 + dx, HALF_H as i32 + dy);
         let at = game.leader_position();
-        let lines = game.engine.as_ref().quiet().state().ui.messages.len();
-        assert!(game.command_at(0x82, x, y));
-        let mut released = 0;
-        for _ in 0..600 {
-            let before = game.pending.len();
-            game.step(20);
-            released += usize::from(game.pending.len() > before);
-            if game.run.is_none() && game.at_prompt() {
+        let lines = |g: &Game| g.engine.as_ref().quiet().state().ui.messages.len();
+        let before = lines(&game);
+        click(&mut game, (x, y), 2);
+        let v = drawn(&game).expect("open");
+        let cast = row_of(&v, 0x82).expect("Cast shown");
+        assert!(!v.rows[cast].enabled(), "disabled");
+        click(&mut game, row_point(&v, cast), 1);
+        assert!(drawn(&game).is_some(), "a press on it: still open");
+        assert!(game.key_down("KeyC", "c", false, 0.0));
+        game.step(20);
+        game.key_up("KeyC");
+        game.step(20);
+        assert!(drawn(&game).is_some(), "its letter: still open");
+        for _ in 0..v.rows.len() {
+            if drawn(&game).is_none_or(|v| v.hover == cast) {
                 break;
             }
+            assert!(game.key_down("ArrowDown", "ArrowDown", false, 0.0));
+            game.step(20);
+            game.key_up("ArrowDown");
+            game.step(20);
         }
-        let printed = game.engine.as_ref().quiet().state().ui.messages.len() - lines;
-        println!(
-            "the cell {dx}, {dy} from the hero; presses released: {released}, lines: {printed}"
+        assert_eq!(
+            drawn(&game).map(|v| v.hover),
+            Some(cast),
+            "Cast highlighted"
         );
+        assert!(game.key_down("Enter", "Enter", false, 0.0));
+        game.step(20);
+        game.key_up("Enter");
+        game.step(20);
+        assert!(drawn(&game).is_some(), "Enter on it: still open");
+        assert_eq!(game.game_buttons(), 0, "no button reached the game");
+        assert!(game.key_down("Escape", "Escape", false, 0.0));
+        game.step(20);
+        game.key_up("Escape");
+        for _ in 0..30 {
+            game.step(20);
+        }
+        println!("the cell {dx}, {dy} from the hero");
         assert!(
-            game.run.is_none() && game.at_prompt(),
-            "the prompt is back, the run over"
+            drawn(&game).is_none() && game.at_prompt(),
+            "closed, the prompt up"
         );
-        assert_eq!(released, 0, "the target press never went in");
-        assert!(printed > 0, "Cast printed its refusal");
+        assert_eq!(lines(&game), before, "no line printed");
         assert_eq!(game.leader_position(), at, "the leader did not move");
     }
 
+    /// Spec 17 (round 2, gpt f2 SHOULD 1), on the user's zip: a game replaced while its menu is
+    /// open (a restart: a new engine on screen) leaves no menu and no press of the old one: the
+    /// held right button's release reaches the new game as a move, which holds no button, and a
+    /// right press at its prompt opens its own menu.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests may read files
+    fn a_game_replaced_while_its_menu_is_open_keeps_nothing_of_it() {
+        let Some(mut game) = at_the_prompt() else {
+            return;
+        };
+        let (hx, hy) = hero_point();
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        assert!(drawn(&game).is_some(), "open");
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.boot(1, true).quiet();
+        assert_eq!(game.menu_view(), "", "the new game: no menu");
+        game.pointer(hx, hy, 0);
+        game.step(20);
+        assert_eq!(game.game_buttons(), 0, "the old press's release: no button");
+        assert!(steps_to_prompt(&mut game), "the new game's prompt");
+        click(&mut game, (hx, hy), 2);
+        assert!(drawn(&game).is_some(), "its own menu");
+    }
+
+    /// Spec 17 Presentation in the platform: a cell drawn half-toned (a disabled entry of the
+    /// context menu) is listed as [`HALFTONE`] | its code; one drawn in full as its code.
+    #[test]
+    fn the_hd_glyphs_flag_a_half_toned_cell() {
+        let mut game = Game::new();
+        let engine = Engine::with_game(
+            u6_core::State::empty(),
+            Files::default(),
+            |_, io| async move {
+                use u6_core::ui::text::{self, TextWindow};
+                let font = u6_formats::font::BitFont {
+                    glyphs: (0..=255u8).map(|c| [c; 8]).collect(),
+                };
+                let w = TextWindow::new(0, 0, 39, 24, 3, 4, 0);
+                io.draw(|fb| {
+                    for (i, c) in fb.palette.iter_mut().enumerate() {
+                        let v = i as u8;
+                        *c = u6_core::Rgb::new(v.wrapping_mul(40), 255 - v, v.wrapping_mul(7));
+                    }
+                    for y in 0..u6_render::HEIGHT {
+                        for x in 0..u6_render::WIDTH {
+                            fb.set(x, y, 4);
+                        }
+                    }
+                    text::draw_char(fb, Some(&font), None, &w, 0x41, 2, 2);
+                    text::draw_halftone(fb, (Some(&font), None), &w, 0x55, (3, 2));
+                });
+                io.present();
+                loop {
+                    io.vblank().await;
+                }
+            },
+        );
+        let mut engine = engine;
+        engine.enable_src_plane();
+        game.put_on_screen(engine);
+        game.step(20);
+        game.present();
+        game.set_hd(true, 2);
+        game.set_hd_font(true);
+        let codes: Vec<u32> = game.hd_glyphs().chunks(5).map(|g| g[2]).collect();
+        assert_eq!(
+            codes,
+            [0x41, HALFTONE | 0x55],
+            "the letter, the half-toned letter"
+        );
+    }
+
     /// Spec 17 round 2, item 0: a key let go just before a right press on the hero ([`hero_point`])
-    /// (its release queued, as `key_up` queues it) does not hide the menu, and the entry chosen
-    /// then runs: the release is applied where the engine queues the input and is never one of
-    /// its events.
+    /// (its release queued, as `key_up` queues it, in the same step) does not keep the menu shut,
+    /// and the entry chosen then runs: the release is applied where the engine queues the input
+    /// and is never one of its events. Look is chosen by its letter.
     #[test]
     fn a_key_let_go_just_before_a_right_press_keeps_the_menu_and_its_run() {
         let Some(mut game) = at_the_prompt() else {
@@ -7505,20 +8199,24 @@ mod tests {
         game.step(20);
         assert!(steps_to_prompt(&mut game), "the prompt after the key");
         let (hx, hy) = hero_point();
-        let menu = game.context_menu(hx, hy);
-        assert!(!menu.is_empty(), "a menu on the hero");
         assert!(game.key_up("KeyX"), "the key was held");
-        let with_release = game.context_menu(hx, hy);
+        game.pointer(hx, hy, 2);
+        game.step(20);
+        game.pointer(hx, hy, 0);
+        game.step(20);
         assert!(
-            with_release == menu,
-            "the same menu with the release queued"
+            drawn(&game).is_some(),
+            "the menu with the release queued before the press"
         );
-        assert!(game.command_at(0x84, hx, hy), "the entry runs");
+        assert!(game.key_down("KeyL", "l", false, 0.0), "Look's letter");
+        game.step(20);
+        game.key_up("KeyL");
+        assert!(drawn(&game).is_none(), "chosen: closed");
         let mut read = 0;
         for _ in 0..200 {
             game.step(20);
-            if game.run.is_none() {
-                read = u32::from(!game.at_prompt());
+            if !game.at_prompt() {
+                read = 1;
                 break;
             }
         }
@@ -7860,10 +8558,16 @@ mod tests {
     /// One step's frames ([`Progress::frame`]), by where the map is drawn (natively the camera,
     /// in the page the static layer): the frames to the next step, those with the map off rest,
     /// at rest while the presenter draws (an early picture held, or other objects sliding),
-    /// moving (closer to rest along the step than on the step's frame before, which was between
-    /// its two cells too), backward (farther from rest than that frame) and stray (off rest but
-    /// not between the step's two cells).
-    #[derive(Debug, Default)]
+    /// moving (closer to rest along the step than on the step's frame before that reached the
+    /// screen, which was between its two cells too), backward (farther from rest than that frame,
+    /// once the step's slide began: a frame at rest before its first frame off rest is before its
+    /// onset, not a place it went back from) and stray (off rest but not between the step's two
+    /// cells). And the jump (round 12, opus S1): the largest drop of the map's offset behind rest
+    /// between two frames that reached the screen, from 16 (the old cell, where the step starts)
+    /// to its first; a frame of the engine's after the slide began counts as at rest (0), one
+    /// before it is not counted. So a slide cut short (16, 15, 14, then the engine's frame) jumps
+    /// 14, and one drawn in larger steps by their size.
+    #[derive(Debug)]
     struct Progress {
         dir: (i32, i32),
         frames: usize,
@@ -7872,45 +8576,147 @@ mod tests {
         moving: usize,
         backward: usize,
         stray: usize,
-        /// How far behind rest the step's frame before was ([`behind`]; `Some(0)` at rest).
+        /// How far behind rest the step's frame before that reached the screen was ([`behind`];
+        /// `Some(0)` at rest).
         before: Option<i32>,
+        /// A frame off rest reached the screen: the step's slide began.
+        began: bool,
+        /// How far behind rest the map was drawn on the last frame that reached the screen (16
+        /// until the slide began), and the largest drop of it so far.
+        last: i32,
+        jump: i32,
     }
 
     impl Progress {
         fn new(dir: (i32, i32)) -> Self {
             Self {
                 dir,
-                ..Self::default()
+                frames: 0,
+                off_rest: 0,
+                held: 0,
+                moving: 0,
+                backward: 0,
+                stray: 0,
+                before: None,
+                began: false,
+                last: 16,
+                jump: 0,
             }
         }
 
         /// A display frame of the step showing `placed`: the placement's offset from rest while
         /// the presenter's picture is shown (`None`: the engine's frame); `moved`: whether the
-        /// frame's picture reached the screen (a moving frame must have).
+        /// frame's picture reached the screen (only such a frame counts as moving, and only it is
+        /// the frame before of the next).
         fn frame(&mut self, placed: Option<(i32, i32)>, moved: bool) {
             self.frames += 1;
-            let Some(offset) = placed else {
-                self.before = None;
-                return;
+            let k = match placed {
+                None => None,
+                Some((0, 0)) => {
+                    self.held += 1;
+                    Some(0)
+                }
+                Some(offset) => {
+                    self.off_rest += 1;
+                    let k = behind(offset, self.dir);
+                    match (k, self.before) {
+                        (None, _) => self.stray += 1,
+                        (Some(k), Some(b)) if b > k && b <= 16 && moved => self.moving += 1,
+                        (Some(k), Some(b)) if b < k && self.began => self.backward += 1,
+                        _ => {}
+                    }
+                    if k.is_none() {
+                        if moved {
+                            self.before = None;
+                        }
+                        return;
+                    }
+                    k
+                }
             };
-            if offset == (0, 0) {
-                self.held += 1;
-                self.before = Some(0);
+            if !moved {
                 return;
             }
-            self.off_rest += 1;
-            let Some(k) = behind(offset, self.dir) else {
-                self.stray += 1;
-                self.before = None;
-                return;
-            };
-            match self.before {
-                Some(b) if b > k && b <= 16 && moved => self.moving += 1,
-                Some(b) if b < k => self.backward += 1,
-                _ => {}
+            self.before = k;
+            self.began |= k.is_some_and(|k| k > 0);
+            // Once the slide began, the engine's frame is the map at rest.
+            if let (true, Some(at)) = (self.began, k.or(Some(0))) {
+                self.jump = self.jump.max(self.last - at);
+                self.last = at;
             }
-            self.before = Some(k);
         }
+    }
+
+    /// The largest jump (drop of the map's offset between two display frames, [`Progress`]) a
+    /// slide at `rate` engine ms per wall ms on 60 Hz frames may make: ceil(16 · Δ / D) + 1, Δ the
+    /// engine ms a display frame runs and D the slide's 360 ms (the presentation clock moves Δ a
+    /// frame; the slide's first frame lies within Δ of its start; the offsets are rounded): 2 at
+    /// 1×, 4 at 4×, 7 at 8×.
+    fn jump_bound(rate: f64) -> i32 {
+        (16.0 * rate * FRAME / u6_render::motion::SLIDE_MS).ceil() as i32 + 1
+    }
+
+    /// The receipts' predicate on hand-made frames (round 12): a slide at 1× ([`jump_bound`] 2)
+    /// moving 16 to 0 a pixel or so a frame passes; one drawn in 4 px steps jumps 4; one cut short
+    /// (16, 15, 14, then the engine's frame) jumps 14; one frozen has no moving frame; one run
+    /// backward or restarted after reaching rest counts backward; a frame at rest before the
+    /// slide's first frame off rest is its onset, not backward; a frame that did not reach the
+    /// screen is neither moving nor the frame before of the next.
+    #[test]
+    fn the_step_receipt_counts_the_jump_onset_and_frames_not_shown() {
+        let run = |frames: &[(Option<i32>, bool)]| {
+            let mut p = Progress::new((1, 0));
+            for &(k, moved) in frames {
+                p.frame(k.map(|k| (-k, 0)), moved);
+            }
+            p
+        };
+        let shown = |ks: &[Option<i32>]| ks.iter().map(|&k| (k, true)).collect::<Vec<_>>();
+        let bound = jump_bound(1.0);
+        assert_eq!(
+            (bound, jump_bound(4.0), jump_bound(8.0)),
+            (2, 4, 7),
+            "the bounds"
+        );
+        let smooth: Vec<Option<i32>> = (0..=22)
+            .map(|f| {
+                let k = (16.0 - 16.0 * f64::from(f) * FRAME / 360.0).round() as i32;
+                Some(k.max(0))
+            })
+            .chain([None])
+            .collect();
+        let p = run(&shown(&smooth));
+        assert!(
+            p.jump <= bound && p.moving >= 2 && p.backward == 0 && p.stray == 0,
+            "smooth: {p:?}"
+        );
+        let p = run(&shown(&[
+            Some(16),
+            Some(12),
+            Some(8),
+            Some(4),
+            Some(0),
+            None,
+        ]));
+        assert_eq!(p.jump, 4, "4 px steps jump 4");
+        let p = run(&shown(&[Some(15), Some(14), None, None]));
+        assert_eq!(p.jump, 14, "cut short: 14");
+        let p = run(&shown(&[Some(12), Some(12), Some(12)]));
+        assert_eq!(p.moving, 0, "frozen: none moving");
+        let p = run(&shown(&[Some(10), Some(12)]));
+        assert_eq!(p.backward, 1, "backward");
+        let p = run(&shown(&[Some(15), Some(0), Some(10)]));
+        assert_eq!(p.backward, 1, "back off rest after reaching it");
+        let p = run(&shown(&[None, Some(0), Some(15), Some(14)]));
+        assert!(
+            p.backward == 0 && p.moving == 1 && p.jump == 1,
+            "onset after a frame at rest: {p:?}"
+        );
+        let p = run(&[(Some(15), true), (Some(13), false), (Some(14), true)]);
+        assert!(
+            p.moving == 1 && p.backward == 0 && p.jump == 1,
+            "against the frame shown, not the one sampled: {p:?}"
+        );
     }
 
     /// The moving frames a paced step must show at `rate` engine ms per wall ms on 60 Hz frames:
@@ -7926,16 +8732,19 @@ mod tests {
         frames.saturating_sub(1).min(2)
     }
 
-    /// Spec 20 (S4, round 11) against spec 19 O1c's held walk, on the user's zip: in the castle
-    /// with smooth motion on, the down arrow held 6 wall s at 1×, 4× and 8× on 60 Hz frames, each
-    /// presented as the page does (after a frame that stepped or while sliding). Per frame, the
-    /// camera of the view the RGBA frame shows ([`Game::present_slide`]'s), or none (the engine's
-    /// frame), counted by [`Progress`]: off rest, at rest, moving (closer to rest along the step
-    /// than on the step's frame before), backward, stray. Every paced step (the first and
-    /// the last left out) slides: at least [`moving_needed`] moving frames, none backward and none
-    /// stray. A slide frozen at any offset, run backward, past rest or snapped has none moving
-    /// or some backward or stray. Printed per speed: the mean wall ms between steps and per step
-    /// the off-rest, moving and held shares of the frames to the next step.
+    /// Spec 20 (S4, rounds 11–12) against spec 19 O1c's held walk, on the user's zip: in the
+    /// castle with smooth motion on, the down arrow held 6 wall s at 1×, 4× and 8× on 60 Hz
+    /// frames, each presented as the page does (after a frame that stepped or while sliding). Per
+    /// frame, the camera of the view the RGBA frame shows ([`Game::present_slide`]'s), or none
+    /// (the engine's frame), counted by [`Progress`]: off rest, at rest, moving (closer to rest
+    /// along the step than on the step's frame before), backward, stray, and the jump (the
+    /// largest drop of the camera's offset between two frames, from 16 to the first). Every paced
+    /// step (the first and the last left out) slides: at least [`moving_needed`] moving frames,
+    /// none backward and none stray, and no jump over [`jump_bound`] (2 px at 1×, 4 at 4×, 7 at
+    /// 8×). A slide frozen at any offset, run backward, past rest, snapped, cut short or drawn
+    /// in steps larger than the bound has none moving, some backward or stray, or a larger jump.
+    /// Printed per speed: the mean wall ms between steps, per step the off-rest, moving and held
+    /// shares of the frames to the next step, and the largest jump of any paced step.
     #[test]
     fn a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed() {
         for speed in [1.0, 4.0, 8.0] {
@@ -7982,14 +8791,14 @@ mod tests {
                 "steps while held at {speed}x: {}",
                 steps.len()
             );
-            let need = moving_needed(speed);
+            let (need, bound) = (moving_needed(speed), jump_bound(speed));
             let bad: Vec<_> = (inner.iter())
-                .filter(|s| s.moving < need || s.backward > 0 || s.stray > 0)
+                .filter(|s| s.moving < need || s.backward > 0 || s.stray > 0 || s.jump > bound)
                 .collect();
             assert!(
                 bad.is_empty(),
                 "at {speed}x every paced step slides: {need} moving frames or more, none \
-                 backward or stray: {bad:?}"
+                 backward or stray, no jump over {bound} px: {bad:?}"
             );
             let share = |n: fn(&Progress) -> usize| {
                 let mut v: Vec<f64> = (inner.iter())
@@ -8006,11 +8815,12 @@ mod tests {
             };
             let gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
             let fewest = inner.iter().map(|s| s.moving).min().unwrap_or(0);
+            let jump = inner.iter().map(|s| s.jump).max().unwrap_or(0);
             println!(
                 "held 6 s at {speed}x: {} steps, a step every {gap:.0} wall ms on average; per \
                  step over the frames to the next: off rest {}, moving (closer to rest than the \
                  frame before) {}, held at rest {}; the fewest moving frames in a step {fewest} \
-                 (needed {need})",
+                 (needed {need}); the largest jump {jump} px (bound {bound})",
                 steps.len(),
                 share(|s| s.off_rest),
                 share(|s| s.moving),
@@ -8019,19 +8829,24 @@ mod tests {
         }
     }
 
-    /// Spec 20 with spec 23 (round 11): while the message history is scrolled back, a slide shows
-    /// the history over the message window, not the live window. In the castle with smooth motion
-    /// on at 1×, after a few passes: the down arrow tapped and, once the leader stepped (a key is
-    /// the player's input and returns the view to the live bottom), the history wheeled three
-    /// lines back through the engine's API while the step's slide runs. Then on every frame (the
-    /// slide drawn off rest, the early picture held at rest, and the first frame after the slide,
-    /// which must come) the page's frame off the shown map is the viewed one: with HD off the
-    /// RGBA frame there is the engine's shown frame's (the published frame, the view, the
-    /// sprite); with HD on the frame the page draws ([`Page`]: the HD frame with the layers over
-    /// its map, or the HD frame alone once no slide is placed) is the HD frame of the published
-    /// frame with the view over it ([`Engine::with_view_frame`], composed here apart from the
-    /// game's). On each of them the engine's shown frame and the viewed frame differ from the
-    /// published one off the shown map: the expected frames hold the history.
+    /// Spec 20 with spec 23 (rounds 11–12): while the message history is scrolled back, a slide
+    /// shows the history over the message window, not the live window. In the castle with smooth
+    /// motion on at 1×, after a few passes: the down arrow tapped and, once the leader stepped (a
+    /// key is the player's input and returns the view to the live bottom), the history wheeled
+    /// three lines back through the engine's API while the step's slide runs. Then on every frame
+    /// (the slide drawn off rest, the early picture held at rest with no slide placed nor drawn
+    /// past it, and the first frame after the slide, which must come, with no slide placed and
+    /// [`Game::sliding`] false) the page's frame off the shown map is the expected composition,
+    /// made here from the published frame and the engine's view of the history alone
+    /// ([`viewed_frame`], apart from the engine's composition and the page's output): with HD off
+    /// the RGBA frame there is that frame with the pointer sprite over it; with HD on the frame the
+    /// page draws ([`Page`]: the HD frame with the layers over its map, or the HD frame alone once
+    /// no slide is placed) is its HD frame ([`hd_words_of`]). Every comparison first asserts the
+    /// two frames' sizes equal. On each of them the engine's shown frame and the expected one
+    /// differ from the published one off the shown map: the expected frames hold the history. In
+    /// HD the three phases share one HD frame off the map (the slide's layers are clipped to the
+    /// shown map), so HD's check is that frame's at each phase. (With a context menu open over the
+    /// history no slide runs: [`a_context_menu_opened_during_a_slide_ends_it_and_it_does_not_resume`].)
     #[test]
     fn a_slide_keeps_the_message_history_the_player_scrolled_back_to() {
         use u6_core::geom::SHOWN;
@@ -8041,10 +8856,16 @@ mod tests {
             !((x0..=x1).contains(&x) && (y0..=y1).contains(&y))
         };
         // The pixels off the shown map where two frames of the classic size differ, of `bytes`
-        // bytes a pixel (1: colour indices, 4: RGBA).
-        let differ = |a: &[u8], b: &[u8], bytes: usize| {
+        // bytes a pixel (1: colour indices, 4: RGBA), the frames' sizes asserted equal first.
+        let differ = |a: &[u8], b: &[u8], bytes: usize, what: &str| {
             let w = u6_render::WIDTH;
-            (0..a.len().min(b.len()) / bytes)
+            assert_eq!(a.len(), b.len(), "{what}: the frames' sizes");
+            assert_eq!(
+                a.len(),
+                w * u6_render::HEIGHT * bytes,
+                "{what}: the classic size"
+            );
+            (0..a.len() / bytes)
                 .filter(|&i| {
                     off_map(i % w, i / w)
                         && a[bytes * i..bytes * (i + 1)] != b[bytes * i..bytes * (i + 1)]
@@ -8110,44 +8931,52 @@ mod tests {
                     let shown = (game.motion.shown.as_ref()).filter(|_| game.motion.drawn);
                     shown.map_or(2, |s| usize::from(!off_rest(&s.0)))
                 };
+                if phase == 2 {
+                    // Not a layer the page missed nor a slide not drawn while one runs (opus N1).
+                    assert!(
+                        game.slide().is_empty() && !game.sliding() && !game.motion.drawn,
+                        "{label}: after the slide no slide placed, drawn or running"
+                    );
+                }
                 let e = game.engine.as_ref().quiet();
-                let live = e.published_frame().pixels().to_vec();
-                let viewed = e.with_view_frame(|v| v.pixels().to_vec());
+                let live = e.published_frame().clone();
+                let viewed = viewed_frame(e);
                 // The published frame with the sprite over it: the shown frame less the view.
-                let mut live_shown = e.published_frame().clone();
+                let (mut live_shown, mut viewed_shown) = (live.clone(), viewed.clone());
                 if let Some(sprite) = e.sprite() {
                     sprite.draw(&mut live_shown);
+                    sprite.draw(&mut viewed_shown);
                 }
                 assert!(
-                    differ(e.frame().pixels(), live_shown.pixels(), 1) > 0
-                        && differ(&viewed, &live, 1) > 0,
-                    "{label}: the shown and the viewed frames hold the history"
+                    differ(e.frame().pixels(), live_shown.pixels(), 1, label) > 0
+                        && differ(viewed.pixels(), live.pixels(), 1, label) > 0,
+                    "{label}: the shown and the expected frames hold the history"
                 );
                 let wrong = if hd {
-                    let mut compositor = u6_render::hd::Compositor::new();
-                    let mut cache = u6_core::hd::ImageCache::new();
-                    e.with_view_frame(|fb| {
-                        let state = e.state();
-                        let mut images = cache.images(&state, e.io());
-                        compositor.compose(fb, &mut images, Scale::X2)
-                    });
+                    let want = hd_words_of(e, &viewed);
                     let drawn = if phase < 2 {
                         page.draw(&game, &game.slide())
                     } else {
                         words_of(exported(game.hd_frame_ptr(), game.hd_frame_len()))
                     };
                     let ow = u6_render::WIDTH * 2;
-                    (drawn.iter().zip(compositor.rgba()).enumerate())
+                    assert_eq!(drawn.len(), want.len(), "{label}: the HD frames' sizes");
+                    assert_eq!(
+                        drawn.len(),
+                        ow * u6_render::HEIGHT * 2,
+                        "{label}: the HD size"
+                    );
+                    (drawn.iter().zip(&want).enumerate())
                         .filter(|&(i, (a, b))| off_map(i % ow / 2, i / ow / 2) && a != b)
                         .count()
                 } else {
                     let mut want = Vec::new();
-                    e.frame().write_rgba(&mut want);
-                    differ(&game.frame_rgba(), &want, 4)
+                    viewed_shown.write_rgba(&mut want);
+                    differ(&game.frame_rgba(), &want, 4, label)
                 };
                 assert_eq!(
                     wrong, 0,
-                    "{label}: off the shown map, the viewed frame (phase {phase})"
+                    "{label}: off the shown map, the expected frame (phase {phase})"
                 );
                 checked[phase] += 1;
                 if phase == 2 {
@@ -8167,8 +8996,238 @@ mod tests {
             println!(
                 "{label}: with the history scrolled back, {} frames drawing the slide off rest, \
                  {} holding the early picture at rest and the first after the slide, each the \
-                 viewed frame off the shown map",
+                 expected frame off the shown map",
                 checked[0], checked[1]
+            );
+        }
+    }
+
+    /// `fb` composed as an HD frame at 2× by a compositor and image cache of its own (no pack),
+    /// apart from the game's: its words.
+    fn hd_words_of(e: &Engine, fb: &Framebuffer) -> Vec<u32> {
+        let mut compositor = u6_render::hd::Compositor::new();
+        let mut cache = u6_core::hd::ImageCache::new();
+        let state = e.state();
+        let mut images = cache.images(&state, e.io());
+        compositor.compose(fb, &mut images, Scale::X2);
+        compositor.rgba().to_vec()
+    }
+
+    /// One 60 Hz display frame at the game's speed as the page runs it: the clock moved on, the
+    /// steps [`Game::pace`] gives, the present after a frame that stepped or while sliding, then
+    /// the page's take of the slide's layers ([`Page::take`]; nothing with HD off).
+    fn page_frame_at(game: &mut Game, page: &mut Page) {
+        game.set_clock(game.clock + FRAME);
+        let k = game.pace(FRAME);
+        for _ in 0..k {
+            game.step(20);
+        }
+        game.ran(k);
+        if k > 0 || game.sliding() {
+            game.present();
+        }
+        page.take(game);
+    }
+
+    /// Spec 20 with spec 17 (round 12): an open context menu ends a running slide at once, so the
+    /// menu is never drawn over a moving map nor a moving map under it. At 1×, HD off and on, the
+    /// menu on as the page puts it on: in the page's start room ([`in_the_start_room`]) with the
+    /// message history at its live bottom, and in its start fight ([`in_the_start_fight`]: combat
+    /// mode, where the party slides from the turn's picture) with the history scrolled three lines
+    /// back. Keys tapped (a step down, a pass, a step up, a pass, by turns) until the prompt comes
+    /// back after one, the menu's gate open, with a slide still running for 100 ms or more (an
+    /// object the turn moved still sliding there: an NPC out of the fight, a member in it; in the
+    /// fight three history lines kept or more); the history wheeled back then, in the fight; then
+    /// a right press on the hero. The first frame with the menu
+    /// open shows no slide: the presenter started again (its generation moved: a snap from the
+    /// menu is no publication), nothing of a slide drawn or placed, [`Game::sliding`] false. Its
+    /// frames hold each layer where the one composition puts it (published, view, menu, sprite),
+    /// against a frame made here from the published frame and the history's view alone
+    /// ([`viewed_frame`]): the screen frame is that frame outside the menu's box and differs from
+    /// it in most of the box; the shown frame is that frame with the box's pixels as the screen
+    /// frame has them and the pointer sprite over it; the page shows it (HD off: the RGBA frame;
+    /// HD on: no layer placed and the HD frame that frame's, composed here apart from the game's);
+    /// the history stays scrolled back. While the menu stays open (its press let go) and after
+    /// Escape closed it, through the slide's own end and 200 ms past it, no slide resumes: the
+    /// generation stays and nothing is drawn or placed.
+    #[test]
+    fn a_context_menu_opened_during_a_slide_ends_it_and_it_does_not_resume() {
+        for (hd, scrolled) in [(false, false), (true, false), (false, true), (true, true)] {
+            let label = format!(
+                "{}{}",
+                if hd { "HD" } else { "classic" },
+                if scrolled { ", history back" } else { "" }
+            );
+            let fixture = if scrolled {
+                in_the_start_fight(hd)
+            } else {
+                in_the_start_room(hd)
+            };
+            let Some(mut game) = fixture else {
+                return;
+            };
+            let mut page = Page::new();
+            // Keys tapped (a step down, a pass, a step up, a pass, by turns) until the prompt is
+            // back after one, the menu's gate open, with a slide running on (and, to wheel the
+            // history back over, three lines or more kept).
+            let (mut taps, mut found) = (0, false);
+            'taps: while taps < 48 {
+                let key = ["ArrowDown", "Space", "ArrowUp", "Space"][taps % 4];
+                taps += 1;
+                let takes = game.engine.as_ref().quiet().prompt_takes();
+                assert!(down(&mut game, key));
+                assert!(game.key_up(key));
+                for _ in 0..900 {
+                    page_frame_at(&mut game, &mut page);
+                    let e = game.engine.as_ref().quiet();
+                    let taken = e.prompt_takes() > takes;
+                    if !(taken && game.pending.is_empty() && e.context_menu_gate(&[])) {
+                        continue;
+                    }
+                    let kept = e.state().ui.scrollback.lines().len();
+                    let (p, t) = (&game.motion.presenter, game.presentation_ms());
+                    let running = p.view(t).filter(|_| p.active(t + 100.0));
+                    if running.is_some_and(|v| off_rest(&v)) && (!scrolled || kept >= 3) {
+                        found = true;
+                        break 'taps;
+                    }
+                    break;
+                }
+            }
+            assert!(
+                found,
+                "{label}: a prompt with a slide running ({taps} keys tapped)"
+            );
+            let back = if scrolled {
+                assert!(game.wheel(200, 150, -3), "{label}: over the message window");
+                3
+            } else {
+                0
+            };
+            let before = game.motion.presenter.generation();
+            let (hx, hy) = hero_point();
+            game.pointer(hx, hy, 2);
+            let mut waited = 0;
+            while drawn(&game).is_none() && waited < 8 {
+                page_frame_at(&mut game, &mut page);
+                waited += 1;
+            }
+            let v = drawn(&game).expect("the menu open");
+            let opened = game.presentation_ms();
+            let after = game.motion.presenter.generation();
+            let none =
+                |game: &Game| game.slide().is_empty() && !game.motion.drawn && !game.sliding();
+            assert!(
+                after != before,
+                "{label}: the slide ended at once (the presenter's generation moved)"
+            );
+            assert!(
+                none(&game),
+                "{label}: no slide drawn or placed under the menu"
+            );
+            assert_eq!(game.history_offset() as usize, back, "{label}: the history");
+            {
+                let e = game.engine.as_ref().quiet();
+                let (screen, viewed) = (e.screen_frame(), viewed_frame(e));
+                let (w, h) = (u6_render::WIDTH, u6_render::HEIGHT);
+                assert_eq!(
+                    screen.pixels().len(),
+                    w * h,
+                    "{label}: the screen frame's size"
+                );
+                assert_eq!(viewed.pixels().len(), w * h, "{label}: the expected size");
+                let (x0, y0, x1, y1) = v.rect;
+                let boxed = |x: usize, y: usize| {
+                    (x0..=x1).contains(&(x as i32)) && (y0..=y1).contains(&(y as i32))
+                };
+                // The expected shown frame: the box's pixels the screen frame's, the sprite over.
+                let mut want = viewed.clone();
+                let (mut inside, mut differ, mut outside) = (0, 0, 0);
+                for y in 0..h {
+                    for x in 0..w {
+                        let (a, b) = (screen.get(x, y), viewed.get(x, y));
+                        if boxed(x, y) {
+                            inside += 1;
+                            differ += usize::from(a != b);
+                            want.set(x, y, a.quiet());
+                        } else {
+                            outside += usize::from(a != b);
+                        }
+                    }
+                }
+                assert_eq!(
+                    outside, 0,
+                    "{label}: the screen frame outside the menu's box: the published frame and the view"
+                );
+                assert!(
+                    differ * 2 > inside,
+                    "{label}: the menu drawn in its box: {differ} of {inside}"
+                );
+                let history = (0..w * h)
+                    .filter(|&i| viewed.pixels()[i] != e.published_frame().pixels()[i])
+                    .count();
+                assert_eq!(history > 0, scrolled, "{label}: the history's view drawn");
+                let screen_want = want.clone();
+                if let Some(sprite) = e.sprite() {
+                    sprite.draw(&mut want);
+                }
+                assert_eq!(e.frame().pixels().len(), w * h, "{label}: the shown size");
+                assert!(
+                    e.frame().pixels() == want.pixels(),
+                    "{label}: the shown frame: the screen frame with the sprite over it"
+                );
+                if hd {
+                    let want = hd_words_of(e, &screen_want);
+                    let shown = words_of(exported(game.hd_frame_ptr(), game.hd_frame_len()));
+                    assert_eq!(shown.len(), want.len(), "{label}: the HD frame's size");
+                    assert!(
+                        shown == want,
+                        "{label}: the page shows the HD frame of the screen frame"
+                    );
+                } else {
+                    let mut rgba = Vec::new();
+                    want.write_rgba(&mut rgba);
+                    let shown = game.frame_rgba();
+                    assert_eq!(shown.len(), rgba.len(), "{label}: the RGBA frame's size");
+                    assert!(
+                        shown == rgba,
+                        "{label}: the RGBA frame is the shown frame, the menu in it"
+                    );
+                }
+            }
+            // The menu's press let go (the menu's), Escape closing it a few frames on; through the
+            // slide's own end and past it no slide comes back.
+            game.pointer(hx, hy, 0);
+            let (mut open, mut closed) = (0, 0);
+            while game.presentation_ms() < opened + u6_render::motion::SLIDE_MS + 200.0 {
+                if open == 6 && drawn(&game).is_some() {
+                    assert!(down(&mut game, "Escape"));
+                    assert!(game.key_up("Escape"));
+                }
+                page_frame_at(&mut game, &mut page);
+                if drawn(&game).is_some() {
+                    open += 1;
+                } else {
+                    closed += 1;
+                }
+                assert!(
+                    none(&game) && game.motion.presenter.generation() == after,
+                    "{label}: no slide resumes (menu open {open} frames, closed {closed})"
+                );
+            }
+            assert!(
+                open >= 6 && closed > 0,
+                "{label}: frames with the menu open ({open}) and after it closed ({closed})"
+            );
+            assert_eq!(
+                game.history_offset() as usize,
+                back,
+                "{label}: the history after"
+            );
+            println!(
+                "{label}: a right press during a slide ({taps} keys tapped to one): the slide \
+                 ended at the menu's first frame, each layer where the composition puts it; \
+                 {open} frames with the menu open and {closed} after it closed, none sliding"
             );
         }
     }
@@ -8205,16 +9264,45 @@ mod tests {
         Some(game)
     }
 
-    /// Spec 20 Design 3–4 (round 11, opus S3), on the user's zip, in the page's start room
-    /// ([`in_the_start_room`]), where a held walk's turns take seconds: at 1× on 60 Hz frames,
-    /// with HD off and on, each way held in turn until the party stops for 10 s (a turn of the
-    /// Wide view, with more actors in it, can take longer than 5 s). Per early picture
-    /// (each step's, [`Engine::take_motion`]'s previews), the engine ms to the first publication
-    /// after it that is not a preview (the turn's picture, or a foreign one), and whether the hold
-    /// ([`u6_render::motion::PREVIEW_MS`]) expired before it; per step, the frames between the
-    /// step and that publication that showed the engine's frame (the party back on its old cell:
-    /// with HD off no slide drawn in the RGBA frame, with HD on no slide placed). None expires and
-    /// no such frame is shown.
+    /// [`in_the_start_room`] in its start fight (not broken off: the party in combat mode, each
+    /// member's turn a prompt), at the first prompt.
+    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
+    fn in_the_start_fight(hd: bool) -> Option<Game> {
+        if !std::path::Path::new(ZIP).exists() {
+            let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
+            assert!(!required, "U6_REQUIRE_ARCHIVE=1 and {ZIP} not present");
+            eprintln!("start fight: skipped ({ZIP} not present)");
+            return None;
+        }
+        eprintln!("start fight: ran");
+        let mut game = Game::new();
+        game.collect("ultima-vi.zip", std::fs::read(ZIP).quiet())
+            .quiet();
+        game.set_motion(true);
+        if hd {
+            game.set_hd(true, 2);
+        }
+        game.boot((1_700_000_000u64 & 0xffff) as u16, true).quiet();
+        assert!(steps_to_prompt(&mut game), "the prompt");
+        game.present();
+        Some(game)
+    }
+
+    /// Spec 20 Design 3–4 (rounds 11–12, opus S3, S2, gpt a S1, S3), on the user's zip, in the
+    /// page's start room ([`in_the_start_room`]), where a held walk's turns take seconds: at 1× on
+    /// 60 Hz frames, with HD off and on, each way held in turn until the party stops for 10 s (a
+    /// turn of the Wide view, with more actors in it, can take longer than 5 s), then 300 steps
+    /// with no key (the last turn drained). Per early picture (each step's,
+    /// [`Engine::take_motion`]'s previews), the engine ms to the first publication after it that
+    /// is not a preview (the turn's picture, or a foreign one), which every early picture has, and
+    /// whether the hold ([`u6_render::motion::PREVIEW_MS`]) expired before it; per step, the
+    /// frames between the step and that publication that showed the engine's frame (the party
+    /// back on its old cell: with HD off no slide drawn in the RGBA frame, with HD on no slide
+    /// placed). None expires and no such frame is shown. The premises: some turn takes longer
+    /// than the hold (so the hold's end at the turn's first picture, not at its end, is what is
+    /// measured), and the game's key waits refresh the view (A4-0x7a56, spec 20 Design 3's bound).
+    /// And the proxy (gpt a S3): on every frame that draws the presenter's picture, its newest
+    /// scene is centred on the leader's cell now, so a stale scene drawn over the old cell counts.
     #[test]
     fn the_early_picture_is_held_until_the_turns_picture_in_the_start_room() {
         use u6_render::motion::PREVIEW_MS;
@@ -8223,10 +9311,17 @@ mod tests {
             let Some(mut game) = in_the_start_room(hd) else {
                 return;
             };
+            assert!(
+                game.engine.as_ref().quiet().state().ui.input.idle_refresh,
+                "{label}: the key waits refresh the view (A4-0x7a56)"
+            );
             let now = |g: &Game| g.engine.as_ref().map_or(0.0, |e| e.io().now_ms() as f64);
             // Per step: its engine ms and the frames after it that showed the engine's frame
             // before the turn's picture.
             let mut steps: Vec<(f64, usize)> = Vec::new();
+            // Frames drawing the presenter's picture, and those whose newest scene was not
+            // centred on the leader's cell.
+            let (mut drawing, mut stale) = (0, 0);
             // The index of each hold's first step, and past the last.
             let mut holds = Vec::new();
             for key in ["ArrowDown", "ArrowRight", "ArrowLeft", "ArrowUp"] {
@@ -8263,6 +9358,14 @@ mod tests {
                         game.motion.drawn
                     };
                     step.1 += usize::from(!pictured && !presenter);
+                    if presenter {
+                        let newest = game.motion.presenter.history().first();
+                        let c = newest.map(|n| n.scene.centre);
+                        let p = game.leader_position();
+                        let leader = (i32::from(p[0]), i32::from(p[1]), p[2] as u8);
+                        drawing += 1;
+                        stale += usize::from(c != Some(leader));
+                    }
                 }
                 assert!(game.key_up(key));
                 for _ in 0..300 {
@@ -8272,14 +9375,21 @@ mod tests {
             }
             holds.push(steps.len());
             let taken = &game.motion.taken;
-            // Per preview: the ms to the next publication that is not one.
-            let waits: Vec<f64> = (taken.iter().enumerate())
+            // Per preview: the ms to the next publication that is not one; none after the drain
+            // is an early picture left unresolved, which fails.
+            let matched: Vec<Option<f64>> = (taken.iter().enumerate())
                 .filter(|(_, p)| p.1)
-                .filter_map(|(i, &(t, _, _))| {
-                    let next = taken[i + 1..].iter().find(|p| !p.1)?;
-                    Some(next.0 - t)
-                })
+                .map(|(i, &(t, _, _))| taken[i + 1..].iter().find(|p| !p.1).map(|n| n.0 - t))
                 .collect();
+            let unmatched = matched.iter().filter(|w| w.is_none()).count();
+            assert_eq!(
+                unmatched,
+                0,
+                "{label}: early pictures with no publication after them, the last turn drained: \
+                 {unmatched} of {}",
+                matched.len()
+            );
+            let waits: Vec<f64> = matched.into_iter().flatten().collect();
             let expired = waits.iter().filter(|&&w| w >= PREVIEW_MS).count();
             let back: Vec<usize> = steps.iter().map(|s| s.1).collect();
             let longest = waits.iter().copied().fold(0.0, f64::max);
@@ -8299,6 +9409,10 @@ mod tests {
                 waits.len() >= 4,
                 "{label}: early pictures in the start room"
             );
+            assert!(
+                turns.iter().any(|&t| t > PREVIEW_MS),
+                "{label}: the premise, a turn longer than the hold: {turns:?}"
+            );
             assert_eq!(
                 expired, 0,
                 "{label}: the hold expired before the turn's picture"
@@ -8307,7 +9421,28 @@ mod tests {
                 back.iter().all(|&n| n == 0),
                 "{label}: the engine's frame (the old cell) shown before the turn's picture: {back:?}"
             );
+            assert!(
+                drawing > 0 && stale == 0,
+                "{label}: the presenter's pictures on the leader's cell: {stale} of {drawing} not"
+            );
+            println!(
+                "{label}: {drawing} frames drawing the presenter's picture, each centred on the \
+                 leader's cell; every early picture matched to a later publication"
+            );
         }
+    }
+
+    /// The published frame of `e` with the message history's view over it, composed here apart
+    /// from the engine's composition (spec 23 Decision 12: what its screen frame is with no menu
+    /// open), from the published frame and the view alone.
+    fn viewed_frame(e: &Engine) -> Framebuffer {
+        let live = e.published_frame();
+        let mut fb = live.clone();
+        let view = e.history_view();
+        if view.offset() > 0 {
+            u6_core::ui::scrollback::draw_view(&e.state().ui, view, &live, &mut fb);
+        }
+        fb
     }
 
     /// The offset from its rest place of the static layer the page draws now ([`Game::slide`]'s

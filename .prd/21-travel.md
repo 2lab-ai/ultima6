@@ -8,7 +8,7 @@ tags: [ultima6, input, pathfinding, ui]
 
 Status: shipped (2026-10-28, deploy 35, main 17c09b6): the search, the walk, the stops and the engine API below
 are the implemented contract, not a future target (unit M4, `feat/travel`). The context-menu entry that calls it is wired
-in unit M3's merge round (spec 17), after this. The owner,
+in unit M3's merge round (spec 17, 2026-10-29: "여기로 이동" calls `Engine::travel_to`, with S3's pace). The owner,
 2026-10-28, verbatim: "그리고 우클릭시 여기로 이동도 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령". Spec 17's context menu (unit M3, `feat/ingame-menu`) draws the entry; this spec owns the search, the
 walk and the API the entry calls. Related: spec 19 (the turn model, O1c held keys = unit K2), spec 20 (smooth motion).
 
@@ -178,7 +178,7 @@ by stop 8. The search and the checks draw no RNG.
 - u6-web `Game::travel_to(x, y) -> bool` (map cell, the party's level), `Game::travel_active() -> bool`.
 - `Reason::code()` and `End::code()` give stable ASCII codes for the page's words.
 
-**Merge contract with unit M3** (the menu; wired in a later round, not in this unit). M3's filter swallows three
+**Merge contract with unit M3** (the menu; wired in M3's merge round, 2026-10-29, as below). M3's filter swallows three
 things the raw input still holds (as the review read M3, `popup.rs:992-1007`, `:1051-1058`, `:1080-1093`,
 `:1160-1169`; not read here): the choosing press's held moves (after the choice it queues a move with no button, so
 the handler's buttons read 0 and a held move reads as a new press), a second click on the entry within 500 ms, and a
@@ -194,7 +194,17 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
   and Down, and M3 counts the game's keys there (M3 `engine.rs:821-822`, per the review).
 - The wiring round's tests, each a travel the menu just started that keeps walking until a later press ends it: a
   swallowed choosing press with its held moves and its release; a double click on the entry; Enter held past its
-  repeat delay. `travel_tests.rs:739-765` models a press the game saw, not one the menu swallowed.
+  repeat delay. `travel_tests.rs:739-765` models a press the game saw, not one the menu swallowed. Done:
+  `a_travel_the_menu_started_walks_through_the_choosing_presss_held_moves_and_release`, `…_a_double_click_on_the_entry`,
+  `…_enter_held_past_its_repeat_delay` (`travel_tests.rs`, the stand-in with the menu on; RED: `travel_press` handed the
+  raw input, each ends `Input` in its tail); the stop flag: `popup_real`'s
+  `a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu` (a right press opening a menu in the tick after
+  the choice ends that travel before its first step; RED: the flag ignored); the real walk:
+  `a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to` (the party arrives on the pressed cell).
+- A press off the frame (the page's `dismiss_menu`, a press that reaches no frame pixel) is never new input but when
+  it closes an open menu (spec 17, Layer flow, Close): a travel under way walks on through one with no menu open.
+  Harmless as long as an open menu means no travel runs: a menu opens only by new input (a right press at the command
+  prompt), which ends a travel, and "여기로 이동" starts one only as the menu closes.
 - Names and types: M3 has no `Engine::travel()` (it asks with `go_here_asked`); this unit's accessor is
   `Engine::travel_progress()`. M3's cells are `i16`; `travel_to` takes them `as u16` and masks them with the level's
   mask, so a cell left of x 0 wraps as the map does.
@@ -207,7 +217,11 @@ held Enter's or Space's repeats. Fed the raw input, a travel the menu just start
   and the travel would press until a `Paced` came. A tick's order: `popup.input`, `travel_press`, K2's take-back, the
   queue.
 - S3: one step in 150 ms at the prompt (K2's `MIN_STEP_MS`). Due-ness comes from the platform's clock through a
-  setter (e.g. `Polled.due`, true by default, so native, headless and this unit's tests are unchanged). `next` tests
+  setter (`Engine::set_travel_due` into `Polled.due`, true by default, so native, headless and this unit's tests are
+  unchanged; the page gives it from its clock and `last_step` at every step once it has a clock, done in M3's merge
+  round, u6-web `at_max_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock`: at Max the page clock at each
+  step the prompt took is at least 150 ms after the one before; RED without the setter, gaps 0 and 16 ms; the
+  hold and the stops while not due: `a_step_not_due_holds_it_and_the_stops_stay_at_once`). `next` tests
   it in the Hold branch after the stops (`travel.rs:624`, after `:612-623`), never after `pressed.take()` (`:639`):
   there it would take `pressed` and pop the path with no press (a false blockage, or `Displaced`). `travel_press`
   still runs every tick while a step is not due, so the stops stay immediate. The travel's key is a prompt take, so

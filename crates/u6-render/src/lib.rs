@@ -79,8 +79,16 @@ pub const BITMAP_PAPER: u16 = 0;
 pub const BITMAP_SPELLBOOK: u16 = 1;
 
 /// [`Src::flags`]: the pixel's colour is the overlay OR over what was there (spec 07 Measured
-/// facts: `masktype & 4`); the pixel names the record whose overlay it is.
+/// facts: `masktype & 4`); the pixel names the record whose overlay it is. Only a tile's pixel
+/// carries it; the same bit on a [`Kind::Glyph`] pixel is [`FLAG_HALFTONE`].
 pub const FLAG_OVERLAY: u8 = 1;
+/// Port-only (spec 17 Presentation, unit M3) [`Src::flags`] of a [`Kind::Glyph`] pixel (the bit
+/// of [`FLAG_OVERLAY`], which only a tile's pixel carries): of a cell drawn half-toned, as
+/// 0x134044's checker shows what cannot be had (a disabled entry of the context menu), on each
+/// pixel of the cell: of the glyph's set pixels only those with (x + y) & 1 = 0 drawn, in its
+/// ink ([`FLAG_INK`] on them alone), every other one in its paper. Shown as without it; the HD
+/// font mode lists the cell half-toned ([`hd::HdGlyph::halftone`]).
+pub const FLAG_HALFTONE: u8 = 1;
 /// [`Src::flags`]: the pixel is an outline pixel, painted in the outline colour over an opaque
 /// colour-0 pixel of the record.
 pub const FLAG_OUTLINE: u8 = 2;

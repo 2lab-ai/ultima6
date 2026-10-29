@@ -12,8 +12,8 @@ use std::rc::Rc;
 use u6_formats::bitmap::Bitmap;
 use u6_formats::font::{BitFont, HangulFont};
 use u6_render::{
-    BITMAP_PAPER, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED, Framebuffer,
-    HEIGHT, Kind, Src, WIDTH,
+    BITMAP_PAPER, FLAG_HALFTONE, FLAG_INK, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED,
+    Framebuffer, HEIGHT, Kind, Src, WIDTH,
 };
 
 /// Window flag (byte 8) bit: wrap at word boundaries.
@@ -207,6 +207,32 @@ pub fn draw_typed(
     (col, row): (u16, u16),
 ) {
     draw_cell(fb, fonts, w, c, (col, row), Some(FLAG_TYPED));
+}
+
+/// Port-only (spec 17 Presentation, unit M3): [`draw_char`] half-toned, as 0x134044 shows a
+/// thing that cannot be had: of the glyph's set pixels only those with (x + y) & 1 = 0 in the
+/// ink, every other pixel in the paper; each pixel names the glyph with [`FLAG_HALFTONE`] (and
+/// [`FLAG_INK`] on the ink ones alone), so the HD font mode lists the cell half-toned and the
+/// platform draws its HD glyph so. The classic pixels are 0x134044's checker over the glyph.
+pub fn draw_halftone(
+    fb: &mut Framebuffer,
+    (font, hangul): (Option<&BitFont>, Option<&HangulFont>),
+    w: &TextWindow,
+    c: u16,
+    (col, row): (u16, u16),
+) {
+    let Some(font) = font else { return };
+    let (x, y) = (usize::from(col) * CELL, usize::from(row) * CELL);
+    let rows = match u8::try_from(c) {
+        Ok(b) => Some(&font.glyphs[usize::from(b)]),
+        Err(_) => hangul.and_then(|h| h.glyph(u32::from(c))),
+    };
+    // x is a whole cell (even): the checker's set columns are the even ones on an even row.
+    let checker = |dy: usize| if (y + dy) & 1 == 0 { 0xaa } else { 0x55 };
+    let masked: Option<[u8; CELL]> = rows.map(|r| std::array::from_fn(|dy| r[dy] & checker(dy)));
+    let code = masked.is_some().then_some(c);
+    let rows = masked.unwrap_or([0; CELL]);
+    draw_rows(fb, x, y, &rows, code, (w.fg, w.bg), FLAG_HALFTONE);
 }
 
 /// Port-only (spec 11): [`draw_char`] for a glyph the game draws as a symbol, not a letter (the

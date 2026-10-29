@@ -56,7 +56,9 @@ pub const SNAP_PX: f64 = 1.5 * CELL as f64;
 /// Scenes kept for the cells a slide shows and the newest scene lacks (the strip leaving the view).
 pub const HISTORY: usize = 3;
 /// How long a preview ([`Presenter::preview`]) is held, on the presentation clock, when no
-/// picture of the engine's follows it: past a step's 540–860 ms to its picture.
+/// picture of the engine's follows it: past the 520 engine ms from a step's early picture to the
+/// turn's first picture that u6-web's start-room receipt measures, and past the bound spec 20
+/// Design 3 writes for a turn's first pick.
 pub const PREVIEW_MS: f64 = 2000.0;
 
 /// Whether slides are shown at `rate` engine ms per wall ms (`None`: Max) on a display of

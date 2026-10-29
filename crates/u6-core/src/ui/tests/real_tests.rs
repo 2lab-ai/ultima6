@@ -106,6 +106,13 @@ fn cell_glyph(fb: &Framebuffer, s: &State, col: usize, row: usize, ink: u8) -> u
 
 /// A PNG of the frame (RGB, zlib stored blocks).
 pub(super) fn png(fb: &Framebuffer) -> Vec<u8> {
+    let mut rgba = Vec::new();
+    fb.write_rgba(&mut rgba);
+    png_rgba(fb.width(), fb.height(), &rgba)
+}
+
+/// A PNG (RGB, zlib stored blocks) of `w` × `h` RGBA8 pixels, row-major (the alpha dropped).
+pub(super) fn png_rgba(w: usize, h: usize, rgba: &[u8]) -> Vec<u8> {
     fn crc32(data: &[u8]) -> u32 {
         let mut c = !0u32;
         for &b in data {
@@ -127,9 +134,6 @@ pub(super) fn png(fb: &Framebuffer) -> Vec<u8> {
         out.extend_from_slice(&body);
         out.extend_from_slice(&crc32(&body).to_be_bytes());
     }
-    let (w, h) = (fb.width(), fb.height());
-    let mut rgba = Vec::new();
-    fb.write_rgba(&mut rgba);
     let mut raw = Vec::with_capacity(h * (w * 3 + 1));
     for y in 0..h {
         raw.push(0);

@@ -353,7 +353,7 @@ fn receipt_a_conversation_scrolled_back_shows_each_line_as_it_was() {
                 std::fs::write(Path::new(dir).join(name), rgba).quiet();
             }
             let line = base_line + (back - at) as u64;
-            let top = e.with_view_frame(|fb| message_rows(fb, &m).swap_remove(0));
+            let top = message_rows(e.screen_frame(), &m).swap_remove(0);
             if let Some(then) = was.get(&line) {
                 compared += 1;
                 // The bar draws over the last cell only where it shows one colour.

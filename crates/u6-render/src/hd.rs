@@ -76,8 +76,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::{
-    BITMAP_PAPER, FLAG_INK, FLAG_MEMORY, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL, FLAG_TYPED,
-    Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH, grey,
+    BITMAP_PAPER, FLAG_HALFTONE, FLAG_INK, FLAG_MEMORY, FLAG_PAPER, FLAG_PAPER_OFF, FLAG_SYMBOL,
+    FLAG_TYPED, Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH, grey,
 };
 
 pub use mmpx::{mmpx, mmpx2x};
@@ -662,6 +662,9 @@ pub struct HdGlyph {
     /// The colour of its set pixels and of its clear ones; a space's ink is its paper.
     pub ink: Rgb,
     pub paper: Rgb,
+    /// Port-only (spec 17 Presentation): drawn half-toned ([`crate::FLAG_HALFTONE`]): the
+    /// platform draws its HD glyph as a checker at the HD pixel grid, half its pixels the paper.
+    pub halftone: bool,
 }
 
 /// A cell listed: its code and its ink and paper indices (a space's ink is its paper); a
@@ -672,12 +675,14 @@ struct CellGlyph {
     ink: u8,
     paper: u8,
     rows: [u8; CELL],
+    halftone: bool,
 }
 
 /// Whether cell (col, row) is listed, and as what. Each of its 64 pixels is a [`Kind::Glyph`]
 /// source of one code at version 0, (u, v) its place in the cell, flags [`FLAG_INK`] or none
-/// (with [`FLAG_PAPER`] where drawn over the paper, and [`FLAG_TYPED`] on all of them or on
-/// none), its set pixels of one colour and its clear ones of one colour; and either the code is
+/// (with [`FLAG_PAPER`] where drawn over the paper, and [`FLAG_TYPED`] and [`FLAG_HALFTONE`]
+/// each on all of them or on none), its set pixels of one colour and its clear ones of one
+/// colour; and either the code is
 /// drawn in the HD font ([`hd_font_code`]) with at least one set pixel and one clear one, or it
 /// is the space ([`SPACE`], not drawn in the HD font, listed on its own; [`TYPED_SPACE`] typed)
 /// with no set pixel, listed with its one colour as its ink and its paper. Or it is a symbol
@@ -692,7 +697,8 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
     if !(hd_font_code(code) || code == SPACE) {
         return None;
     }
-    let typed = first.flags & FLAG_TYPED;
+    let typed = first.flags & (FLAG_TYPED | FLAG_HALFTONE);
+    let halftone = first.flags & FLAG_HALFTONE != 0;
     let (mut ink, mut paper) = (None, None);
     for v in 0..CELL {
         for u in 0..CELL {
@@ -722,10 +728,15 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
     if code == SPACE {
         return match (ink, paper) {
             (None, Some(paper)) => Some(CellGlyph {
-                code: if typed != 0 { TYPED_SPACE } else { SPACE },
+                code: if typed & FLAG_TYPED != 0 {
+                    TYPED_SPACE
+                } else {
+                    SPACE
+                },
                 ink: paper,
                 paper,
                 rows: [0; CELL],
+                halftone,
             }),
             _ => None,
         };
@@ -735,6 +746,7 @@ fn glyph_cell(plane: &[Src], pixels: &[u8], col: usize, row: usize) -> Option<Ce
         ink: ink?,
         paper: paper?,
         rows: [0; CELL],
+        halftone,
     })
 }
 
@@ -807,6 +819,7 @@ fn symbol_cell(plane: &[Src], pixels: &[u8], (x0, y0): (usize, usize)) -> Option
         ink,
         paper: paper?,
         rows,
+        halftone: false,
     })
 }
 
@@ -1198,6 +1211,7 @@ impl Compositor {
                     code: g.code,
                     ink: frame.palette[usize::from(g.ink)],
                     paper: frame.palette[usize::from(g.paper)],
+                    halftone: g.halftone,
                 })
             }));
         self.symbol_rows.clear();

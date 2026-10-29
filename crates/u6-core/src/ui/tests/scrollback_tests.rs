@@ -462,8 +462,8 @@ fn the_wheel_shows_a_kept_line_as_it_looked_before_it_scrolled_off() {
             compared += 1;
             lines.insert(want);
         }
-        // The HD frame's view is the shown frame (no pointer sprite here).
-        assert!(e.with_view_frame(|v| same_frame(v, e.frame())));
+        // The HD frame's screen frame is the shown frame (no pointer sprite here).
+        assert!(same_frame(e.screen_frame(), e.frame()));
     }
     // Every line in view but the newest at the window's last row: the live frames show a line
     // there only before its newline, which scrolls it first.
@@ -494,7 +494,7 @@ fn with_no_history_view_the_frame_is_the_frame_without_the_feature() {
             same_frame(e.frame(), &e.published_frame()),
             "live: as published"
         );
-        assert!(e.with_view_frame(|v| same_frame(v, &e.published_frame())));
+        assert!(same_frame(e.screen_frame(), &e.published_frame()));
     }
     // Back and forward again: the live frame once more, the bar gone.
     assert!(e.wheel(IN.0, IN.1, -3));
@@ -1788,4 +1788,139 @@ fn the_view_adds_only_what_the_history_no_longer_holds() {
     until(&mut e, &|e| published(e) > at);
     assert_eq!(view(&e), full, "4: published, the vector kept");
     println!("the view's vector: {full} bytes; a dropped line all patch: {dropped} bytes");
+}
+
+/// Spec 23 Decision 12 (done at unit M3's merge round): one composition, the published frame,
+/// the view, the context menu and the sprite. Scrolled back three lines with the menu open over
+/// the map, the screen frame shows the kept lines in the window and the menu's box, and outside
+/// both it is the published frame; the HD frame (2×, no pack: a pixel is a 2 × 2 block of its
+/// colour) shows both, every pixel of the window and of the box; a wheel with the menu open
+/// composes the HD frame again (the view's stamp in its key) with the menu still over it; the
+/// menu closed, the HD frame shows the history alone.
+#[test]
+fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
+    use crate::hd::HdView;
+    use crate::ui::menu::{Entry, Kind, LOOK, Menu, Section};
+    use u6_render::hd::Scale;
+    let n = 30u16;
+    // The command read up (A4-0x7a2c), which an open menu needs to stay open.
+    let mut s = game_state();
+    s.main.reading = 1;
+    let mut e = Engine::with_game(s, Files::default(), talker(n, 0));
+    e.enable_src_plane();
+    e.io().draw(|fb| {
+        for (i, c) in fb.palette.iter_mut().enumerate() {
+            let v = i as u8;
+            *c = u6_render::Rgb::new(v.wrapping_mul(9), 255 - v, 7);
+        }
+    });
+    e.set_context_menu(true);
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    let kept = e.state().ui.scrollback.lines().len();
+    let menu = Menu {
+        kind: Kind::Map,
+        cell: Some((1, 1)),
+        underlined: None,
+        sections: vec![Section {
+            object: -1,
+            kind: None,
+            name: String::new(),
+            entries: vec![Entry {
+                code: LOOK,
+                reason: None,
+                theft: false,
+            }],
+        }],
+        go_here: None,
+    };
+    let open = crate::ui::popup::Open::new(&menu, MAP, &e.state(), &[]);
+    let (x0, y0, x1, y1) = open.rect();
+    assert!(
+        x1 < X.start as i32 || y1 < Y.start as i32,
+        "the fixture: the box off the window"
+    );
+    e.popup_mut().show(open);
+    e.tick(&[], 16);
+    let in_box =
+        |x: usize, y: usize| (x0..=x1).contains(&(x as i32)) && (y0..=y1).contains(&(y as i32));
+    let in_window = |x: usize, y: usize| X.contains(&x) && Y.contains(&y);
+    // The screen frame: the kept lines back `back` in the window, the menu's box drawn, the
+    // published frame elsewhere; the shown frame the same (no sprite).
+    let screen_shows = |e: &Engine, back: usize| {
+        let screen = e.screen_frame();
+        let rows: Vec<String> = (0..10).map(|r| format!("l{}", kept - back + r)).collect();
+        assert_eq!(shown_rows(screen), rows, "{back} back: the kept lines");
+        let (mut boxed, mut differ) = (0, 0);
+        for y in 0..u6_render::HEIGHT {
+            for x in 0..u6_render::WIDTH {
+                let (a, b) = (screen.get(x, y), e.published_frame().get(x, y));
+                if in_box(x, y) {
+                    boxed += 1;
+                    differ += usize::from(a != b);
+                } else if !in_window(x, y) {
+                    assert_eq!(
+                        a, b,
+                        "{back} back: outside the box and the window at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(
+            differ * 2 > boxed,
+            "{back} back: the menu drawn: {differ} of {boxed}"
+        );
+        assert!(same_frame(e.frame(), screen), "no sprite: shown = screen");
+    };
+    // Every pixel of the window and of the box in the HD frame: its 2 × 2 block in the screen
+    // frame's colour.
+    let hd_is_screen = |e: &Engine, hd: &HdView| {
+        let screen = e.screen_frame();
+        let w = u6_render::WIDTH * 2;
+        let rgba = hd.rgba();
+        for y in 0..u6_render::HEIGHT {
+            for x in 0..u6_render::WIDTH {
+                if !in_box(x, y) && !in_window(x, y) {
+                    continue;
+                }
+                let p = screen.palette[usize::from(screen.get(x, y).unwrap_or(0))];
+                let want = u32::from_le_bytes([p.r, p.g, p.b, 255]);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    if rgba[(y * 2 + dy) * w + x * 2 + dx] != want {
+                        return Some((x, y));
+                    }
+                }
+            }
+        }
+        None
+    };
+    assert!(e.wheel(IN.0, IN.1, -3));
+    screen_shows(&e, 3);
+    let mut hd = HdView::new();
+    hd.set(true, Scale::X2);
+    assert!(hd.present(Some(&e), &Framebuffer::new()));
+    assert_eq!(hd_is_screen(&e, &hd), None, "3 back: the HD frame");
+    assert!(e.wheel(IN.0, IN.1, -1));
+    assert!(e.context_menu().is_some(), "the menu still open");
+    assert!(
+        hd.present(Some(&e), &Framebuffer::new()),
+        "the wheel with the menu open: composed again"
+    );
+    screen_shows(&e, 4);
+    assert_eq!(hd_is_screen(&e, &hd), None, "4 back: the HD frame");
+    assert!(e.dismiss_context_menu(), "closed");
+    assert!(hd.present(Some(&e), &Framebuffer::new()), "composed again");
+    let screen = e.screen_frame();
+    assert_eq!(
+        shown_rows(screen)[0],
+        format!("l{}", kept - 4),
+        "the history still shown"
+    );
+    assert!(
+        (0..u6_render::HEIGHT).all(|y| (0..u6_render::WIDTH)
+            .all(|x| !in_box(x, y) || screen.get(x, y) == e.published_frame().get(x, y))),
+        "the box gone"
+    );
+    assert_eq!(hd_is_screen(&e, &hd), None, "closed: the HD frame");
 }

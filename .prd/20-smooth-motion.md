@@ -6,8 +6,8 @@ tags: [ultima6, render, hd, timing]
 
 # 20 — Smooth motion
 
-Status: implemented, not merged (2026-10-29: unit W2, branch `feat/smooth-motion`, round 10 on 369f00a, which has
-integ/r1027 9e8f133 merged in). Item 5 of `objects-menu-fog-motion/ssot.md`. Research and measurements: round 1 unit
+Status: implemented, not merged (2026-10-29: unit W2, branch `feat/smooth-motion`, round 12 on 9e45fe4, which merges
+integ/r1027 3e78d27 in: unit M3's in-game context menu, spec 17, and its one composition of the screen frame). Item 5 of `objects-menu-fog-motion/ssot.md`. Research and measurements: round 1 unit
 W1, `~/Games/ultima6/work/dispatch/r1027-w1/motion.md` (runner and raw outputs in `runner/` beside it), and spec 19
 (T1).
 Presentation only: the engine keeps its cells, its RNG order and the original's timing (spec 06).
@@ -45,15 +45,30 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
      slides. Both receipts (`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`; in the page,
      test-web's "a held walk in the page", read from `Game.slide` per display frame, not from the page's draws, which
      it makes only when the slide changed) count per display frame where the map is drawn: natively the camera of
-     the view shown, in the page the static layer's placement (the frame layer found by its role,
+     the view shown, in the page the static layer's placement (the static and the frame layer found by their roles,
      `Game::slide_layer_role`). A frame is off rest when the map is off its place; moving when it is also between
-     the step's two cells (on the step's side of rest, within one cell) and closer to rest than on the step's frame
-     before, which lay between them too (in the page, drawn onto the screen as well); backward when farther; stray
-     when off rest anywhere else. Every paced step needs two moving frames or more and none backward or stray. At 8×
-     a slide is 45 wall ms, 2.7 display frames: two frames off rest are sure (`slides_shown` shows no slide under
-     two), the first with no frame of the step before it, so there one moving frame (`moving_needed`). A slide frozen
-     at its start (`Track::offset` read at `start`), run backward in time, overshooting rest by half a cell, drawn on
-     the wrong side of rest, or snapped (`SNAP_PX` under a cell) fails both receipts. The slide keeps its 360 engine
+     the step's two cells (on the step's side of rest, within one cell) and closer to rest than on the step's last
+     frame that reached the screen, which lay between them too (in the page, drawn onto the screen as well);
+     backward when farther, once the step's slide began (a frame at rest before its first frame off rest is its
+     onset); stray when off rest anywhere else. Every paced step needs two moving frames or more, none backward or
+     stray, and no jump over the bound (round 12): the jump is the largest drop of the map's offset between two
+     frames that reached the screen, from 16 (the old cell, where the step starts) to the first, a frame of the
+     engine's after the slide began counting as at rest (0) and one before it not counted; the bound is
+     ceil(16 · Δ / D) + 1 (`jump_bound`), Δ the engine ms a display frame runs and D the slide's 360 ms: 2 px at 1×,
+     4 at 4×, 7 at 8× (the presentation clock moves Δ a frame, a slide's first frame lies within Δ of its start, and
+     the offsets are rounded). In the page, besides, every frame whose placement or layers changed since the last
+     that drew the static layer onto the screen draws it, each draw where `Game.slide` puts it. At 8× a slide is 45
+     wall ms, 2.7 display frames: two frames off rest are sure (`slides_shown` shows no slide under two), the first
+     with no frame of the step before it, so there one moving frame (`moving_needed`). A slide frozen at its start
+     (`Track::offset` read at `start`), run backward in time, overshooting rest by half a cell, drawn on the wrong
+     side of rest, snapped (`SNAP_PX` under a cell), cut short (16, 15, 14, then the engine's frame: a jump of 14) or
+     drawn in 4 px steps fails both receipts; a page that draws the static layer every 4th frame, or a device pixel
+     off its place, fails the page's (`the_step_receipt_counts_the_jump_onset_and_frames_not_shown` checks the
+     counting itself on such frames). The receipts measure the map, which the camera moves, not the movers: a
+     companion's or an NPC's own slide is not counted frame by frame (the frames and slide-end receipts draw them,
+     Design 5, and the start room's hold receipt checks the presenter's newest scene on the leader's cell). The largest
+     jump measured over the paced steps (2026-10-29): 1, 3 and 6 px at 1×, 4× and 8× in Original and in Wide; 1 px in
+     the page's start room. The slide keeps its 360 engine
      ms, so the map moves on part of each step. Measured in the castle fixture (the assault's actors passed over),
      the down arrow held 6 s on 60 Hz frames, per step over the frames to the next, median and range; "at rest" is
      the presenter's picture with the map at its place (an early picture held until the turn's, or other objects
@@ -96,8 +111,10 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
        step, each paced press taken 17–33 ms (one or two frames) after the prompt came back.
 
      The receipt asserts, motion on and off, that no step leaves the prompt up with a paced press due (`late` 0) and
-     that each paced step's engine ms lie within two display frames of its wall ms; it bounds neither the ms dropped
-     nor the times. With a delay of 300 ms injected at each ready prompt (`U6_DELAY_TAKE_MS`, test-only) both fail.
+     that each paced step's engine ms lie within two display frames of its wall ms less the ms the pace clamped
+     (`Game::clamped_ms`: a host stall past `CAP_MS`, pacer.rs), both ends read at the last log row of the display
+     frame they lie in (round 12: a frame that runs more steps after the step's own row no longer reads as lag); it
+     bounds neither the ms dropped nor the times. With a delay of 300 ms injected at each ready prompt (`U6_DELAY_TAKE_MS`, test-only) both fail.
      What was seen: no slowdown that comes with motion on, and no delay of a held press at a ready prompt; the time
      between two steps is the room's world turn (3.7–7.3 s on the real clock in these runs, the virtual display's
      two paced steps 3.4 s; the runs walked different steps, and a turn's length varies with what the room's actors
@@ -138,7 +155,40 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
        turns took 0.7–8.5 s (Original) and 1.2–8.7 s (Wide), the first publication after each early picture came 520
        engine ms after it, so the hold never expired (1480 ms of margin) and no frame showed the old cell. The
        turn's first picture is its refresh after the first pick (Measured facts), not its end. The receipt fails with
-       the hold at 500 ms.
+       the hold at 500 ms. It asserts its premises (round 12): some turn takes longer than the hold, and the game's
+       key waits refresh the view (A4-0x7a56 set in the game's tables); every early picture has a publication after
+       it once the last turn drained (none left out of the count); and on every frame that draws the presenter's
+       picture its newest scene is centred on the leader's cell (a stale scene over the old cell counts).
+     - **Why the hold ends before it can expire (round 12, the bound).** From the early picture (made at the step,
+       `actors/walk.rs:82`) the engine waits, before it publishes the map again: the step's pace, `STEP_MS` +
+       `FOLLOW_MS` = 65 ms (`walk.rs:90`); per refill before the first pick a pass and a clock minute, `PICK_MS` +
+       `MINUTE_MS` = 197 ms (`actors/turn.rs:585-597`); the first pick's pass, 11 ms, and `COMBAT_NPC_MS` = 46 ms when
+       it runs a combat routine (`turn.rs:609`); then `AFTER_TURN_MS` = 427 ms (`turn.rs:626`) before the refresh
+       that publishes the map (`turn.rs:628`). These waits (`combat::present::pace`) count display frames and render
+       nothing. With one refill that is 746 ms; the hold expires first only with eight refills or more before the first
+       pick (2125 ms), and a refill gives every actor its dexterity back (`turn.rs:492-501`, a debt carried), so a
+       second comes only when no actor the pick sees has points after it. A first pick that waits on the player (an arrest's Y or N,
+       `actors/npc.rs:571-585`, its read at `:582`; an NPC's talk, `npc.rs:642`, whose conversation reads its lines
+       through `ui/keyread.rs:299`; a more prompt of the prints flushed before them, `actors/seams.rs:308-311`) waits
+       in `keyread::idle_wait` (`ui/keyread.rs:129`). Its first idle frame with no key refreshes the view
+       (`:158-195`, while `idle_refresh`, A4-0x7a56, is set: it is in the game's tables, and only character creation
+       and Peer clear it): `gfx::refresh_view` (`gfx/view.rs:435-439`) rebuilds the view the step marked dirty
+       (`actors/party.rs:356`), renders it framed and presents it. So the map is published with the party on its new
+       cell within a display frame of the wait (a scene of the early picture's places: the party's slide runs on),
+       the hold ends there, and the question is asked over the new cell. A cast (`npc.rs:550-552`) shows its spell's
+       missiles and flashes, foreign pictures: they end the hold, and the party shows on its old cell until the
+       turn's picture, the case named above.
+     - an open context menu (spec 17) ends every slide at once, and none runs while it is open (round 12): a slide
+       running when the menu opens, or one a publication would start under it, ends (`Presenter::foreign`, from
+       u6-web `Game::slide_view`, which reads `Engine::context_menu_open`: a snap, not a publication, so the
+       presenter keeps the scene it shows and its generation moves). The platform then shows the screen frame, the
+       menu over the map at rest: the menu is never drawn over a moving map, nor a moving map under it, and nothing
+       slides on after it closes (the next publication that moves something slides from the scene kept). Receipts:
+       `a_context_menu_opened_during_a_slide_ends_it_and_it_does_not_resume` (HD off and on, Original and Wide: in
+       the page's start room out of its fight, an NPC still sliding at the prompt; in its start fight, a member still
+       sliding at the next member's prompt, with the history scrolled three lines back: no slide at the menu's first
+       frame, none through the slide's own end and 200 ms past it, open or closed, each layer where the one
+       composition puts it) and test-web's "a right press during a slide opens the menu".
 4. **The early picture (spec 19 O2, pure form).** Right after the leader's step (`actors::walk::paced_player_step`),
    the engine builds a scene on a clone of `State` (`update_view` and the draw lists on the clone; the clone is
    dropped; the clone holds no remembered sight, so the early picture reads the live state's). It hands
@@ -291,5 +341,6 @@ Presentation only: the engine keeps its cells, its RNG order and the original's 
 | Animation during a slide | The HD layers are made again only when what slides changes: a camera slide starts or restarts, a mover joins, restarts or leaves, the presenter starts again (a foreign picture, a snap, the switch). A publication that only lets the slides run on keeps them, so an animated tile or the clock keeps its frame for at most one slide; the slide's end shows the engine's frame. |
 | Actor entering or leaving sight | It is in one scene only, so it pops (spec 18's memory never holds actors). |
 | A click during a slide | Mapped through the published cell grid. The held walk is relative to the centred leader, so it is unaffected. |
-| The message history scrolled back (spec 23) | A slide keeps the history over the message window. Classic draws the slide into a copy of the engine's shown frame (the published frame, the history over it, the pointer sprite), HD over the HD frame composed with the history (`Engine::with_view_frame`); the slide's layers are clipped to the shown map (`a_slide_keeps_the_message_history_the_player_scrolled_back_to`: the frames off rest, those holding the early picture at rest and the first after the slide; in the page, test-web's "while the history is scrolled back"). |
+| The message history scrolled back (spec 23) | A slide keeps the history over the message window. Classic draws the slide into a copy of the engine's shown frame (the published frame, the history over it, the pointer sprite), HD over the HD frame of the screen frame (`Engine::screen_frame`: the published frame, the history, the menu); the slide's layers are clipped to the shown map (`a_slide_keeps_the_message_history_the_player_scrolled_back_to`: against a frame made in the test from the published frame and the history's view alone, the frames off rest, those holding the early picture at rest and the first after the slide; in HD the three share one frame off the map; in the page, test-web's "while the history is scrolled back"). With a context menu open over it no slide runs (Design 3). |
+| A right press during a slide (spec 17's menu) | The slide ends at once and the menu is drawn over the map at rest; nothing slides on after it closes (Design 3). |
 | Key type-ahead | Fixed by spec 19 O1 (unit K1), which lands before this. Otherwise one hold queues up to 49 slides. |

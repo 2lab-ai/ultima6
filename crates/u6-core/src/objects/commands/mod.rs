@@ -29,7 +29,7 @@ mod text;
 pub(crate) mod world;
 
 #[cfg(test)]
-mod real_data;
+pub(crate) mod real_data;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
