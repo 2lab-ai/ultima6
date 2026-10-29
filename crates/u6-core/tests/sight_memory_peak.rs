@@ -408,11 +408,17 @@ fn a_save_and_a_restore_of_a_full_memory_hold_one_memory_and_one_file() {
 /// state, saved. Its cells: a third of `MAX_SAVED_LAYERS` of three layers each and one for the
 /// rest, so their layers are exactly that limit, on the dungeon levels (keys above every surface
 /// key), read from a file; then one framed render of the party's view puts the cells in sight on
-/// top, past the limit. The Save writes the newest sights that fit (of one minute, the highest
-/// keys), so it sorts the cells by sight: besides the keys (4 bytes a cell) it collects a tuple of
-/// 16 bytes a cell in a vector grown by doubling (at its last growth the old block and the new,
-/// under 3 × 16 bytes a cell), and lets it go before it makes the file. Its peak over the heap
-/// before it: at most the keys, the larger of the file and the tuples, and 64 KiB.
+/// top, past the limit, of the same minute (the clock stands still). The Save writes the newest
+/// sights that fit (of one minute, the highest keys): the file's cells come first and fill the
+/// limit exactly, and the first of the render's (a layer or more) does not fit, so the file holds
+/// every cell read from the file and none of the render's (its cells the cells read, its layers
+/// the limit). Outside the measure, the file the Save wrote is decoded against the Save's objlist
+/// and compared with the fixture's from the counts on: its copies, and its cells' keys, minutes,
+/// layer counts and layers. To choose the cells the Save sorts them by sight: besides the keys (4
+/// bytes a cell) it collects a tuple of 16 bytes a cell in a vector grown by doubling from 4, and
+/// lets it go before it makes the file; at the vector's last growth the old block and the new
+/// live together, 3 × 16 bytes × the largest power of two under the cells. Its peak over the heap
+/// before it: at most the keys, the larger of the file and those tuples, and 64 KiB.
 #[test]
 fn a_save_past_the_files_layers_holds_the_keys_and_the_sort_or_the_file() {
     let _one = serial();
@@ -435,11 +441,9 @@ fn a_save_past_the_files_layers_holds_the_keys_and_the_sort_or_the_file() {
             (most - 3 * stacks) as u16
         }
     };
-    let file = file_of(
-        copies,
-        minute(&s),
-        (0..=stacks).map(|n| (below(n), layers(n))),
-    );
+    let now = minute(&s);
+    let fixture = || file_of(copies, now, (0..=stacks).map(|n| (below(n), layers(n))));
+    let file = fixture();
     s.gfx
         .cache
         .set_sight(u6_core::gfx::cache::read_sight(&file, &[]).quiet());
@@ -456,17 +460,32 @@ fn a_save_past_the_files_layers_holds_the_keys_and_the_sort_or_the_file() {
     let size = saved.bytes().len();
     let (kept, written) = (header(saved.bytes(), 36), header(saved.bytes(), 40));
     assert!(
-        kept < cells && written <= most,
-        "past the file's layers: the cells that fit"
+        kept == read && written == most,
+        "past the file's layers: the cells read from the file, all of them, none of the render's"
     );
-    let (keys, sort) = (4 * cells, 3 * 16 * cells);
+    let expected = fixture();
+    u6_testkit::assert_same!(
+        saved.bytes()[32..],
+        expected[32..],
+        "the file from its counts on: the fixture's copies and cells"
+    );
+    drop(expected);
+    let objlist = s.saveload.objlist.clone().quiet();
+    let back = u6_core::gfx::cache::read_sight(saved.bytes(), &objlist);
+    assert!(back.is_ok(), "the file decodes against the Save's objlist");
+    s.gfx.cache.set_sight(back.quiet());
+    assert!(s.gfx.cache.sight_cells() == read, "into the cells read");
+    let keys = 4 * cells;
+    let tuples = (3 * std::mem::size_of::<(u32, u32, usize)>()) << (cells - 1).ilog2();
     println!(
         "past the file's layers: a memory of {cells} cells and {copies} copies, a file of {size} \
-         bytes of {kept} cells and {written} layers, the keys {keys}; the Save peaks {save} bytes \
-         over the heap before it ({held} held after)"
+         bytes of {kept} cells and {written} layers, the keys {keys}, the sort's tuples at their \
+         last growth {tuples}; the Save peaks {save} bytes over the heap before it ({held} held \
+         after)"
     );
     assert!(
-        save <= keys + size.max(sort) + (64 << 10),
-        "a Save past the file's layers: the keys, the larger of the file and the sort, and 64 KiB"
+        save <= keys + size.max(tuples) + (64 << 10),
+        "a Save past the file's layers: the keys, the larger of the file and the tuples at their \
+         last growth, and 64 KiB"
     );
 }
