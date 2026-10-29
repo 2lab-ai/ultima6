@@ -6,11 +6,12 @@ tags: [ultima6, ui, input]
 
 # 17 — Context menu
 
-Status: in progress (2026-10-28). Item 2 of `objects-menu-fog-motion/ssot.md`. Research: round 1 unit M1
-(`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build: round 2 unit M2 (shipped in deploy 30
-as a page overlay); in-game rework: unit M3 (branch `feat/ingame-menu`, from `60f92c6`). The entry "Go here" starts
-unit M4's travel (spec 21): wired in M3's round 4, the merge with integ/r1027 9e8f133 (M4 travel, T1, K2, D2), where
-the menu, the travel and spec 23's history view share one tick and one composition.
+Status: shipped (deploy 37, main 850ce4f, 2026-10-29; unit M3 round 4 7ff3213). This document is the implemented contract,
+not a future target. Round 5 (review fixes on round 4, `feat/ingame-menu`) follows. Item 2 of `objects-menu-fog-motion/ssot.md`.
+History: research round 1 unit M1 (`~/Games/ultima6/work/dispatch/r1027-m1/menu.md`, code at `587d973`); build round 2
+unit M2 (shipped in deploy 30 as a page overlay); in-game rework unit M3 (branch `feat/ingame-menu`, from `60f92c6`). The
+entry "Go here" starts unit M4's travel (spec 21): wired in M3's round 4, the merge with integ/r1027 9e8f133 (M4 travel,
+T1, K2, D2), where the menu, the travel and spec 23's history view share one tick and one composition.
 
 Owner, 2026-10-28, verbatim: "문맥 메뉴 인게임 ui로 해줘 시발 왜 웹페이지 ui로 만듬?" and "우클릭시 여기로 이동도
 하나 추가해줘 해당 위치까지 a*로 검색해서 이동하는 명령".
