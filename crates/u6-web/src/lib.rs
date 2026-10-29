@@ -8269,6 +8269,12 @@ mod tests {
     /// it fails instead (round 5, review b-1). Each use prints whether it ran.
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn in_the_castle() -> Option<Game> {
+        castle_with_state().map(|(game, _)| game)
+    }
+
+    /// [`in_the_castle`], with the game's state kept for the test to write.
+    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
+    fn castle_with_state() -> Option<(Game, Rc<std::cell::RefCell<u6_core::State>>)> {
         use std::cell::RefCell;
         if !std::path::Path::new(ZIP).exists() {
             let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
@@ -8307,7 +8313,7 @@ mod tests {
             game.step(20);
         }
         assert!(steps_to_prompt(&mut game), "the prompt after the break-off");
-        Some(game)
+        Some((game, st))
     }
 
     /// The command loop reads a command key (A4-0x7a2c set).
@@ -8874,6 +8880,7 @@ mod tests {
             let mut steps: Vec<Progress> = Vec::new();
             let mut gaps = Vec::new();
             let mut last = None;
+            let mut page = Page::new();
             // The hold, then the frames after its release until nothing slides or steps for 60.
             let (mut held, mut still, mut drained) = (true, 0, 0);
             while held || (still < 60 && drained < 600) {
@@ -8882,12 +8889,9 @@ mod tests {
                     held = false;
                 }
                 drained += usize::from(!held);
-                game.set_clock(game.clock + FRAME);
-                let k = game.pace(FRAME);
                 let mut stepped = false;
-                for _ in 0..k {
-                    game.step(20);
-                    let now = game.leader_position();
+                page_frame_at(&mut game, &mut page, &mut |g| {
+                    let now = g.leader_position();
                     if now != at {
                         let d = |i: usize| i32::from(now[i]) - i32::from(at[i]);
                         if let Some(step) = steps.last_mut() {
@@ -8896,15 +8900,11 @@ mod tests {
                         steps.push(Progress::new((d(0), d(1))));
                         at = now;
                         stepped = true;
-                        if let Some(t) = last.replace(game.clock).filter(|_| held) {
-                            gaps.push(game.clock - t);
+                        if let Some(t) = last.replace(g.clock).filter(|_| held) {
+                            gaps.push(g.clock - t);
                         }
                     }
-                }
-                game.ran(k);
-                if k > 0 || game.sliding() {
-                    game.present();
-                }
+                });
                 still = if stepped || game.sliding() { 0 } else { still + 1 };
                 let Some(step) = steps.last_mut() else {
                     continue;
@@ -9040,19 +9040,12 @@ mod tests {
             // Frames checked: off rest, held at rest, after the slide.
             let mut checked = [0usize; 3];
             for _ in 0..240 {
-                game.set_clock(game.clock + FRAME);
-                let k = game.pace(FRAME);
-                for _ in 0..k {
-                    game.step(20);
-                }
-                game.ran(k);
-                if !wheeled && game.leader_position() != at {
-                    assert!(game.wheel(200, 150, -3), "{label}: over the message window");
-                    wheeled = true;
-                }
-                if k > 0 || game.sliding() {
-                    game.present();
-                }
+                page_frame_at(&mut game, &mut page, &mut |g| {
+                    if !wheeled && g.leader_position() != at {
+                        assert!(g.wheel(200, 150, -3), "{label}: over the message window");
+                        wheeled = true;
+                    }
+                });
                 if !wheeled {
                     continue;
                 }
@@ -9153,20 +9146,167 @@ mod tests {
         compositor.rgba().to_vec()
     }
 
-    /// One 60 Hz display frame at the game's speed as the page runs it: the clock moved on, the
-    /// steps [`Game::pace`] gives, the present after a frame that stepped or while sliding, then
-    /// the page's take of the slide's layers ([`Page::take`]; nothing with HD off).
-    fn page_frame_at(game: &mut Game, page: &mut Page) {
+    /// One 60 Hz display frame at the game's speed as the page runs it (site/app.js `frame`): the
+    /// clock moved on, the steps [`Game::pace`] gives, each followed by `each`, the present after
+    /// a frame that stepped or while sliding, then the page's take of the slide's layers
+    /// ([`Page::take`]; nothing with HD off). The motion receipts' one frame (round 13, opus N8):
+    /// spec 19's [`frame`] presents nothing, and spec 17's [`page_frame`] runs on the page's clock
+    /// given whole with Max's budget.
+    fn page_frame_at(game: &mut Game, page: &mut Page, each: &mut impl FnMut(&mut Game)) {
         game.set_clock(game.clock + FRAME);
         let k = game.pace(FRAME);
         for _ in 0..k {
             game.step(20);
+            each(game);
         }
         game.ran(k);
         if k > 0 || game.sliding() {
             game.present();
         }
         page.take(game);
+    }
+
+    /// The directory `U6_FRAMES_DIR` names, made, for frames the dispatcher reads; none without it.
+    /// Fails closed on a path that is not absolute, holds `.` or `..`, or lies (resolved) in the
+    /// worktree or the main checkout it lies in.
+    #[allow(clippy::disallowed_methods)] // tests may read the environment and write files
+    fn frames_dir() -> Option<std::path::PathBuf> {
+        use std::path::{Component, Path, PathBuf};
+        let dir = PathBuf::from(std::env::var_os("U6_FRAMES_DIR")?);
+        assert!(
+            dir.is_absolute()
+                && (dir.components()).all(|c| matches!(c, Component::RootDir | Component::Normal(_))),
+            "U6_FRAMES_DIR an absolute path without . or .."
+        );
+        std::fs::create_dir_all(&dir).quiet();
+        let made = std::fs::canonicalize(&dir).quiet();
+        let repo = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).quiet();
+        let main = (repo.parent())
+            .filter(|p| p.file_name().is_some_and(|n| n == ".worktrees"))
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        for root in std::iter::once(&repo).chain(main.as_ref()) {
+            assert!(!made.starts_with(root), "the frames directory outside the repository");
+        }
+        Some(made)
+    }
+
+    /// Writes `rgba` (`w` × `h` RGBA8 pixels) as `name`, a PNG (RGB, zlib stored blocks), into
+    /// [`frames_dir`]; whether it did.
+    #[allow(clippy::disallowed_methods)] // tests may write files
+    fn keep_frame(name: &str, (w, h): (usize, usize), rgba: &[u8]) -> bool {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for &b in data {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+        }
+        let Some(dir) = frames_dir() else {
+            return false;
+        };
+        assert_eq!(rgba.len(), w * h * 4, "{name}: the frame's size");
+        let mut raw = Vec::with_capacity(h * (w * 3 + 1));
+        for row in rgba.chunks_exact(w * 4) {
+            raw.push(0);
+            for px in row.chunks_exact(4) {
+                raw.extend_from_slice(&px[..3]);
+            }
+        }
+        let mut z = vec![0x78, 0x01];
+        let blocks: Vec<&[u8]> = raw.chunks(0xffff).collect();
+        for (i, b) in blocks.iter().enumerate() {
+            z.push(u8::from(i + 1 == blocks.len()));
+            let n = b.len() as u16;
+            z.extend_from_slice(&n.to_le_bytes());
+            z.extend_from_slice(&(!n).to_le_bytes());
+            z.extend_from_slice(b);
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in &raw {
+            a = (a + u32::from(x)) % 65521;
+            b = (b + a) % 65521;
+        }
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+        ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        std::fs::write(dir.join(name), out).quiet();
+        true
+    }
+
+    /// The camera's offset the page shows now: with HD off the view the RGBA frame shows
+    /// ([`Game::present_slide`]'s), with HD on the static layer's placement ([`static_offset`]);
+    /// `None` for the engine's frame.
+    fn shown_offset(game: &Game) -> Option<(i32, i32)> {
+        if game.hd_on() {
+            // The page draws the static layer where the world shows: at -camera.
+            static_offset(game).map(|(x, y)| (-x, -y))
+        } else {
+            (game.motion.shown.as_ref())
+                .filter(|_| game.motion.drawn)
+                .map(|s| s.0.camera)
+        }
+    }
+
+    /// Spec 20 (round 13, opus S3): one step tapped at the prompt (down, right, up, left, a pass
+    /// after a round of them walked none), counted by [`Progress`] over its frames
+    /// ([`shown_offset`]) until the prompt is back and nothing slides for 30 frames (at most 15 s),
+    /// then closed; `None` when no key walked in four rounds.
+    fn tap_step(game: &mut Game, page: &mut Page) -> Option<Progress> {
+        for round in 0..4 {
+            for key in ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Space"] {
+                if key == "Space" && round == 0 {
+                    continue;
+                }
+                let at = game.leader_position();
+                let takes = game.engine.as_ref().quiet().prompt_takes();
+                assert!(down(game, key));
+                assert!(game.key_up(key));
+                let (mut step, mut still) = (None::<Progress>, 0);
+                for _ in 0..900 {
+                    let mut moved = None;
+                    page_frame_at(game, page, &mut |g| {
+                        let now = g.leader_position();
+                        if moved.is_none() && now != at {
+                            let d = |i: usize| i32::from(now[i]) - i32::from(at[i]);
+                            moved = Some((d(0), d(1)));
+                        }
+                    });
+                    if let Some(dir) = moved.filter(|_| step.is_none()) {
+                        step = Some(Progress::new(dir));
+                    }
+                    if let Some(p) = step.as_mut() {
+                        p.frame(shown_offset(game), game.old_cell(), true);
+                    }
+                    let taken = game.engine.as_ref().quiet().prompt_takes() > takes;
+                    still = if taken && game.at_prompt() && !game.sliding() { still + 1 } else { 0 };
+                    if still >= 30 {
+                        break;
+                    }
+                }
+                if let Some(mut p) = step {
+                    p.close();
+                    return Some(p);
+                }
+            }
+        }
+        None
     }
 
     /// Spec 20 with spec 17 (round 12): an open context menu ends a running slide at once, so the
@@ -9218,7 +9358,7 @@ mod tests {
                 assert!(down(&mut game, key));
                 assert!(game.key_up(key));
                 for _ in 0..900 {
-                    page_frame_at(&mut game, &mut page);
+                    page_frame_at(&mut game, &mut page, &mut |_| {});
                     let e = game.engine.as_ref().quiet();
                     let taken = e.prompt_takes() > takes;
                     if !(taken && game.pending.is_empty() && e.context_menu_gate(&[])) {
@@ -9249,8 +9389,13 @@ mod tests {
             game.pointer(hx, hy, 2);
             let mut waited = 0;
             while drawn(&game).is_none() && waited < 8 {
-                page_frame_at(&mut game, &mut page);
+                page_frame_at(&mut game, &mut page, &mut |_| {});
                 waited += 1;
+                // Round 13 (opus N1): the slide still runs on every frame before the menu's first.
+                assert!(
+                    drawn(&game).is_some() || game.sliding(),
+                    "{label}: the slide running before the menu's first frame ({waited} frames)"
+                );
             }
             let v = drawn(&game).expect("the menu open");
             let opened = game.presentation_ms();
@@ -9344,7 +9489,7 @@ mod tests {
                     assert!(down(&mut game, "Escape"));
                     assert!(game.key_up("Escape"));
                 }
-                page_frame_at(&mut game, &mut page);
+                page_frame_at(&mut game, &mut page, &mut |_| {});
                 if drawn(&game).is_some() {
                     open += 1;
                 } else {
@@ -9364,11 +9509,146 @@ mod tests {
                 back,
                 "{label}: the history after"
             );
+            // Round 13 (opus S3): motion resumes after the menu. Out of the fight a step tapped
+            // slides as a held walk's paced step must, and ends at rest (Go here, refused here
+            // with a foe in view, is the castle's: `go_here_chosen_from_a_menu_slides_…`).
+            let mut resumed = String::new();
+            if !scrolled {
+                let p = tap_step(&mut game, &mut page).expect("a step after the menu");
+                assert!(slid_at_1x(&p), "{label}: the step after the menu slides: {p:?}");
+                resumed.push_str(&format!(
+                    "; the step after it: {} moving frames, jump {} px",
+                    p.moving, p.jump
+                ));
+            }
             println!(
                 "{label}: a right press during a slide ({taps} keys tapped to one): the slide \
                  ended at the menu's first frame, each layer where the composition puts it; \
-                 {open} frames with the menu open and {closed} after it closed, none sliding"
+                 {open} frames with the menu open and {closed} after it closed, none sliding\
+                 {resumed}"
             );
+        }
+    }
+
+    /// The held walk's predicate on one step at 1× ([`a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed`]):
+    /// [`moving_needed`] moving frames or more, none backward or stray, no jump over
+    /// [`jump_bound`], and at rest by its close.
+    fn slid_at_1x(p: &Progress) -> bool {
+        p.moving >= moving_needed(1.0)
+            && p.backward == 0
+            && p.stray == 0
+            && p.jump <= jump_bound(1.0)
+            && !p.unfinished
+    }
+
+    /// Spec 20 with spec 17 and 21 (round 13, opus S3, the second variant): after a context menu,
+    /// Go here chosen starts the travel and its first step slides (a presenter left stuck by the
+    /// menu fails). In the castle ([`in_the_castle`]: no foe in view, so Go here can run; the
+    /// start room's fight leaves foes in view, which refuse it) at 1×, HD off and on, after two
+    /// passes: a right press on a cell two from the hero whose Go here can run; the menu's frames
+    /// show no slide; its press let go, Go here chosen, the travel's first step slides as a held
+    /// walk's paced step must ([`slid_at_1x`], counted to its second step or to rest). The menu
+    /// opens at rest here: no NPC of the castle slides at a prompt (none in 64 keys tapped, nor
+    /// one set to walk at random within five cells), so the menu's snap of a running slide and the
+    /// step after it are [`a_context_menu_opened_during_a_slide_ends_it_and_it_does_not_resume`]'s.
+    #[test]
+    fn go_here_chosen_from_a_menu_slides_the_travels_first_step() {
+        for hd in [false, true] {
+            let label = if hd { "HD" } else { "classic" };
+            let Some(mut game) = in_the_castle() else {
+                return;
+            };
+            game.engine.as_mut().quiet().set_context_menu(true);
+            game.set_motion(true);
+            if hd {
+                game.set_hd(true, 2);
+            }
+            let mut page = Page::new();
+            for _ in 0..2 {
+                assert!(down(&mut game, "Space"));
+                assert!(game.key_up("Space"));
+                game.step(20);
+                assert!(steps_to_prompt(&mut game), "{label}: the prompt after a pass");
+                game.present();
+            }
+            for _ in 0..60 {
+                page_frame_at(&mut game, &mut page, &mut |_| {});
+            }
+            let (hx, hy) = hero_point();
+            let cell = [(32, 0), (-32, 0), (0, 32), (0, -32), (32, 32), (-32, -32)]
+                .into_iter()
+                .map(|(dx, dy)| (hx + dx, hy + dy))
+                .find(|&(x, y)| {
+                    let e = game.engine.as_ref().quiet();
+                    u6_core::ui::menu::query(&e.state(), e.io(), x as i16, y as i16)
+                        .and_then(|m| m.go_here)
+                        .is_some_and(|g| g.enabled())
+                })
+                .expect("a cell two from the hero whose Go here can run");
+            game.pointer(cell.0, cell.1, 2);
+            for _ in 0..8 {
+                if drawn(&game).is_some() {
+                    break;
+                }
+                page_frame_at(&mut game, &mut page, &mut |_| {});
+            }
+            let v = drawn(&game).expect("the menu open on the cell");
+            assert!(
+                game.slide().is_empty() && !game.motion.drawn && !game.sliding(),
+                "{label}: no slide under the menu"
+            );
+            game.pointer(cell.0, cell.1, 0);
+            for _ in 0..4 {
+                page_frame_at(&mut game, &mut page, &mut |_| {});
+            }
+            let go = row_of(&v, u6_core::ui::menu::GO_HERE).expect("Go here");
+            let (gx, gy) = row_point(&v, go);
+            let at = game.leader_position();
+            game.pointer(gx, gy, 1);
+            // The travel's first step (it may come before the press is let go), counted to its
+            // second (or to rest at the travel's end).
+            let (mut first, mut still) = (None::<(Progress, Vec<u16>)>, 0);
+            for f in 0..1800 {
+                if f == 4 {
+                    game.pointer(gx, gy, 0);
+                    assert_eq!(game.go_here_asked(), 1, "{label}: Go here chosen");
+                }
+                let mut moved = None;
+                page_frame_at(&mut game, &mut page, &mut |g| {
+                    let now = g.leader_position();
+                    let from = first.as_ref().map_or(&at, |f| &f.1);
+                    if moved.is_none() && now != *from {
+                        moved = Some(now);
+                    }
+                });
+                match (moved, first.as_mut()) {
+                    (Some(now), None) => {
+                        let d = |i: usize| i32::from(now[i]) - i32::from(at[i]);
+                        first = Some((Progress::new((d(0), d(1))), now));
+                    }
+                    (Some(_), Some(_)) => break,
+                    _ => {}
+                }
+                if let Some((p, _)) = first.as_mut() {
+                    p.frame(shown_offset(&game), game.old_cell(), true);
+                }
+                still = if !game.travel_active() && game.at_prompt() && !game.sliding() {
+                    still + 1
+                } else {
+                    0
+                };
+                if first.is_some() && still >= 30 {
+                    break;
+                }
+            }
+            let (mut p, _) = first.expect("the travel's first step");
+            p.close();
+            println!(
+                "{label}: Go here from the menu: the travel's first step {} moving frames, \
+                 backward {}, stray {}, jump {} px, unfinished {}",
+                p.moving, p.backward, p.stray, p.jump, p.unfinished
+            );
+            assert!(slid_at_1x(&p), "{label}: the travel's first step slides: {p:?}");
         }
     }
 
@@ -9377,8 +9657,13 @@ mod tests {
     /// receipts' fixed time (`clockSeed` in site/app.js: 1 700 000 000 s, its low word), smooth
     /// motion on, HD on at 2× with `hd`, the start fight broken off with `b` (the assault's
     /// actors not passed over, as in the page), at the prompt.
-    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
     fn in_the_start_room(hd: bool) -> Option<Game> {
+        in_the_start_room_seeded(hd, (1_700_000_000u64 & 0xffff) as u16)
+    }
+
+    /// [`in_the_start_room`] with the game's seed `seed`.
+    #[allow(clippy::disallowed_methods)] // tests may read files and the environment
+    fn in_the_start_room_seeded(hd: bool, seed: u16) -> Option<Game> {
         if !std::path::Path::new(ZIP).exists() {
             let required = std::env::var("U6_REQUIRE_ARCHIVE").is_ok_and(|v| v == "1");
             assert!(!required, "U6_REQUIRE_ARCHIVE=1 and {ZIP} not present");
@@ -9393,7 +9678,7 @@ mod tests {
         if hd {
             game.set_hd(true, 2);
         }
-        game.boot((1_700_000_000u64 & 0xffff) as u16, true).quiet();
+        game.boot(seed, true).quiet();
         assert!(steps_to_prompt(&mut game), "the prompt");
         let t = game.clock;
         assert!(game.key_down("KeyB", "b", false, t));
@@ -9428,24 +9713,26 @@ mod tests {
         Some(game)
     }
 
-    /// Spec 20 Design 3–4 (rounds 11–12, opus S3, S2, gpt a S1, S3), on the user's zip, in the
-    /// page's start room ([`in_the_start_room`]), where a held walk's turns take seconds: at 1× on
-    /// 60 Hz frames, with HD off and on, each way held in turn until the party stops for 10 s (a
-    /// turn of the Wide view, with more actors in it, can take longer than 5 s), then 300 steps
-    /// with no key (the last turn drained). Per early picture (each step's,
+    /// Spec 20 Design 3–4 (rounds 11–13, opus S3, S2, gpt a S1, S3; round 13 MUST 2 and 3), on
+    /// the user's zip, in the page's start room ([`in_the_start_room`]), where a held walk's turns
+    /// take seconds: at 1× on 60 Hz frames, with HD off and on, each way held in turn until the
+    /// party stops for 10 s (a turn of the Wide view, with more actors in it, can take longer than
+    /// 5 s), then 300 steps with no key (the last turn drained). Per early picture (each step's,
     /// [`Engine::take_motion`]'s previews), the engine ms to the first publication after it that
-    /// is not a preview (the turn's picture, or a foreign one), which every early picture has, and
-    /// whether the hold ([`u6_render::motion::PREVIEW_MS`]) expired before it; per step, the
-    /// frames between the step and that publication that showed the engine's frame (the party
-    /// back on its old cell: with HD off no slide drawn in the RGBA frame, with HD on no slide
-    /// placed). None expires and no such frame is shown. The premises: some turn takes longer
-    /// than the hold (so the hold's end at the turn's first picture, not at its end, is what is
-    /// measured), and the game's key waits refresh the view (A4-0x7a56, spec 20 Design 3's bound).
-    /// And the proxy (gpt a S3): on every frame that draws the presenter's picture, its newest
-    /// scene is centred on the leader's cell now, so a stale scene drawn over the old cell counts.
+    /// is not a preview, which every early picture has; per step that has one (round 13: a step
+    /// whose turn's first pick fights has none, spec 20 Design 4), the frames between the step and
+    /// the turn's picture (the first scene of the engine's after it, round 13: a foreign
+    /// publication is not it, opus S1) that showed the engine's frame (the party back on its old
+    /// cell: with HD off no slide drawn in the RGBA frame, with HD on no slide placed), counted
+    /// apart when a foreign picture came after the early picture with no scene since
+    /// ([`Game::old_cell`]: the old cell through a foreign picture). No such frame is shown. The
+    /// premises: some turn takes longer than the longest wait to the turn's first publication (so
+    /// the hold's end at that publication, not at the turn's end or its prompt, is what is
+    /// measured), and the game's key waits refresh the view (A4-0x7a56, spec 20 Design 3). And
+    /// the proxy (gpt a S3): on every frame that draws the presenter's picture, its newest scene
+    /// is centred on the leader's cell now, so a stale scene drawn over the old cell counts.
     #[test]
     fn the_early_picture_is_held_until_the_turns_picture_in_the_start_room() {
-        use u6_render::motion::PREVIEW_MS;
         for hd in [false, true] {
             let label = if hd { "HD" } else { "classic" };
             let Some(mut game) = in_the_start_room(hd) else {
@@ -9455,10 +9742,11 @@ mod tests {
                 game.engine.as_ref().quiet().state().ui.input.idle_refresh,
                 "{label}: the key waits refresh the view (A4-0x7a56)"
             );
+            let mut page = Page::new();
             let now = |g: &Game| g.engine.as_ref().map_or(0.0, |e| e.io().now_ms() as f64);
-            // Per step: its engine ms and the frames after it that showed the engine's frame
-            // before the turn's picture.
-            let mut steps: Vec<(f64, usize)> = Vec::new();
+            // Per step: its engine ms, the frames after it that showed the engine's frame before
+            // the turn's picture, and those of them through a foreign picture.
+            let mut steps: Vec<(f64, usize, usize)> = Vec::new();
             // Frames drawing the presenter's picture, and those whose newest scene was not
             // centred on the leader's cell.
             let (mut drawing, mut stale) = (0, 0);
@@ -9472,32 +9760,32 @@ mod tests {
                     if still >= 600 {
                         break;
                     }
-                    game.set_clock(game.clock + FRAME);
-                    let k = game.pace(FRAME);
-                    for _ in 0..k {
-                        game.step(20);
-                        if game.leader_position() != at {
-                            at = game.leader_position();
-                            steps.push((now(&game), 0));
+                    page_frame_at(&mut game, &mut page, &mut |g| {
+                        if g.leader_position() != at {
+                            at = g.leader_position();
+                            steps.push((now(g), 0, 0));
                             still = 0;
                         }
-                    }
-                    game.ran(k);
+                    });
                     still += 1;
-                    if k > 0 || game.sliding() {
-                        game.present();
-                    }
                     let Some(step) = steps.last_mut() else {
                         continue;
                     };
-                    let pictured =
-                        (game.motion.taken.iter()).any(|&(t, preview, _)| !preview && t >= step.0);
+                    let taken = &game.motion.taken;
+                    let pictured = (taken.iter()).any(|&(t, preview, shot)| !preview && shot && t >= step.0);
+                    let early = (taken.iter()).any(|&(t, preview, _)| preview && t >= step.0);
                     let presenter = if hd {
                         !game.slide().is_empty()
                     } else {
                         game.motion.drawn
                     };
-                    step.1 += usize::from(!pictured && !presenter);
+                    if early && !pictured && !presenter {
+                        if game.old_cell() {
+                            step.2 += 1;
+                        } else {
+                            step.1 += 1;
+                        }
+                    }
                     if presenter {
                         let newest = game.motion.presenter.history().first();
                         let c = newest.map(|n| n.scene.centre);
@@ -9530,19 +9818,21 @@ mod tests {
                 matched.len()
             );
             let waits: Vec<f64> = matched.into_iter().flatten().collect();
-            let expired = waits.iter().filter(|&&w| w >= PREVIEW_MS).count();
             let back: Vec<usize> = steps.iter().map(|s| s.1).collect();
+            let through: usize = steps.iter().map(|s| s.2).sum();
             let longest = waits.iter().copied().fold(0.0, f64::max);
             // The engine ms between two steps of the same hold (the turns).
             let turns: Vec<f64> = (holds.windows(2))
                 .flat_map(|h| (h[0]..h[1].saturating_sub(1)).map(|i| steps[i + 1].0 - steps[i].0))
                 .collect();
             println!(
-                "{label}, the start room at 1x: {} steps, engine ms between them {turns:?}; {} \
-                 early pictures, engine ms from each to the turn's picture {waits:?}, the longest \
-                 {longest} against the {PREVIEW_MS} ms hold; {expired} expired; per step the \
-                 frames showing the engine's frame before the turn's picture {back:?}",
+                "{label}, the start room at 1x: {} steps ({} with no early picture), engine ms \
+                 between them {turns:?}; {} early pictures, engine ms from each to the turn's \
+                 first publication {waits:?}, the longest {longest}; per step the frames showing \
+                 the engine's frame before the turn's picture {back:?}; frames of the old cell \
+                 through a foreign picture {through}",
                 steps.len(),
+                steps.len().saturating_sub(waits.len()),
                 waits.len()
             );
             assert!(
@@ -9550,16 +9840,17 @@ mod tests {
                 "{label}: early pictures in the start room"
             );
             assert!(
-                turns.iter().any(|&t| t > PREVIEW_MS),
-                "{label}: the premise, a turn longer than the hold: {turns:?}"
-            );
-            assert_eq!(
-                expired, 0,
-                "{label}: the hold expired before the turn's picture"
+                turns.iter().any(|&t| t > longest),
+                "{label}: the premise, a turn longer than the wait to its first publication: \
+                 {turns:?}"
             );
             assert!(
                 back.iter().all(|&n| n == 0),
                 "{label}: the engine's frame (the old cell) shown before the turn's picture: {back:?}"
+            );
+            assert_eq!(
+                through, 0,
+                "{label}: the old cell through a foreign picture after an early picture"
             );
             assert!(
                 drawing > 0 && stale == 0,
@@ -9570,6 +9861,305 @@ mod tests {
                  leader's cell; every early picture matched to a later publication"
             );
         }
+    }
+
+    /// Spec 20 Design 3 (round 13, MUST 2: gpt a and opus MUST): the early picture is held until
+    /// the turn's first publication, however long the turn's first pick waits. In the castle
+    /// ([`castle_with_state`]) with no NPC that acts in the window (every actor outside the party
+    /// passed over, as the assault's) and the leader's step leaving it 128 points in debt, forced
+    /// in the tick of the step (the real data's vessel steps, the costs aboard a ship or a raft
+    /// against the avatar's dexterity, leave at most one refill: the most a debt of 128 points
+    /// leaves is nine, `turn.rs` `refill` carrying the debt), so the scheduler refills nine times
+    /// (a pass and a clock minute each) before it picks the leader: the turn's first picture comes
+    /// more than 2000 ms (round 12's `PREVIEW_MS`) after the early picture. At 1× on 60 Hz frames,
+    /// HD off and on, the down arrow tapped after two passes: on every frame from the step to
+    /// that publication the presenter's picture shows (with HD off a slide drawn in the RGBA
+    /// frame, with HD on one placed), centred on the leader's cell; the publication is a scene of
+    /// the engine's. On round 12's presenter the engine's frame (the party on its old cell) showed
+    /// from 2000 ms to the refresh. With HD off a frame 2200 ms after the step is written for the
+    /// dispatcher (`hold-long-first-pick-classic.png`, [`keep_frame`]).
+    #[test]
+    fn an_early_picture_is_held_through_a_long_first_pick_until_the_turns_picture() {
+        for hd in [false, true] {
+            let label = if hd { "HD" } else { "classic" };
+            let Some((mut game, st)) = castle_with_state() else {
+                return;
+            };
+            {
+                let mut s = st.borrow_mut();
+                for a in 0..0x100 {
+                    if s.actors.attrs.status[a] & 0x80 == 0 {
+                        s.actors.attrs.status[a] |= 0x10;
+                    }
+                }
+            }
+            game.set_motion(true);
+            if hd {
+                game.set_hd(true, 2);
+            }
+            let mut page = Page::new();
+            for _ in 0..2 {
+                assert!(down(&mut game, "Space"));
+                assert!(game.key_up("Space"));
+                game.step(20);
+                assert!(steps_to_prompt(&mut game), "{label}: the prompt after a pass");
+                game.present();
+            }
+            for _ in 0..120 {
+                page_frame_at(&mut game, &mut page, &mut |_| {});
+            }
+            assert!(
+                !game.motion.presenter.history().is_empty(),
+                "{label}: a scene to slide from"
+            );
+            let now = |g: &Game| g.engine.as_ref().map_or(0.0, |e| e.io().now_ms() as f64);
+            let leader = usize::from(st.borrow().actors.party.leader().quiet().0);
+            let at = game.leader_position();
+            assert!(down(&mut game, "ArrowDown"));
+            assert!(game.key_up("ArrowDown"));
+            let mut step: Option<f64> = None;
+            let (mut before, mut back, mut drawn, mut stale, mut kept) = (0, 0, 0, 0, false);
+            let mut first = None;
+            for _ in 0..1800 {
+                page_frame_at(&mut game, &mut page, &mut |g| {
+                    if step.is_none() && g.leader_position() != at {
+                        // The step's debt: the most a point count holds below 0.
+                        st.borrow_mut().actors.movement_points[leader] = 0x80;
+                        step = Some(now(g));
+                    }
+                });
+                let Some(t0) = step else {
+                    continue;
+                };
+                if first.is_none() {
+                    first = (game.motion.taken.iter())
+                        .find(|p| !p.1 && p.0 >= t0)
+                        .copied();
+                }
+                if first.is_some() {
+                    if game.at_prompt() {
+                        break;
+                    }
+                    continue;
+                }
+                before += 1;
+                let presenter = if hd {
+                    !game.slide().is_empty()
+                } else {
+                    game.motion.drawn
+                };
+                back += usize::from(!presenter);
+                if presenter {
+                    let c = game.motion.presenter.history().first().map(|n| n.scene.centre);
+                    let p = game.leader_position();
+                    drawn += 1;
+                    stale += usize::from(c != Some((i32::from(p[0]), i32::from(p[1]), p[2] as u8)));
+                }
+                if !hd && !kept && now(&game) - t0 >= 2200.0 {
+                    let rgba = game.frame_rgba();
+                    kept = keep_frame(
+                        "hold-long-first-pick-classic.png",
+                        (u6_render::WIDTH, u6_render::HEIGHT),
+                        &rgba,
+                    );
+                }
+            }
+            let t0 = step.expect("the step");
+            let early = (game.motion.taken.iter()).filter(|p| p.1 && p.0 >= t0).count();
+            let (t1, _, scene) = first.expect("the turn's first publication");
+            println!(
+                "{label}: a step in debt, no NPC acting: its early picture's hold {} engine ms to \
+                 the turn's first publication; {before} frames between, {drawn} drawing the \
+                 presenter's picture, {back} the engine's frame (the old cell), {stale} stale; \
+                 a frame {}",
+                t1 - t0,
+                if kept { "written" } else { "not written" }
+            );
+            assert_eq!(early, 1, "{label}: the step's early picture");
+            assert!(
+                t1 - t0 > 2000.0 && scene,
+                "{label}: the premise, the turn's first publication a scene past 2000 ms: {} ms",
+                t1 - t0
+            );
+            assert_eq!(
+                back, 0,
+                "{label}: the engine's frame (the old cell) shown before the turn's picture"
+            );
+            assert!(
+                drawn == before && stale == 0,
+                "{label}: the presenter's picture on the leader's cell: {drawn} of {before}, {stale} stale"
+            );
+        }
+    }
+
+    /// Spec 20 Design 3 (round 13): an early picture whose turn publishes nothing more of the map
+    /// ends at the command prompt ([`Presenter::prompt`], from [`Game::slide_view`]). In the
+    /// castle at 1×, HD off, the down arrow tapped after two passes; once the presenter took the
+    /// step's early picture, every publication the engine queues is dropped before the page
+    /// presents (a turn whose picture did not change the shown map). Until the prompt is back the
+    /// presenter's picture shows (the engine's frame holds the old cell); at the first present
+    /// with the command prompt up nothing is held or drawn. The castle's turn ends well inside
+    /// round 12's 2000 ms timer, which held it past the prompt.
+    #[test]
+    fn an_early_picture_with_nothing_published_after_it_ends_at_the_prompt() {
+        let Some(mut game) = in_the_castle() else {
+            return;
+        };
+        game.set_motion(true);
+        let mut page = Page::new();
+        for _ in 0..2 {
+            assert!(down(&mut game, "Space"));
+            assert!(game.key_up("Space"));
+            game.step(20);
+            assert!(steps_to_prompt(&mut game), "the prompt after a pass");
+            game.present();
+        }
+        for _ in 0..120 {
+            page_frame_at(&mut game, &mut page, &mut |_| {});
+        }
+        let now = |g: &Game| g.engine.as_ref().map_or(0.0, |e| e.io().now_ms() as f64);
+        let at = game.leader_position();
+        let takes = game.engine.as_ref().quiet().prompt_takes();
+        assert!(down(&mut game, "ArrowDown"));
+        assert!(game.key_up("ArrowDown"));
+        let (mut step, mut prompt) = (None, None);
+        let (mut frames, mut held) = (0, 0);
+        for _ in 0..1800 {
+            page_frame_at(&mut game, &mut page, &mut |g| {
+                if g.motion.taken.iter().any(|p| p.1) {
+                    drop(g.engine.as_mut().quiet().take_motion());
+                }
+            });
+            if step.is_none() && game.leader_position() != at {
+                step = Some(now(&game));
+            }
+            let Some(t0) = step else {
+                continue;
+            };
+            let e = game.engine.as_ref().quiet();
+            if e.prompt_takes() > takes && u6_core::engine::command_prompt(&e.state()) {
+                prompt = Some((now(&game) - t0, game.sliding(), game.motion.drawn));
+                break;
+            }
+            frames += 1;
+            held += usize::from(game.motion.drawn);
+        }
+        let (ms, sliding, drawn) = prompt.expect("the prompt back");
+        let early = game.motion.taken.iter().filter(|p| p.1).count();
+        println!(
+            "an early picture with nothing published after it: {early} taken; the prompt back \
+             {ms} engine ms after the step; {held} of the {frames} frames before it drawing the \
+             presenter's picture; at the prompt held {sliding}, drawn {drawn}"
+        );
+        assert_eq!(early, 1, "the step's early picture taken");
+        assert!(ms < 2000.0, "the premise: the prompt inside round 12's timer");
+        assert!(frames > 0 && held == frames, "the presenter's picture until the prompt");
+        assert!(!sliding && !drawn, "the hold ended at the prompt");
+    }
+
+    /// Spec 20 Design 4 (round 13, MUST 3: opus S1), on the user's zip: out of combat mode an NPC
+    /// in a combat routine that the scheduler picks first after the leader's step plays its
+    /// frames before the turn's refresh over the window as last published (a flight's steps), so
+    /// an early picture would show the party slide, then back on its old cell, then on the new
+    /// one. In the page's start room (HD off, 1×) at seed 25402, where the start fight's actors,
+    /// left out of combat mode by B, shoot: a step toward the nearest of them, or beside it once
+    /// adjacent (down, right, up, left, a pass, by turns), 40 times. Per step whether a foreign
+    /// publication came before the turn's first scene (the fight's frames first), whether the
+    /// step had an early picture, and the frames that showed the engine's frame through a foreign
+    /// picture after the early picture with no scene since ([`Game::old_cell`]). Some step's
+    /// first pick shows a fight's frames (the premise), none of those steps has an early picture,
+    /// and no frame shows the old cell through a foreign picture. At the first such step the frame
+    /// before its first foreign publication and the one with it are written for the dispatcher
+    /// (`fight-first-pick-before.png`, `fight-first-pick-at.png`, [`keep_frame`]).
+    #[test]
+    fn a_fighter_first_after_the_step_gets_no_early_picture_and_no_old_cell_shows() {
+        let Some(mut game) = in_the_start_room_seeded(false, 25402) else {
+            return;
+        };
+        let fighter = |wt: u8| matches!(wt, 3..=11 | 13 | 14 | 0x13 | 0x9a | 0x9b);
+        // The nearest actor out of the party in a combat routine, as (dx, dy, Chebyshev distance).
+        let nearest = |g: &Game| {
+            let e = g.engine.as_ref().quiet();
+            let s = e.state();
+            let c = s.map.centre;
+            let mut best: Option<(i32, i32, i32)> = None;
+            for a in 0..0x100usize {
+                let (st, p) = (s.actors.attrs.status[a], s.objects.location[a]);
+                if s.objects.type_frame[a] == 0
+                    || st & 0x90 != 0
+                    || !fighter(s.actors.worktype[a])
+                    || p.z != c.z
+                {
+                    continue;
+                }
+                let (dx, dy) = (i32::from(p.x) - i32::from(c.x), i32::from(p.y) - i32::from(c.y));
+                let d = dx.abs().max(dy.abs());
+                if best.is_none_or(|b| d < b.2) {
+                    best = Some((dx, dy, d));
+                }
+            }
+            best
+        };
+        let mut page = Page::new();
+        let (mut steps, mut tries) = (0, 0);
+        let (mut fights, mut fights_early, mut through, mut kept) = (0, 0, 0, false);
+        while steps < 40 && tries < 300 {
+            tries += 1;
+            let Some((dx, dy, d)) = nearest(&game) else {
+                break;
+            };
+            let key = match () {
+                _ if d <= 1 => ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Space"][tries % 5],
+                _ if dx.abs() >= dy.abs() => ["ArrowLeft", "ArrowRight"][usize::from(dx > 0)],
+                _ => ["ArrowUp", "ArrowDown"][usize::from(dy > 0)],
+            };
+            let at = game.leader_position();
+            let takes = game.engine.as_ref().quiet().prompt_takes();
+            let n0 = game.motion.taken.len();
+            let mut frame_before = game.frame_rgba();
+            assert!(down(&mut game, key));
+            assert!(game.key_up(key));
+            let (mut moved, mut first_foreign) = (false, false);
+            for _ in 0..1200 {
+                page_frame_at(&mut game, &mut page, &mut |_| {});
+                moved |= game.leader_position() != at;
+                let t = &game.motion.taken[n0..];
+                let scene = t.iter().position(|p| !p.1 && p.2).unwrap_or(t.len());
+                let foreign = t[..scene].iter().any(|p| !p.2);
+                if moved && foreign && !first_foreign {
+                    first_foreign = true;
+                    if !kept {
+                        let size = (u6_render::WIDTH, u6_render::HEIGHT);
+                        kept = keep_frame("fight-first-pick-before.png", size, &frame_before)
+                            & keep_frame("fight-first-pick-at.png", size, &game.frame_rgba());
+                    }
+                }
+                through += usize::from(moved && game.old_cell() && !game.motion.drawn);
+                frame_before = game.frame_rgba();
+                let e = game.engine.as_ref().quiet();
+                if e.prompt_takes() > takes && game.at_prompt() && game.pending.is_empty() {
+                    break;
+                }
+            }
+            if moved {
+                steps += 1;
+                let t = &game.motion.taken[n0..];
+                if first_foreign {
+                    fights += 1;
+                    fights_early += usize::from(t.iter().any(|p| p.1));
+                }
+            }
+        }
+        println!(
+            "seed 25402, the start room out of its fight: {steps} steps in {tries} keys; {fights} \
+             whose turn showed a fight's frames before its first scene, {fights_early} of them with \
+             an early picture; frames of the old cell through a foreign picture {through}; the \
+             frame pair {}",
+            if kept { "written" } else { "not written" }
+        );
+        assert!(fights > 0, "the premise: a fighter first after a step");
+        assert_eq!(fights_early, 0, "no early picture when the first pick fights");
+        assert_eq!(through, 0, "the old cell through a foreign picture");
     }
 
     /// The published frame of `e` with the message history's view over it, composed here apart

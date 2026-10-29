@@ -13844,7 +13844,8 @@ const staticOffset = (placed, roles) => {
 // slide placed (Game.slide) with its layers' roles, whether the frame drew the static layer onto
 // the screen (onto the screen canvas, or onto a canvas drawn onto it after), how many of those
 // draws lie elsewhere than Game.slide's static triple (found by its role) times their scale, or
-// transformed (`misplaced`, as `motionUntil` counts them), and the layers version.
+// transformed (`misplaced`, as `motionUntil` counts them), the layers version, and whether the
+// engine's frame shows the old cell through a foreign picture (Game.old_cell, round 13).
 const runSlideFrame = (page) => page.evaluate(() => {
   const c = document.getElementById('screen');
   const g = globalThis.__shownGame;
@@ -13859,33 +13860,66 @@ const runSlideFrame = (page) => page.evaluate(() => {
   for (let k = 0; k + 2 < placed.length && at === null; k += 3) if (roles[placed[k]] === 0) at = [placed[k + 1], placed[k + 2]];
   const shown = draws.filter((d, k) => d.isStatic && onScreen(d, k));
   const misplaced = shown.filter((d) => !(at && d.plain && d.x === at[0] * d.scale && d.y === at[1] * d.scale)).length;
-  return [c.dataset.leader, placed, roles, shown.length > 0, misplaced, g.slide_layers_version()];
+  return [c.dataset.leader, placed, roles, shown.length > 0, misplaced, g.slide_layers_version(), g.old_cell()];
 });
 
-// One step's frames, as the native receipt counts them (u6-web `Progress`), on the static layer's
-// placement: `frame(off, shown)` with its offset from rest (null: no slide placed, the HD frame
-// shown) and whether the frame's picture reached the screen (the static layer drawn onto it; a
-// frame with no slide placed shows the HD frame). Off rest, held at rest, moving (drawn closer to
-// rest along the step than on the step's last frame that reached the screen, which lay between
-// the step's two cells too: the map moving against the step, `k` pixels behind it with
-// 0 < k <= 16), backward (farther from rest than that frame, once the step's slide began: a frame
-// at rest before its first frame off rest is its onset, round 12, review gpt b S3) and stray (off
-// rest, not between the two cells). And the jump (round 12, opus S1): the largest drop of k
-// between two frames that reached the screen, from 16 (the old cell) to the first; a frame with
-// no slide placed after the slide began counts as at rest (0), one before it is not counted. So
-// a slide frozen at any offset, run backward, past rest, snapped or cut short (16, 15, 14, then
-// the HD frame: a jump of 14), or drawn in steps over the bound, fails the receipt.
+// Round 13 (gpt b S1): the pixels of the map on the canvas (HD on, the Original layout: the canvas
+// is the HD frame's size) that differ from the game's HD frame there, the pointer's box left out
+// (the page draws the pointer over the frame): 0 when the engine's frame reached the canvas whole
+// (no slide drawn over it, none left from one).
+const mapOffHd = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  const s = g.hd_scale();
+  const [mx, my, mw, mh] = [8, 8, 160, 160].map((v) => v * s);
+  const shown = c.getContext('2d').getImageData(mx, my, mw, mh).data;
+  const hd = g.hd_frame_rgba();
+  const w = g.width() * s;
+  const p = g.hd_pointer();
+  const inPointer = (x, y) => p[2] > 0 && x >= p[0] * s && x < (p[0] + p[2]) * s && y >= p[1] * s && y < (p[1] + p[3]) * s;
+  let off = 0;
+  for (let y = 0; y < mh; y += 1) {
+    for (let x = 0; x < mw; x += 1) {
+      if (inPointer(mx + x, my + y)) continue;
+      const [i, j] = [(y * mw + x) * 4, ((my + y) * w + mx + x) * 4];
+      if (shown[i] !== hd[j] || shown[i + 1] !== hd[j + 1] || shown[i + 2] !== hd[j + 2]) off += 1;
+    }
+  }
+  return off;
+});
+
+// One step's frames, as the native receipt counts them (u6-web `Progress`, the same rules), on the
+// static layer's placement: `frame(off, shown, old)` with its offset from rest (null: no slide
+// placed, the HD frame shown), whether the frame's picture reached the screen (the static layer
+// drawn onto it; a frame with no slide placed shows the HD frame) and whether that HD frame shows
+// the old cell through a foreign picture (Game.old_cell, round 13). Off rest, held at rest,
+// moving (drawn closer to rest along the step than on the step's last frame that reached the
+// screen, which lay between the step's two cells too: the map moving against the step, `k`
+// pixels behind it with 0 < k <= 16), backward (round 13: a frame that reached the screen
+// farther from rest than the last that did, the HD frame at rest included, once the step's slide
+// began: a frame at rest before its first frame off rest is its onset, round 12, review gpt b S3)
+// and stray (off rest, not between the two cells). And the jump (round 12, opus S1): the largest
+// drop of k between two frames that reached the screen, from 16 (the old cell) to the first; a
+// frame with no slide placed after the slide began counts as at rest (0), one before it is not
+// counted, one showing the old cell counts as 16. `close()` at the step's end (the next step, or
+// the end of the hold): once its slide began the map must stand at rest (k 0), else the step is
+// `unfinished`. So a slide frozen at its start, run backward, past rest, snapped or cut short
+// (16, 15, 14, then the HD frame: a jump of 14), or drawn in steps over the bound fails the
+// receipt, and one frozen short of rest after it moved (16, 15, 14 and 14 on) is unfinished.
 const progress = (dir) => {
-  const p = { dir, frames: 0, offRest: 0, held: 0, moving: 0, backward: 0, stray: 0, before: null, began: false, last: 16, jump: 0 };
+  const p = { dir, frames: 0, offRest: 0, held: 0, moving: 0, backward: 0, stray: 0, oldCell: 0, before: null, began: false, last: 16, jump: 0, unfinished: false };
   // The map is drawn k pixels along the step from rest: the static layer at k · dir.
   const behind = ([x, y]) => {
     const k = dir[0] !== 0 ? x * dir[0] : y * dir[1];
     return k >= 1 && k <= 16 && x === k * dir[0] && y === k * dir[1] ? k : null;
   };
-  p.frame = (off, shown) => {
+  p.frame = (off, shown, old = false) => {
     p.frames += 1;
     let k = null;
-    if (off !== null && off[0] === 0 && off[1] === 0) {
+    if (off === null && old) {
+      p.oldCell += 1;
+      k = 16;
+    } else if (off !== null && off[0] === 0 && off[1] === 0) {
       p.held += 1;
       k = 0;
     } else if (off !== null) {
@@ -13896,10 +13930,10 @@ const progress = (dir) => {
         if (shown) p.before = null;
         return;
       }
-      if (p.before !== null && p.before > k && p.before <= 16 && shown) p.moving += 1;
-      else if (p.before !== null && p.before < k && p.began) p.backward += 1;
     }
     if (!shown) return;
+    if (k !== null && k > 0 && p.before !== null && p.before > k && p.before <= 16) p.moving += 1;
+    if (k !== null && p.began && k > p.last) p.backward += 1;
     p.before = k;
     p.began ||= k !== null && k > 0;
     const at = k ?? (p.began ? 0 : null);
@@ -13908,12 +13942,48 @@ const progress = (dir) => {
       p.last = at;
     }
   };
+  p.close = () => {
+    p.unfinished = p.began && p.last !== 0;
+  };
   return p;
 };
 
 // The largest jump a slide at speed `rate` on 60 Hz frames may make (u6-web `jump_bound`):
-// ceil(16 · Δ / D) + 1, Δ the engine ms a display frame runs, D the slide's 360 ms; 2 at 1×.
-const jumpBound = (rate) => Math.ceil((16 * rate * (1000 / 60)) / 360) + 1;
+// ceil(16 · Δ / D), Δ the engine ms a display frame runs, D the slide's 360 ms; 1 at 1× (round 13,
+// opus N4: round 12's + 1 was slack).
+const jumpBound = (rate) => Math.ceil((16 * rate * (1000 / 60)) / 360);
+
+// Round 13 (opus N3): the hand-made frames of u6-web's `the_step_receipt_counts_the_jump_onset_and_
+// frames_not_shown` through `progress`, each closed: a frame is k pixels behind rest (null: the HD
+// frame), shown or not, the old cell or not. Returns the cases that fail, by label.
+const progressCases = () => {
+  const run = (frames) => {
+    const p = progress([1, 0]);
+    for (const [k, shown = true, old = false] of frames) p.frame(k === null ? null : [k, 0], shown, old);
+    p.close();
+    return p;
+  };
+  const ks = (list) => list.map((k) => [k]);
+  const smooth = [];
+  for (let f = 0; f <= 22; f += 1) smooth.push([Math.max(0, Math.round(16 - (16 * f * (1000 / 60)) / 360))]);
+  smooth.push([null]);
+  const cases = [
+    ['the bounds', () => jumpBound(1) === 1 && jumpBound(4) === 3 && jumpBound(8) === 6],
+    ['smooth', () => { const p = run(smooth); return p.jump <= 1 && p.moving >= 2 && p.backward === 0 && p.stray === 0 && !p.unfinished && p.oldCell === 0; }],
+    ['4 px steps jump 4', () => run(ks([16, 12, 8, 4, 0, null])).jump === 4],
+    ['cut short: 14', () => run(ks([15, 14, null, null])).jump === 14],
+    ['frozen: none moving', () => run(ks([12, 12, 12])).moving === 0],
+    ['stopped short of rest', () => { const p = run(ks([16, 15, 14, 14, 14])); return p.unfinished && p.moving === 2 && p.backward === 0 && p.jump === 1; }],
+    ['backward', () => run(ks([10, 12])).backward === 1],
+    ['back off rest after reaching it', () => run(ks([15, 0, 10])).backward === 1],
+    ['back off rest after the HD frame', () => run(ks([15, 0, null, 10])).backward === 1],
+    ['a frame not shown is not backward', () => { const p = run([[15], [16, false], [14]]); return p.backward === 0 && p.moving === 1; }],
+    ['onset after a frame at rest', () => { const p = run(ks([null, 0, 15, 14])); return p.backward === 0 && p.moving === 1 && p.jump === 1; }],
+    ['against the frame shown', () => { const p = run([[15], [13, false], [14]]); return p.moving === 1 && p.backward === 0 && p.jump === 1; }],
+    ['the old cell through a foreign picture', () => { const p = run([[15], [14], [null, true, true], [null, true, true], [null]]); return p.oldCell === 2 && p.backward === 1 && p.jump === 16 && !p.unfinished; }],
+  ];
+  return cases.filter(([, ok]) => !ok()).map(([label]) => label);
+};
 
 // The median and the range of `values` (shares), as percents.
 const sharesLine = (values) => {
