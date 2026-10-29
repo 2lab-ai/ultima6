@@ -292,7 +292,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
     let mut dir = dir as i16;
     if s.actors.tail(super::tail::ALCOHOL) > 3 && s.rng.range(0, 1) != 0 {
         // The hiccup (PC-relative string at 0x11b912).
-        seams::print_image(s, HICCUP);
+        seams::print_image(s, crate::string_registry::text!(HICCUP));
         dir = s.rng.range(0, 7) as i16;
     }
     let t = walk::obj_type(s, ObjectId(l));
@@ -311,7 +311,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
             };
         }
         if dir < 0 {
-            seams::print(s, NO_WIND, &[]);
+            seams::print(s, crate::string_registry::text!(NO_WIND), &[]);
             s.actors.work.prompt = 1;
             s.actors.movement_points[li] = 0;
             return StepResult::NoWind;
@@ -361,7 +361,7 @@ pub fn player_step(s: &mut State, dir: u16) -> StepResult {
         s.map.centre.y = p.y;
         seams::rebuild_window(s);
         // The mismatch message (PC-relative string at 0x11b918).
-        seams::print_image(s, MISMATCH);
+        seams::print_image(s, crate::string_registry::text!(MISMATCH));
         StepResult::Mismatch
     };
     s.actors.work.hic = 0;
@@ -541,7 +541,11 @@ pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
         if immune || s.actors.attrs.status[a] & 0x08 != 0 {
             return;
         }
-        seams::print(s, POISONED, &[seams::Arg::Name(me)]);
+        seams::print(
+            s,
+            crate::string_registry::text!(POISONED),
+            &[seams::Arg::Name(me)],
+        );
         s.actors.work.prompt = 1;
         seams::after_turn_refresh(s);
         flash(s, actor);
@@ -564,7 +568,11 @@ pub fn tile_effect(s: &mut State, actor: u16, tile: u16) {
                 return;
             }
             s.actors.attrs.status[a] |= 0x02;
-            seams::print(s, WEBBED, &[seams::Arg::Name(me)]);
+            seams::print(
+                s,
+                crate::string_registry::text!(WEBBED),
+                &[seams::Arg::Name(me)],
+            );
             s.actors.work.prompt = 1;
         }
         0xdc..=0xdf | 0x37a | 0x464 | 0x465 | 0x46a | 0x46b | 0x48c | 0x4a9 => {
@@ -632,9 +640,13 @@ pub fn heal(s: &mut State, i: usize, announce: bool) {
         let max = leaves::max_hp(s, id);
         s.actors.attrs.hp[mi] = if hp < max as i16 { hp as u8 } else { max as u8 };
         if announce {
-            seams::print(s, 0, &[seams::Arg::PartyName(i as u8)]);
+            seams::print(
+                s,
+                crate::string_registry::ARGUMENT,
+                &[seams::Arg::PartyName(i as u8)],
+            );
             // The healed line (PC-relative string at 0x1272a8).
-            seams::print_image(s, HEALED);
+            seams::print_image(s, crate::string_registry::text!(HEALED));
         }
     }
     s.actors.attrs.magic[mi] = leaves::max_magic(s, id) as u8;

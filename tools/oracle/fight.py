@@ -14,8 +14,9 @@ import json
 import os
 import statistics
 
-DUMPS = "/Users/zhugehyuk/Games/ultima6/re/dumps/game"
-GAME_JSON = "/Users/zhugehyuk/Games/ultima6/re/game.json"
+DATA_ROOT = os.environ.get("U6_DATA_ROOT", os.path.expanduser("~/Games/ultima6"))
+DUMPS = os.path.join(DATA_ROOT, "re", "dumps", "game")
+GAME_JSON = os.path.join(DATA_ROOT, "re", "game.json")
 
 # Image base of each of the 35 hunks (re/notes/game-layout.md). Their lengths come from the hunk
 # headers at run time (tools/hunk2raw.py's JSON beside the image, `hunk_sizes`); code hunks only

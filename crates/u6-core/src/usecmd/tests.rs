@@ -297,7 +297,7 @@ fn codex_shrine() -> (State, Slot, Slot) {
 }
 
 #[test]
-fn the_vortex_cube_refuses_before_the_codex_goes_while_the_ending_is_unported() {
+fn the_vortex_cube_refuses_before_the_codex_goes_without_ending_resources() {
     let (s, cube, codex) = codex_shrine();
     let done = Rc::new(std::cell::Cell::new(None));
     let d = Rc::clone(&done);
@@ -307,7 +307,7 @@ fn the_vortex_cube_refuses_before_the_codex_goes_while_the_ending_is_unported() 
     assert_eq!(
         e.state().objects.kind(codex),
         0x3b,
-        "the Codex stays while 0x13513a is a stub"
+        "the Codex stays without validated ending resources"
     );
     assert_eq!(
         done.get(),
@@ -315,8 +315,8 @@ fn the_vortex_cube_refuses_before_the_codex_goes_while_the_ending_is_unported() 
         "refused: the caller prints the cube's own refusal"
     );
     assert!(
-        e.stub_hits().keys().any(|k| k.starts_with("0x13513a")),
-        "the refusal is counted as the ending's stub hit"
+        e.stub_hits().is_empty(),
+        "unavailable resources are a refusal, not an unported path"
     );
 }
 
@@ -1551,4 +1551,48 @@ fn the_serpent_figure_takes_a_spot_only_when_each_of_its_six_cells_is_open() {
         }
         assert_eq!(s.rng, after_first, "cell {k}: 5 draws for the first egg");
     }
+}
+
+/// E1 RED: the user's original runtime resources must allow the completed shrine to hand off.
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn ending_handoff_real_resources_reach_the_launcher() {
+    use u6_testkit::Quiet;
+    let archive = std::env::var_os("U6_ARCHIVE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join("Games/ultima6/original/ultima-vi.zip")
+        });
+    if !archive.exists() {
+        assert_ne!(std::env::var("U6_REQUIRE_ARCHIVE").as_deref(), Ok("1"));
+        return;
+    }
+    let intake = u6_intake::intake(vec![u6_intake::InputFile {
+        name: "owned.zip".into(),
+        data: std::fs::read(&archive).quiet(),
+    }]);
+    let files = Files::new(intake.files);
+    let (s, cube, codex) = codex_shrine();
+    let got = Rc::new(std::cell::Cell::new(None));
+    let result = Rc::clone(&got);
+    let mut e = Engine::with_game(s, files, move |st, io| async move {
+        result.set(Some(misc::vortex_cube(Ux::new(&st, &io), cube).await));
+    });
+    for _ in 0..300 {
+        e.tick(&[crate::InputEvent::Key(crate::Key::Space)], 20);
+        if e.finished() {
+            break;
+        }
+    }
+    assert_eq!(
+        got.get(),
+        Some(true),
+        "valid ending resources permit handoff"
+    );
+    assert_eq!(
+        e.state().objects.kind(codex),
+        0,
+        "the completed shrine consumed the object"
+    );
 }

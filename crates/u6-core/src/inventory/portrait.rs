@@ -139,7 +139,7 @@ pub async fn show_actor(state: &RefCell<State>, io: &Io, actor: Slot) {
         let d = 0x11 - name.len() as i16;
         let col = if d < 0 { (d + 1) >> 1 } else { d >> 1 };
         set_cursor(state, io, col, 10).await;
-        let fmt = game_string(io, STR_NAME_LINE);
+        let fmt = game_string(io, crate::string_registry::text!(STR_NAME_LINE));
         printf(state, io, &fmt, &[Arg::Str(&name)]).await;
         let wait = {
             let mut s = state.borrow_mut();

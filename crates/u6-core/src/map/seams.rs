@@ -243,20 +243,23 @@ const fn place_names() -> [u32; 20] {
 /// at 0x11b902 for q 9..=11, then the name the pointer table A4-0x6a60 + 4q points at, then the
 /// string at 0x11b90e; all read from the user's `game`, queued for the loop to print.
 pub(crate) fn say_place_name(state: &mut State, q: u8) {
-    use crate::image::A4;
     use crate::main_loop::{game_string, pointed_string, queue_print};
     let lines = crate::engine::with_current_io(|io| {
-        let mut lines = vec![crate::main_loop::a4_string(io, 0x7303)];
-        if q < 8 {
-            lines.push(game_string(io, 0x0011_b8f8));
-        } else if (9..=11).contains(&q) {
-            lines.push(game_string(io, 0x0011_b902));
-        }
-        lines.push(pointed_string(
+        let mut lines = vec![crate::main_loop::a4_string(
             io,
-            A4.wrapping_sub(0x6a60) + 4 * u32::from(q),
-        ));
-        lines.push(game_string(io, 0x0011_b90e));
+            crate::string_registry::text!(0x7303),
+        )];
+        if q < 8 {
+            lines.push(game_string(io, crate::string_registry::text!(0x0011_b8f8)));
+        } else if (9..=11).contains(&q) {
+            lines.push(game_string(io, crate::string_registry::text!(0x0011_b902)));
+        }
+        lines.push(
+            crate::string_registry::text_table!(0x6a60)
+                .get(usize::from(q))
+                .map_or_else(Vec::new, |text| pointed_string(io, text)),
+        );
+        lines.push(game_string(io, crate::string_registry::text!(0x0011_b90e)));
         lines
     });
     for line in lines.unwrap_or_default() {
@@ -267,7 +270,9 @@ pub(crate) fn say_place_name(state: &mut State, q: u8) {
 /// Print A4-0x72cf, the line that the party must be in party mode (printf 0x108658 of the
 /// string in the user's `game`, queued for the loop to print).
 pub(crate) fn say_party_mode_needed(state: &mut State) {
-    let line = crate::engine::with_current_io(|io| crate::main_loop::a4_string(io, 0x72cf));
+    let line = crate::engine::with_current_io(|io| {
+        crate::main_loop::a4_string(io, crate::string_registry::text!(0x72cf))
+    });
     crate::main_loop::queue_print(state, line.unwrap_or_default(), Vec::new());
 }
 

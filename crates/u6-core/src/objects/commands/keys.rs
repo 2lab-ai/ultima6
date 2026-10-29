@@ -74,7 +74,7 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
         let a = Slot::from(p.members[usize::from(p.leader_index).min(15)]);
         (a, s.objects.kind(key))
     };
-    print_at(state, io, S_ON, &[]).await;
+    print_at(state, io, crate::string_registry::text!(S_ON), &[]).await;
     {
         let mut s = state.borrow_mut();
         if s.ui.input.targeting != 0 {
@@ -85,8 +85,14 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
     let k = crate::ui::wait::read_key(state, io).await;
     let sel = state.borrow().ui.input.selection;
     if k != TARGET_DONE || sel == -1 {
-        let msg = message(&state.borrow(), P_NOTHING);
-        print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(&state.borrow(), crate::string_registry::pointer!(P_NOTHING));
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let name = shown_name(&state.borrow(), sel).into_bytes();
@@ -100,13 +106,31 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
         (s.objects.kind(sel), s.objects.place(sel) == 0 && away)
     };
     if far {
-        let msg = message(&state.borrow(), P_OUT_OF_RANGE);
-        print_at(state, io, S_BANG, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_OUT_OF_RANGE),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_BANG),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     if !((0x129..=0x12c).contains(&kind) || kind == CHEST) {
-        let msg = message(&state.borrow(), P_NO_EFFECT);
-        print_at(state, io, S_LINE, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_NO_EFFECT),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_LINE),
+            &[Arg::Str(&msg)],
+        )
+        .await;
         return;
     }
     let broke = ktype == LOCK_PICK && {
@@ -115,7 +139,7 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
         pick_breaks(&mut s, dex)
     };
     if broke {
-        print_at(state, io, S_KEY_BROKE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(S_KEY_BROKE), &[]).await;
         let mut s = state.borrow_mut();
         let qq = s.objects.qq_of(key);
         if qq & 0xff == 1 {
@@ -145,7 +169,16 @@ pub async fn use_key(state: &RefCell<State>, io: &Io, key: Slot) {
         }
         crate::main_loop::flush_prints(state, io).await;
     } else {
-        let msg = message(&state.borrow(), P_NO_EFFECT);
-        print_at(state, io, S_NL_LINE_NL, &[Arg::Str(&msg)]).await;
+        let msg = message(
+            &state.borrow(),
+            crate::string_registry::pointer!(P_NO_EFFECT),
+        );
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(S_NL_LINE_NL),
+            &[Arg::Str(&msg)],
+        )
+        .await;
     }
 }

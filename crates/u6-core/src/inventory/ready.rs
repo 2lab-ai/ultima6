@@ -65,7 +65,12 @@ const SPARKLE_TYPE: u16 = 0x51;
 const INVISIBLE: u8 = 0x02;
 
 /// `printf` of the image string at `addr`.
-async fn say(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+async fn say(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = game_string(io, addr);
     printf(state, io, &fmt, args).await;
 }
@@ -73,7 +78,13 @@ async fn say(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
 /// The command prompt with the leader's name (`\n%s:\n%>`, 0x110c5a).
 async fn prompt(state: &RefCell<State>, io: &Io) {
     let name = leader_name(&state.borrow());
-    say(state, io, STR_PROMPT, &[Arg::Str(&name)]).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(STR_PROMPT),
+        &[Arg::Str(&name)],
+    )
+    .await;
 }
 
 /// The actor of the member the panel shows (A4+0x47ec + A4-0x7a3e; 16 is party slot 16, where
@@ -115,17 +126,36 @@ pub async fn ready(state: &RefCell<State>, io: &Io) {
         let ty = s.objects.kind(obj);
         (actor, obj, ty, s.actors.attrs.strength[actor as usize])
     };
-    say(state, io, STR_READY, &[]).await;
+    say(state, io, crate::string_registry::text!(STR_READY), &[]).await;
     if ty == TORCH {
-        say(state, io, STR_TORCH, &[]).await;
+        say(state, io, crate::string_registry::text!(STR_TORCH), &[]).await;
     } else {
         // Port (spec 08, slice K3): shown, so the locale pack's object name when it has one.
         let name = shown_name(&state.borrow(), obj).into_bytes();
-        say(state, io, STR_NAME_LINE, &[Arg::Str(&name)]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(STR_NAME_LINE),
+            &[Arg::Str(&name)],
+        )
+        .await;
     }
     let refusal = place(&mut state.borrow_mut(), obj, ty, strength);
     if let Some(msg) = refusal {
-        say(state, io, msg, &[]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::choose(
+                (msg) as i64,
+                &[
+                    crate::string_registry::text!(0x00110c24),
+                    crate::string_registry::text!(0x00110c38),
+                    crate::string_registry::text!(0x00110c46),
+                ],
+            ),
+            &[],
+        )
+        .await;
     } else {
         panel_contents(state, io, actor).await;
         let mut s = state.borrow_mut();
@@ -225,15 +255,27 @@ pub async fn unready_check(state: &RefCell<State>, io: &Io, obj: Slot) -> i16 {
     if stays(&state.borrow(), obj) {
         // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of
         // it when it has one ([`LABELS`], [`crate::locale::shown`]).
-        let line = pointed_string(io, A4.wrapping_sub(PTR_AMULET));
+        let line = pointed_string(
+            io,
+            crate::string_registry::pointer!(A4.wrapping_sub(PTR_AMULET)),
+        );
         let text = crate::locale::shown(&state.borrow(), line);
-        say(state, io, STR_LINE, &[Arg::Str(&text)]).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(STR_LINE),
+            &[Arg::Str(&text)],
+        )
+        .await;
         return 1;
     }
     if ty == TORCH && frame == 1 {
         remove(&mut state.borrow_mut(), obj);
-        say(state, io, STR_NEWLINE, &[]).await;
-        let text = game_string(io, A4.wrapping_sub(STR_BURNED_OUT));
+        say(state, io, crate::string_registry::text!(STR_NEWLINE), &[]).await;
+        let text = game_string(
+            io,
+            crate::string_registry::text!(A4.wrapping_sub(STR_BURNED_OUT)),
+        );
         printf(state, io, &text, &[]).await;
         return 2;
     }
@@ -285,7 +327,13 @@ pub async fn unready(state: &RefCell<State>, io: &Io) {
     }
     let outer = crate::combat::present::interrupt(state, io).await;
     let name = shown_name(&state.borrow(), obj).into_bytes();
-    say(state, io, STR_UNREADY, &[Arg::Str(&name)]).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(STR_UNREADY),
+        &[Arg::Str(&name)],
+    )
+    .await;
     let (ty, actor) = {
         let s = state.borrow();
         (s.objects.kind(obj), shown_actor(&s))

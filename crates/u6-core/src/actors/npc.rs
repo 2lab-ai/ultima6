@@ -382,7 +382,11 @@ pub fn steal(s: &mut State, actor: u16, target: u16) {
         need += 1;
     }
     if roll >= need >> 1 {
-        seams::print(s, THEFT_NOTICED, &[Arg::Name(ObjectId(actor))]);
+        seams::print(
+            s,
+            crate::string_registry::text!(THEFT_NOTICED),
+            &[Arg::Name(ObjectId(actor))],
+        );
     }
 }
 
@@ -576,7 +580,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
             s.actors.worktype[a] = 0x81;
             return;
         }
-        seams::print(&mut s, ARREST_ASK, &[]);
+        seams::print(&mut s, crate::string_registry::text!(ARREST_ASK), &[]);
     }
     let key = loop {
         let k = seams::read_key(state, io).await;
@@ -587,7 +591,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
     let mut s = state.borrow_mut();
     s.actors.worktype[a] = 0x81;
     if key == u16::from(b'Y') {
-        seams::print(&mut s, ARREST_YES, &[]);
+        seams::print(&mut s, crate::string_registry::text!(ARREST_YES), &[]);
         seams::full_redraw(&mut s);
         if s.actors.combat_mode() {
             crate::combat::mode::break_off(&mut s);
@@ -624,7 +628,7 @@ pub async fn arrest(state: &RefCell<State>, io: &Io, actor: u16) {
         seams::area_music(&mut s);
         seams::refresh_view(&mut s);
     } else {
-        seams::print(&mut s, ARREST_NO, &[]);
+        seams::print(&mut s, crate::string_registry::text!(ARREST_NO), &[]);
         crate::combat::damage::rouse_neutrals(&mut s);
         s.actors.worktype[a] = 8;
         s.actors.attrs.status[a] = (s.actors.attrs.status[a] & 0x9f) | 0x20;

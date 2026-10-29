@@ -11,8 +11,9 @@
 //! Each skips without the zip, unless `U6_REQUIRE_ARCHIVE=1`, which fails it instead. The release
 //! receipt is that run, in both builds, writing the frames:
 //! `U6_REQUIRE_ARCHIVE=1 U6_FRAMES_DIR=<a directory outside the repository> scripts/cargo.sh test
-//! -p u6-core --profile gate --lib [--features wide] -- popup_real --nocapture`. The data is read
-//! only.
+//! -p u6-core --profile gate --lib [--features wide] -- popup_real --nocapture`, with
+//! `U6_KO_PACK=<the user's ko.u6lp>` for the Go here receipt to install the user's Korean pack
+//! (else a pack of no runs). The data is read only.
 #![allow(clippy::disallowed_methods)] // the test reads the zip and writes the PNG receipts
 
 use std::path::{Component, Path, PathBuf};
@@ -152,6 +153,10 @@ impl Play {
     /// web build starts it), every actor outside the party passed over by the world turn (status
     /// bit 0x10, as the oracle's quiet start) and the start fight broken off (`b`): at the prompt.
     fn boot(files: &Files) -> Play {
+        Self::boot_with_world(files, true)
+    }
+
+    fn boot_with_world(files: &Files, quiet: bool) -> Play {
         let mut state = State::new_game(files).quiet();
         state.rng.seed(0);
         let keep = Rc::new(RefCell::new(None));
@@ -168,6 +173,9 @@ impl Play {
             .expect("the game future holds the state");
         let mut p = Play { e, st };
         p.settle(4000);
+        if !quiet {
+            return p;
+        }
         {
             let mut s = p.st.borrow_mut();
             let party: Vec<usize> = s.actors.party.active().map(|a| a.index()).collect();
@@ -209,7 +217,15 @@ impl Play {
         for _ in 0..8 {
             self.e.tick(&[], STEP_MS);
         }
-        assert!(self.at_prompt(), "the prompt");
+        assert!(
+            self.at_prompt(),
+            "the prompt (reading {}, queued {}, targeting {}, accept {}, target pending {})",
+            self.e.state().main.reading,
+            self.e.io().pending_events(),
+            self.e.state().ui.input.targeting,
+            self.e.state().ui.input.accept,
+            self.e.state().ui.input.target_pending
+        );
     }
 
     /// A key pressed and let go, then the prompt again.
@@ -453,20 +469,29 @@ fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
 /// A view cell of bare ground two or more cells from the leader (its menu the tile's Look alone,
 /// with Go here) and its pixel.
 fn bare_ground(p: &Play) -> ((i16, i16), (i16, i16)) {
+    go_here_cells(p, true)
+        .into_iter()
+        .next()
+        .expect("bare ground near the leader")
+}
+
+/// Every view cell two to four cells from the leader whose menu offers Go here able to run (of
+/// [`bare_ground`] only, with `bare`), row by row, and its pixel.
+fn go_here_cells(p: &Play, bare: bool) -> Vec<((i16, i16), (i16, i16))> {
     let leader = p.e.state().leader_position().expect("a leader");
     let (lx, ly) = (leader.x as i16, leader.y as i16);
     (-4..=4i16)
         .flat_map(|dy| (-4..=4i16).map(move |dx| (dx, dy)))
         .filter(|&(dx, dy)| dx.abs().max(dy.abs()) >= 2)
         .map(|(dx, dy)| (lx + dx, ly + dy))
-        .find_map(|(x, y)| {
+        .filter_map(|(x, y)| {
             let at = p.pixel(x as u16, y as u16);
             let m = menu::query(&p.e.state(), p.e.io(), at.0, at.1)?;
-            let bare = m.sections.len() == 1 && m.sections[0].object == -1;
+            let ground = m.sections.len() == 1 && m.sections[0].object == -1;
             let go = m.go_here.is_some_and(|e| e.enabled());
-            (bare && go && m.cell == Some((x, y))).then_some(((x, y), at))
+            ((ground || !bare) && go && m.cell == Some((x, y))).then_some(((x, y), at))
         })
-        .expect("bare ground near the leader")
+        .collect()
 }
 
 /// Escape closes the open menu, then the prompt again.
@@ -567,32 +592,257 @@ fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
     println!("{NAME}: ran");
 }
 
+/// Spec 21's merge contract (round 5, opus SHOULD 1): Go here chosen by a left press, its
+/// release and a right press on the map, all in one tick's input: the right press opens a menu
+/// after the choice, and no travel walks under it (round 6: the travel the choice started ends at
+/// once on the menu's new input after the choice, `Input`, as the right press in the next tick
+/// ends it); the cell is recorded as asked all the same. Over quiet ticks the menu stays open and
+/// the party where it stood; Escape closes it and no travel walks. Frames: `r5-menu-no-walk` (the
+/// menu open after those ticks).
+#[test]
+fn a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel() {
+    const NAME: &str = "a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (cell, at) = bare_ground(&p);
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    let stood = p.e.state().leader_position().expect("a leader");
+    let ptr = |(x, y): (i16, i16), buttons: u8| InputEvent::Pointer { x, y, buttons };
+    p.e.tick(
+        &[
+            ptr(go_at, POINTER_LEFT),
+            ptr(go_at, 0),
+            ptr(at, POINTER_RIGHT),
+        ],
+        STEP_MS,
+    );
+    assert!(
+        p.e.context_menu().is_some(),
+        "the right press opened a menu"
+    );
+    assert!(!p.e.travel_active(), "no travel under it");
+    assert_eq!(
+        p.e.travel_end(),
+        Some(crate::actors::travel::End::Input),
+        "the menu's new input after the choice ended the travel the choice started"
+    );
+    assert_eq!(p.e.go_here_asked().asked, [cell], "Go here asked");
+    p.release(at);
+    let quiet = 30;
+    for _ in 0..quiet {
+        p.e.tick(&[], STEP_MS);
+    }
+    let now = p.e.state().leader_position().expect("a leader");
+    assert!(
+        p.e.context_menu().is_some() && !p.e.travel_active() && now == stood,
+        "over {quiet} quiet ticks: the menu open, no travel, the party where it stood"
+    );
+    p.frames("r5-menu-no-walk");
+    p.e.tick(&[InputEvent::Key(Key::Escape)], STEP_MS);
+    p.e.tick(&[InputEvent::Release(Key::Escape)], STEP_MS);
+    assert!(
+        p.e.context_menu().is_none(),
+        "the fixture: Escape closed it"
+    );
+    for _ in 0..quiet {
+        p.e.tick(&[], STEP_MS);
+    }
+    let after = p.e.state().leader_position().expect("a leader");
+    println!(
+        "the menu open over {quiet} quiet ticks, then closed and {quiet} more: travel steps {}, \
+         Go here asked {}, the leader moved {}",
+        p.e.travel_log().len(),
+        p.e.go_here_asked().asked.len(),
+        u8::from(after != stood)
+    );
+    assert!(
+        !p.e.travel_active() && p.e.travel_log().is_empty() && after == stood,
+        "closed: no travel walks, the party where it stood"
+    );
+    println!("{NAME}: ran");
+}
+
+/// Spec 21's merge contract (round 6, opus MUST B): Go here chosen by a left press, its release,
+/// a right press on the map that opens a menu, that press's release and Escape closing the menu,
+/// all in one tick's input: no menu is open after the input, and the travel the choice started
+/// ends at once (`Input`, before its first step) on the menu's new input after the choice, as the
+/// same events in the next tick end it (round 5 started it, and the party walked off); the cell
+/// is asked. Over quiet ticks no travel walks and the party stands where it stood. Frames:
+/// `r6-menu-closed-no-walk` (the menu closed after those ticks, the party standing).
+#[test]
+fn a_menu_opened_and_closed_in_the_input_that_chose_go_here_ends_its_travel() {
+    const NAME: &str = "a_menu_opened_and_closed_in_the_input_that_chose_go_here_ends_its_travel";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (cell, at) = bare_ground(&p);
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    let stood = p.e.state().leader_position().expect("a leader");
+    let ptr = |(x, y): (i16, i16), buttons: u8| InputEvent::Pointer { x, y, buttons };
+    p.e.tick(
+        &[
+            ptr(go_at, POINTER_LEFT),
+            ptr(go_at, 0),
+            ptr(at, POINTER_RIGHT),
+            ptr(at, 0),
+            InputEvent::Key(Key::Escape),
+        ],
+        STEP_MS,
+    );
+    assert!(
+        p.e.context_menu().is_none(),
+        "the fixture: Escape closed the menu the right press opened"
+    );
+    assert_eq!(
+        (
+            p.e.travel_active(),
+            p.e.travel_end(),
+            p.e.travel_log().len()
+        ),
+        (false, Some(crate::actors::travel::End::Input), 0),
+        "the menu after the choice ended its travel before its first step"
+    );
+    assert_eq!(p.e.go_here_asked().asked, [cell], "Go here asked");
+    p.e.tick(&[InputEvent::Release(Key::Escape)], STEP_MS);
+    let quiet = 30;
+    for _ in 0..quiet {
+        p.e.tick(&[], STEP_MS);
+    }
+    let now = p.e.state().leader_position().expect("a leader");
+    println!(
+        "the menu opened and closed in the choice's input, then {quiet} quiet ticks: travel steps \
+         {}, Go here asked {}, the leader moved {}",
+        p.e.travel_log().len(),
+        p.e.go_here_asked().asked.len(),
+        u8::from(now != stood)
+    );
+    assert!(
+        p.e.context_menu().is_none()
+            && !p.e.travel_active()
+            && p.e.travel_log().is_empty()
+            && now == stood,
+        "no menu, no travel walks, the party where it stood"
+    );
+    p.frames("r6-menu-closed-no-walk");
+    println!("{NAME}: ran");
+}
+
+/// Spec 17 Layer flow with spec 21 (round 6, opus NIT 1): Go here chosen twice in one tick's input
+/// (a left press on its row and the release, a right press on another cell whose menu offers Go
+/// here opening that menu and the release, a left press on its Go here and the release): the record
+/// keeps both cells, in order, and the second travel walks the party to the second cell (the first
+/// ended at once on the menu opened after it; round 5 kept only the second cell).
+#[test]
+fn every_go_here_chosen_in_one_input_is_asked_and_the_last_walks() {
+    const NAME: &str = "every_go_here_chosen_in_one_input_is_asked_and_the_last_walks";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (first, at) = bare_ground(&p);
+    let (second, at2) = go_here_cells(&p, false)
+        .into_iter()
+        .find(|&(c, _)| c != first)
+        .expect("a second cell whose menu offers Go here");
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    // The second menu as the right press at its pixel lays it out in the tick (the state the same).
+    let v2 = {
+        let s = p.e.state();
+        let m = menu::query(&s, p.e.io(), at2.0, at2.1).expect("the second cell's menu");
+        crate::ui::popup::Open::new(&m, at2, &s, p.e.context_menu_hidden()).view()
+    };
+    let (_, go2_at) = row_of(&v2, menu::GO_HERE).expect("the second menu's Go here");
+    let ptr = |(x, y): (i16, i16), buttons: u8| InputEvent::Pointer { x, y, buttons };
+    p.e.tick(
+        &[
+            ptr(go_at, POINTER_LEFT),
+            ptr(go_at, 0),
+            ptr(at2, POINTER_RIGHT),
+            ptr(at2, 0),
+            ptr(go2_at, POINTER_LEFT),
+            ptr(go2_at, 0),
+        ],
+        STEP_MS,
+    );
+    let asked = &p.e.go_here_asked().asked;
+    assert!(
+        *asked == [first, second],
+        "both choices asked, in order: {} asked",
+        asked.len()
+    );
+    assert!(
+        p.e.context_menu().is_none() && p.e.travel_active(),
+        "the second menu closed by its choice, the second travel walks"
+    );
+    let mut ticks = 0;
+    while p.e.travel_active() && ticks < 4000 {
+        p.e.tick(&[], STEP_MS);
+        ticks += 1;
+    }
+    let l = p.e.state().leader_position().expect("a leader");
+    println!(
+        "two choices of Go here in one input: {} asked, the travel's end {:?} after {ticks} ticks, \
+         {} steps",
+        p.e.go_here_asked().asked.len(),
+        p.e.travel_end().map(crate::actors::travel::End::code),
+        p.e.travel_log().len()
+    );
+    assert_eq!(
+        (p.e.travel_end(), (l.x as i16, l.y as i16)),
+        (Some(crate::actors::travel::End::Arrived), second),
+        "the party on the second cell"
+    );
+    println!("{NAME}: ran");
+}
+
 /// Spec 17 Acceptance 9 with spec 21 (the merge round): a right press on bare ground (a view
 /// cell whose menu is the tile's Look alone, two or more cells from the leader, Go here able to
 /// run: the travel's own `reachable`) opens the menu with Look and Go here last; chosen by a left
 /// press on its row it starts the real travel to the cell (`Engine::travel_to`): the menu closed,
 /// the party walks there, a key a step, and the travel ends on it (`Arrived`), the prompt up.
-/// The menu in the port's Korean words ("여기로 이동"), as the Korean pack sets the language,
-/// drawn from the site's Hangul table (the game's own text stays the English it is without the
-/// pack). Frames: `r4-menu-ground` (the menu over bare ground), `r4-go-here-walking` (the party on
-/// its way, at the first prompt after its first step).
+/// The menu in the port's Korean words ("여기로 이동"), the Korean pack installed as the page
+/// installs it (`Engine::install_locale`, `Game::set_locale`; round 5, MUST 4: rounds 1 to 4 set
+/// the text layer's language by hand, which no pack does), with the site's Hangul table, the text
+/// layer's language left at its default: the user's own pack when `U6_KO_PACK` names its file
+/// (outside the repository, which holds none), else a pack of no runs (the menu's words are the
+/// port's own, so it shows them the same). Frames: `r4-menu-ground` (the menu over bare ground),
+/// `r4-go-here-walking` (the party on its way, at the first prompt after its first step).
 #[test]
 fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
     const NAME: &str = "a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to";
     let Some(files) = archive(NAME) else { return };
     let mut p = Play::boot(&files);
     p.beside_a_door();
-    {
-        let table = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../site/fonts/galmuri7-hangul.bin"
-        ));
-        let mut s = p.st.borrow_mut();
-        s.ui.text.language = crate::ui::wide::Language::Korean;
-        s.ui.hangul = Some(Rc::new(
-            u6_formats::font::HangulFont::parse(table).expect("the site's Hangul table"),
-        ));
-    }
+    let table = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../site/fonts/galmuri7-hangul.bin"
+    ));
+    let hangul = u6_formats::font::HangulFont::parse(table).expect("the site's Hangul table");
+    let (pack, whose) = match std::env::var_os("U6_KO_PACK") {
+        Some(path) => {
+            let bytes = std::fs::read(&path).expect("the pack U6_KO_PACK names");
+            let pack = crate::locale::Pack::parse(&bytes).expect("a pack");
+            (pack, "the user's")
+        }
+        None => {
+            let base = crate::locale::fingerprint([]);
+            let pack = crate::locale::Pack::new(crate::ui::Language::Korean, "test/1", base, [])
+                .expect("a pack of no runs");
+            (pack, "one of no runs")
+        }
+    };
+    assert_eq!(pack.language, crate::ui::Language::Korean, "a Korean pack");
+    p.e.install_locale(Rc::new(pack), Some(Rc::new(hangul)))
+        .expect("the pack checks against the user's files");
+    assert_eq!(
+        p.e.state().ui.text.language,
+        crate::ui::Language::English,
+        "the fixture: the text layer's language as the pack leaves it"
+    );
+    println!("the Korean pack installed: {whose}");
     let leader = p.e.state().leader_position().expect("a leader");
     let (lx, ly) = (leader.x as i16, leader.y as i16);
     let (cell, at) = bare_ground(&p);
@@ -615,9 +865,46 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
         "Go here can run (the travel's reachable)"
     );
     let text = drawn_in_the_frame(&p, &v);
+    // The cells of the text area drawn from the Hangul table: their glyph sources name a syllable.
+    // The cells of the text area drawn from the Hangul table, and of Go here's label (its row,
+    // columns 1 to 6: the port's words, three syllables, a space, two): whether each is.
+    let (syllables, go_label) = {
+        let f = p.e.screen_frame();
+        let (tx0, ty0, tx1, ty1) = v.text;
+        let hangul = |x: i32, y: i32| {
+            (0..64).any(|k| {
+                f.src_at((x + k % 8) as usize, (y + k / 8) as usize)
+                    .is_some_and(|s| {
+                        s.kind == u6_render::Kind::Glyph && (0xac00..=0xd7a3).contains(&s.id)
+                    })
+            })
+        };
+        let all = (ty0..=ty1)
+            .step_by(8)
+            .flat_map(|y| (tx0..=tx1).step_by(8).map(move |x| (x, y)))
+            .filter(|&(x, y)| hangul(x, y))
+            .count();
+        let label: Vec<bool> = (1..=6)
+            .map(|col| hangul(tx0 + col * 8, v.rows[go].y))
+            .collect();
+        (all, label)
+    };
     println!(
-        "ground menu: {} rows, text area {text} pixels",
-        v.rows.len()
+        "ground menu: {} rows, text area {text} pixels, {syllables} cells of Hangul syllables, {} \
+         of Go here's 6 label cells",
+        v.rows.len(),
+        go_label.iter().filter(|&&h| h).count()
+    );
+    assert!(
+        v.korean && syllables > 0,
+        "the menu in the Korean words, drawn from the Hangul table"
+    );
+    // Round 6 (gpt a SHOULD, opus NIT 3): the count above holds with the pack's heading alone;
+    // Go here's own row is in the port's Korean words.
+    assert_eq!(
+        go_label,
+        [true, true, true, false, true, true],
+        "Go here's label drawn from the Hangul table, syllable by syllable"
     );
     p.frames("r4-menu-ground");
     let steps = (lx - cell.0).abs().max((ly - cell.1).abs());
@@ -822,4 +1109,497 @@ fn a_wide_inventory_slot_menu_keeps_its_rows_whole() {
     p.key(Key::Escape);
     assert!(p.e.context_menu().is_none(), "closed");
     println!("{NAME}: ran");
+}
+
+/// Ctrl's label and click use the existing Use/Go here routes, with cancellation at every
+/// input boundary. The frame is kept outside the repository like the full-menu receipts.
+#[test]
+fn control_representative_door_ground_release_modal_and_target_changes() {
+    const NAME: &str = "control_representative_door_ground_release_modal_and_target_changes";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    let door = p.beside_a_door();
+    let at = {
+        let s = p.e.state();
+        p.pixel(s.objects.x(door), s.objects.y(door))
+    };
+    let closed = p.e.state().objects.tf(door);
+    let ptr = |(x, y), buttons| InputEvent::Pointer { x, y, buttons };
+    p.e.tick_controls(&[ptr(at, 0)], &[], &[(0, true)], STEP_MS);
+    let v = p.e.quick_action().expect("Ctrl hover label");
+    assert_eq!(
+        v.rows.iter().filter_map(|r| r.code).collect::<Vec<_>>(),
+        [menu::USE]
+    );
+    assert!(p.e.context_menu().is_none(), "no full menu");
+    drawn_in_the_frame(&p, &v);
+    p.frames("control-use");
+    // Releasing only the modifier clears a stationary hover, with no pointer event needed.
+    p.e.tick_controls(&[], &[], &[(0, false)], STEP_MS);
+    assert!(p.e.quick_action().is_none());
+    assert!(p.e.screen_frame().pixels() == p.e.published_frame().pixels());
+    p.e.tick_controls(&[], &[], &[(0, true)], STEP_MS);
+    assert!(p.e.quick_action().is_some(), "stationary re-entry");
+    // A different hover between down/up must not run either target.
+    let (ground, ground_at) = bare_ground(&p);
+    p.press(at, POINTER_LEFT);
+    p.release(ground_at);
+    assert_eq!(p.e.state().objects.tf(door), closed);
+    assert!(p.e.go_here_asked().asked.is_empty());
+    // A Ctrl-up before the button-up cancels the captured action.
+    p.e.tick_controls(
+        &[ptr(at, POINTER_LEFT), ptr(at, 0)],
+        &[],
+        &[(1, false)],
+        STEP_MS,
+    );
+    assert_eq!(p.e.state().objects.tf(door), closed);
+    // Hidden world pixels and modal/target reads expose no representative action.
+    p.e.set_context_menu_hidden(vec![(
+        i32::from(at.0) - 1,
+        i32::from(at.1) - 1,
+        i32::from(at.0) + 1,
+        i32::from(at.1) + 1,
+    )]);
+    p.e.tick_controls(&[ptr(at, 0)], &[], &[(0, true)], STEP_MS);
+    assert!(p.e.quick_action().is_none());
+    p.e.set_context_menu_hidden(vec![]);
+    p.e.tick(&[InputEvent::Key(Key::Char('u'))], STEP_MS);
+    p.e.tick(&[InputEvent::Release(Key::Char('u'))], STEP_MS);
+    for _ in 0..400 {
+        if p.e.state().ui.input.in_wait && p.e.state().main.reading == 0 {
+            break;
+        }
+        p.e.tick(&[], STEP_MS);
+    }
+    assert_eq!(p.e.state().main.reading, 0, "Use is reading a target");
+    assert!(
+        p.e.quick_action().is_none(),
+        "a target prompt is not a command prompt"
+    );
+    // The original's first Escape lowers the cross-hair; the second ends the pending command.
+    p.e.tick(&[InputEvent::Key(Key::Escape)], STEP_MS);
+    p.e.tick(&[InputEvent::Release(Key::Escape)], STEP_MS);
+    p.key(Key::Escape);
+    p.e.tick(&[], STEP_MS);
+    assert!(p.e.quick_action().is_some());
+    // Ctrl right-click still opens the full menu.
+    p.click(at, POINTER_RIGHT);
+    assert!(p.e.context_menu().is_some());
+    assert!(p.e.quick_action().is_none());
+    close(&mut p);
+    // All four edges can arrive in one tick: Ctrl down, click, Ctrl up, in that order.
+    p.e.tick_controls(
+        &[ptr(at, POINTER_LEFT), ptr(at, 0)],
+        &[],
+        &[(0, true), (2, false)],
+        STEP_MS,
+    );
+    p.settle(4000);
+    assert_eq!(
+        p.e.state().objects.tf(door),
+        closed ^ (4 << 10),
+        "existing Use opens the door"
+    );
+    // Ground uses the same travel request and reaches the chosen world cell.
+    p.e.tick_controls(&[ptr(ground_at, 0)], &[], &[(0, true)], STEP_MS);
+    assert_eq!(
+        p.e.quick_action()
+            .expect("ground")
+            .rows
+            .iter()
+            .filter_map(|r| r.code)
+            .collect::<Vec<_>>(),
+        [menu::GO_HERE]
+    );
+    p.frames("control-go-here");
+    p.click(ground_at, POINTER_LEFT);
+    p.e.tick_controls(&[], &[], &[(0, false)], STEP_MS);
+    for _ in 0..4000 {
+        if !p.e.travel_active() {
+            break;
+        }
+        p.e.tick(&[], STEP_MS);
+    }
+    let now = p.e.state().leader_position().expect("leader");
+    assert_eq!((now.x as i16, now.y as i16), ground);
+    assert_eq!(p.e.go_here_asked().asked, [ground]);
+    println!("{NAME}: ran (one Use, one travel, cancelled inputs unchanged)");
+}
+
+#[test]
+fn control_representative_tracks_a_persons_current_allegiance_and_visibility() {
+    const NAME: &str = "control_representative_tracks_a_persons_current_allegiance_and_visibility";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    let leader = p.e.state().actors.party.leader().expect("leader").index();
+    let mut target = None;
+    for row in 1..crate::geom::VIEW_H - 1 {
+        for col in 1..crate::geom::VIEW_W - 1 {
+            let at = (
+                crate::geom::MAP_X as i16 + col as i16 * 16 + 8,
+                crate::geom::MAP_Y as i16 + row as i16 * 16 + 8,
+            );
+            if let Some(m) = menu::query(&p.e.state(), p.e.io(), at.0, at.1)
+                && let Some(section) = m.sections.iter().find(|section| {
+                    section.object > 0
+                        && section.object < 0x100
+                        && section.object as usize != leader
+                        && p.e.state().actors.attrs.status[section.object as usize] & 0x80 == 0
+                        && section.entries.iter().any(|e| e.code == menu::TALK)
+                })
+            {
+                target = Some((at, section.object as usize));
+                break;
+            }
+        }
+        if target.is_some() {
+            break;
+        }
+    }
+    let (at, actor) = target.expect("a visible person outside the party");
+    let codes = |p: &Play| {
+        p.e.quick_action()
+            .map(|v| v.rows.iter().filter_map(|r| r.code).collect::<Vec<_>>())
+    };
+    p.st.borrow_mut().actors.attrs.status[actor] = 0x40;
+    p.e.tick_controls(
+        &[InputEvent::Pointer {
+            x: at.0,
+            y: at.1,
+            buttons: 0,
+        }],
+        &[],
+        &[(0, true)],
+        STEP_MS,
+    );
+    assert_eq!(codes(&p), Some(vec![menu::TALK]), "friendly person");
+    p.frames("control-talk");
+    p.st.borrow_mut().actors.attrs.status[actor] = 0x20;
+    p.e.tick(&[], STEP_MS);
+    assert_eq!(
+        codes(&p),
+        Some(vec![menu::ATTACK]),
+        "same person now hostile without moving the pointer"
+    );
+    p.frames("control-attack");
+    p.press(at, POINTER_LEFT);
+    p.st.borrow_mut().actors.attrs.status[actor] = 0x40;
+    let before = p.e.game_presses();
+    p.release(at);
+    assert_eq!(
+        p.e.game_presses(),
+        before,
+        "changed allegiance cancels captured attack instead of talking"
+    );
+    assert_eq!(codes(&p), Some(vec![menu::TALK]));
+    p.e.set_context_menu_hidden(vec![(
+        i32::from(at.0) - 8,
+        i32::from(at.1) - 8,
+        i32::from(at.0) + 8,
+        i32::from(at.1) + 8,
+    )]);
+    p.e.tick(&[], STEP_MS);
+    assert!(p.e.quick_action().is_none(), "occluded world target");
+    println!("{NAME}: ran (Talk, Attack, allegiance cancellation, hidden target)");
+}
+
+/// A natural hostile in the user's starting world, retaining its allegiance and combat state:
+/// Ctrl Attack and the existing icon/target input execute the same command and whole game state.
+#[test]
+fn control_representative_attack_matches_the_original_command_in_the_live_world() {
+    const NAME: &str =
+        "control_representative_attack_matches_the_original_command_in_the_live_world";
+    let Some(files) = archive(NAME) else { return };
+    let p = Play::boot_with_world(&files, false);
+    let k = Play::boot_with_world(&files, false);
+    let mut target = None;
+    for row in 1..crate::geom::VIEW_H - 1 {
+        for col in 1..crate::geom::VIEW_W - 1 {
+            let at = (
+                crate::geom::MAP_X as i16 + col as i16 * 16 + 8,
+                crate::geom::MAP_Y as i16 + row as i16 * 16 + 8,
+            );
+            if let Some(m) = menu::query(&p.e.state(), p.e.io(), at.0, at.1)
+                && m.sections.iter().any(|section| {
+                    let owner =
+                        crate::combat::leaves::owner(&mut p.e.state().clone(), section.object);
+                    owner > 0
+                        && owner < 0x100
+                        && p.e.state().actors.attrs.status[owner as usize] & 0x90 == 0
+                        && p.e.state().actors.attrs.status[owner as usize] & 0x20 != 0
+                        && section
+                            .entries
+                            .iter()
+                            .any(|e| e.code == menu::ATTACK && e.enabled())
+                })
+            {
+                target = Some(at);
+                break;
+            }
+        }
+        if target.is_some() {
+            break;
+        }
+    }
+    // The starting foes can be outside the leader's weapon range. Put the party on an
+    // actually walkable adjacent cell using the game's teleport, keeping the original foe's
+    // allegiance, type, equipment and combat attributes. No enemy or alignment is invented.
+    if target.is_none() {
+        let start = p.e.state().clone();
+        let leader = start.actors.party.leader().expect("leader");
+        let home = start.objects.location[leader.index()];
+        let mut owners = start.clone();
+        let mut foes: Vec<usize> = (1..start.objects.type_frame.len())
+            .filter(|&a| {
+                let owner = crate::combat::leaves::owner(&mut owners, a as Slot);
+                start.objects.type_frame[a] != 0
+                    && (1..0x100).contains(&owner)
+                    && start.actors.attrs.status[owner as usize] & 0x90 == 0
+                    && start.actors.attrs.status[owner as usize] & 0x20 != 0
+                    && start.objects.location[a].z == home.z
+            })
+            .collect();
+        foes.sort_by_key(|&a| {
+            let q = start.objects.location[a];
+            q.x.abs_diff(home.x) + q.y.abs_diff(home.y)
+        });
+        'foes: for actor in foes {
+            let pos = start.objects.location[actor];
+            for (dx, dy) in [
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+                (1, 1),
+            ] {
+                let (x, y) = (pos.x.wrapping_add_signed(dx), pos.y.wrapping_add_signed(dy));
+                let mut trial = start.clone();
+                if !crate::actors::walk::can_move_to(&mut trial, leader.0, x, y) {
+                    continue;
+                }
+                crate::map::travel::teleport(&mut trial, x, y, u16::from(home.z), 0);
+                crate::objects::build_draw_lists(&mut trial);
+                crate::map::view::update_view(&mut trial);
+                let q = trial.objects.location[actor];
+                let at = (
+                    crate::geom::MAP_X as i16
+                        + (q.x as i16 - trial.map.centre.x as i16 + crate::geom::HALF_W as i16)
+                            * 16
+                        + 8,
+                    crate::geom::MAP_Y as i16
+                        + (q.y as i16 - trial.map.centre.y as i16 + crate::geom::HALF_H as i16)
+                            * 16
+                        + 8,
+                );
+                if menu::query(&trial, p.e.io(), at.0, at.1).is_some_and(|m| {
+                    m.entry(actor as Slot, menu::ATTACK)
+                        .is_some_and(|e| e.enabled())
+                }) {
+                    let owner =
+                        crate::combat::leaves::owner(&mut trial.clone(), actor as Slot) as usize;
+                    assert_eq!(
+                        trial.actors.attrs.status[owner], start.actors.attrs.status[owner],
+                        "original hostile allegiance"
+                    );
+                    *p.st.borrow_mut() = trial.clone();
+                    *k.st.borrow_mut() = trial;
+                    crate::ui::seams::present_map(&mut p.st.borrow_mut(), p.e.io(), 1);
+                    crate::ui::seams::present_map(&mut k.st.borrow_mut(), k.e.io(), 1);
+                    target = Some(at);
+                    break 'foes;
+                }
+            }
+        }
+    }
+    let at = target.expect("a natural visible hostile on a reachable adjacent cell");
+    check_control_attack_matches_original(p, k, at, "control-natural-attack");
+    println!("{NAME}: ran (natural hostile, one Attack, one target, same whole game state)");
+}
+
+/// A real engine and original game data, with a controlled hostile serpent and a distinct
+/// body tile. This exercises object slots above the actor table even if the starting world
+/// happens to offer only single-tile hostiles.
+#[test]
+fn control_representative_part_attack_matches_the_original_command() {
+    const NAME: &str = "control_representative_part_attack_matches_the_original_command";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    let mut k = Play::boot(&files);
+    let start = p.e.state().clone();
+    let leader = start.actors.party.leader().expect("leader");
+    let home = start.objects.location[leader.index()];
+    let mut target = None;
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let (x, y) = (
+            home.x.wrapping_add_signed(dx),
+            home.y.wrapping_add_signed(dy),
+        );
+        let at = p.pixel(x, y);
+        if !menu::query(&start, p.e.io(), at.0, at.1)
+            .is_some_and(|m| m.go_here.is_some_and(|e| e.enabled()))
+        {
+            continue;
+        }
+        let mut trial = start.clone();
+        let head = crate::objects::create_actor(
+            &mut trial,
+            0x19d,
+            x.wrapping_add_signed(dx),
+            y.wrapping_add_signed(dy),
+            u16::from(home.z),
+        );
+        assert!((1..0x100).contains(&head), "a free actor slot");
+        trial.actors.attrs.status[head as usize] = 0x20;
+        trial.actors.attrs.hp[head as usize] = 100;
+        trial.actors.attrs.strength[head as usize] = 30;
+        let body = crate::objects::create_on_map(
+            &mut trial.objects,
+            0x19d | (8 << 10),
+            1,
+            head as u16,
+            x,
+            y,
+            u16::from(home.z),
+        );
+        assert!(body >= 0x100, "a body outside the actor table");
+        crate::objects::build_draw_lists(&mut trial);
+        crate::map::view::update_view(&mut trial);
+        if menu::query(&trial, p.e.io(), at.0, at.1)
+            .is_some_and(|m| m.entry(body, menu::ATTACK).is_some_and(|e| e.enabled()))
+        {
+            assert_eq!(crate::combat::leaves::owner(&mut trial.clone(), body), head);
+            *p.st.borrow_mut() = trial.clone();
+            *k.st.borrow_mut() = trial;
+            crate::ui::seams::present_map(&mut p.st.borrow_mut(), p.e.io(), 1);
+            crate::ui::seams::present_map(&mut k.st.borrow_mut(), k.e.io(), 1);
+            target = Some((at, body, head));
+            break;
+        }
+    }
+    let (at, body, head) = target.expect("an adjacent body with an enabled existing Attack");
+    let ptr = |buttons| InputEvent::Pointer {
+        x: at.0,
+        y: at.1,
+        buttons,
+    };
+    p.e.tick_controls(&[ptr(0)], &[], &[(0, true)], STEP_MS);
+    k.e.tick(&[ptr(0)], STEP_MS);
+    // Idle ticks animate the game even with zero elapsed time. Compare the same ticks on
+    // an engine without Ctrl to isolate any state change caused by the hover query.
+    for _ in 0..64 {
+        p.e.tick(&[], 0);
+        k.e.tick(&[], 0);
+    }
+    assert!(
+        *p.e.state() == *k.e.state(),
+        "stationary body hover matches the whole idle game State: {:?}",
+        differing(&p.e.state(), &k.e.state())
+    );
+    for status in [0, 0x40, 0x30, 0xa0] {
+        p.st.borrow_mut().actors.attrs.status[head as usize] = 0x20;
+        p.e.tick(&[], STEP_MS);
+        assert!(p.e.quick_action().is_some(), "hostile body preview");
+        p.press(at, POINTER_LEFT);
+        p.st.borrow_mut().actors.attrs.status[head as usize] = status;
+        let presses = p.e.game_presses();
+        p.release(at);
+        assert_eq!(
+            p.e.game_presses(),
+            presses,
+            "owner change cancels the captured Attack"
+        );
+        assert!(
+            p.e.quick_action().is_none(),
+            "body follows its owner's current state"
+        );
+    }
+    // Fresh engines keep the command comparison independent of the cancellation inputs.
+    let trial = k.e.state().clone();
+    let p = Play::boot(&files);
+    let k = Play::boot(&files);
+    *p.st.borrow_mut() = trial.clone();
+    *k.st.borrow_mut() = trial;
+    crate::ui::seams::present_map(&mut p.st.borrow_mut(), p.e.io(), 1);
+    crate::ui::seams::present_map(&mut k.st.borrow_mut(), k.e.io(), 1);
+    assert!(
+        menu::query(&p.e.state(), p.e.io(), at.0, at.1)
+            .is_some_and(|m| m.entry(body, menu::ATTACK).is_some_and(|e| e.enabled()))
+    );
+    check_control_attack_matches_original(p, k, at, "control-part-attack");
+    println!("{NAME}: ran (body slot, owner changes, one Attack, same whole game state)");
+}
+
+fn check_control_attack_matches_original(mut p: Play, mut k: Play, at: (i16, i16), receipt: &str) {
+    let ptr = |buttons| InputEvent::Pointer {
+        x: at.0,
+        y: at.1,
+        buttons,
+    };
+    p.e.tick_controls(&[ptr(0)], &[], &[(0, true)], STEP_MS);
+    k.e.tick(&[ptr(0)], STEP_MS);
+    let shown = p.e.quick_action().expect("hostile representative");
+    assert_eq!(
+        shown.rows.iter().filter_map(|r| r.code).collect::<Vec<_>>(),
+        [menu::ATTACK]
+    );
+    assert!(
+        shown
+            .rows
+            .iter()
+            .any(|r| r.code == Some(menu::ATTACK) && r.enabled())
+    );
+    p.frames(receipt);
+    let (before, prompt) = (p.e.game_presses(), p.e.state().ui.input.prompt_reads);
+    p.press(at, POINTER_LEFT);
+    k.e.tick(&[], STEP_MS);
+    p.release(at);
+    let icons = menu::icon_press(menu::ATTACK);
+    k.e.tick(&[ptr(0), icons[0], icons[1]], STEP_MS);
+    assert_eq!(
+        p.e.popup_mut().run().expect("the existing Attack run").code,
+        menu::ATTACK
+    );
+    assert_eq!(p.e.popup_mut().run().expect("targeted Attack").at, at);
+    let mut targets = 0;
+    for _ in 0..4000 {
+        if targets != 0 && p.at_prompt() && k.at_prompt() {
+            break;
+        }
+        let input = if targets == 0 && menu::target_read(&k.e.state(), menu::ATTACK) {
+            assert!(
+                menu::target_read(&p.e.state(), menu::ATTACK),
+                "same Attack target read"
+            );
+            targets += 1;
+            menu::left_press(at.0, at.1).to_vec()
+        } else {
+            vec![]
+        };
+        p.e.tick(&[], STEP_MS);
+        k.e.tick(&input, STEP_MS);
+    }
+    assert_eq!(targets, 1, "one Attack target input");
+    assert!(
+        p.at_prompt() && k.at_prompt(),
+        "the original command completed"
+    );
+    assert_eq!(
+        p.e.game_presses() - before,
+        2,
+        "one icon and one target press"
+    );
+    assert_eq!(
+        p.e.state().ui.input.prompt_reads.wrapping_sub(prompt),
+        1,
+        "one new command prompt after the Attack"
+    );
+    assert!(
+        *p.e.state() == *k.e.state(),
+        "same whole game state, including combat, RNG, turn and visibility: {:?}",
+        differing(&p.e.state(), &k.e.state())
+    );
 }

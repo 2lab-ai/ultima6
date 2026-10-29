@@ -25,6 +25,7 @@
 pub mod actors;
 pub mod combat;
 pub mod converse;
+pub mod ending;
 pub mod engine;
 pub mod files;
 pub mod geom;
@@ -45,6 +46,7 @@ pub mod sound;
 pub mod speech;
 pub mod state;
 pub mod stub;
+pub mod turn_speed;
 pub mod ui;
 pub mod usecmd;
 
@@ -53,3 +55,5 @@ pub use files::Files;
 pub use rng::Rng;
 pub use state::{LoadError, State};
 pub use u6_render::{Framebuffer, HEIGHT, Kind, Rgb, Src, WIDTH};
+
+pub mod string_registry;

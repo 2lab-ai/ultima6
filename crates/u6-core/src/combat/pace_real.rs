@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::Path;
+
 use std::rc::Rc;
 
 use u6_intake::{InputFile, intake};
@@ -25,8 +25,6 @@ use crate::engine::{Engine, InputEvent, Key};
 use crate::files::Files;
 use crate::pacer::STEP_MS as HOST_STEP_MS;
 use crate::state::State;
-
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
 /// The steps of the oracle's runs: north out of the start position, then east and west.
 const KEYS: [Key; 7] = [
@@ -79,11 +77,11 @@ const ORACLE: [[(u32, u32); 7]; 3] = [
 const SEEDS: [u16; 9] = [0, 2, 5, 7, 11, 100, 1000, 4242, 31337];
 
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        println!("skipped: no game files ({ZIP} not present)");
+    if !u6_testkit::archive().exists() {
+        println!("skipped: no game files (the archive (U6_ARCHIVE) not present)");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,

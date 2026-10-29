@@ -66,8 +66,8 @@ Owner, 2026-10-28, verbatim: "문맥 메뉴 인게임 ui로 해줘 시발 왜 �
 
 ## Contract
 
-**When.** With the engine's context menu on (`Engine::set_context_menu`; the web build turns it on at every start,
-the native build and the engine's own tests keep it off, so the original's right press stays the default), a right
+**When.** With the engine's context menu on (`Engine::set_context_menu`; the web and native window turn it on
+at every start; the bare engine keeps the original right press by default), a right
 press (the right button alone going down) on the map or on an inventory or equipment slot (Wide's slots included)
 opens the menu only at the command prompt: A4-0x7a2c is 1, nothing is queued for the game and no chosen entry is
 still running. Everywhere else the right press reaches the game as before: it confirms a pending target, underlines
@@ -111,16 +111,17 @@ slot's own action are a single press (the icon's, or a left click on the slot). 
   `Engine::pointer_at() -> Pointer`: the menu's pointer while it takes it, else the game's (K3's OS cursor).
   `Engine::game_presses()` / `Engine::game_keys()`: the presses and the key events the menu let through to the game,
   counted (tests). `Engine::go_here_asked()`: the cells Go here asked travel to, each given to `Engine::travel_to`
-  (spec 21) as chosen (tests).
+  (spec 21) as chosen, in order. A new stopping event after a choice in the same input ends that
+  choice's travel with `End::Input` before any step; its choosing gesture's own tail does not (tests).
   `Engine::context_menu_gate(pending)`: the gate a tick puts before a right press that would open the menu (§2), for
   a press after `pending`, the platform's events not yet given to a tick (tests: `Game::context_menu`).
 - `Engine::context_menu() -> Option<View>`: the open menu as drawn: its box and text area in frame pixels, and per
   row its kind (heading, entry, note), its code, whether it can run, its reason, its theft mark and its pixel rows,
-  the highlighted entry; no text (tests, the page's tests).
+  the highlighted entry, and whether it is in the Korean words (`korean`); no text (tests, the page's tests).
 - `Engine::screen_frame()` / `Engine::screen_version()`: the published frame with spec 23's history view and the menu
   over it, without the pointer sprite, and its version (it moves when the published frame, the view or the drawn menu
   changes). The shown frame (`Engine::frame`) is it with the sprite; the HD frame is composed from it, keyed on its
-  version and the view's stamp (spec 23 Decision 12).
+  version (spec 23 Decision 12).
 - `u6-web`: `Game::context_menu(x, y) -> String` (read only, for tests): `""` unless the engine's gate lets a right
   press after the page's queued events open one (`Engine::context_menu_gate`) and on the map or a slot; else JSON
   `{kind, cell, underlined, sections: [{object, kind, entries: [{code, enabled, reason, theft}]}], go_here: {code,
@@ -136,8 +137,8 @@ slot's own action are a single press (the icon's, or a left click on the slot). 
   next step (`Engine::tick_dismissing`), at once when none wait. `Game::set_clock(now)` gives the engine the page's
   clock as its wall clock at each step. `Game::go_here_asked()`: Go here's travel requests, counted.
   `Game::menu_view() -> String`: `""` while closed, else JSON `{rect: [x, y, w, h], text: [x, y, w, h], hover,
-  colours: [paper, ink, heading], rows: [{kind, code, enabled, reason, theft, y}]}` (frame pixels, 0xRRGGBB colours
-  for the page's pixel checks; codes only). `Game::command_at` and the page's run are gone.
+  korean, colours: [paper, ink, heading], rows: [{kind, code, enabled, reason, theft, y}]}` (frame pixels, 0xRRGGBB
+  colours for the page's pixel checks; `korean` true while the menu is in the Korean words, no words; codes only). `Game::command_at` and the page's run are gone.
 
 **Predicates.** Each situational condition is a small function beside its handler citing the original's lines, with
 a test that runs the real handler on a clone and checks enabled ⇔ the handler reached its action.
@@ -168,9 +169,13 @@ draws nothing of it and has no element for it.
   ink; it is as wide as the reasons of the entries shown need, no wider. An entry's theft mark follows its label on
   its own row, in the alert colour, highlighted or not. With two or more sections the underlined command's entry
   (first) has its section's name after it, in the alert colour (its own heading comes later).
-- **Words.** The port's own words, in English or, when the Korean pack set the Korean language
-  (`ui.text.language`), in Korean drawn with the game's Hangul glyphs: one table in `ui/popup.rs` (the page's copies
-  in `site/i18n.js` are deleted). Section names are the engine's display names. Each row is cut to the text area's
+- **Words.** The port's own words, in English or, while the installed locale pack is Korean (`state.locale.pack`'s
+  language, which `locale::install` sets: `ui::popup::korean`, the one reading of it for the layout, the words, the
+  note, the theft mark and the relayout check), in Korean drawn with the game's Hangul glyphs: one table in
+  `ui/popup.rs` (the page's copies in `site/i18n.js` are deleted). Not the text layer's `ui.text.language`: that is
+  the language of the string being printed, which `puts`, `printf`, Look and the conversation set for one pack string
+  and put back, English at rest; round 1 to 4 read it, so with the pack installed the live menu (deploy 37, ko-KR)
+  drew English rows under a Korean section name (round 5, MUST 4). Section names are the engine's display names. Each row is cut to the text area's
   width, which only a frame too small for the widest row makes narrower than the rows ask.
 - **Where it is placed.** Beside the pressed point: the text area's top left one cell right of and below the point's
   cell, flipped to the other side where it would not fit, then held inside the bounds of the region pressed, rings
@@ -208,7 +213,7 @@ draws nothing of it and has no element for it.
   gesture, and the engine's clock runs as fast as the game is stepped (8× makes 200 ms of the player's 1600 of the
   engine's, and Max more), so on it every double click at speed would leak its second press. Without a wall clock (a
   platform that gives none) it is the engine's, which is the player's at 1×; so a platform that runs the game faster
-  than 1× gives `Engine::set_wall_clock` (the native build has speed presets but no menu today). So is every press
+  than 1× gives `Engine::set_wall_clock` (the native window supplies monotonic elapsed frame time). So is every press
   while a chosen command's target press waits: neither becomes the game's press or the command's target. Keys: Up
   and Down move the highlight over the entries (wrapping, disabled ones included), Enter or Space chooses the
   highlighted entry when it can run, a command letter (A, B, C, D, G, L, M, R, T, U, either case) chooses its first
@@ -223,6 +228,10 @@ draws nothing of it and has no element for it.
 - **Not state.** The menu is not part of `State` or the savegame: presentation and input only. It closes when the
   prompt goes (A4-0x7a2c no longer 1 after a tick) and when the menu is turned off, which also forgets the pointer,
   the press and the keys it took.
+- **With smooth motion (spec 20).** While a menu is open no slide runs: one running when it opens, or started under
+  it, ends at once (`Engine::context_menu_open`, u6-web `Game::slide_view`), so the platform shows the screen frame,
+  the menu over the map at rest, and nothing slides on after it closes. Spec 20 Design 3 holds the rule and its
+  receipts.
 
 ## Trace (STV, written before the code)
 
@@ -255,18 +264,22 @@ queue one the prompt takes back (`taken_back`; none at all elsewhere) and `now` 
   highlight → `Popup.open`; `version += 1`.
 - Hover: `Pointer{x, y, _}` inside a row of an entry → `hover = row`; `version += 1` when it changed.
 - Choose: `Pointer{x, y, 1}` (left newly down) on an enabled entry, or Enter/Space/letter → `Popup::choose(row)` →
-  `Go here` → `Popup.go_here = cell` (the engine then `take_go_here` → `travel_to`); slot action → `menu::left_press(at)`; Rest/Combat → `menu::icon_press`;
-  else `Run::start(state, code, at)` → icon press to the game's events, `Popup.run = Some(run)`. The menu closes
-  (`version += 1`).
+  `Go here` → append `GoHere { cell, at, later }` to `Popup.go_here` (`at` is after the choice's
+  events in the filtered input; later new menu input sets `later`). The engine takes every choice,
+  records it, calls `travel_to`, then applies the stops after it (spec 21's merge contract); slot
+  action → `menu::left_press(at)`; Rest/Combat → `menu::icon_press`; else `Run::start(state, code, at)` → icon press
+  to the game's events, `Popup.run = Some(run)`. The menu closes (`version += 1`).
 - Close: Escape, a right press, a left press outside → `open = None` (`version += 1`), the press swallowed to its
   release, the key kept in the taken set to its own release; `dismiss` (a press off the canvas, at its place among
   the tick's events) → the double click ended, and with a menu open `open = None` and new input; with none open it
   is no new input (not a press on the game, so no travel stops for it).
 - Relay: new hidden rects (`set_hidden`) or a language change after the poll while open → `Open::relaid` (the same
-  entry highlighted); `version += 1`, the engine drawing again at once (`redraw_menu` → `Engine::compose`, the one
+  entry highlighted); `version += 1`, the engine drawing again at once (`Engine::redraw` → `Engine::compose`, the one
   composition of the screen and the shown frame a tick uses too, with the pointer sprite as it is then: a dismissed
   menu's arrow gives way to the game's pointer in that frame).
-- Draw (after the poll): when the game presented or the menu's version moved, `layer.sync_from(published)`; open →
+- Draw (after the poll, `Engine::compose`): when the game presented, the menu's version or the message history's
+  view (its stamp, spec 23) moved, `layer.sync_from(published)`; `Engine::draw_view` (spec 23 Decision 3: the kept
+  lines and the bar over the message window while scrolled back, nothing at the live bottom); open →
   `Open::draw(&mut layer, &State)` (the paper filled, the rings, `draw_char` per cell, `draw_halftone` for disabled
   labels, `draw_symbol` of glyph 0x1a at the highlight), `screen_version += 1`; `shown.sync_from(layer)`; the sprite
   (the arrow at the menu's pointer while the menu is open; the game's own shape at the menu's pointer while it still
@@ -322,18 +335,26 @@ the engine keeps the cell in its record (`Engine::go_here_asked`, `ui::popup::Tr
 `Engine::travel_progress`). Order in a tick (spec 21's merge contract): the menu's filter first
 (`Popup::input_with`); M4's `travel_press` sees only what passes it, plus `Popup::took_new_input()` as a stop (the
 menu took an event that is not the tail of a gesture it already held; a press off the canvas is new only when it
-closed an open menu); the chosen Go here is applied after `travel_press`, so the new travel's first step is the next
-tick's; M4's own step key is appended after the filter and never fed to it, nor to spec 23's `View::input`, which
-the player's events of the filter's output go through next; then K2's take-back, the rings, the queue. The tail of
-a choice is the menu's and not new: its press's held moves, a double click's press and release, the repeats and
-release of a key taken while open; the press's own release reaches the game as a move with no button, which ends no
-travel (`the_tail_of_a_choice_is_not_new_input`, `a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press`,
-and with the real travel `travel_tests.rs`'s three `a_travel_the_menu_started_walks_through_…`). Whether Go here can
-run: M4's `travel::reachable(s, target)`; `ui::popup::go_here_reason` maps its `Reason` onto the menu's: `Here`,
-`NoLeader` and `NoGame` hide the entry, `Aboard`, `Unreachable`, `Far`, `Combat` and `Foe` disable it with that
-reason (en and ko words in `ui/popup.rs`; `Reason::ALL` holds them). The stubs (`travel_reason`, `Refusal`,
-`popup::travel_to`) are gone. Pace: at the prompt a travel steps at most once a `MIN_STEP_MS` of the platform's
-clock (spec 21 S3, `Engine::set_travel_due`, given by the page at every step).
+closed an open menu; without the user's zip, `a_key_the_menu_takes_ends_a_travel_under_way_by_its_flag`); the chosen
+Go here choices are applied in order after `travel_press`, so a new travel's first step is the next tick's.
+For each choice, `Polled::stops` examines `through[at..]`, using the handler pointer's buttons and
+`menu = later` (new menu input after that choice), with `queued` and `foreign` false. A stop ends
+the new travel with `End::Input` before any step, including a menu opened and closed again in that
+input; the choice stays recorded. A later Go here choice can start its own travel. Thus grouping
+the same events into one tick or splitting them after the choice has the same outcome (spec 21).
+M4's own step key is appended after the filter and never fed to it, nor
+to spec 23's `View::input`, which the player's events of the filter's output go through next; then K2's take-back,
+the rings, the queue. The tail of a choice is the menu's and not new: its press's held moves, a double click's press
+and release, the repeats and release of a key taken while open; the press's own release reaches the game as a move
+with no button, which ends no travel (`the_tail_of_a_choice_is_not_new_input`,
+`a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press`, and with the real travel `travel_tests.rs`'s three
+`a_travel_the_menu_started_walks_through_…`, each against a control of as many ticks with no input since round 5: the
+same cells walked and keys pressed at the same ticks, Go here chosen once, none of the tail the game's). Whether Go
+here can run: M4's `travel::reachable(s, target)`; `ui::popup::go_here_reason` maps its `Reason` onto the menu's:
+`Here`, `NoLeader` and `NoGame` hide the entry, `Aboard`, `Unreachable`, `Far`, `Combat` and `Foe` disable it with
+that reason (en and ko words in `ui/popup.rs`; `Reason::ALL` holds them). The stubs (`travel_reason`, `Refusal`,
+`popup::travel_to`) are gone. Pace: at the prompt a travel steps at most once a `MIN_STEP_MS` of the platform's clock
+(spec 21 S3, `Engine::set_travel_due`, given by the page at every step).
 
 ## Acceptance
 
@@ -359,10 +380,19 @@ clock (spec 21 S3, `Engine::set_travel_due`, given by the page at every step).
 
 Receipt on the user's data (`ui/tests/popup_real.rs`): each test prints `ran` or `skipped`; the release receipt is
 `U6_REQUIRE_ARCHIVE=1 U6_FRAMES_DIR=<outside the repository> scripts/cargo.sh test -p u6-core --profile gate --lib
-[--features wide] -- popup_real --nocapture` in both builds, which fails without the archive and writes the frames.
+[--features wide] -- popup_real --nocapture` in both builds, which fails without the archive and writes the frames;
+with `U6_KO_PACK=<the user's ko.u6lp>` the bare-ground receipt installs the user's Korean pack as the page does
+(`Engine::install_locale`), else a Korean pack of no runs (the menu's words are the port's own either way; round 5).
 
 ## Not settled
 
+- A Go here whose cell `Engine::travel_to` refuses at the moment of choosing (its `Err`, dropped by the engine's
+  `let _ = self.travel_to(...)`) closes the menu with no sign: the entry was enabled by `travel::reachable` on the
+  state as the menu opened, and the choice runs the travel's start again on the state then (the two differ only if
+  the game changed its state while the prompt waited; not measured). Nothing tells the player why the party did not
+  walk; the record (`go_here_asked`) still holds the cell. A sign would be the port's own text in the frame (a word in
+  both languages and a place to show it), a presentation decision of its own: not settled, and no new text in round
+  5 (dispatcher, 2026-10-29).
 - The cost of one `State` clone per right press (estimate: a few MB, once per press, not per frame), and since
   round 4 Go here's `travel::reachable` on a map cell (spec 21's search: one more clone and at most two passes of
   `WINDOW²` expansions, once per press; not measured apart: the whole u6-web lib suite, the every-view-cell query
@@ -372,3 +402,31 @@ Receipt on the user's data (`ui/tests/popup_real.rs`): each test prints `ran` or
 - Wide's page windows lie over the map: the page gives the engine the rects they hide and the menu keeps off them;
   when every place in the map meets one (the windows dragged over most of it), the menu takes the place least hidden.
   So does a viewport that shows too little of the frame to hold the menu.
+
+## Ctrl representative action (2026-10-29, SSOT T6/T7)
+
+While Ctrl alone is held, hover on a visible world target shows one existing command in the
+same in-game paper/ink renderer: a currently hostile actor → Attack (before Talk, including
+humanoid enemies), a door → Use, another talkable person → Talk, reachable ordinary ground →
+Go here. Hostility reads the game's present alignment relation to the leader and excludes
+party/dead actors; appearance never classifies an enemy. Disabled target actions retain the
+existing reason. Missing or disabled travel offers no quick action.
+
+Left down captures that action and target; left up runs it only if Ctrl, the command prompt,
+visibility, target and action still agree. Target/allegiance changes, Ctrl release, focus loss,
+capture cancellation, Settings and other prompts cancel it. Modifier edges are ordered with
+pointer events even within one engine tick. Holding Alt or Meta does not enable this mode.
+A fresh Ctrl click is captured only in `Program::Game` at a quiet command prompt with no
+pending command run. Intro/ending, dialogue, more/target prompts and busy input keep their
+original pointer presses. An invalid world target at the command prompt still cancels the
+click; a press already captured there keeps ownership of its release across a prompt change.
+The native window reads actual keyboard focus, clears Ctrl on blur and requires an observed
+Ctrl release before rearming after focus returns; stale window key state cannot revive it.
+The label clears on release and resumes on another valid Ctrl hover. Right-click still opens
+the full menu. Use/Talk/Attack share the original icon and target-input route; Go here shares
+the existing travel request and its same-tick cancellation rules. None of this state is saved.
+
+Receipts: `control_representative_*` in both core builds; representative-selection tests with
+changing alignment, party/dead/neutral controls and missing travel; web Ctrl representative
+tests in Original/Wide plus a real door action and capture cancellation. Screenshots remain
+outside the repository because they contain the user's game data.

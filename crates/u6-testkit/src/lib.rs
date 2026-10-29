@@ -8,6 +8,49 @@
 //! the lengths (the length of a list of the user's records or paths is a count of them, so a
 //! prefix is reported without the index where the shorter one ends).
 
+/// The owner's local data tree. The environment override makes real-data gates portable;
+/// the fallback retains the documented `~/Games/ultima6` layout.
+pub fn data_path(relative: &str) -> std::path::PathBuf {
+    data_path_from(relative, |key| std::env::var_os(key))
+}
+
+fn data_path_from(
+    relative: &str,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    let root = env("U6_DATA_ROOT").unwrap_or_else(|| {
+        let home = env("HOME")
+            .or_else(|| env("USERPROFILE"))
+            .expect("set U6_DATA_ROOT when the home directory is unavailable");
+        std::path::PathBuf::from(home)
+            .join("Games/ultima6")
+            .into_os_string()
+    });
+    std::path::PathBuf::from(root).join(relative)
+}
+
+/// A specific asset override, otherwise a path under [`data_path`].
+pub fn data_path_with(key: &str, relative: &str) -> std::path::PathBuf {
+    std::env::var_os(key).map_or_else(|| data_path(relative), std::path::PathBuf::from)
+}
+
+/// Optional real-data inputs may skip locally, but an explicitly required gate must fail.
+pub fn available(present: bool, label: &str) -> bool {
+    assert!(
+        present
+            || std::env::var_os("U6_REQUIRE_ARCHIVE").as_deref() != Some(std::ffi::OsStr::new("1")),
+        "U6_REQUIRE_ARCHIVE=1: required local input is missing ({label})"
+    );
+    present
+}
+
+/// The original archive, read locally only. Required-data gates cannot silently skip it.
+pub fn archive() -> std::path::PathBuf {
+    let path = data_path_with("U6_ARCHIVE", "original/ultima-vi.zip");
+    available(path.is_file(), "U6_ARCHIVE/U6_DATA_ROOT archive");
+    path
+}
+
 /// `assert_eq!` for sequences that hold content of the user's files:
 /// `assert_same!(left, right, "label {}", arg)`.
 ///
@@ -82,6 +125,30 @@ impl<T> Quiet<T> for Option<T> {
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn data_paths_use_the_selected_root_before_the_home_fallback() {
+        let resolve = |pairs: &[(&str, &str)]| {
+            super::data_path_from("original/game.zip", |key| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).into())
+            })
+        };
+        assert_eq!(
+            resolve(&[("U6_DATA_ROOT", "/owned/data"), ("HOME", "/home/player")]),
+            std::path::PathBuf::from("/owned/data/original/game.zip")
+        );
+        assert_eq!(
+            resolve(&[("HOME", "/home/player")]),
+            std::path::PathBuf::from("/home/player/Games/ultima6/original/game.zip")
+        );
+        assert_eq!(
+            resolve(&[("USERPROFILE", "profile")]),
+            std::path::PathBuf::from("profile/Games/ultima6/original/game.zip")
+        );
+    }
 
     /// The panic message of `f`, or `None` when it returned.
     fn failure(f: impl FnOnce()) -> Option<String> {

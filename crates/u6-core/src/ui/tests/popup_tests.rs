@@ -70,6 +70,11 @@ fn ptr(x: i16, y: i16, buttons: u8) -> InputEvent {
     InputEvent::Pointer { x, y, buttons }
 }
 
+/// The cells of the choices of Go here `p` holds, taken ([`Popup::take_go_here`]).
+fn chosen(p: &mut Popup) -> Vec<(i16, i16)> {
+    p.take_go_here().iter().map(|c| c.cell).collect()
+}
+
 /// A popup on, `open` shown.
 fn popup_with(open: &Open) -> Popup {
     let mut p = Popup::default();
@@ -423,11 +428,11 @@ fn escape_a_right_press_a_press_outside_a_letter_and_go_here() {
         [ptr(gx, gy, 0)]
     );
     assert_eq!(
-        p.take_go_here(),
-        Some(CELL_PRESSED),
+        chosen(&mut p),
+        [CELL_PRESSED],
         "Go here: travel to the cell"
     );
-    assert_eq!(p.take_go_here(), None, "handed out once");
+    assert!(chosen(&mut p).is_empty(), "handed out once");
     assert!(p.run().is_none() && p.open().is_none());
 }
 
@@ -557,19 +562,39 @@ fn the_engine_draws_the_menu_over_the_published_frame_only() {
     assert_eq!(e.published_version(), published);
 }
 
-/// Spec 17 Presentation, Words: with the Korean language set (as the Korean pack sets it) the
-/// menu is laid out and drawn from the Korean words of the one table: the text area is as wide
-/// as the widest Korean row (Go here's 6 cells and the mark's column, 7, where the English rows
-/// make it 12), and each label's syllables are drawn from the Hangul table (here every syllable a
-/// full block: a cell of ink), its spaces with the game font's space.
+/// A Korean locale pack (it holds no runs: the menu's words are the port's own) installed on `s`
+/// as the page installs one ([`crate::locale::install`], `Game::set_locale` through
+/// [`Engine::install_locale`]), with a Hangul table whose every syllable is a full block (a cell
+/// of ink). The text layer's language stays the English it is at rest.
+fn with_korean_pack(s: &mut State) {
+    let glyphs = vec![[0xff; 8]; u6_formats::font::HANGUL_GLYPHS];
+    let table = u6_formats::font::HangulFont::from_glyphs(glyphs).expect("a table");
+    let pack = crate::locale::Pack::new(
+        crate::ui::Language::Korean,
+        "test/1",
+        crate::locale::fingerprint([]),
+        [],
+    )
+    .expect("an empty Korean pack");
+    crate::locale::install(s, &Files::default(), Rc::new(pack), Some(Rc::new(table)))
+        .expect("installed");
+    assert_eq!(
+        s.ui.text.language,
+        crate::ui::Language::English,
+        "the fixture: the text layer's language as the pack leaves it"
+    );
+}
+
+/// Spec 17 Presentation, Words (round 5, MUST 4: the pack installed as the page installs it, not
+/// the text layer's language set by hand): with the Korean pack installed the menu is laid out
+/// and drawn from the Korean words of the one table: the text area is as wide as the widest
+/// Korean row (Go here's 6 cells and the mark's column, 7, where the English rows make it 12),
+/// and each label's syllables are drawn from the Hangul table (here every syllable a full block:
+/// a cell of ink), its spaces with the game font's space.
 #[test]
 fn korean_words_are_laid_out_and_drawn_with_the_hangul_glyphs() {
     let mut s = prompt();
-    s.ui.text.language = crate::ui::wide::Language::Korean;
-    let glyphs = vec![[0xff; 8]; u6_formats::font::HANGUL_GLYPHS];
-    s.ui.hangul = Some(Rc::new(
-        u6_formats::font::HangulFont::from_glyphs(glyphs).expect("a table"),
-    ));
+    with_korean_pack(&mut s);
     let o = Open::new(&menu(), AT, &s, &[]);
     assert!(o.korean);
     assert_eq!(o.text.2, 7, "the widest Korean row");
@@ -607,6 +632,60 @@ fn korean_words_are_laid_out_and_drawn_with_the_hangul_glyphs() {
     assert_eq!(cell(&fb, 4, 3), space, "its space, the game font's glyph");
     // Look (row 1): three syllables, highlighted (the mark in column 0).
     assert!((1..=3).all(|c| cell(&fb, c, 1) == ink), "Look's syllables");
+}
+
+/// Round 5, MUST 4 (deploy 37 in ko-KR drew English rows under a Korean section name): a game
+/// with the Korean pack installed through the engine as the page does it
+/// ([`Engine::install_locale`], `Game::set_locale`), the text layer's language left at its
+/// default: a menu opened over it is in the Korean words (its view says so), its Go here row
+/// drawn in the frame from the Hangul table, and it stays so over the ticks after (the relayout
+/// check reads the same language). Without the pack, the English words.
+#[test]
+fn a_menu_over_a_game_with_the_korean_pack_is_in_korean() {
+    let s = prompt();
+    let english = Open::new(&menu(), AT, &s, &[]);
+    assert!(!english.korean, "no pack: English");
+    let mut e = checkered_engine(&s);
+    let glyphs = vec![[0xff; 8]; u6_formats::font::HANGUL_GLYPHS];
+    let table = u6_formats::font::HangulFont::from_glyphs(glyphs).expect("a table");
+    let pack = crate::locale::Pack::new(
+        crate::ui::Language::Korean,
+        "test/1",
+        crate::locale::fingerprint([]),
+        [],
+    )
+    .expect("an empty Korean pack");
+    e.install_locale(Rc::new(pack), Some(Rc::new(table)))
+        .expect("installed");
+    assert_eq!(
+        e.state().ui.text.language,
+        crate::ui::Language::English,
+        "the fixture: the text layer's language at rest"
+    );
+    let o = Open::new(&menu(), AT, &e.state(), &[]);
+    e.popup_mut().show(o);
+    for _ in 0..3 {
+        e.tick(&[], 16);
+    }
+    let v = e.context_menu().expect("open");
+    let tx0 = v.text.0;
+    let go = v
+        .rows
+        .iter()
+        .position(|r| r.code == Some(GO_HERE))
+        .expect("Go here");
+    let y = v.rows[go].y;
+    let frame = e.screen_frame();
+    let ink_cell = |col: i32| {
+        (0..64)
+            .all(|k| frame.get((tx0 + col * 8 + k % 8) as usize, (y + k / 8) as usize) == Some(INK))
+    };
+    let syllables: Vec<bool> = (1..=6).map(ink_cell).collect();
+    assert_eq!(
+        (v.korean, v.text.2 - tx0 + 1, syllables),
+        (true, 7 * 8, vec![true, true, true, false, true, true]),
+        "the Korean words: the view, the widest Korean row, Go here's syllables in the frame"
+    );
 }
 
 /// Spec 17 Presentation, Where it is placed: a menu keeps off the frame rects the platform shows
@@ -686,7 +765,7 @@ fn every_key_the_menu_took_keeps_its_repeats_to_its_own_release() {
         );
         assert!(p.open().is_none(), "{close:?}: closed");
         if close == Key::Enter {
-            assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+            assert_eq!(chosen(&mut p), [CELL_PRESSED], "Enter chose Go here");
         }
         for _ in 0..3 {
             assert!(
@@ -762,8 +841,8 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
     let out = p.input(&s, &io, &clicks, true);
     assert_eq!(presses(&out), 0, "one batch: {out:?}");
     assert_eq!(
-        (p.take_go_here(), p.take_go_here()),
-        (Some(CELL_PRESSED), None),
+        (chosen(&mut p), chosen(&mut p)),
+        (vec![CELL_PRESSED], vec![]),
         "one batch: chosen once"
     );
     let mut p = popup_with(&o);
@@ -773,8 +852,8 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
     }
     assert_eq!(presses(&all), 0, "across ticks: {all:?}");
     assert_eq!(
-        (p.take_go_here(), p.take_go_here()),
-        (Some(CELL_PRESSED), None),
+        (chosen(&mut p), chosen(&mut p)),
+        (vec![CELL_PRESSED], vec![]),
         "across ticks: chosen once"
     );
     // Unit M4's merge contract (spec 21): a travel ends on an event that sets a button the
@@ -801,7 +880,7 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
         [ptr(gx + 40, gy - 20, 0)],
         "its release: a move with no button"
     );
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "held: chosen once");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "held: chosen once");
     // Independent clicks pass (round 2b, gpt c SHOULD 3): the next press later than
     // DOUBLE_CLICK_MS on the player's clock, or farther than DOUBLE_CLICK_PX, is the game's.
     for (what, at, (x, y)) in [
@@ -812,14 +891,14 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
         let mut p = popup_with(&o);
         p.input_with(&s, &io, &[ptr(gx, gy, 1)], true, 1_000, &[]);
         p.input_with(&s, &io, &[ptr(gx, gy, 0)], true, 1_000, &[]);
-        assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "{what}: chosen");
+        assert_eq!(chosen(&mut p), [CELL_PRESSED], "{what}: chosen");
         let second = [ptr(x, y, 1), ptr(x, y, 0)];
         assert_eq!(
             p.input_with(&s, &io, &second, true, at, &[]),
             second,
             "{what}: the next click is the game's"
         );
-        assert_eq!(p.take_go_here(), None, "{what}: chosen once");
+        assert!(chosen(&mut p).is_empty(), "{what}: chosen once");
     }
 }
 
@@ -850,7 +929,7 @@ fn a_double_click_is_the_choosing_buttons_press_again_uninterrupted() {
     let choose = |p: &mut Popup| {
         p.input(&s, &io, &[ptr(gx, gy, POINTER_LEFT)], true);
         p.input(&s, &io, &[ptr(gx, gy, 0)], true);
-        assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
+        assert_eq!(chosen(p), [CELL_PRESSED], "Go here chosen");
     };
     let mut p = popup_with(&o);
     choose(&mut p);
@@ -1095,7 +1174,7 @@ fn a_paced_press_is_the_held_keys_not_the_players() {
     assert_eq!(p.version(), drawn, "nothing drawn again");
     let (out, new) = feed(&mut p, InputEvent::Key(Key::Enter));
     assert!(out.is_empty() && new, "Enter: the menu's");
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Enter chose Go here");
     for ev in [
         InputEvent::Paced(Key::Down),
         InputEvent::Paced(Key::Down),
@@ -1342,7 +1421,7 @@ fn the_tail_of_a_choice_is_not_new_input() {
     let mut p = popup_with(&o);
     assert!(fed(&mut p, &s, ptr(gx, gy, 0)), "a move while open");
     assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press");
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Go here chosen");
     for (what, ev) in [
         ("a held move", ptr(gx + 3, gy, 1)),
         ("the release", ptr(gx + 3, gy, 0)),
@@ -1372,7 +1451,7 @@ fn the_tail_of_a_choice_is_not_new_input() {
     // A press 5 pixels off is no double click: it reaches the game (the menu took nothing new).
     let mut p = popup_with(&o);
     assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press again");
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen again");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Go here chosen again");
     p.input(&s, &io, &[ptr(gx, gy, 0)], true);
     let off = ptr(gx + 5, gy, 1);
     assert_eq!(
@@ -1390,7 +1469,7 @@ fn the_tail_of_a_choice_is_not_new_input() {
         fed(&mut p, &s, InputEvent::Key(Key::Enter)),
         "Enter choosing"
     );
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Enter chose Go here");
     for ev in [
         InputEvent::Repeat(Key::Enter),
         InputEvent::Repeat(Key::Down),
@@ -1715,7 +1794,7 @@ fn an_open_menu_is_laid_out_again_for_new_hidden_rects_and_language() {
     assert!(e.popup_mut().version() > v, "drawn again");
     assert!(e.screen_version() > screen, "at once, no tick");
     let mut korean = s.clone();
-    korean.ui.text.language = crate::ui::wide::Language::Korean;
+    with_korean_pack(&mut korean);
     let mut p = popup_with(&o);
     p.after_poll(&korean);
     let k = p.open().expect("open");

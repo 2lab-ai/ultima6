@@ -63,12 +63,12 @@ pub fn light_torch(s: &mut State, t: Slot) {
     if s.objects.status(t) & 0x80 != 0 {
         remove(s, t);
         queue(s, b"\n".to_vec(), Vec::new());
-        let fmt = super::text::a4_string(s, MSG_BURNED_OUT);
+        let fmt = super::text::a4_string(s, crate::string_registry::text!(MSG_BURNED_OUT));
         queue(s, fmt, Vec::new());
         return;
     }
     if s.inventory.equip(HANDS[0]) != 0 && s.inventory.equip(HANDS[1]) != 0 {
-        queue_at(s, S_NO_FREE_HAND, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_NO_FREE_HAND), Vec::new());
     } else {
         let mut torch = t;
         if q > 1 {
@@ -108,7 +108,7 @@ pub fn light_torch(s: &mut State, t: Slot) {
             s.objects.qq[i] = (s.objects.qq[i] & 0xff00) | 200;
         }
         crate::actors::clock::tick(s, 0);
-        queue_at(s, S_TORCH_LIT, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_TORCH_LIT), Vec::new());
     }
     if s.ui.panel.mode == 0x92 {
         seams::redraw_inventory(s);
@@ -161,14 +161,27 @@ pub fn douse_or_light(s: &mut State, obj: Slot) {
         _ => None,
     };
     if let Some(n) = name {
-        queue_at(s, n, Vec::new());
+        queue_at(
+            s,
+            crate::string_registry::choose(
+                (n) as i64,
+                &[
+                    crate::string_registry::text!(S_CANDLE),
+                    crate::string_registry::text!(S_CANDELABRA),
+                    crate::string_registry::text!(S_FIREPLACE),
+                    crate::string_registry::text!(S_BRAZIER),
+                    crate::string_registry::text!(S_CAMPFIRE),
+                ],
+            ),
+            Vec::new(),
+        );
     }
     let t = &mut s.objects.type_frame[obj as usize];
     if frame & 1 != 0 {
         *t = (*t & 0x3ff) + ((frame & 2) << 10);
-        queue_at(s, S_DOUSED, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_DOUSED), Vec::new());
     } else {
         *t = (*t & 0x3ff) + ((frame | 1) << 10);
-        queue_at(s, S_LIT, Vec::new());
+        queue_at(s, crate::string_registry::text!(S_LIT), Vec::new());
     }
 }

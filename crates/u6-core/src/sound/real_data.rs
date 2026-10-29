@@ -3,8 +3,6 @@
 //! numbers only (no game bytes go into the repo).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
-use std::path::Path;
-
 use u6_intake::{InputFile, intake};
 use u6_testkit::assert_same;
 
@@ -16,15 +14,14 @@ use crate::image::GameImage;
 use crate::state::State;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 const RATE: u32 = 48_000;
 
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,

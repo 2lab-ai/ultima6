@@ -14,7 +14,7 @@ ported > partial > placeholder > stubbed > replaced > planned; `-` = no marker y
 port lacks, a guard inside the port, or a stub that names the wrong address (counted as
 `also named by a stub`); partial and placeholder rows show their stubs the same way.
 
-Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2, - 6. Milestone 1 (M + S) 406: ported 322, partial 2, stubbed 1, replaced 79, planned 2.
+Totals: functions 599: ported 502, partial 5, stubbed 1, replaced 84, planned 2, - 5. Milestone 1 (M + S) 406: ported 322, partial 2, stubbed 1, replaced 79, planned 2.
 
 | address | subsystem | M1 | Rust path | status |
 |---|---|---|---|---|
@@ -89,7 +89,7 @@ Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2,
 | 0x103f64 | ui | M | `ui/panels.rs::redraw_panel` | ported |
 | 0x103fd4 | main | M | `main_loop/main_hunk.rs::switch_leader` | ported |
 | 0x104094 | main | M | `main_loop/main_hunk.rs::end_solo` | ported |
-| 0x104140 | main | M | `main_loop/commands.rs:438 in dispatch` | stubbed |
+| 0x104140 | main | M | `main_loop/commands.rs:484 in dispatch` | stubbed |
 | 0x1041d8 | main | M | `main_loop/commands.rs::command_loop` | ported |
 | 0x105016 | ui | M | `inventory/portrait.rs::direction_to` | ported |
 | 0x1051a6 | ui | M | `ui/pointer.rs::update_shape` | ported |
@@ -523,7 +523,7 @@ Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2,
 | 0x133a96 | ui | M | `ui/effects.rs::reset_window` | ported |
 | 0x133b0e | ui | M | `ui/effects.rs::redraw_view` | ported |
 | 0x133b28 | ui | M | `ui/panels.rs::sky_bar` | ported |
-| 0x133d1e | ui |  |  | - |
+| 0x133d1e | ui |  | `ending/mod.rs::vanished` | ported |
 | 0x133d3e | converse | M | `converse/script.rs::draw_portrait` | ported |
 | 0x133e5e | converse | M | `converse/script.rs::load_script` | ported |
 | 0x133fe0 | ui | M | `ui/panels.rs::figure_frame` | ported |
@@ -560,7 +560,7 @@ Totals: functions 599: ported 500, partial 5, stubbed 2, replaced 84, planned 2,
 | 0x135118 | boot | M | `main_loop/main_hunk.rs::debug_hook` | ported |
 | 0x13511a | boot | M | `main_loop/main_hunk.rs::boot_hook` | ported |
 | 0x135120 | boot | M | `main_loop/main_hunk.rs::anim_step` | ported |
-| 0x13513a | boot |  | `usecmd/seams.rs:233 in ending_ported` | stubbed |
+| 0x13513a | boot |  | `ending/mod.rs::Elapsed`; `ending/mod.rs::request` | ported |
 | 0x1351d8 | boot | M | `main_loop.rs::game_main` | partial |
 | 0x14ee70 | os | M | Engine / Io (rule: spec 03 §4) | replaced |
 | 0x14ef06 | os | M | `engine.rs::with_seed` | replaced |

@@ -6,7 +6,7 @@ use u6_formats::basetile::BaseTiles;
 use u6_formats::schedule::Schedules as ScheduleFile;
 
 use super::save::MODE_PLAY;
-use super::{OBJLIST_FILE, SIGHT_FILE, SavedSight, objlist, seams};
+use super::{OBJLIST_FILE, SAVE_LAYER, SIGHT_FILE, SavedSight, objlist, seams};
 use crate::actors::Schedules;
 use crate::engine::Io;
 use crate::files::Files;
@@ -80,13 +80,15 @@ pub fn read_state_files(s: &State, files: &Files) -> Result<StateFiles, LoadErro
 /// Port-only (spec 18, saved with the game): the remembered sight saved with `objlist`, the
 /// objlist load state reads. The file goes with the objlist: once this session wrote the objlist
 /// (a Save, or the character `u`), the one the last Save wrote ([`super::SaveLoad::sight`]; none
-/// after a Save that wrote none, and after `u` still the Save's, of another objlist), else the
-/// platform's [`SIGHT_FILE`]. Read only when it was written with these objlist bytes and is well
-/// formed ([`crate::gfx::cache::read_sight`]); otherwise none, and the memory stays empty.
+/// after a Save that wrote none, and none after `u`, which clears it), else the platform's
+/// [`SIGHT_FILE`] in the save's layer ([`SAVE_LAYER`], the files [`super::attach`] laid over): a
+/// file of its name in another layer (the game files, a mod) is not the save's. Read only when it
+/// was written with these objlist bytes and is well formed ([`crate::gfx::cache::read_sight`]);
+/// otherwise none, and the memory stays empty.
 fn saved_sight(s: &State, files: &Files, objlist: &[u8]) -> Option<SightMemory> {
     let file = match &s.saveload.objlist {
         Some(_) => s.saveload.sight.as_ref().map(SavedSight::bytes),
-        None => files.get(SIGHT_FILE),
+        None => files.get_in(SAVE_LAYER, SIGHT_FILE).map(|(_, bytes)| bytes),
     };
     crate::gfx::cache::read_sight(file?, objlist).ok()
 }
@@ -117,9 +119,11 @@ pub fn boot_sight(s: &mut State, files: &Files) {
 /// ([`crate::gfx::cache::RenderCache::forget_sight`]), and the one saved with this objlist read
 /// right after ([`saved_sight`]: the file [`read_state_files`]'s objlist goes with, as the save
 /// state still names it), so the old memory is let go before the new one is made (Bounds).
+/// No slide crosses the load (spec 20): its source copies belonged to the prior sight.
 pub fn load_state(s: &mut State, io: &Io, files: StateFiles) {
     s.map.window_key = [-1; 3];
     s.gfx.cache.forget_sight();
+    io.break_motion();
     if let Some(m) = saved_sight(s, io.files(), &files.objlist) {
         s.gfx.cache.set_sight(m);
     }

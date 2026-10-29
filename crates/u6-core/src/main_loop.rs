@@ -67,6 +67,10 @@ use crate::image::A4;
 use crate::state::State;
 use crate::ui::printf::{Arg, printf, printf_swallowed};
 
+#[cfg(test)]
+#[path = "main_loop/date_preview_tests.rs"]
+mod date_preview_tests;
+
 /// One queued `printf` argument (owned: the queue outlives the caller's borrows).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrintArg {
@@ -107,6 +111,8 @@ pub struct MainState {
     pub flag_64ce: u16,
     /// Port-only: the program of the launcher's sequence that runs (for the platforms).
     pub program: Program,
+    /// Exit-code-2 arguments, set only after the complete ending preflight and final key.
+    pub ending: Option<crate::ending::Elapsed>,
 }
 
 /// The programs the launcher runs one after the other ([`run`]).
@@ -117,6 +123,8 @@ pub enum Program {
     U,
     /// `game`: main 0x1351d8 and the command loop.
     Game,
+    /// `end`: the final scene after game exits with code 2.
+    End,
 }
 
 /// Queues a `printf` of `fmt` for the loop to print (synchronous callers).
@@ -185,29 +193,27 @@ fn print_args(args: &[PrintArg]) -> Vec<Arg<'_>> {
 
 /// The NUL-terminated string at image address `addr` of the user's `game` (empty when the file
 /// or the address is missing: a message the port cannot read is not printed).
-pub fn game_string(io: &Io, addr: u32) -> Vec<u8> {
-    io.game_image()
-        .and_then(|img| img.cstr(addr).ok())
-        .unwrap_or_default()
+pub fn game_string(io: &Io, text: crate::string_registry::Text) -> Vec<u8> {
+    text.io(io)
 }
 
-/// [`game_string`] at `A4 - off`.
-pub fn a4_string(io: &Io, off: u32) -> Vec<u8> {
-    game_string(io, A4.wrapping_sub(off))
+/// Reads the registered data-hunk string.
+pub fn a4_string(io: &Io, text: crate::string_registry::Text) -> Vec<u8> {
+    text.io(io)
 }
 
-/// The string the pointer at image address `at` points to.
-pub fn pointed_string(io: &Io, at: u32) -> Vec<u8> {
-    let Some(img) = io.game_image() else {
-        return Vec::new();
-    };
-    img.pointer(at)
-        .and_then(|p| img.cstr(p))
-        .unwrap_or_default()
+/// Reads the registered pointer slot.
+pub fn pointed_string(io: &Io, text: crate::string_registry::Text) -> Vec<u8> {
+    text.io(io)
 }
 
 /// `printf` of the string at `A4 - off` with `args`.
-pub(crate) async fn say(state: &RefCell<State>, io: &Io, off: u32, args: &[Arg<'_>]) {
+pub(crate) async fn say(
+    state: &RefCell<State>,
+    io: &Io,
+    off: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = a4_string(io, off);
     printf(state, io, &fmt, args).await;
 }
@@ -231,7 +237,7 @@ const EXIT_RUN_U: u16 = 0;
 const EXIT_QUIT: u16 = 3;
 
 /// Original: ultcli 0x100360 (the launcher `PROGRAM:ultima6`: run `u`, then `game` while `u`
-/// journeys on) [partial]
+/// journeys on)
 ///
 /// A state machine on the exit code of the program it ran last (D7, the jump table at ultcli
 /// 0x100452): state 0 runs `u JJS` (0x10045c), 1 checks for a PAL display and runs `game JJS`
@@ -243,8 +249,8 @@ const EXIT_QUIT: u16 = 3;
 /// host's player starts over at each hand-over from `u` ([`crate::sound::MedCall::NewProcess`]),
 /// and every `game` after the first also gets a new State ([`relaunch`]; the first one's is the
 /// State the engine booted, which `u` gave its character). Not ported: the PAL check (the port
-/// has no NTSC display), `end` (exit 2; no path of the port reaches the end of the game) and the
-/// requesters. With no usable `u` in the user's files the port starts `game` at once, as
+/// has no NTSC display), the requesters. State 2 runs [`crate::ending`] with the elapsed date
+/// buffers prepared by game 0x13513a, then stops. With no usable `u` in the user's files the port starts `game` at once, as
 /// [`game_first`] does: no program ran before it, so the player the host built (the audio part
 /// of setup 0x14ef06, [`crate::sound::AudioDriver::new`]) is already `game`'s and nothing is
 /// marked.
@@ -257,7 +263,8 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
             crate::intro::IntroOutcome::Quit => return,
             crate::intro::IntroOutcome::Unavailable => {
                 state.borrow_mut().main.program = Program::Game;
-                game_main(state, io, false).await;
+                let code = game_main(state, io, false).await;
+                finish_program(state, io, code).await;
                 return;
             }
             crate::intro::IntroOutcome::Play { .. } => {}
@@ -271,7 +278,9 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
             .sound
             .call(crate::sound::MedCall::NewProcess);
         state.borrow_mut().main.program = Program::Game;
-        if game_main(state, io, true).await != EXIT_RUN_U {
+        let code = game_main(state, io, true).await;
+        if code != EXIT_RUN_U {
+            finish_program(state, io, code).await;
             return;
         }
     }
@@ -283,7 +292,18 @@ pub async fn run(state: Rc<RefCell<State>>, io: Rc<Io>) {
 pub async fn game_first(state: Rc<RefCell<State>>, io: Rc<Io>) {
     let (state, io) = (&*state, &*io);
     state.borrow_mut().main.program = Program::Game;
-    game_main(state, io, false).await;
+    let code = game_main(state, io, false).await;
+    finish_program(state, io, code).await;
+}
+
+/// The launcher's state 2 runs end once, then stops (ultcli 0x1004e6).
+pub(crate) async fn finish_program(state: &RefCell<State>, io: &Io, code: u16) {
+    if code == 2 {
+        let elapsed = state.borrow().main.ending;
+        if let Some(elapsed) = elapsed {
+            let _ = crate::ending::run(state, io, elapsed).await;
+        }
+    }
 }
 
 /// A new `game` process after the launcher ran `u` again: what the boot reads
@@ -305,7 +325,8 @@ fn relaunch(state: &RefCell<State>, io: &Io) {
 /// sound log and the locale layer go on, the character `u` made is read in. Its records'
 /// versions start again at 0 while the screen buffers keep what the old records drew, so every
 /// source plane is reset to classic, the colours untouched ([`Io::reset_src_plane`]): no old
-/// pixel can match a new version (spec 07 HD0).
+/// pixel can match a new version (spec 07 HD0). Nor can a slide cross into the new game
+/// ([`Io::break_motion`], spec 20).
 pub(crate) fn take_over(s: &mut State, mut fresh: State, io: &Io) {
     fresh.rng = s.rng;
     fresh.saveload = std::mem::take(&mut s.saveload);
@@ -319,6 +340,7 @@ pub(crate) fn take_over(s: &mut State, mut fresh: State, io: &Io) {
     }
     *s = fresh;
     io.reset_src_plane();
+    io.break_motion();
 }
 
 /// Original: 0x1351d8 (main(): setup, load data, character check, music, command loop) [partial]
@@ -360,7 +382,7 @@ async fn game_main(state: &RefCell<State>, io: &Io, launched: bool) -> u16 {
         .copied();
     if created.unwrap_or(0) == 0 {
         if launched {
-            let msg = game_string(io, MSG_CREATE_CHARACTER);
+            let msg = game_string(io, crate::string_registry::text!(MSG_CREATE_CHARACTER));
             printf(state, io, &msg, &[]).await;
             state.borrow_mut().ui.input.idle_refresh = false;
             crate::ui::wait::read_key(state, io).await;
@@ -384,6 +406,9 @@ async fn game_main(state: &RefCell<State>, io: &Io, launched: bool) -> u16 {
     }
     flush_prints(state, io).await;
     commands::command_loop(state, io).await;
+    if state.borrow().main.ending.is_some() {
+        return 2;
+    }
     crate::sound::play_song(&mut state.borrow_mut(), 0);
     crate::objects::delete_tmp_files(&mut state.borrow_mut().objects);
     EXIT_QUIT
@@ -439,7 +464,11 @@ pub(crate) fn paper_bitmap(io: &Io) -> Option<Bitmap> {
 
 /// The name of the file [`paper_bitmap`] reads (the pointer at A4-0x61e2).
 pub(crate) fn paper_file(io: &Io) -> String {
-    String::from_utf8_lossy(&pointed_string(io, A4.wrapping_sub(0x61e2))).into_owned()
+    String::from_utf8_lossy(&pointed_string(
+        io,
+        crate::string_registry::pointer!(A4.wrapping_sub(0x61e2)),
+    ))
+    .into_owned()
 }
 
 /// The calls 0x105350 makes after its reads, in its order: link the actors (0x10edb4),
@@ -488,14 +517,11 @@ mod queue_tests {
     //! it is called (asm 0x108660 `tst.w -0x7a4c(a4)`, 0x108664 `beq.w` to its return at
     //! 0x10887e).
 
-    use std::path::Path;
-
     use super::*;
     use crate::engine::Engine;
     use crate::files::Files;
     use u6_testkit::Quiet;
 
-    const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
     /// A vine root (type 0x16e) and the vine actor its quality's high byte names.
     const ROOT: usize = 0x200;
     const VINE: usize = 10;
@@ -503,11 +529,11 @@ mod queue_tests {
     /// The user's files (skipped when the archive is absent; reads it, copies nothing).
     #[allow(clippy::disallowed_methods)] // tests may read files
     fn files() -> Option<Files> {
-        if !Path::new(ZIP).exists() {
-            eprintln!("skipped: {ZIP} not present");
+        if !u6_testkit::archive().exists() {
+            eprintln!("skipped: the archive (U6_ARCHIVE) not present");
             return None;
         }
-        let data = std::fs::read(ZIP).quiet();
+        let data = std::fs::read(u6_testkit::archive()).quiet();
         let r = u6_intake::intake(vec![u6_intake::InputFile {
             name: "ultima-vi.zip".into(),
             data,
@@ -648,7 +674,11 @@ mod queue_tests {
 
     /// The vine's combat line (A4-0x755a), said with Attack's newline held.
     fn say_held(s: &mut State) {
-        crate::combat::present::say(s, crate::image::A4 - 0x755a, Vec::new());
+        crate::combat::present::say(
+            s,
+            crate::string_registry::fixture((crate::image::A4 - 0x755a) as i64, false),
+            Vec::new(),
+        );
     }
 
     #[test]

@@ -175,7 +175,7 @@ impl UiTables {
     /// Reads every item from the decrunched `game` executable.
     pub fn load(game: &[u8]) -> Result<Self, FormatError> {
         let img = GameImage::parse(game)?;
-        let s = |addr| img.cstr(addr);
+        let s = |text: crate::string_registry::Text| text.image(&img);
         let colour = |off: i32| img.a4_word(off).map(|w| w as u8);
         let keys = img.a4_bytes(-0x3572, RAW_KEYS * 8)?;
         let keymap = keys
@@ -184,15 +184,17 @@ impl UiTables {
             .collect();
         let mut combat_modes = Vec::new();
         for mode in COMBAT_MODES {
-            let ptr = img.pointer(mode_pointer(u32::from(mode)))?;
-            combat_modes.push(img.cstr(ptr)?);
+            let text = crate::string_registry::text_table!(0x7230)
+                .get(usize::from(mode))
+                .expect("combat mode in registered table");
+            combat_modes.push(text.image(&img)?);
         }
         let w = img.a4_bytes(-0x7a1a, 9)?;
         let (dx, dy) = (img.a4_bytes(-0x61ce, 8)?, img.a4_bytes(-0x61c6, 8)?);
         let byte = |off: i32| img.a4_bytes(off, 1).map(|b| b[0]);
         Ok(UiTables {
             keymap,
-            keyword_end: s(0x104ffe)?,
+            keyword_end: s(crate::string_registry::text!(0x104ffe))?,
             colours: Colours {
                 text: colour(-0x656a)?,
                 paper: colour(-0x656c)?,
@@ -201,18 +203,25 @@ impl UiTables {
                 command: colour(-0x6572)?,
             },
             panel: PanelStrings {
-                roster_hp: s(0x110ba4)?,
-                name_line: s(0x110baa)?,
-                plain: s(0x110bae)?,
-                attributes: [s(0x110bb2)?, s(0x110bba)?, s(0x110bc2)?],
-                magic: s(0x110bca)?,
-                magic_value: s(0x110bd0)?,
-                health: s(0x110bd8)?,
-                hp_value: s(0x110be0)?,
-                hp_max: s(0x110be4)?,
-                level_exp: s(0x110bea)?,
-                level_exp_value: s(0x110bf4)?,
-                weights: [s(0x110c0c)?, s(0x110c10)?],
+                roster_hp: s(crate::string_registry::text!(0x110ba4))?,
+                name_line: s(crate::string_registry::text!(0x110baa))?,
+                plain: s(crate::string_registry::text!(0x110bae))?,
+                attributes: [
+                    s(crate::string_registry::text!(0x110bb2))?,
+                    s(crate::string_registry::text!(0x110bba))?,
+                    s(crate::string_registry::text!(0x110bc2))?,
+                ],
+                magic: s(crate::string_registry::text!(0x110bca))?,
+                magic_value: s(crate::string_registry::text!(0x110bd0))?,
+                health: s(crate::string_registry::text!(0x110bd8))?,
+                hp_value: s(crate::string_registry::text!(0x110be0))?,
+                hp_max: s(crate::string_registry::text!(0x110be4))?,
+                level_exp: s(crate::string_registry::text!(0x110bea))?,
+                level_exp_value: s(crate::string_registry::text!(0x110bf4))?,
+                weights: [
+                    s(crate::string_registry::text!(0x110c0c))?,
+                    s(crate::string_registry::text!(0x110c10))?,
+                ],
                 combat_modes,
             },
             initial: Initial {

@@ -159,14 +159,13 @@ pub struct MagicTables {
     pub potions: Vec<Vec<u8>>,
 }
 
-fn strings(img: &GameImage<'_>, off: u32, n: usize) -> Result<Vec<Vec<u8>>, String> {
-    (0..n)
-        .map(|i| {
-            let at = A4.wrapping_sub(off) + 4 * i as u32;
-            let p = img.pointer(at).map_err(|e| format!("{at:#x}: {e}"))?;
-            img.cstr(p).map_err(|e| format!("{p:#x}: {e}"))
-        })
-        .collect()
+fn strings(
+    img: &GameImage<'_>,
+    table: crate::string_registry::Table,
+) -> Result<Vec<Vec<u8>>, String> {
+    table
+        .image(img)
+        .map_err(|_| "registered spell text table is invalid".to_string())
 }
 
 fn words<const N: usize>(img: &GameImage<'_>, off: u32) -> Result<[u16; N], String> {
@@ -183,7 +182,7 @@ impl MagicTables {
     /// Reads every table from the user's `game` (the decrunched hunk file).
     pub fn from_game(game: &[u8]) -> Result<Self, String> {
         let img = GameImage::parse(game).map_err(|e| format!("game: {e}"))?;
-        let syllables = strings(&img, SYLLABLES - 4 * 0x41, 26)?;
+        let syllables = strings(&img, crate::string_registry::text_table!(SYLLABLES))?;
         let masks = img
             .a4_bytes(-(MASKS as i32), SPELLS)
             .map_err(|e| format!("A4-{MASKS:#x}: {e}"))?
@@ -193,17 +192,17 @@ impl MagicTables {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("A4-{MAGIC_TILES:#x}: {e}"))?;
         Ok(Self {
-            names: strings(&img, NAMES, SPELLS)?,
-            words: strings(&img, WORDS, SPELLS)?,
+            names: strings(&img, crate::string_registry::text_table!(NAMES))?,
+            words: strings(&img, crate::string_registry::text_table!(WORDS))?,
             syllables,
             masks,
             reagents: words::<8>(&img, REAGENTS)?,
-            circles: strings(&img, CIRCLES, 8)?,
-            alignments: strings(&img, ALIGNMENTS, 4)?,
-            messages: strings(&img, MESSAGES, 13)?,
+            circles: strings(&img, crate::string_registry::text_table!(CIRCLES))?,
+            alignments: strings(&img, crate::string_registry::text_table!(ALIGNMENTS))?,
+            messages: strings(&img, crate::string_registry::text_table!(MESSAGES))?,
             magic_tiles,
             doors: words::<4>(&img, DOORS)?,
-            potions: strings(&img, POTIONS, 8)?,
+            potions: strings(&img, crate::string_registry::text_table!(POTIONS))?,
         })
     }
 

@@ -8,7 +8,6 @@
 #![allow(clippy::disallowed_methods)] // tests read the zip and write the frame receipts
 
 use std::cell::RefCell;
-use std::path::Path;
 
 use u6_intake::{InputFile, intake};
 
@@ -24,15 +23,14 @@ use super::tables::Msg;
 use u6_render::Framebuffer;
 use u6_testkit::Quiet;
 
-pub(super) const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 pub(super) const HERO: u16 = 1;
 
 pub(super) fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -94,8 +92,11 @@ pub(super) async fn cast_command(state: &RefCell<State>, io: &Io) {
         input.target_pending = 1;
         input.target_command = 0x82;
     }
-    let name = pointed_string(io, A4.wrapping_sub(0x7c8e) + 4 * 0x82);
-    let fmt = game_string(io, 0x0010_1f48);
+    let name = pointed_string(
+        io,
+        crate::string_registry::fixture((A4.wrapping_sub(0x7c8e) + 4 * 0x82) as i64, true),
+    );
+    let fmt = game_string(io, crate::string_registry::fixture(0x0010_1f48, false));
     printf(state, io, &fmt, &[Arg::Str(&name)]).await;
     super::cast(state, io).await;
     {
@@ -155,7 +156,10 @@ fn plain(bytes: &[u8]) -> String {
 
 /// The string at image address `addr` of the user's `game`, without its newlines.
 pub(super) fn text_at(io: &Io, addr: u32) -> String {
-    plain(&game_string(io, addr))
+    plain(&game_string(
+        io,
+        crate::string_registry::fixture((addr) as i64, false),
+    ))
 }
 
 /// Result message `m` of the spell tables (read from the user's `game` at load).
@@ -221,7 +225,10 @@ pub(super) fn lines_of(s: &State) -> Scroll {
 
 /// The line the command loop prints for Cast (0x101f48 with the command's name).
 pub(super) fn cast_line_text(io: &Io) -> String {
-    let name = plain(&pointed_string(io, A4.wrapping_sub(0x7c8e) + 4 * 0x82));
+    let name = plain(&pointed_string(
+        io,
+        crate::string_registry::fixture((A4.wrapping_sub(0x7c8e) + 4 * 0x82) as i64, true),
+    ));
     printed(io, 0x0010_1f48, &[&name])
 }
 
@@ -433,7 +440,10 @@ fn light_at_night_lights_the_view() {
     };
     std::fs::write("/tmp/claude-501/m2-magic-light-before.png", png(e.frame())).quiet();
     // The book picture 0x116028 draws is the user's file named at A4-0x61de.
-    let name = pointed_string(e.io(), A4.wrapping_sub(0x61de));
+    let name = pointed_string(
+        e.io(),
+        crate::string_registry::fixture((A4.wrapping_sub(0x61de)) as i64, true),
+    );
     let bmp = files
         .get(&String::from_utf8_lossy(&name))
         .and_then(|f| u6_formats::bitmap::Bitmap::from_lzw(f).ok());
@@ -502,8 +512,11 @@ fn detect_magic_on_a_potion() {
             s.ui.input.selection = at;
             s.ui.input.target = (c.x as i16 + 2, c.y as i16);
         }
-        let name = pointed_string(&io, A4.wrapping_sub(0x7c8e) + 4 * 0x82);
-        let fmt = game_string(&io, 0x0010_1f48);
+        let name = pointed_string(
+            &io,
+            crate::string_registry::fixture((A4.wrapping_sub(0x7c8e) + 4 * 0x82) as i64, true),
+        );
+        let fmt = game_string(&io, crate::string_registry::fixture(0x0010_1f48, false));
         printf(&st, &io, &fmt, &[Arg::Str(&name)]).await;
         super::dispatch(&st, &io, 1, true).await;
         flush_prints(&st, &io).await;

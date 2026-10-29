@@ -103,7 +103,7 @@ fn finish(e: &mut Engine) {
 /// The pixels of the buttons' row in the command colour.
 fn button_pixels(e: &Engine) -> usize {
     let fb = e.frame();
-    (ROW * CELL..(ROW + 1) * CELL)
+    ((ROW - 3) * CELL..(ROW + 1) * CELL)
         .flat_map(|y| (176..312).map(move |x| (x, y)))
         .filter(|&(x, y)| fb.get(x, y) == Some(COMMAND))
         .count()
@@ -117,9 +117,19 @@ fn row_blank(e: &Engine) -> bool {
 
 /// The middle pixel of button `i`.
 fn button_pixel(e: &Engine, i: usize) -> (i16, i16) {
-    let b = &e.state().ui.talk.buttons[i];
+    let st = e.state();
+    let b = st
+        .ui
+        .talk
+        .buttons
+        .iter()
+        .find(|b| b.id == i)
+        .expect("visible button");
     let col = usize::from(b.col) + b.cells.len() / 2;
-    ((col * CELL + 4) as i16, (ROW * CELL + 4) as i16)
+    (
+        (col * CELL + 4) as i16,
+        (usize::from(b.row) * CELL + 4) as i16,
+    )
 }
 
 fn at(x: i16, y: i16, buttons: u8) -> InputEvent {
@@ -190,11 +200,19 @@ fn the_buttons_show_only_while_the_words_after_you_say_are_read() {
     let (s, f) = talk_state(body, None);
     let mut e = waiting(s, f);
     let st = e.state().clone();
-    assert_eq!(st.ui.talk.buttons.len(), 2, "two buttons in the f7 read");
+    assert_eq!(
+        st.ui.talk.buttons.len(),
+        3,
+        "three initial buttons in the f7 read"
+    );
     let words: Vec<&[u8]> = st.ui.talk.buttons.iter().map(|b| &b.word[..]).collect();
-    assert_eq!(words, [&b"job"[..], b"name"], "the script's keywords");
+    assert_eq!(
+        words,
+        [&b"job"[..], b"name", b"bye"],
+        "the script's keywords"
+    );
     let drawn = button_pixels(&e);
-    assert!(drawn > 0 && !row_blank(&e), "drawn in the command colour");
+    assert!(drawn > 0, "drawn in the command colour");
     println!(
         "f7 read: buttons {}, pixels {drawn}",
         st.ui.talk.buttons.len()
@@ -304,7 +322,11 @@ fn with_a_pack_the_name_button_types_its_first_alias() {
         .collect();
     assert_eq!(
         words,
-        ["일".as_bytes().to_vec(), "이름".as_bytes().to_vec()]
+        [
+            "일".as_bytes().to_vec(),
+            "이름".as_bytes().to_vec(),
+            b"bye".to_vec()
+        ]
     );
     let cells: Vec<usize> = e
         .state()
@@ -314,7 +336,7 @@ fn with_a_pack_the_name_button_types_its_first_alias() {
         .iter()
         .map(|b| b.cells.len())
         .collect();
-    assert_eq!(cells, [3, 4], "one cell a syllable, a blank each side");
+    assert_eq!(cells, [5, 5, 5], "three equal columns");
     let (e, same) = press_against_typing(&s, &f, |e| button_pixel(e, 1), "이름\n");
     assert!(same, "the state and frame of typing the alias");
     assert_eq!(e.state().converse.input, "이름".as_bytes());
@@ -400,7 +422,8 @@ fn the_hover_inverts_a_button_and_a_keyword_and_puts_them_back() {
         let fb = e.frame();
         let key = (row * CELL..(row + 1) * CELL)
             .flat_map(|y| (col * CELL..(col + 3) * CELL).map(move |x| (x, y)));
-        let buttons = (ROW * CELL..(ROW + 1) * CELL).flat_map(|y| (176..312).map(move |x| (x, y)));
+        let buttons =
+            ((ROW - 3) * CELL..(ROW + 1) * CELL).flat_map(|y| (176..312).map(move |x| (x, y)));
         key.chain(buttons)
             .map(|(x, y)| fb.get(x, y))
             .collect::<Vec<_>>()
@@ -413,7 +436,9 @@ fn the_hover_inverts_a_button_and_a_keyword_and_puts_them_back() {
     let x0 = usize::from(b.col) * CELL;
     let fb = e.frame();
     let left = (x0..x0 + b.cells.len() * CELL).filter(|&x| x % CELL == 0);
-    let inverse = left.clone().all(|x| fb.get(x, ROW * CELL) == Some(PAPER));
+    let inverse = left
+        .clone()
+        .all(|x| fb.get(x, usize::from(b.row) * CELL) == Some(PAPER));
     assert!(
         inverse,
         "the key cap inverse: its cells' paper the paper colour"
@@ -479,28 +504,44 @@ fn a_keyword_moves_up_with_the_scroll_and_is_gone_once_it_left() {
 }
 
 #[test]
-fn no_button_over_a_row_the_panel_does_not_leave_blank() {
+fn choices_cover_a_nonblank_panel_and_restore_its_pixels_and_sources() {
     let (s, _) = talk_state(BODY, None);
-    let made = |paint: bool| {
-        let mut e = Engine::with_game(s.clone(), Files::default(), move |st, io| async move {
-            io.draw(|fb| {
-                for y in ROW * CELL..(ROW + 1) * CELL {
-                    for x in 176..312 {
-                        fb.set(x, y, PAPER);
-                    }
+    let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+        io.enable_src_plane();
+        io.draw(|fb| {
+            for y in 8..104 {
+                for x in 176..312 {
+                    fb.set_src(
+                        x,
+                        y,
+                        ((x + y) % 16) as u8,
+                        u6_render::Src {
+                            kind: u6_render::Kind::Glyph,
+                            id: 65,
+                            u: (x % 8) as u16,
+                            v: (y % 8) as u16,
+                            ..u6_render::Src::CLASSIC
+                        },
+                    );
                 }
-                if paint {
-                    fb.set(200, ROW * CELL + 3, 7);
-                }
-            });
-            talk::begin(&mut st.borrow_mut(), &io);
+            }
         });
-        finish(&mut e);
-        e.state().ui.talk.buttons.len()
-    };
-    assert_eq!(made(false), 2, "a blank row: two buttons");
-    assert_eq!(made(true), 0, "one pixel not the paper: none");
-    println!("buttons only over a blank row: pass");
+        let capture = || {
+            io.draw(|fb| {
+                (8..104)
+                    .flat_map(|y| (176..312).map(move |x| (x, y)))
+                    .map(|(x, y)| (fb.get(x, y), fb.src_at(x, y)))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = capture();
+        talk::begin(&mut st.borrow_mut(), &io);
+        assert_eq!(st.borrow().ui.talk.buttons.len(), 3);
+        assert_ne!(capture(), before);
+        talk::end(&mut st.borrow_mut(), &io);
+        assert_eq!(capture(), before, "every underlying pixel and Src restored");
+    });
+    finish(&mut e);
 }
 
 /// Spec 22 Contract 2 (gpt-a MUST 1): the buttons fit the Status window's last row: with their
@@ -536,14 +577,14 @@ fn the_buttons_fit_the_row_or_none_are_drawn() {
         (cells, outside, button_pixels(&e))
     };
     for (pack, width, cells) in [
-        (None, 17, vec![5, 6]),
-        (None, 12, vec![5, 6]),
-        (None, 11, vec![3, 4]),
-        (None, 8, vec![3, 4]),
-        (None, 7, vec![]),
-        (Some(&pack), 17, vec![10, 6]),
-        (Some(&pack), 13, vec![8, 4]),
-        (Some(&pack), 12, vec![]),
+        (None, 17, vec![5; 3]),
+        (None, 12, vec![3; 3]),
+        (None, 11, vec![3; 3]),
+        (None, 8, vec![2; 3]),
+        (None, 4, vec![]),
+        (Some(&pack), 17, vec![5; 3]),
+        (Some(&pack), 13, vec![3; 3]),
+        (Some(&pack), 12, vec![3; 3]),
     ] {
         let (got, outside, drawn) = made(pack, width);
         assert_eq!(got, cells, "width {width}, pack {}", pack.is_some());
@@ -569,7 +610,7 @@ fn a_press_moved_off_its_target_before_the_release_types_nothing() {
     e.tick(&[at(4, 4, POINTER_LEFT)], 16);
     e.tick(&[at(4, 4, 0)], 16);
     idle(&mut e, 8);
-    assert_eq!(e.state().ui.talk.buttons.len(), 2, "still the f7 read");
+    assert_eq!(e.state().ui.talk.buttons.len(), 3, "still the f7 read");
     e.tick(&typed("job\n"), 16);
     finish(&mut e);
     assert_eq!(
@@ -1329,13 +1370,13 @@ fn what_follows_an_injecting_release_waits_for_the_next_reader() {
         assert_eq!(
             e.io().pending_events(),
             usize::from(click_after),
-            "{label}: the f9 read's next pass took one"
+            "{label}: after the next pass a release remains only if one was queued"
         );
         idle(&mut e, 1);
         assert_eq!(
             e.io().pending_events(),
             0,
-            "{label}: the pass after it took the other"
+            "{label}: after one more pass no pointer event remains"
         );
         let injected = talk::INJECTED.with(|k| k.borrow().clone());
         assert_eq!(
@@ -1361,10 +1402,11 @@ fn what_follows_an_injecting_release_waits_for_the_next_reader() {
 /// Spec 22 Contract 5 "Timing" (gpt SHOULD 1): when the next reader is another f7 read (`job`'s
 /// answer jumps back to the player's words), that read takes what was queued after the injecting
 /// release as its own pointer events, hit-tested in its first pass: a click on the keyword the
-/// answer showed, queued in the frame of the click on Job, types that keyword there, and the
-/// conversation ends in that frame (a read takes one pass a frame once it waits, as the f9 case
-/// shows, so the second read's first pass took it). Taken by the first read instead, hit-tested
-/// there before the answer showed the keyword or taken there with no hit test, it types nothing
+/// answer showed, queued in the frame of the click on Job, types that keyword in that frame.
+/// A pass that leaves a pointer event queued must await `io.vblank()` in `keyread::idle_wait`,
+/// so the second read's first pass took it. The answer may finish printing on later frames.
+/// Taken by the first read instead, hit-tested there before the answer showed the keyword or
+/// taken there with no hit test, it types nothing
 /// and the second read waits.
 #[test]
 fn a_click_after_an_injecting_release_is_the_next_f7_reads_own() {
@@ -1397,11 +1439,13 @@ fn a_click_after_an_injecting_release_is_the_next_f7_reads_own() {
         16,
     );
     // In that frame (opus N1, gpt NIT): its first pass took the click, its Enter ended it.
-    assert!(
-        e.finished() && e.state().converse.input == b"cat",
+    assert_eq!(
+        e.state().converse.input,
+        b"cat",
         "the second read's first pass typed the keyword, in the click's frame"
     );
     finish(&mut e);
+    assert!(e.finished(), "the answer eventually finished");
     assert_eq!(
         e.state().converse.input,
         b"cat",
@@ -1421,3 +1465,6 @@ fn a_click_after_an_injecting_release_is_the_next_f7_reads_own() {
     );
     println!("a click after an injecting release is the next f7 read's own: pass");
 }
+
+#[path = "tests_choices.rs"]
+mod choices_tests;

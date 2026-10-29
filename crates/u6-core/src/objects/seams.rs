@@ -16,7 +16,7 @@ pub(crate) fn command_member(s: &State) -> u16 {
 
 /// Printf 0x108658 of the game string at image address `fmt` with word arguments, queued for
 /// the command loop to print (object code is synchronous; ui printf may wait on a more prompt).
-pub(crate) fn print(s: &mut State, fmt: u32, args: &[i32]) {
+pub(crate) fn print(s: &mut State, fmt: crate::string_registry::Text, args: &[i32]) {
     let text = crate::engine::with_current_io(|io| crate::main_loop::game_string(io, fmt));
     let args = args
         .iter()

@@ -9,6 +9,10 @@ tags: [ultima6]
 Status: in progress (2026-10-27). One production deploy per item as soon as its receipt is green, then one per
 follow-up (`ssot.md`).
 
+Current authorization (2026-10-29): the older deployment plan above is historical. Work now
+continues on an isolated local branch; remote push/PR/main merge/issue disposition require the
+owner's pending authorization. Deployment and any pack/model transmission are separate actions.
+
 Merge rule (2026-10-28): a merge into a unit branch is built (clippy plain and wide) before the dispatcher commits it. d082854 (integ into `feat/smooth-motion`) was committed unbuilt and does not compile; fixed forward in W2 r5.
 
 GitHub (2026-10-29): the epic is issue #1 (https://github.com/2lab-ai/ultima6/issues/1), with one sub-issue per open unit (#2–#12) and draft PRs #13–#18.
@@ -177,3 +181,93 @@ Carried to B12: when the staff cast (row 5) turns the text switch off, check eve
 `queue_print` or `combat::present::say` (both test the switch since B2). The forced-on writes once noted here were
 withdrawn: those addresses are thunks of 0x1231be, not switch writes. Only 0x124232 turns the switch off around
 0x11a586.
+
+## Local integration checkpoint (2026-10-29)
+
+All twelve open issue bodies/comments and PR snapshots #13–#18 were reviewed. Earlier completed
+nodes above remain historical evidence; no old PR approval was treated as current permission.
+Original main remains `b134f0d`. Five clean obsolete worktrees were removed only after ancestry
+and status checks; all three dirty builder worktrees and their uncommitted files were preserved.
+
+| Issue | Local result at `e95c1db` | Remaining acceptance |
+|---|---|---|
+| #2 M3 | Korean choices, input-batch boundary, all selection receipts, monotonic completed-line count; phone landscape 6/6 including counts beyond 64 | Final combined browser run |
+| #3 C3 | Bounded sidecar reads/memory, same saved contents, actual grey pixels restored after launcher reload in both layouts | Final combined browser/CI |
+| #4 W2 | Event-ended preview, complete slide receipts, conservative first-pick/clock/unknown-I/O guard and no-old-cell controls; unit `faadca7` integrated | W3 combined frames and owner pace verdict |
+| #5 W3 | Actual step timestamps and independent mover cadence in progress; ordinary quiet-turn date-line boundary under investigation | Implementation, bounded-memory/continuity gates, live frames, owner pace |
+| #6 O3/O5 | Original default, Quick/Fast/Instant, current-turn skip; real quiet/fight rules and RNG unchanged | Final combined checks; O4 remains outside scope |
+| #7 D2 | Shadow code/ink, kept spans, wording and shared setup; new answer UI retains conversation content/order and VM outcome | Final combined UI checks |
+| #8 Talk | Input-received and response-complete receipts separated; integrated conversation clicks 3/3 | Expanded grid/answer browser events |
+| #9 K2 | Actual non-wake steps, strict command prompt and pending-before evidence | W3 combined held regression |
+| #10 B13 | Typed single reader registry, unchanged catalogue, six compiler RED controls, all 256 saved wind values handled; `a78b39f` integrated | Final combined checks |
+| #11 E1 | Original ending program/launcher path, resource-failure preservation, 16 scenes and final exit; successful Use terminal receipt | Native actual window; distinguish constructed runtime fixture from unavailable owner-played ending save |
+| #12 | Portable data/live paths, measured Wide scale fallback with unchanged 8ms policy, safe worktree cleanup | Idle live 1× measurement; OS-dependent test prerequisites |
+
+Additional owner requirements are implemented in the same branch: T4 three-column discovered
+keywords with paging, fixed accessible Exit, grey/reselectable used choices ordered last and
+conversation-only reset; T5 clickable exact yes/no responses; T6/T7 Ctrl primary actions with
+hostility taking precedence over Talk. Existing command/range/sight/turn paths are retained.
+Cross-feature review found and fixed End/modal click capture and native focus/repeat boundaries.
+
+Evidence boundaries: full Original workspace at this checkpoint has 2,128 passed, 3 failed and
+12 ignored. The three failures are mocked-process tests whose OS prerequisites fail: `pgrep`
+cannot find sysmond and `nohup` cannot detach from the console, including in a PTY. Wide workspace
+with `u6-hdtool` explicitly excluded has 2,054 passed, 0 failed and 12 ignored. Both workspace
+Clippy layouts passed before recent merges. This is not a full-gate or CI success claim.
+Integrated ending tests pass 18 per layout; earlier actual Chromium conversation regressions
+pass 3/3. Expanded Chromium launch subsequently fails before any page with Mach service error
+1100/SIGTRAP, including one bounded normal retry. This was an OS runtime error, not a tool
+approval rejection; a causal link to screen lock is unproven. Native UI inventory separately
+reports the Mac locked. No security/service workaround or remote action was performed.
+
+Original archives, derived packs, extracted text/art, private captures and runtime saves stay
+outside Git. Content-free reports record counts, timings, source addresses and pass/fail only.
+
+## Final local implementation and verification (2026-10-29)
+
+Production revision `340f550` integrates all eleven task issues (#2–#12) and the added
+dialogue/Ctrl requirements. This supersedes the implementation-in-progress entries in the
+checkpoint above; it does not remove their history or claim all acceptance is complete.
+
+W3 now observes each mover's actual logical step times, starts a retarget at its current drawn
+position, and buffers the maximum of exactly its last two raw intervals. A long interval
+expires after one shorter leg. Taps/direction changes keep their base timing, NPC tracks remain
+independent of player release, and the authoritative rules/RNG are unchanged. The date-only
+prediction guard proves its localized UI output does not touch the map; actual output keeps
+the four Pending operations and original waits. Unknown I/O remains refused.
+
+W3 validation: EN36 + owned-KO12 runs per layout, 96 runs and 48 whole-State comparisons.
+Ordinary quiet 1/4/8x longest unchanged camera pixels span 33.3/0/16.7ms; old-cell exposure and
+capacity resets are zero, targets are traversed or explicitly direction-cancelled, and release
+ends at rest. A previously unseen longer NPC turn or unsafe-preview refusal can still pause.
+Owner pace judgement and live performance remain separate acceptance. Spec20 records resource
+bounds, long-to-short recovery, mutation controls and the input policy.
+
+| Verification scope | Result |
+|---|---|
+| Original workspace at `ff37261` | 2,149 passed, 0 failed, 12 ignored, 3 explicitly excluded |
+| Final `340f550` Original renderer/web packages | 210 passed, 0 failed, 2 ignored; overlaps the preceding scope, do not sum |
+| Final Original owned-KO date proof | 1 passed; explicitly selected local pack |
+| Final Wide workspace | 2,178 passed, 0 failed, 12 ignored, the same 3 explicitly excluded |
+| Workspace Clippy both layouts; fmt; port-map; JS syntax | Pass |
+| Final Original/Wide WASM and actual-WASM Node choices | Builds pass; synthetic EN/KO x HD/Wide 4/4, binary hashes checked |
+| Final native release and headless smoke | Build passes; 600 frames, queued input0, stub hits0; private frame reviewed |
+
+The three excluded process tests remain blocked by the reproduced pgrep/sysmond and
+nohup/console failures described above; exclusion is not a pass. The final complete repeated
+browser gate and remote CI were not run. Earlier Chromium conversation3/3 and unit ending16
+scene runs remain separate evidence. Final ordinary EN/KO engine frames were reviewed in both
+layouts; that is not compositor/DOM, visible native-window or idle performance evidence.
+
+Remaining acceptance: expanded dialogue/Ctrl browser flows, actual native focus/input/ending,
+idle 1x Wide measurement with the unchanged8ms policy, owner pace verdict, and those three
+host process tests. Native CUA requires manual Mac unlock; Chromium's Mach1100/SIGTRAP was an
+OS execution failure, not an approval rejection, and a lock-related cause is unproven.
+The owned archive and KO pack are available. Ending used a constructed owned-data fixture;
+an owner-played near-ending save was not identified. No source assets or saves are committed.
+
+Epic mapping remains: object/text completion (#10/#11); menu/history/clicks (#2/#7/#8 plus the
+new choices/Ctrl actions); grey sight (#3); turn controls (#6/#9); motion (#4/#5), all supported
+by #12's portable tooling and preserved work. Original main remains clean `b134f0d`, and the
+three dirty original builder worktrees remain intact. Remote push, draft PR, main merge and
+issue disposition still await human authorization; deployment/model transmission are separate.

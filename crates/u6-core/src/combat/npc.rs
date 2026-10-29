@@ -133,6 +133,18 @@ pub fn worktype(s: &mut State, actor: u16, wt: u8) {
     }
 }
 
+/// The alignment relation checked by target search (0x12500a), without distance, RNG or
+/// the fleeing/guarding worktypes' exception. Also used by the Ctrl representative action.
+pub(crate) fn opposes(s: &State, actor: i16, target: i16) -> bool {
+    let me = align(s, actor);
+    let other = align(s, target);
+    !(me == 0 && (wt(s, actor) != 0x9b || other != 0x40)
+        || me == 0x60 && other == 0x60
+        || other == 0
+        || me == 0x40 && status(s, target) & 0x20 == 0
+        || me == 0x20 && status(s, target) & 0x40 == 0)
+}
+
 /// Original: 0x12500a (combat: the nearest foe `actor` can see within 8 tiles, -1 when none)
 ///
 /// Foes by alignment: good attack evil-bit (0x20) actors, evil attack good-bit (0x40) ones,
@@ -140,7 +152,6 @@ pub fn worktype(s: &mut State, actor: u16, wt: u8) {
 /// fleeing or guarding actor (7, 9, 0x13, 0x99, 0x9a) takes anyone. A fleeing foe counts only
 /// near the party. Nearest by squared distance (16-bit), ties by a coin.
 pub fn find_target(s: &mut State, actor: i16) -> i16 {
-    let me = align(s, actor);
     let (ax, ay) = pos(s, actor);
     let mut best: i16 = -1;
     let mut best_d: i16 = 0x7fff;
@@ -152,23 +163,8 @@ pub fn find_target(s: &mut State, actor: i16) -> i16 {
             continue;
         }
         let w = wt(s, actor);
-        if ![9, 0x9a, 0x13, 7, 0x99].contains(&w) {
-            let ta = align(s, t);
-            if me == 0 && (w != 0x9b || ta != 0x40) {
-                continue;
-            }
-            if me == 0x60 && ta == 0x60 {
-                continue;
-            }
-            if ta == 0 {
-                continue;
-            }
-            if me == 0x40 && status(s, t) & 0x20 == 0 {
-                continue;
-            }
-            if me == 0x20 && status(s, t) & 0x40 == 0 {
-                continue;
-            }
+        if ![9, 0x9a, 0x13, 7, 0x99].contains(&w) && !opposes(s, actor, t) {
+            continue;
         }
         let (tx, ty) = pos(s, t);
         if distance(s, actor, tx, ty) > 8 {

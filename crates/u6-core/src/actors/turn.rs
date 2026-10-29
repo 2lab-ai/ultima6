@@ -97,10 +97,10 @@ pub fn darkness(s: &mut State) {
         return;
     }
     crate::sound::play_song(s, 0);
-    seams::print(s, DARKNESS_FIRST, &[]);
+    seams::print(s, crate::string_registry::text!(DARKNESS_FIRST), &[]);
     s.gfx.window_shown = 1;
     seams::full_redraw(s);
-    seams::print(s, DARKNESS_SECOND, &[]);
+    seams::print(s, crate::string_registry::text!(DARKNESS_SECOND), &[]);
     s.actors.work.resurrect_pending = true;
 }
 
@@ -332,12 +332,16 @@ pub fn swallowed(s: &mut State, actor: u16) -> bool {
     }
     let me = crate::objects::ObjectId(actor);
     if s.actors.worktype[a] == 2 {
-        seams::print(s, SWALLOWED_CRY, &[Arg::Name(me)]);
+        seams::print(
+            s,
+            crate::string_registry::text!(SWALLOWED_CRY),
+            &[Arg::Name(me)],
+        );
     }
     let r = s.rng.range(1, 30) as i16;
     if r < leaves::strength(s, actor) as i16 {
         seams::print_name(s, me);
-        seams::print(s, SWALLOWED_FREED, &[]);
+        seams::print(s, crate::string_registry::text!(SWALLOWED_FREED), &[]);
         s.actors.attrs.movement_flags[a] &= !0x10;
         s.map.view_dirty = 1;
         return false;
@@ -512,6 +516,73 @@ fn fights(s: &State, actor: usize, npc: bool) -> bool {
     npc && runs && npc::runs_combat_routine(turn_worktype(s, actor))
 }
 
+/// Whether an early picture may be followed by a picture of the old cell before the first
+/// refresh. Run the real prologue, picks and clock minutes on a fresh copy, before the preview's
+/// view build consumes RNG. The date line's known UI-only queue is omitted on this copy; every
+/// other I/O request is unknown and rejects the preview. So do a raise,
+/// a changed leader/centre, a swallowed pick (which can skip the refresh), or exhausted search.
+/// No prediction can write the polling engine's I/O. A safe first pick need not be the player's:
+/// a noncombat NPC normally reaches the refresh before another pick, so it keeps early motion.
+pub(crate) fn preview_blocked(state: &State) -> bool {
+    crate::engine::predict_without_io(|| {
+        let mut s = state.clone();
+        let centre = s.map.centre;
+        let leader = s.actors.party.leader_index;
+        leader_bookkeeping(&mut s);
+        if s.actors.work.resurrect_pending
+            || s.map.centre != centre
+            || s.actors.party.leader_index != leader
+        {
+            return true;
+        }
+        let mask = setup_after_raise(&mut s);
+        let mut pick = Pick {
+            actor: -1,
+            mp: 0,
+            dex: 1,
+        };
+        for _ in 0..=256 {
+            pick_actor(&mut s, mask, &mut pick);
+            if pick.mp > 0 {
+                let a = pick.actor as usize;
+                // `swallowed` may queue a line, hurt/raise the actor, or consume this pick
+                // without any refresh. Do not approve a preview from the following guess.
+                if s.actors.attrs.movement_flags[a] & 0x10 != 0 {
+                    return true;
+                }
+                let wt = s.actors.worktype[a];
+                let npc = wt != 2 && wt != 1;
+                if fights(&s, a, npc) {
+                    return true;
+                }
+                // Even a noncombat worktype can show something: a guard's strike or an
+                // arrest/conversation. Use the actual synchronous turn and playback test.
+                let started = npc.then(|| npc::npc_turn_sync(&mut s, a as u16)).flatten();
+                return shows(&s, started.as_ref());
+            }
+            refill(&mut s);
+            clock::tick(&mut s, 1);
+            if s.actors.work.resurrect_pending || s.map.centre != centre {
+                return true;
+            }
+        }
+        true
+    })
+    .unwrap_or(true)
+}
+
+/// The synchronous setup after the world's pending resurrection has been handled. Shared
+/// with the early-picture prediction so schedules and leader bookkeeping cannot drift apart.
+fn setup_after_raise(s: &mut State) -> u16 {
+    formation(s);
+    go_to_schedules(s);
+    let leader = member(s, usize::from(s.actors.party.leader_index));
+    if (2..0x10).contains(&s.actors.worktype[leader]) {
+        s.actors.attrs.unknown_18f1[leader] = leader as u8;
+    }
+    if s.map.centre.z == 0 { 0x3ff } else { 0xff }
+}
+
 /// The worktype 0x1200b0 runs for `actor`. Its first test (0x1200ba..0x1200d4), before it saves
 /// the points and before the time-stop and level tests: a party member (status bit 0x80) who is
 /// not charmed (object status 0x04) is uncharmed (0x121bce through the thunk 0x121988,
@@ -559,19 +630,11 @@ fn turn_worktype(s: &State, actor: usize) -> u8 {
 /// refills wait nothing (the minute only counts the stop down), so the passes of up to 255
 /// refills of up to 256 picks stay owed: hence a u32.
 pub async fn world_turn(state: &RefCell<State>, io: &Io) {
+    let _playback = io.playback.begin();
     let mut owed: u32 = 0;
     leader_bookkeeping(&mut state.borrow_mut());
     raise_if_dead(state, io, &mut owed).await;
-    let mask = {
-        let mut s = state.borrow_mut();
-        formation(&mut s);
-        go_to_schedules(&mut s);
-        let leader = member(&s, usize::from(s.actors.party.leader_index));
-        if (2..0x10).contains(&s.actors.worktype[leader]) {
-            s.actors.attrs.unknown_18f1[leader] = leader as u8;
-        }
-        if s.map.centre.z == 0 { 0x3ff } else { 0xff }
-    };
+    let mask = setup_after_raise(&mut state.borrow_mut());
     loop {
         let mut pick = Pick {
             actor: -1,
@@ -665,6 +728,7 @@ fn owe_first(s: &mut State, owed: &mut u32) {
             cost: part,
             mark: 0,
             dissolve: false,
+            strike: None,
         });
         ms -= u32::from(part);
     }
@@ -766,6 +830,199 @@ mod tests {
         };
         pick_actor(s, 0x3ff, &mut p);
         p.actor
+    }
+
+    /// The prediction preserves safe first picks and time stops, refuses a fighting NPC,
+    /// and refuses a clock minute that needs I/O before it knows the next pick.
+    #[test]
+    fn preview_prediction_keeps_safe_picks_and_rejects_fighters_or_unknown_minutes() {
+        let first = |npcs: &[(i8, u8)], fighter: usize, leader: i8, stop: bool| {
+            let mut s = world(npcs);
+            s.actors.worktype[10 + fighter] = 8;
+            s.actors.movement_points[1] = leader as u8;
+            s.actors.timers[timer::TIME_STOP] = u8::from(stop) * 5;
+            s.actors.work.last_hour = 0xff; // a refill must draw the unknown hour's sky
+            preview_blocked(&s)
+        };
+        assert!(
+            first(&[(0, 10), (10, 10)], 1, 0, false),
+            "the fighter first"
+        );
+        assert!(
+            !first(&[(10, 10), (10, 10)], 1, 0, false),
+            "a loiterer first"
+        );
+        assert!(first(&[(0, 10), (0, 9)], 0, -3, false), "after a refill");
+        assert!(
+            first(&[(0, 10), (0, 9)], 1, 0, false),
+            "a minute needs I/O, so the preview is conservatively withheld"
+        );
+        assert!(!first(&[(0, 10), (10, 10)], 1, 0, true), "a time stop");
+    }
+
+    #[test]
+    fn preview_prediction_rejects_a_swallowed_pick_before_a_fighter() {
+        let mut s = world(&[(10, 10), (10, 10)]);
+        s.actors.movement_points[1] = 0;
+        s.actors.worktype[11] = 8;
+        s.actors.attrs.movement_flags[10] |= 0x10;
+        assert!(
+            preview_blocked(&s),
+            "a swallowed loiterer can skip the refresh before the fighter"
+        );
+    }
+
+    #[test]
+    fn preview_prediction_runs_bookkeeping_before_it_picks() {
+        let mut s = world(&[(10, 10)]);
+        s.actors.worktype[10] = 8;
+        s.actors.party.size = 2;
+        s.actors.party.members[1] = 2;
+        s.objects.type_frame[2] = 0x17a;
+        s.objects.location[2] = s.map.centre;
+        s.actors.worktype[2] = 1;
+        s.actors.attrs.status[2] = 0x80;
+        s.actors.attrs.dexterity[2] = 10;
+        s.actors.movement_points[2] = 1; // no follower debt that could mask the prologue
+        s.objects.obj_status[1] |= 0x04; // charmed: pickable, but cannot keep the lead
+        assert!(
+            preview_blocked(&s),
+            "bookkeeping replaces an unable leader before the fighter pick"
+        );
+        assert_eq!(
+            s.actors.party.leader_index, 0,
+            "the live leader is untouched"
+        );
+        assert_eq!(s.actors.worktype[1], 2, "the live worktype is untouched");
+    }
+
+    #[test]
+    fn preview_prediction_rejects_a_noncombat_npcs_wait_before_refresh() {
+        let mut s = world(&[(10, 10)]);
+        s.actors.movement_points[1] = 0;
+        s.actors.worktype[10] = 0x12; // arrest, not a combat routine
+        s.objects.location[10].x = 21;
+        let before = s.clone();
+        assert!(!npc::runs_combat_routine(s.actors.worktype[10]));
+        assert!(
+            preview_blocked(&s),
+            "a noncombat pick can show an arrest before the refresh"
+        );
+        assert!(
+            s == before,
+            "the prediction leaves every live State field and the RNG unchanged"
+        );
+    }
+
+    #[test]
+    fn preview_prediction_runs_clock_minutes_and_rejects_unknown_io() {
+        let mut s = world(&[(0, 10), (0, 9)]);
+        s.actors.movement_points[1] = 0;
+        s.actors.worktype[11] = 8;
+        s.actors.timers[timer::TIME_STOP] = 1;
+        s.actors.work.last_hour = 0xff; // not the date-only minute: sky I/O is required
+        assert!(
+            preview_blocked(&s),
+            "the refill ends time stop; the minute can publish before the pick"
+        );
+        assert_eq!(
+            s.actors.timers[timer::TIME_STOP],
+            1,
+            "the live timer is untouched"
+        );
+        s.actors.work.resurrect_pending = true;
+        assert!(
+            preview_blocked(&s),
+            "an asynchronous resurrection is not predicted"
+        );
+    }
+
+    fn plain_refill() -> State {
+        let mut s = world(&[]);
+        s.ui.text.main_windows(&s.ui.tables);
+        s.actors.movement_points[1] = 0;
+        s.actors.calendar.hour = 12;
+        s.actors.calendar.minute = 30;
+        s.actors.work.last_hour = 12;
+        s.actors.set_tail(tail::LIGHT, 7);
+        s.actors.attrs.hp[1] = 20;
+        s
+    }
+
+    fn preview_minute(s: &State) -> bool {
+        let game = crate::locale::strings::test_game(&[(A4 - 0x7293, b"Zdate %d %d %d %s")]);
+        let files = crate::Files::new([("game".into(), game)].into());
+        let result = std::rc::Rc::new(std::cell::Cell::new(None));
+        let out = std::rc::Rc::clone(&result);
+        let mut e = crate::Engine::with_game(s.clone(), files, move |state, _| async move {
+            out.set(Some(preview_blocked(&state.borrow())));
+        });
+        e.tick(&[], 20);
+        assert!(e.finished());
+        result.get().expect("prediction returned")
+    }
+
+    #[test]
+    fn preview_prediction_allows_a_plain_minute_without_changing_live_state() {
+        let s = plain_refill();
+        let before = s.clone();
+        assert!(
+            !preview_minute(&s),
+            "a date-only minute allows the early picture"
+        );
+        assert!(s == before, "prediction preserves every live field and RNG");
+    }
+
+    #[test]
+    fn preview_prediction_still_rejects_hour_sky_torch_poison_raise_and_other_prints() {
+        let mut hour = plain_refill();
+        hour.actors.calendar.minute = 59;
+        assert!(
+            preview_blocked(&hour),
+            "the hour's sky draw remains unknown I/O"
+        );
+        let mut raise = plain_refill();
+        raise.actors.work.resurrect_pending = true;
+        assert!(preview_blocked(&raise), "a pending raise is not predicted");
+        let mut pending = plain_refill();
+        pending
+            .main
+            .pending_print
+            .push(crate::main_loop::Pending::Cursor(0, 0));
+        assert!(
+            preview_blocked(&pending),
+            "unknown pending UI is not a date line"
+        );
+
+        let mut torch = plain_refill();
+        crate::objects::init_slots(&mut torch.objects);
+        let obj =
+            crate::objects::create_in(&mut torch, 0x5a | 1 << 10, crate::objects::READIED, 1, 1);
+        assert!(obj >= 0, "created the synthetic expiring torch");
+        let mut poison = plain_refill();
+        poison.actors.attrs.status[1] |= 0x08;
+        for (label, mut state) in [("torch", torch), ("poison", poison)] {
+            let mut blocked = 0;
+            let mut safe = 0;
+            for seed in 0..128u32 {
+                state.rng.set_state(seed.wrapping_mul(0x9e37_79b9) | 1);
+                let before = state.clone();
+                if preview_minute(&state) {
+                    blocked += 1;
+                } else {
+                    safe += 1;
+                }
+                assert!(state == before, "{label}: live state and RNG are unchanged");
+            }
+            assert!(
+                blocked > 0,
+                "{label}: a minute that shows the effect is rejected"
+            );
+            assert!(
+                safe > 0,
+                "{label}: a minute without the effect remains safe"
+            );
+        }
     }
 
     #[test]

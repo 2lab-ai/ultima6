@@ -24,7 +24,10 @@ const MSG_CREATE_CHARACTER: u32 = 0x0013_50a6;
 /// That message read from the user's `game`, up to its last word (the scroll holds the lines
 /// the window wrapped it into; the last one stays open while the cursor waits after it).
 fn no_character(r: &Run) -> String {
-    let msg = crate::main_loop::game_string(r.e.io(), MSG_CREATE_CHARACTER);
+    let msg = crate::main_loop::game_string(
+        r.e.io(),
+        crate::string_registry::fixture((MSG_CREATE_CHARACTER) as i64, false),
+    );
     let msg = String::from_utf8_lossy(&msg);
     let msg = msg.trim();
     let head = msg.rsplit_once(' ').map_or(msg, |(head, _)| head);
@@ -298,7 +301,7 @@ fn without_u_the_game_starts_at_once() {
     if files().is_none() {
         return;
     }
-    let zip = std::fs::read(super::real::ZIP).quiet();
+    let zip = std::fs::read(u6_testkit::archive()).quiet();
     let mut map: BTreeMap<String, Vec<u8>> = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data: zip,

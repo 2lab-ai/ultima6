@@ -102,8 +102,8 @@ impl GameData {
     }
 
     /// The string the pointer at `addr` names.
-    pub fn pointed(&self, addr: u32) -> Vec<u8> {
-        self.cstr(self.long(addr))
+    pub fn pointed(&self, addr: crate::string_registry::Text) -> Vec<u8> {
+        addr.data(self)
     }
 
     /// Image address `A4 + off`.

@@ -108,12 +108,12 @@ pub struct SaveLoad {
     pub restores: u32,
     /// Port (spec 18, saved with the game): [`SIGHT_FILE`] as the last Save wrote it, bound to
     /// the objlist that Save wrote (`None` until a Save, and after one that wrote none: nothing
-    /// was remembered). The character `u` writes none and leaves it as it is: [`SaveLoad::objlist`]
-    /// is then `u`'s, of another digest, so it is not read. A Restore reads it in place of the
-    /// platform's file once [`SaveLoad::objlist`] is this session's.
+    /// was remembered). The character `u` writes none and clears it
+    /// ([`crate::intro::handoff::apply`]): it was bound to the objlist `u`'s replaces. A Restore
+    /// reads it in place of the platform's file once [`SaveLoad::objlist`] is this session's.
     pub sight: Option<SavedSight>,
     /// The [`SaveLoad::generation`] of the Save that wrote [`SaveLoad::sight`] ([`changed_since`]
-    /// lists the file after it; `u`'s generation does not).
+    /// lists the file after it, while there is one; `u` leaves this as it is).
     pub sight_gen: u32,
 }
 

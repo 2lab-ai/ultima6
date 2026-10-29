@@ -12,13 +12,13 @@ use crate::state::State;
 use crate::ui::printf::{Arg, printf};
 
 /// The game string at image address `addr`.
-pub(crate) fn string(s: &State, addr: u32) -> Vec<u8> {
-    s.objcmds.data.cstr(addr)
+pub(crate) fn string(s: &State, addr: crate::string_registry::Text) -> Vec<u8> {
+    addr.data(&s.objcmds.data)
 }
 
 /// The game string at `A4 + off`.
-pub(crate) fn a4_string(s: &State, off: i32) -> Vec<u8> {
-    s.objcmds.data.cstr(super::GameData::a4(off))
+pub(crate) fn a4_string(s: &State, off: crate::string_registry::Text) -> Vec<u8> {
+    off.data(&s.objcmds.data)
 }
 
 /// Queues printf of `fmt` for the command loop (synchronous callers).
@@ -27,7 +27,7 @@ pub(crate) fn queue(s: &mut State, fmt: Vec<u8>, args: Vec<PrintArg>) {
 }
 
 /// Queues printf of the game string at `addr`.
-pub(crate) fn queue_at(s: &mut State, addr: u32, args: Vec<PrintArg>) {
+pub(crate) fn queue_at(s: &mut State, addr: crate::string_registry::Text, args: Vec<PrintArg>) {
     let fmt = string(s, addr);
     queue(s, fmt, args);
 }
@@ -39,7 +39,12 @@ pub(crate) async fn print(state: &RefCell<State>, io: &Io, fmt: &[u8], args: &[A
 }
 
 /// printf of the game string at image address `addr`.
-pub(crate) async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+pub(crate) async fn print_at(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = string(&state.borrow(), addr);
     print(state, io, &fmt, args).await;
 }

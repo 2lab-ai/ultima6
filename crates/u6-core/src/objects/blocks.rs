@@ -195,7 +195,14 @@ pub(crate) fn parse_lenient(bytes: &[u8]) -> u6_formats::objblk::ObjBlock {
 /// Prints the messages a block routine queued (0x10d376's warning).
 fn flush(s: &mut State, prints: Vec<u32>) {
     for p in prints {
-        seams::print(s, p, &[]);
+        seams::print(
+            s,
+            crate::string_registry::choose(
+                (p) as i64,
+                &[crate::string_registry::text!(STR_REGION_FULL)],
+            ),
+            &[],
+        );
     }
 }
 

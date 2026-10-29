@@ -137,11 +137,17 @@ pub async fn summon(state: &RefCell<State>, io: &Io, spell: u16, caster: u16) {
     };
     let hostile = spell == 0x77 && seams::resists(&mut state.borrow_mut(), caster, new as u16);
     let align = if hostile {
-        print_at(state, io, MSG_HOSTILE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_HOSTILE), &[]).await;
         0x60
     } else {
         let a = state.borrow().actors.attrs.status[usize::from(caster)] & 0x60;
-        say(state, io, FMT_NL_S_NL, Msg::Success).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Success,
+        )
+        .await;
         a
     };
     let mut s = state.borrow_mut();
@@ -171,7 +177,13 @@ pub async fn insect_swarm(state: &RefCell<State>, io: &Io, spell: u16) {
             }
         }
     }
-    say(state, io, FMT_NL_S_NL, Msg::Success).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Success,
+    )
+    .await;
 }
 
 /// Original: 0x119cbe (magic: Tremor: the window shakes, every evil actor in view is hurt)
@@ -212,11 +224,17 @@ pub async fn tremor(state: &RefCell<State>, io: &Io) {
                 let exp = seams::hurt(&mut s, o as u16, d);
                 seams::add_experience(&mut s, caster, exp);
             }
-            print_at(state, io, NEWLINE, &[]).await;
+            print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
             seams::wound_line(state, io, o as u16).await;
         }
     }
-    say(state, io, FMT_NL_S_NL, Msg::Success).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Success,
+    )
+    .await;
 }
 
 /// Original: 0x11a41e (magic: spell 0x80, outside the eight circles: the caster turns invisible
@@ -235,7 +253,7 @@ pub async fn spell_0x80(state: &RefCell<State>, io: &Io) {
         }
     };
     let m = if done { Msg::Success } else { Msg::NoEffect };
-    say(state, io, FMT_NL_S_NL, m).await;
+    say(state, io, crate::string_registry::text!(FMT_NL_S_NL), m).await;
 }
 
 /// Original: 0x11a550 (magic: Armageddon: every actor slot 0..0xfe but the hero (1) and the
@@ -368,6 +386,6 @@ pub(super) async fn sweep(state: &RefCell<State>, io: &Io, caster: u16, rows: &[
         crate::objects::remove(&mut s, parts.1);
     }
     if !any {
-        print_at(state, io, MSG_NO_FOES, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NO_FOES), &[]).await;
     }
 }

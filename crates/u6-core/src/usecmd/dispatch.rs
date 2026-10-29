@@ -142,6 +142,9 @@ pub async fn use_command(state: &RefCell<State>, io: &Io) {
         return;
     };
     super::cases::dispatch_type(ux, obj, ty, frame).await;
+    if state.borrow().main.ending.is_some() {
+        return;
+    }
     ux.flush().await;
     let lead = leader(&ux.s());
     {
@@ -157,18 +160,27 @@ pub async fn use_command(state: &RefCell<State>, io: &Io) {
 async fn check(ux: Ux<'_>) -> Checked {
     let (sel, first_ty) = resolve(&mut ux.s());
     if sel == -1 {
-        ux.say(FMT_LINE, MSG_NOTHING).await;
+        ux.say(
+            crate::string_registry::text!(FMT_LINE),
+            crate::string_registry::pointer!(MSG_NOTHING),
+        )
+        .await;
         return Checked::Refused;
     }
     if first_ty == 0x1af {
-        ux.print(STR_HORSE, &[]).await;
+        ux.print(crate::string_registry::text!(STR_HORSE), &[])
+            .await;
     } else {
         ux.name(sel).await;
         ux.put(b'\n').await;
     }
     let ty = ux.s().objects.kind(sel);
     if !crate::objects::commands::in_type_list(&ux.s(), ty) {
-        ux.say(FMT_NL_LINE, MSG_NOT_USABLE).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_NOT_USABLE),
+        )
+        .await;
         return Checked::Refused;
     }
     let refused = {
@@ -176,19 +188,21 @@ async fn check(ux: Ux<'_>) -> Checked {
         aboard(&s) && refused_aboard(&s, ux.io, sel)
     };
     if refused {
-        ux.print(STR_NL, &[]).await;
-        ux.print_a4(STR_ABOARD).await;
+        ux.print(crate::string_registry::text!(STR_NL), &[]).await;
+        ux.print_a4(crate::string_registry::text!(STR_ABOARD)).await;
         return Checked::Refused;
     }
     if !in_reach(ux, sel).await {
         return Checked::Refused;
     }
     if not_now(&mut ux.s(), sel) {
-        ux.print(STR_NOT_NOW, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NOT_NOW), &[])
+            .await;
         return Checked::Refused;
     }
     if in_other_hand(&ux.s(), sel) {
-        ux.print(STR_IN_HAND, &[]).await;
+        ux.print(crate::string_registry::text!(STR_IN_HAND), &[])
+            .await;
         return Checked::Refused;
     }
     let frame = ux.s().objects.tf(sel) >> 10;
@@ -212,27 +226,41 @@ async fn in_reach(ux: Ux<'_>, sel: Slot) -> bool {
         out_of_reach(&s, sel)
     };
     if far {
-        ux.say(FMT_BANG, MSG_OUT_OF_RANGE).await;
+        ux.say(
+            crate::string_registry::text!(FMT_BANG),
+            crate::string_registry::pointer!(MSG_OUT_OF_RANGE),
+        )
+        .await;
     }
     !far
 }
 
 /// The not-usable message the type cases print when a condition fails.
 pub(super) async fn not_usable(ux: Ux<'_>) {
-    ux.say(FMT_NL_LINE, MSG_NOT_USABLE).await;
+    ux.say(
+        crate::string_registry::text!(FMT_NL_LINE),
+        crate::string_registry::pointer!(MSG_NOT_USABLE),
+    )
+    .await;
 }
 
 /// The no-effect message.
 pub(super) async fn no_effect(ux: Ux<'_>) {
-    ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
+    ux.say(
+        crate::string_registry::text!(FMT_NL_LINE),
+        crate::string_registry::pointer!(MSG_NO_EFFECT),
+    )
+    .await;
 }
 
 /// The solo-mode refusal 0x12cfc0 (the ladder case).
 pub(super) async fn not_solo(ux: Ux<'_>) {
-    ux.print(STR_NOT_SOLO, &[]).await;
+    ux.print(crate::string_registry::text!(STR_NOT_SOLO), &[])
+        .await;
 }
 
 /// The not-readied line 0x12cfd4 (shovels, wands).
 pub(super) async fn not_readied(ux: Ux<'_>) {
-    ux.print(STR_NOT_READIED, &[]).await;
+    ux.print(crate::string_registry::text!(STR_NOT_READIED), &[])
+        .await;
 }

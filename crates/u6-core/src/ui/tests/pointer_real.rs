@@ -103,7 +103,10 @@ impl Play {
     /// `game`, as 0x1041d8 reads it).
     fn command_name(&self, code: u32) -> String {
         let at = crate::image::A4.wrapping_sub(0x7c8e) + 4 * code;
-        let name = crate::main_loop::pointed_string(self.e.io(), at);
+        let name = crate::main_loop::pointed_string(
+            self.e.io(),
+            crate::string_registry::fixture((at) as i64, true),
+        );
         assert!(!name.is_empty(), "command {code:#x} has a name");
         String::from_utf8_lossy(&name).into_owned()
     }
@@ -579,27 +582,23 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
         "member 1 waits for words"
     );
     let (n, pixels) = press.buttons();
-    assert_eq!(n, 2, "the Job and Name buttons");
+    assert!(n >= 3, "End, Name, Job and discovered choices");
     println!("buttons {n}, drawn pixels {pixels}");
-    let first_row = press.button_row();
     press.frame("buttons");
     let button = |p: &Play, i: usize| {
         let s = p.e.state();
-        let b = &s.ui.talk.buttons[i];
-        let w = s.ui.text.window(WindowId::Status);
+        let b = s.ui.talk.buttons.iter().find(|b| b.id == i).quiet();
         let col = usize::from(b.col) + b.cells.len() / 2;
-        let row = usize::from(w.y) + usize::from(w.height) - 1;
+        let row = usize::from(b.row);
         (((col * CELL) + 4) as i16, ((row * CELL) + 4) as i16)
     };
-    // The next read after an answer: the words read again, the two buttons back, and, the
-    // pointer back where the read began (off the buttons: resting on one it shows it inverse,
-    // Contract 6), their row as at the first read.
+    // Each answer returns to a choice grid with a fixed exit and retained used state.
     let again = |press: &mut Play, typed: &mut Play, after: &str| {
         assert!(
             press.e.state().ui.input.line_input,
             "{after}: the words read again"
         );
-        assert_eq!(press.buttons().0, 2, "{after}: the buttons again");
+        assert!(press.buttons().0 >= 3, "{after}: the choices again");
         for p in [&mut *press, &mut *typed] {
             p.send(InputEvent::Pointer {
                 x: rest.0,
@@ -607,16 +606,35 @@ fn a_real_talk_answers_a_press_as_the_word_typed() {
                 buttons: 0,
             });
         }
+        let st = press.e.state();
+        let exit = st
+            .ui
+            .talk
+            .buttons
+            .iter()
+            .find(|b| b.id == talk::choices::EXIT)
+            .quiet();
+        assert_eq!((exit.row, exit.col), (9, 22), "{after}: exit remains fixed");
         assert!(
-            press.button_row() == first_row,
-            "{after}: their row as at the first read"
+            st.ui.choices.topics.iter().any(|t| t.used),
+            "{after}: clicked topic retained as used"
         );
     };
     let mut answers = 0;
     // Name, then Job after a letter typed: the press takes the letter back first.
     for (i, before) in [(1, 0), (0, 1)] {
         let xy = button(&press, i);
-        let word = press.e.state().ui.talk.buttons[i].word.clone();
+        let word = press
+            .e
+            .state()
+            .ui
+            .talk
+            .buttons
+            .iter()
+            .find(|b| b.id == i)
+            .quiet()
+            .word
+            .clone();
         for p in [&mut press, &mut typed] {
             for _ in 0..before {
                 p.send(InputEvent::Key(Key::Char('x')));
@@ -682,25 +700,11 @@ impl Play {
         let row = usize::from(w.y) + usize::from(w.height) - 1;
         let x0 = usize::from(w.x) * CELL;
         let fb = self.e.frame();
-        let drawn = (row * CELL..(row + 1) * CELL)
+        let drawn = ((row - 3) * CELL..(row + 1) * CELL)
             .flat_map(|y| (x0..x0 + usize::from(w.width) * CELL).map(move |x| (x, y)))
             .filter(|&(x, y)| fb.get(x, y) == Some(command))
             .count();
         (s.ui.talk.buttons.len(), drawn)
-    }
-
-    /// The buttons' row (the Status window's last) as the game drew it (no pointer sprite):
-    /// each pixel and its HD source.
-    fn button_row(&self) -> Vec<(Option<u8>, Option<u6_render::Src>)> {
-        let s = self.e.state();
-        let w = s.ui.text.window(WindowId::Status);
-        let row = usize::from(w.y) + usize::from(w.height) - 1;
-        let x0 = usize::from(w.x) * CELL;
-        let fb = self.e.published_frame();
-        (row * CELL..(row + 1) * CELL)
-            .flat_map(|y| (x0..x0 + usize::from(w.width) * CELL).map(move |x| (x, y)))
-            .map(|(x, y)| (fb.get(x, y), fb.src_at(x, y)))
-            .collect()
     }
 
     /// The pointer moved to `xy`, then a press and release there, or `back` Backspaces, `word`
@@ -729,10 +733,27 @@ impl Play {
         assert!(a.converse.input == b.converse.input, "the same words");
         assert!(a.ui.messages == b.ui.messages, "the same scroll");
         assert!(
-            self.e.frame().pixels() == typed.e.frame().pixels(),
-            "the same frame"
+            self.e
+                .frame()
+                .pixels()
+                .iter()
+                .zip(typed.e.frame().pixels())
+                .enumerate()
+                .all(|(i, (x, y))| {
+                    let (col, row) = (i % u6_render::WIDTH, i / u6_render::WIDTH);
+                    ((176..312).contains(&col) && (16..104).contains(&row)) || x == y
+                }),
+            "same frame outside the intentionally different used-choice panel"
         );
-        assert!(*a == *b, "the same state");
+        let (mut ac, mut bc) = (a.clone(), b.clone());
+        ac.ui.talk = talk::TalkClicks::default();
+        bc.ui.talk = talk::TalkClicks::default();
+        ac.ui.choices = talk::choices::Choices::default();
+        bc.ui.choices = talk::choices::Choices::default();
+        assert!(
+            ac == bc,
+            "same state except conversation-local used choices and targets"
+        );
     }
 
     /// Writes the frame to `$U6_TALK_FRAMES/<build>-<name>.png` when that is set.

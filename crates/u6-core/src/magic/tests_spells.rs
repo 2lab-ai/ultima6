@@ -120,8 +120,10 @@ fn dispatch_chosen(files: &Files, spell: u16, setup: Setup, after: &str) -> Engi
 /// The Cast line as the command loop prints it (so [`show`] finds the start).
 async fn cast_line(st: &RefCell<State>, io: &Io) {
     let at = crate::image::A4.wrapping_sub(0x7c8e) + 4 * 0x82;
-    let name = crate::main_loop::pointed_string(io, at);
-    let fmt = crate::main_loop::game_string(io, 0x0010_1f48);
+    let name =
+        crate::main_loop::pointed_string(io, crate::string_registry::fixture((at) as i64, true));
+    let fmt =
+        crate::main_loop::game_string(io, crate::string_registry::fixture(0x0010_1f48, false));
     crate::ui::printf::printf(st, io, &fmt, &[crate::ui::printf::Arg::Str(&name)]).await;
 }
 

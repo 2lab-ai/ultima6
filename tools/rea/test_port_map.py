@@ -155,6 +155,14 @@ class PortMapTests(unittest.TestCase):
         self.assertEqual(rows["u 0x200100"], "| u 0x200100 | 0 | `intro.rs:5 in seam` | stubbed |")
         self.assertIn("Totals: u functions 3: ported 1 (also named by a stub 1), stubbed 1, - 1.", text)
 
+    def test_end_markers_do_not_replace_game_or_intro_at_the_same_address(self):
+        with open(os.path.join(self.dir.name, "ending.rs"), "w", encoding="utf-8") as f:
+            f.write("/// Original: end 0x200000 (separate executable)\nfn scene() {}\n"
+                    "/// Original: end 0x200300 (separate executable)\nfn dissolve() {}\n"
+                    "//! Original: end 0x200100 (module documentation)\n")
+        self.assertEqual(port_map.scan(self.dir.name), self.marks)
+        self.assertEqual(port_map.scan_u(self.dir.name), self.u_marks)
+
     def test_stub_naming_no_address_is_listed(self):
         self.assertEqual(port_map.unnamed_stubs(self.dir.name), (["game.rs:32"], 9))
 

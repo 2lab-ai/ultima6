@@ -92,15 +92,27 @@ pub async fn detect(
         (no_target(&s), super::cast::caster(&s))
     };
     if missing {
-        say(state, io, super::effects::FMT_S_NL, Msg::Nothing).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(super::effects::FMT_S_NL),
+            Msg::Nothing,
+        )
+        .await;
     } else {
         let sel = state.borrow().ui.input.selection;
         print_name(state, io, sel).await;
-        print_at(state, io, NEWLINE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     }
     seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
     if no_target(&state.borrow()) {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     let far = {
@@ -114,12 +126,24 @@ pub async fn detect(
             || ty.wrapping_sub(at.y as i16).wrapping_abs() > range
     };
     if far && !matches!(spell, 1 | 2 | 0x16 | 0x18 | 0x24 | 0x17) {
-        say(state, io, FMT_NL_S_BANG, Msg::OutOfRange).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_BANG),
+            Msg::OutOfRange,
+        )
+        .await;
         return;
     }
     let sel = state.borrow().ui.input.selection;
     if (kind == 1 && sel > 0xff) || (kind == -1 && sel < 0x100) {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     let (sel, k) = {
@@ -203,8 +227,24 @@ async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
         }
     };
     match (found, charge) {
-        (_, Some(name)) => print_at(state, io, MSG_CHARGE, &[Arg::Str(&name)]).await,
-        (0, None) => print_at(state, io, MSG_NOT_MAGICAL, &[]).await,
+        (_, Some(name)) => {
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(MSG_CHARGE),
+                &[Arg::Str(&name)],
+            )
+            .await
+        }
+        (0, None) => {
+            print_at(
+                state,
+                io,
+                crate::string_registry::text!(MSG_NOT_MAGICAL),
+                &[],
+            )
+            .await
+        }
         _ => {
             let potion = {
                 let s = state.borrow();
@@ -219,8 +259,16 @@ async fn detect_magic(state: &RefCell<State>, io: &Io, sel: Slot) {
                 })
             };
             match potion {
-                Some(p) => print_at(state, io, MSG_POTION, &[Arg::Str(&p)]).await,
-                None => print_at(state, io, MSG_MAGICAL, &[]).await,
+                Some(p) => {
+                    print_at(
+                        state,
+                        io,
+                        crate::string_registry::text!(MSG_POTION),
+                        &[Arg::Str(&p)],
+                    )
+                    .await
+                }
+                None => print_at(state, io, crate::string_registry::text!(MSG_MAGICAL), &[]).await,
             }
         }
     }
@@ -249,10 +297,10 @@ async fn detect_trap(state: &RefCell<State>, io: &Io, caster: u16, sel: Slot) {
         }
     };
     for _ in 0..traps {
-        print_at(state, io, MSG_TRAPPED, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_TRAPPED), &[]).await;
     }
     if traps == 0 {
-        print_at(state, io, MSG_NO_TRAP, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NO_TRAP), &[]).await;
     }
     set_result(state, 0xff);
 }

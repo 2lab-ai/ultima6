@@ -455,7 +455,8 @@ fn scouts_warning(pack: bool, seed: u16) -> Option<Vec<u8>> {
     s.objects.obj_status[egg as usize] = 0; // not marked (0x20): its hostiles are warned of
     create_in(&mut s, 0x16b, 0x08, 0x0801, egg);
     hatch_egg(&mut s, egg);
-    let warning = super::text::a4_string(&s, WARNING);
+    let warning =
+        super::text::a4_string(&s, crate::string_registry::fixture((WARNING) as i64, false));
     s.main.pending_print.iter().find_map(|p| match p {
         Pending::Print(f, args) if *f == warning => match args.as_slice() {
             [PrintArg::Str(name)] => Some(name.clone()),

@@ -76,9 +76,8 @@ const WISHES: i32 = -0x65ce;
 /// 0x133d1e, the vanishing line (0x12cf66), a key, the end sequence 0x13513a. False otherwise
 /// (the caller prints the cube's refusal).
 ///
-/// Port: the ending is not ported, so the cube refuses before the Codex goes (03 §3: an
-/// unported step on a path that destroys something stops it first) and play goes on with the
-/// Codex in place.
+/// Port: missing or corrupt ending resources refuse before the Codex goes (03 §3). A valid
+/// ending sets exit code 2 after the final key; the launcher runs `end` and stops.
 pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
     let codex = {
         let mut s = ux.s();
@@ -108,13 +107,15 @@ pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
         }
         codex
     };
-    if !seams::ending_ported() {
+    if crate::ending::preflight(ux.io.files()).is_err() {
         return false;
     }
-    // Once the ending is ported: 0x133d1e after the removal, 0x13513a after the key.
     crate::objects::remove(&mut ux.s(), codex);
-    ux.print(STR_CODEX, &[]).await;
+    crate::ending::vanished(&mut ux.s(), ux.io);
+    ux.print(crate::string_registry::text!(STR_CODEX), &[])
+        .await;
     ux.key().await;
+    crate::ending::request(&mut ux.s());
     true
 }
 
@@ -127,16 +128,38 @@ pub async fn vortex_cube(ux: Ux<'_>, cube: Slot) -> bool {
 pub async fn wand(ux: Ux<'_>, obj: Slot) {
     let charge = crate::objects::first_child(&mut ux.s().objects, obj);
     if charge == -1 {
-        ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_NO_EFFECT),
+        )
+        .await;
         return;
     }
     let q = super::quality(&ux.s(), charge);
-    ux.print(STR_WITH, &[]).await;
-    let list = defs::a4_pointed_list(ux.io, defs::WAND_SPELLS, usize::from(q));
+    ux.print(crate::string_registry::text!(STR_WITH), &[]).await;
+    let list = defs::a4_pointed_list(
+        ux.io,
+        crate::string_registry::text_table!(defs::WAND_SPELLS),
+        usize::from(q),
+    );
     for (i, &spell) in list.iter().enumerate() {
-        let syllable = defs::a4_pointed(ux.io, defs::SPELL_NAMES, usize::from(spell));
+        let syllable = defs::a4_pointed(
+            ux.io,
+            crate::string_registry::text_table!(defs::SPELL_NAMES),
+            usize::from(spell),
+        );
         let fmt = if i == 0 { FMT_STR } else { FMT_SP_STR };
-        ux.print(fmt, &[Arg::Str(&syllable)]).await;
+        ux.print(
+            crate::string_registry::choose(
+                (fmt) as i64,
+                &[
+                    crate::string_registry::text!(0x0012c94a),
+                    crate::string_registry::text!(0x0012c94e),
+                ],
+            ),
+            &[Arg::Str(&syllable)],
+        )
+        .await;
     }
     {
         let mut s = ux.s();
@@ -235,17 +258,27 @@ pub async fn wish(ux: Ux<'_>) {
         let s = ux.s();
         crate::objects::party_member(&s, usize::from(s.actors.party.leader_index))
     };
-    ux.print(STR_WISH, &[]).await;
+    ux.print(crate::string_registry::text!(STR_WISH), &[]).await;
     if ux.key().await != 0x59 {
-        ux.print(STR_NL, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NL), &[]).await;
     } else {
-        ux.print(STR_WISH_FOR, &[]).await;
+        ux.print(crate::string_registry::text!(STR_WISH_FOR), &[])
+            .await;
         let line = seams::read_line(ux.state, ux.io, 0x12).await;
-        let hit = (0..0x14).any(|i| matches(&defs::a4_pointed(ux.io, WISHES, i), &line));
+        let hit = (0..0x14).any(|i| {
+            matches(
+                &defs::a4_pointed(ux.io, crate::string_registry::text_table!(WISHES), i),
+                &line,
+            )
+        });
         if !hit {
-            ux.say(FMT_S, MSG_NO_EFFECT).await;
+            ux.say(
+                crate::string_registry::text!(FMT_S),
+                crate::string_registry::pointer!(MSG_NO_EFFECT),
+            )
+            .await;
         } else if ux.s().rng.range(0, 4) == 0 {
-            ux.print(STR_FOOD, &[]).await;
+            ux.print(crate::string_registry::text!(STR_FOOD), &[]).await;
             let heavy = {
                 let mut s = ux.s();
                 let w = seams::carried_weight(&mut s, Slot::from(m));
@@ -253,13 +286,18 @@ pub async fn wish(ux: Ux<'_>) {
                 w.wrapping_add(2) > st.wrapping_mul(0x14)
             };
             if heavy {
-                ux.print(STR_CANT_CARRY, &[]).await;
+                ux.print(crate::string_registry::text!(STR_CANT_CARRY), &[])
+                    .await;
             } else {
                 crate::objects::add_to_owner(&mut ux.s(), Slot::from(m), 0x81, 1);
-                ux.print(STR_BANG, &[]).await;
+                ux.print(crate::string_registry::text!(STR_BANG), &[]).await;
             }
         } else {
-            ux.say(FMT_S, MSG_FAILED).await;
+            ux.say(
+                crate::string_registry::text!(FMT_S),
+                crate::string_registry::pointer!(MSG_FAILED),
+            )
+            .await;
         }
     }
     let mut s = ux.s();
@@ -284,13 +322,23 @@ fn matches(word: &[u8], line: &[u8]) -> bool {
 /// 0x115b7c, else the no-effect message.
 pub async fn mantra(ux: Ux<'_>, shrine: Slot) {
     let virtue = ux.s().objects.kind(shrine).wrapping_sub(0xf2);
-    ux.print(STR_MANTRA, &[]).await;
+    ux.print(crate::string_registry::text!(STR_MANTRA), &[])
+        .await;
     let line = seams::read_line(ux.state, ux.io, 4).await;
     ux.put(b'\n').await;
-    let found =
-        (0..8u16).find(|&i| matches(&defs::a4_pointed(ux.io, MANTRAS, usize::from(i)), &line));
+    let found = (0..8u16).find(|&i| {
+        matches(
+            &defs::a4_pointed(
+                ux.io,
+                crate::string_registry::text_table!(MANTRAS),
+                usize::from(i),
+            ),
+            &line,
+        )
+    });
     if found != Some(virtue) {
-        ux.print(STR_WRONG_MANTRA, &[]).await;
+        ux.print(crate::string_registry::text!(STR_WRONG_MANTRA), &[])
+            .await;
         return;
     }
     let freed = {
@@ -323,9 +371,17 @@ pub async fn mantra(ux: Ux<'_>, shrine: Slot) {
     };
     if freed {
         seams::shrine_flash(ux.state, ux.io).await;
-        ux.say(FMT_NL_LINE, MSG_DONE).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_DONE),
+        )
+        .await;
     } else {
-        ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_NO_EFFECT),
+        )
+        .await;
     }
 }
 
@@ -406,22 +462,26 @@ pub async fn fish(ux: Ux<'_>) {
                     w.wrapping_add(5) > st.wrapping_mul(0x14)
                 };
                 if heavy {
-                    ux.print(STR_CANT_CARRY_FISH, &[]).await;
+                    ux.print(crate::string_registry::text!(STR_CANT_CARRY_FISH), &[])
+                        .await;
                 } else {
-                    ux.print(STR_GOT_IT, &[]).await;
+                    ux.print(crate::string_registry::text!(STR_GOT_IT), &[])
+                        .await;
                     let mut s = ux.s();
                     crate::objects::create_in(&mut s, 0x109, 0x10, 1, Slot::from(m));
                     s.actors.objlist_tail[HOURLY_B] = 1;
                 }
             } else {
-                ux.print(STR_NO_FISH, &[]).await;
+                ux.print(crate::string_registry::text!(STR_NO_FISH), &[])
+                    .await;
             }
             water = true;
             break 'out;
         }
     }
     if !water {
-        ux.print(STR_NEED_WATER, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NEED_WATER), &[])
+            .await;
     }
     let mut s = ux.s();
     if s.ui.panel.mode == 0x92 {
@@ -518,5 +578,16 @@ pub async fn serpents(ux: Ux<'_>) {
             }
         }
     };
-    ux.print(line, &[]).await;
+    ux.print(
+        crate::string_registry::choose(
+            (line) as i64,
+            &[
+                crate::string_registry::text!(0x0012cee2),
+                crate::string_registry::text!(0x0012ceee),
+                crate::string_registry::text!(0x0012cf00),
+            ],
+        ),
+        &[],
+    )
+    .await;
 }

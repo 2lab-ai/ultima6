@@ -1,23 +1,20 @@
 //! Main-hunk helpers and the command loop on synthetic states, and the boot on the user's
 //! files (skipped when the archive is absent; reads it, copies nothing).
 
-use std::path::Path;
-
 use super::*;
 use crate::files::Files;
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// Image address of the prompt format the command loop prints (the leader's name, a newline).
 const FMT_PROMPT: u32 = 0x0010_1f3c;
 
 #[allow(clippy::disallowed_methods)] // tests may read files
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -42,7 +39,10 @@ fn boot_reaches_the_prompt_without_stub_points() {
     let s = e.state();
     assert!(s.ui.text.current == crate::ui::WindowId::Messages);
     // The prompt's first line: the leader's name through the format, both from the user's files.
-    let fmt = game_string(e.io(), FMT_PROMPT);
+    let fmt = game_string(
+        e.io(),
+        crate::string_registry::fixture((FMT_PROMPT) as i64, false),
+    );
     let first = fmt.split(|&b| b == b'\n').next().unwrap_or_default();
     let name = String::from_utf8_lossy(&leader_name(&s)).into_owned();
     let prompt = String::from_utf8_lossy(first).replace("%s", &name);

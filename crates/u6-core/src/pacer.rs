@@ -131,6 +131,19 @@ impl Pacer {
         }
     }
 
+    /// Port-only (spec 20): the engine milliseconds the wall clock is ahead of the steps run, at
+    /// most one step ([`STEP_MS`]; 0 at [`Speed::Max`]): what a clock that moves between the steps
+    /// adds to the engine's (smooth motion's presentation clock).
+    pub fn carried_ms(&self) -> f64 {
+        self.acc.min(f64::from(STEP_MS))
+    }
+
+    /// The engine milliseconds per wall millisecond the last frame [`Pacer::due`] added was paced
+    /// at: 1 while a button was held, else the speed; `None` at [`Speed::Max`].
+    pub fn pace_rate(&self) -> Option<f64> {
+        self.rate()
+    }
+
     /// Sets the speed; a change of speed or mode forgets what was owed. An invalid speed (a
     /// finite one that is not above 0, NaN or infinite) is ignored.
     pub fn set_speed(&mut self, speed: Speed) {

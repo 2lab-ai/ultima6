@@ -15,7 +15,7 @@
 #![allow(clippy::disallowed_methods)] // reads the owner's zip
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::path::Path;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -23,8 +23,6 @@ use u6_core::geom::{VIEW_H, VIEW_W};
 use u6_core::{Engine, Files, State};
 use u6_intake::{InputFile, intake};
 use u6_testkit::Quiet;
-
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 
 struct Counting;
 
@@ -69,16 +67,16 @@ fn serial() -> MutexGuard<'static, ()> {
 }
 
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
+    if !u6_testkit::archive().exists() {
         assert_ne!(
             std::env::var("U6_REQUIRE_ARCHIVE").as_deref(),
             Ok("1"),
             "sight_memory_peak: U6_REQUIRE_ARCHIVE=1 and the archive is missing"
         );
-        println!("sight_memory_peak: skipped ({ZIP} not present)");
+        println!("sight_memory_peak: skipped (the archive (U6_ARCHIVE) not present)");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -246,14 +244,23 @@ fn the_remembered_sight_peaks_once_as_its_table_grows() {
 /// the surface, keys 0, 1, .. (x the key's bits 10 on, y its low 10), seen at `minute`, record 1,
 /// every eighth layer drawn from a copy.
 fn sight_file(copies: usize, cells: usize, minute: u32) -> Vec<u8> {
+    file_of(copies, minute, (0..cells as u32).map(|k| (k, 1)))
+}
+
+/// [`sight_file`]'s copies and minute, then a cell for each (key, layer count) of `cells` (the
+/// keys increasing), its layers all of record 1, cell n's first drawn from a copy when n is a
+/// multiple of 8 (slot n / 8, round the copies), the others from none.
+fn file_of(copies: usize, minute: u32, cells: impl Iterator<Item = (u32, u16)> + Clone) -> Vec<u8> {
     const NO_BYTES: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut f = Vec::with_capacity(44 + 290 * copies + 16 * cells);
+    let (count, layers) =
+        (cells.clone()).fold((0, 0), |(n, l), (_, c)| (n + 1, l + usize::from(c)));
+    let mut f = Vec::with_capacity(44 + 290 * copies + 10 * count + 6 * layers);
     f.extend_from_slice(b"u6sight\0");
     f.extend_from_slice(&1u32.to_le_bytes());
     f.extend_from_slice(&0u32.to_le_bytes());
     f.extend_from_slice(&NO_BYTES.to_le_bytes());
     f.extend_from_slice(&u64::MAX.to_le_bytes());
-    for n in [copies, cells, cells] {
+    for n in [copies, count, layers] {
         f.extend_from_slice(&(n as u32).to_le_bytes());
     }
     for i in 0..copies {
@@ -263,19 +270,28 @@ fn sight_file(copies: usize, cells: usize, minute: u32) -> Vec<u8> {
         f.extend_from_slice(&pixels);
         f.extend_from_slice(&[0u8; 32]);
     }
-    for k in 0..cells as u32 {
+    for (n, (k, count)) in cells.enumerate() {
         f.extend_from_slice(&k.to_le_bytes());
         f.extend_from_slice(&minute.to_le_bytes());
-        f.extend_from_slice(&1u16.to_le_bytes());
-        f.extend_from_slice(&1u16.to_le_bytes());
-        f.extend_from_slice(&[0, 0]);
-        let slot = match k % 8 {
-            0 => (k as usize / 8 % copies) as u16,
-            _ => u16::MAX,
-        };
-        f.extend_from_slice(&slot.to_le_bytes());
+        f.extend_from_slice(&count.to_le_bytes());
+        for l in 0..count {
+            f.extend_from_slice(&1u16.to_le_bytes());
+            f.extend_from_slice(&[0, 0]);
+            let slot = match (l, n % 8) {
+                (0, 0) => (n / 8 % copies) as u16,
+                _ => u16::MAX,
+            };
+            f.extend_from_slice(&slot.to_le_bytes());
+        }
     }
     f
+}
+
+/// The u32 at byte `at` of sight file `file` (its header's counts: the copies at 32, the cells at
+/// 36, the layers at 40).
+fn header(file: &[u8], at: usize) -> usize {
+    let n: [u8; 4] = file.get(at..at + 4).and_then(|b| b.try_into().ok()).quiet();
+    u32::from_le_bytes(n) as usize
 }
 
 /// The game clock of `s` in minutes, as the remembered sight keeps it (spec 18: 60 minutes, 24
@@ -308,7 +324,11 @@ fn measure(s: &mut State, run: impl FnOnce(&mut State)) -> (usize, isize) {
 ///   peaks at the larger of the two memories, not at both.
 ///
 /// Each within 64 KiB of that (the Save's and the Restore's own work: the objlist, the region, 26
-/// KB with nothing remembered).
+/// KB with nothing remembered). Before the Restore the memory is made another of the same size
+/// (every cell a minute older), and after it the memory is the saved one again, cell for cell,
+/// layer for layer and copy for copy (written again, it is the saved file's bytes): so the
+/// Restore read the file, all of it, and did not keep the memory it found. Both outside the
+/// measures.
 #[test]
 fn a_save_and_a_restore_of_a_full_memory_hold_one_memory_and_one_file() {
     let _one = serial();
@@ -335,11 +355,29 @@ fn a_save_and_a_restore_of_a_full_memory_hold_one_memory_and_one_file() {
     let size = saved(&s);
     let (second, second_held) = measure(&mut s, u6_core::saveload::save);
     assert_eq!(saved(&s), size, "the same file again");
+    let objlist = s.saveload.objlist.clone().quiet();
+    let file = s.saveload.sight.clone().quiet();
+    let older = sight_file(copies, cells, minute(&s) - 1);
+    s.gfx
+        .cache
+        .set_sight(u6_core::gfx::cache::read_sight(&older, &[]).quiet());
+    drop(older);
+    assert!(
+        s.gfx
+            .cache
+            .sight_file(&objlist)
+            .is_some_and(|m| m != file.bytes()),
+        "before the Restore: another memory of the same size"
+    );
     let (restore, restore_held) = measure(&mut s, |s| u6_core::saveload::restore(s, io).quiet());
     assert_eq!(
         s.gfx.cache.sight_cells(),
         cells,
         "the Restore reads it back"
+    );
+    assert!(
+        s.gfx.cache.sight_file(&objlist).as_deref() == Some(file.bytes()),
+        "the Restore reads back the saved memory: its cells, their layers and records, its copies"
     );
     let keys = 4 * cells;
     println!(
@@ -360,5 +398,92 @@ fn a_save_and_a_restore_of_a_full_memory_hold_one_memory_and_one_file() {
     assert!(
         restore <= slack,
         "a Restore: the old memory let go before the new one is read"
+    );
+}
+
+/// Spec 18 (saved with the game, Bounds, past [`u6_core::gfx::cache::MAX_SAVED_LAYERS`]: never in
+/// play): a memory of more layers than a file holds and `MAX_COPIES` copies, on the owner's game
+/// state, saved. Its cells: a third of `MAX_SAVED_LAYERS` of three layers each and one for the
+/// rest, so their layers are exactly that limit, on the dungeon levels (keys above every surface
+/// key), read from a file; then one framed render of the party's view puts the cells in sight on
+/// top, past the limit, of the same minute (the clock stands still). The Save writes the newest
+/// sights that fit (of one minute, the highest keys): the file's cells come first and fill the
+/// limit exactly, and the first of the render's (a layer or more) does not fit, so the file holds
+/// every cell read from the file and none of the render's (its cells the cells read, its layers
+/// the limit). Outside the measure, the file the Save wrote is decoded against the Save's objlist
+/// and compared with the fixture's from the counts on: its copies, and its cells' keys, minutes,
+/// layer counts and layers. To choose the cells the Save sorts them by sight: besides the keys (4
+/// bytes a cell) it collects a tuple of 16 bytes a cell in a vector grown by doubling from 4, and
+/// lets it go before it makes the file; at the vector's last growth the old block and the new
+/// live together, 3 × 16 bytes × the largest power of two under the cells. Its peak over the heap
+/// before it: at most the keys, the larger of the file and those tuples, and 64 KiB.
+#[test]
+fn a_save_past_the_files_layers_holds_the_keys_and_the_sort_or_the_file() {
+    let _one = serial();
+    let Some(files) = files() else { return };
+    println!("sight_memory_peak: ran");
+    let mut s = State::new_game(&files).quiet();
+    u6_core::main_loop::load_state_tail(&mut s);
+    let e = Engine::with_game(State::empty(), files, |_, _| async {});
+    let io = e.io();
+    io.set_sight_memory(true);
+    let most = u6_core::gfx::cache::MAX_SAVED_LAYERS;
+    let copies = u6_core::gfx::cache::MAX_COPIES;
+    let stacks = most / 3;
+    // Cell n of the dungeon levels from level 1 on, 256 × 256 cells a level.
+    let below = |n: usize| ((1 + n / 0x1_0000) << 20 | (n >> 8 & 0xff) << 10 | n & 0xff) as u32;
+    let layers = |n: usize| {
+        if n < stacks {
+            3
+        } else {
+            (most - 3 * stacks) as u16
+        }
+    };
+    let now = minute(&s);
+    let fixture = || file_of(copies, now, (0..=stacks).map(|n| (below(n), layers(n))));
+    let file = fixture();
+    s.gfx
+        .cache
+        .set_sight(u6_core::gfx::cache::read_sight(&file, &[]).quiet());
+    drop(file);
+    let read = s.gfx.cache.sight_cells();
+    u6_core::gfx::render_window(&mut s, io, true);
+    let cells = s.gfx.cache.sight_cells();
+    assert!(
+        read == stacks + 1 && cells > read,
+        "the render's cells on top of the file's"
+    );
+    let (save, held) = measure(&mut s, u6_core::saveload::save);
+    let saved = s.saveload.sight.clone().quiet();
+    let size = saved.bytes().len();
+    let (kept, written) = (header(saved.bytes(), 36), header(saved.bytes(), 40));
+    assert!(
+        kept == read && written == most,
+        "past the file's layers: the cells read from the file, all of them, none of the render's"
+    );
+    let expected = fixture();
+    u6_testkit::assert_same!(
+        saved.bytes()[32..],
+        expected[32..],
+        "the file from its counts on: the fixture's copies and cells"
+    );
+    drop(expected);
+    let objlist = s.saveload.objlist.clone().quiet();
+    let back = u6_core::gfx::cache::read_sight(saved.bytes(), &objlist);
+    assert!(back.is_ok(), "the file decodes against the Save's objlist");
+    s.gfx.cache.set_sight(back.quiet());
+    assert!(s.gfx.cache.sight_cells() == read, "into the cells read");
+    let keys = 4 * cells;
+    let tuples = (3 * std::mem::size_of::<(u32, u32, usize)>()) << (cells - 1).ilog2();
+    println!(
+        "past the file's layers: a memory of {cells} cells and {copies} copies, a file of {size} \
+         bytes of {kept} cells and {written} layers, the keys {keys}, the sort's tuples at their \
+         last growth {tuples}; the Save peaks {save} bytes over the heap before it ({held} held \
+         after)"
+    );
+    assert!(
+        save <= keys + size.max(tuples) + (64 << 10),
+        "a Save past the file's layers: the keys, the larger of the file and the tuples at their \
+         last growth, and 64 KiB"
     );
 }

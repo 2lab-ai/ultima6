@@ -8,7 +8,8 @@ import { deflateSync } from 'node:zlib';
 import { extname, join, normalize, dirname } from 'node:path';
 import { chromium } from 'playwright';
 
-export const ORACLE_HOME = process.env.U6_ORACLE_HOME || '/Users/zhugehyuk/Games/ultima6/oracle';
+import { ORACLE_HOME } from '../data-paths.mjs';
+export { ORACLE_HOME };
 export const VAW_DIR = process.env.U6_VAW_DIR || join(ORACLE_HOME, 'vamigaweb');
 export const SHOTS_DIR = process.env.U6_SHOTS_DIR || join(ORACLE_HOME, 'shots');
 

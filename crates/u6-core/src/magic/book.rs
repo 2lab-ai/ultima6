@@ -9,7 +9,6 @@ use u6_formats::bitmap::Bitmap;
 use super::seams;
 use super::{MagicState, SPELL};
 use crate::engine::Io;
-use crate::image::A4;
 use crate::main_loop::pointed_string;
 use crate::objects::{Objects, Slot};
 use crate::state::State;
@@ -170,8 +169,8 @@ pub fn carried_count(o: &Objects, actor: Slot, kind: u16, quality: u8) -> i16 {
 }
 
 /// The A4 string pointer at `off` (a file name of the data hunk).
-fn a4_pointed(io: &Io, off: u32) -> String {
-    String::from_utf8_lossy(&pointed_string(io, A4.wrapping_sub(off))).into_owned()
+fn a4_pointed(io: &Io, off: crate::string_registry::Text) -> String {
+    String::from_utf8_lossy(&pointed_string(io, off)).into_owned()
 }
 
 /// Original: 0x116028 (magic: clear the side panel to the paper colour and draw the book
@@ -215,10 +214,15 @@ pub(crate) fn book_bitmap(io: &Io) -> Option<Bitmap> {
 
 /// The name of the file [`book_bitmap`] reads (named at A4-0x61de).
 pub(crate) fn book_file(io: &Io) -> String {
-    a4_pointed(io, BOOK_BMP)
+    a4_pointed(io, crate::string_registry::pointer!(BOOK_BMP))
 }
 
-async fn print_at(state: &RefCell<State>, io: &Io, addr: u32, args: &[Arg<'_>]) {
+async fn print_at(
+    state: &RefCell<State>,
+    io: &Io,
+    addr: crate::string_registry::Text,
+    args: &[Arg<'_>],
+) {
     let fmt = crate::main_loop::game_string(io, addr);
     printf(state, io, &fmt, args).await;
 }
@@ -265,7 +269,13 @@ pub async fn reagent_count(state: &RefCell<State>, io: &Io, actor: Slot, spell: 
         }
         count
     };
-    print_at(state, io, FMT_D, &[Arg::Word(count as u16)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_D),
+        &[Arg::Word(count as u16)],
+    )
+    .await;
 }
 
 /// The page lines 0x116218 lays out: per line the spell and whether it is the current one.
@@ -355,7 +365,13 @@ pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
             let s = state.borrow();
             crate::locale::shown(&s, s.magic.tables.name(usize::from(spell)).to_vec())
         };
-        print_at(state, io, FMT_S, &[Arg::Str(&name)]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(FMT_S),
+            &[Arg::Str(&name)],
+        )
+        .await;
         set_cursor(state, io, 14, row).await;
         reagent_count(state, io, caster, spell, i as i16).await;
         if spell == state.borrow().magic.current_spell() {
@@ -385,9 +401,15 @@ pub async fn draw_book_page(state: &RefCell<State>, io: &Io) {
             .unwrap_or_default();
         crate::locale::shown(&s, english)
     };
-    print_at(state, io, FMT_S, &[Arg::Str(&name)]).await;
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_S),
+        &[Arg::Str(&name)],
+    )
+    .await;
     set_cursor(state, io, 10, 11).await;
-    print_at(state, io, MSG_LEVEL, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_LEVEL), &[]).await;
     select_window(state, io, WindowId::Messages).await;
 }
 

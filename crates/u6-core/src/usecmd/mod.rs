@@ -67,7 +67,6 @@ pub(crate) const PRINTED: [&[u32]; 5] = [
 pub(crate) use mech::{drawbridge, lever};
 
 use crate::engine::Io;
-use crate::image::A4;
 use crate::main_loop::{flush_prints, game_string, pointed_string};
 use crate::objects::Slot;
 use crate::state::State;
@@ -91,21 +90,21 @@ impl<'a> Ux<'a> {
     }
 
     /// printf 0x108658 of the string at image address `fmt`.
-    pub async fn print(&self, fmt: u32, args: &[Arg<'_>]) {
+    pub async fn print(&self, fmt: crate::string_registry::Text, args: &[Arg<'_>]) {
         let text = game_string(self.io, fmt);
         printf(self.state, self.io, &text, args).await;
     }
 
     /// printf 0x108658 of the string at A4 - `off` (a data-hunk string).
-    pub async fn print_a4(&self, off: u32) {
-        self.print(A4.wrapping_sub(off), &[]).await;
+    pub async fn print_a4(&self, off: crate::string_registry::Text) {
+        self.print(off, &[]).await;
     }
 
     /// printf of the format at `fmt` with the message the pointer at A4 - `ptr` names (the
     /// shared Use messages: not usable, no effect, ...). Port (spec 08, slice K2): the message is
     /// read for display, so the locale pack's label of it is shown ([`crate::locale::shown`]).
-    pub async fn say(&self, fmt: u32, ptr: u32) {
-        let msg = pointed_string(self.io, A4.wrapping_sub(ptr));
+    pub async fn say(&self, fmt: crate::string_registry::Text, ptr: crate::string_registry::Text) {
+        let msg = pointed_string(self.io, ptr);
         let msg = crate::locale::shown(&self.state.borrow(), msg);
         self.print(fmt, &[Arg::Str(&msg)]).await;
     }

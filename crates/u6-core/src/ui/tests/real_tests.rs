@@ -12,14 +12,12 @@ use u6_intake::{InputFile, intake};
 use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 pub(super) fn files() -> Option<Files> {
-    if !std::path::Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,

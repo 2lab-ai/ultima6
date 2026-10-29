@@ -34,13 +34,19 @@ pub(super) async fn location(state: &RefCell<State>, io: &Io, pre: i16) -> bool 
         (c, s.actors.attrs.status[usize::from(c)] & 0x80 != 0)
     };
     if member {
-        say(state, io, FMT_S, Msg::Location).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_S),
+            Msg::Location,
+        )
+        .await;
     }
     if pre == 0 {
         state.borrow_mut().ui.input.target_pending = 1;
         crate::ui::wait::read_key(state, io).await;
     }
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
     let (x, y) = state.borrow().ui.input.target;
     x != -1 && y != -1
@@ -93,11 +99,23 @@ pub async fn reappear(state: &RefCell<State>, io: &Io, pre: i16) {
     let at = location(state, io, pre).await;
     let tf = state.borrow().actors.tail_word(VANISHED);
     if !at || tf == 0 {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     if !missile_to_target(state, io, 0x17f).await {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
         return;
     }
     let placed = {
@@ -111,10 +129,22 @@ pub async fn reappear(state: &RefCell<State>, io: &Io, pre: i16) {
         lay(&mut s, io, new, x as u16, y as u16)
     };
     if placed {
-        say(state, io, FMT_NL_S_NL, Msg::Success).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Success,
+        )
+        .await;
         state.borrow_mut().actors.set_tail_word(VANISHED, 0);
     } else {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
     }
 }
 
@@ -138,11 +168,23 @@ pub async fn area(
     pre: i16,
 ) {
     if !location(state, io, pre).await {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     if !missile_to_target(state, io, missile).await {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
         return;
     }
     let (caster, (x, y)) = {
@@ -159,7 +201,13 @@ pub async fn area(
         crate::objects::blast_doors(&mut state.borrow_mut(), x as u16, y as u16);
     }
     if state.borrow().magic.result != 0xff {
-        say(state, io, FMT_NL_S_NL, Msg::Success).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Success,
+        )
+        .await;
     }
 }
 
@@ -213,11 +261,23 @@ async fn on_actor(state: &RefCell<State>, io: &Io, spell: u16, caster: u16, a: u
 /// (0x1189f6); the port lays nothing and reports `Msg::NotPossible`.
 pub async fn field(state: &RefCell<State>, io: &Io, spell: u16, missile: u16, pre: i16) {
     if !location(state, io, pre).await {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     if !missile_to_target(state, io, missile).await {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
         return;
     }
     let kind = match spell {
@@ -239,7 +299,7 @@ pub async fn field(state: &RefCell<State>, io: &Io, spell: u16, missile: u16, pr
     } else {
         Msg::NotPossible
     };
-    say(state, io, FMT_NL_S_NL, m).await;
+    say(state, io, crate::string_registry::text!(FMT_NL_S_NL), m).await;
 }
 
 /// The location of object `o` as words.
@@ -276,7 +336,13 @@ pub fn web_flight(s: &mut State, io: &Io, actor: u16, x: i16, y: i16) -> i16 {
 /// -1) leaves its cell empty (the original passes the -1 on to 0x11b1c0, 0x119818).
 pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
     if !location(state, io, pre).await {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     let reached = {
@@ -286,7 +352,13 @@ pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
         web_flight(&mut s, io, caster, x, y)
     };
     if reached == 0 {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
         return;
     }
     {
@@ -308,20 +380,38 @@ pub async fn web(state: &RefCell<State>, io: &Io, pre: i16) {
         }
         crate::map::view::update_view(&mut s);
     }
-    say(state, io, FMT_NL_S_NL, Msg::Success).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Success,
+    )
+    .await;
 }
 
 /// Original: 0x119e8c (magic: Hail Storm: the location prompt; none: `Msg::NoEffect`; else the
 /// storm 0x133562 there and `Msg::Success`)
 pub async fn hail_storm(state: &RefCell<State>, io: &Io, pre: i16) {
     if !location(state, io, pre).await {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     let (x, y) = state.borrow().ui.input.target;
     hail(&mut state.borrow_mut(), io, x, y);
     crate::combat::play_effects(state, io).await;
-    say(state, io, FMT_NL_S_NL, Msg::Success).await;
+    say(
+        state,
+        io,
+        crate::string_registry::text!(FMT_NL_S_NL),
+        Msg::Success,
+    )
+    .await;
 }
 
 /// One hail stone of 0x133562: where it lands and where it is (pixels of the map).
@@ -460,7 +550,13 @@ pub async fn wind(state: &RefCell<State>, io: &Io, spell: u16, tile: u16, pre: i
         (c, s.ui.input.target, xy(&s, c))
     };
     if !at || target == own {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     let hit = wind_flight(

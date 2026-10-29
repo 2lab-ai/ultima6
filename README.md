@@ -1,9 +1,10 @@
 # ultima6 — Ultima VI (Amiga) reverse-engineered and ported to Rust
 
 Play: **https://ultima6.2lab.ai** — bring your own copy of the game. The page asks for the
-archive.org `ultima-vi.zip` (Amiga flux dump), the three ADFs, or the extracted files; they are
+user-owned `ultima-vi.zip` (Amiga flux dump), the three ADFs, or the extracted files; they are
 decoded in your browser, kept in its IndexedDB for the next visit, and never uploaded
-(`connect-src 'self'`, no third-party requests). This site hosts no game data.
+(`connect-src 'self'`, no third-party requests). Original disks and executables are not hosted;
+optional derivative packs are described below and in `.prd/01-spec.md`.
 
 Ultima VI is © Origin Systems / Electronic Arts. This project is not affiliated with or endorsed
 by EA. See `.prd/01-spec.md` "Rights boundary" for what this repository does and does not contain.
@@ -22,6 +23,27 @@ Fidelity checks against the original running in an Amiga emulator (vAmigaWeb + A
 panel on 100%; timing is taken from traces of the original — a fight turn in the start scene
 takes 301 PAL frames against the original's 277, a quiet step in the castle 31 against 33.
 Open items are in `.prd/browser-port/loop.md`.
+
+### Development branch (unreleased, 2026-10-29)
+
+The current local branch adds saved grey sight memory, turn playback choices, the ending
+program, and the following controls. These changes have not been deployed to the link above.
+
+- Conversations start with Exit, Name and Job in a three-column choice panel. Discovered
+  keywords are added; arrows page through them. Used choices turn grey and follow unused
+  choices, remain clickable, and reset with each conversation. Yes/no prompts offer clickable
+  answers only while the game is waiting for that response.
+- Hold Ctrl over the world to preview and click its primary action: Use a door, Talk to a
+  person, Go here on reachable ground, or Attack an actual hostile target. The existing
+  right-click menu remains available, and actions use the normal game rules.
+- The ending uses the player's original `end`, `end.new` and `u6.set` files. Missing or invalid
+  ending resources leave the triggering game item and normal play intact.
+
+Held-walk continuity follows each mover's actual recent step intervals and starts each new
+track at its current drawn position. English and Korean movement/state regressions pass in
+both layouts. Final browser and native-window verification, the owner's pace judgement,
+and remote integration remain pending; the issue-by-issue record is in
+`.prd/objects-menu-fog-motion/loop.md`.
 
 ## How it was built
 
@@ -47,6 +69,8 @@ bash scripts/build-web.sh && node tools/web/test-web.mjs
 tools/speech/fetch-models.sh                        # the voice model into site/models/ (gitignored), before a deploy
 scripts/deploy-web.sh main                          # Cloudflare Pages project ultima6
 ```
+
+Turn playback has its own `Turns` choice beside Speed: Original (default), Quick (2×), Fast (4×), or Instant. It changes drawing waits and held-pointer walking only; the game rules, music and opening keep their timing. Space or Escape during a world turn skips the rest of its playback. The native runner accepts `--turns original|quick|fast|instant`.
 
 ## Packs from your own copy
 
@@ -91,3 +115,31 @@ site's listing) as the site does, under `/packs/`.
 | `tools/i18n` | `translate.mjs` (spec 08, slices K1 to K4): run by the owner on the NPC bundles the page downloads, for one script (`--item a:N`, or `--name <NPC name>`) or the first N (its lines and its table strings), and on the page's Game strings download (`--strings ultima6-strings.json`: the game's own messages, the names Look gives things, the books and signs, and the opening, story, gypsy, character creation and transfer lines of `u`; `--only strings,look,books,u` picks the parts); it sends them through his llmux (gpt-6-astra by default) after a preview and a typed `yes`, checks each answer with the mechanical gates and merges them into `~/Games/ultima6/i18n/ko/ko.u6lp` (what an earlier run put stays; dropped on the page, used in 한글) beside a count-only coverage receipt; `style-ko.md` is the 사극체 register guide it sends. `speakers.mjs` (spec 12) makes the local speaker file that `translate.mjs --speakers` reads (each script's age and class, from the NPC bundles and the voice notes), kept in `~/Games/ultima6/i18n/speakers/`, never in git |
 | `tools/speech` | `fetch-models.sh` (spec 09 V2): the pinned Supertonic-3 revision and onnxruntime-web 1.30.0, checked against their sha256 pins and hosted in parts of at most 24 MiB under `site/models/` with their licences and notices; `--check` checks them as hosted |
 | `site/` | the static page; `site/voice/` its on-device voices (spec 09 V3: the worker, the player, the model's terms) |
+
+## Local verification inputs
+
+Real-data tests read the owner's files locally. `U6_DATA_ROOT` selects their directory;
+by default it is `~/Games/ultima6`. `U6_ARCHIVE` selects an archive directly (default
+`$U6_DATA_ROOT/original/ultima-vi.zip`). Rust tests and the web/oracle tools share this
+layout. Optional overrides are `U6_ORIGINAL_DIR` (web HFE directory), `U6_DATA_DIR`
+(unpacked files), `U6_GAME_BIN` (local flattened executable), and `U6_ORACLE_HOME`.
+Set `U6_REQUIRE_ARCHIVE=1` for a real-data gate: missing archive, disks or unpacked inputs
+then fail instead of silently passing a skipped test. Comparisons requiring local flattened
+images or oracle references also require those inputs. Leave it unset for content-free CI.
+The optional tile contact-sheet export uses `U6_SHEET_DIR`; keep it outside git.
+
+Optional Korean date-preview and held-walk receipts use `U6_LOCALE=/absolute/path/to/ko.u6lp`.
+An explicitly selected missing file fails; without this variable, an available local default
+is used and a missing default is reported as skipped, including under `U6_REQUIRE_ARCHIVE=1`.
+An English real-data gate needs no locale pack or model service. Existing popup/dialogue
+receipts use the separate `U6_KO_PACK` override; set both variables to the same owned pack
+when checking all Korean paths. Neither variable uploads or generates a pack.
+
+Held-walk presentation uses each mover's last two raw step intervals, buffering their maximum
+to cover ordinary short/long turn alternation. The old interval expires after one shorter leg;
+taps retain their base timing and authoritative movement is unchanged. See spec 20 for actual
+world-position, state-equality, resource and live-play acceptance checks.
+
+Portable live checks are in `tools/web/live/`. They require an explicit site URL and a
+private screenshot output outside every git worktree. They never upload the local game
+archive or print its content. See [live-check instructions](tools/web/live/README.md).

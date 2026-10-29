@@ -82,15 +82,19 @@ fn frame(s: &State, slot: Slot) -> u16 {
     s.objects.tf(slot) >> 10
 }
 
-fn line(s: &mut State, addr: u32) {
+fn line(s: &mut State, addr: crate::string_registry::Text) {
     queue_at(s, addr, Vec::new());
 }
 
 /// `printf("%s\n", A4-0x6c64)`: the no-effect message (shown as the locale pack has it,
 /// [`super::get::message`]).
 fn no_effect(s: &mut State) {
-    let msg = super::get::message(s, P_NO_EFFECT);
-    queue_at(s, S_LINE, vec![PrintArg::Str(msg)]);
+    let msg = super::get::message(s, crate::string_registry::pointer!(P_NO_EFFECT));
+    queue_at(
+        s,
+        crate::string_registry::text!(S_LINE),
+        vec![PrintArg::Str(msg)],
+    );
 }
 
 fn leader_z(s: &State) -> u16 {
@@ -112,40 +116,40 @@ pub fn door(s: &mut State, door: Slot, key: bool, lock: bool, unlock: bool) {
     if !door_locked(f) {
         if f < 4 {
             if !key && !lock && !unlock {
-                line(s, S_CLOSED);
+                line(s, crate::string_registry::text!(S_CLOSED));
                 set_frame(s, door, f ^ 4);
             } else {
-                line(s, S_OPEN_DOOR_LOCK);
+                line(s, crate::string_registry::text!(S_OPEN_DOOR_LOCK));
             }
         } else if key {
-            line(s, S_LOCKED);
+            line(s, crate::string_registry::text!(S_LOCKED));
             set_frame(s, door, f ^ 0xc);
         } else if lock {
-            line(s, S_MAGIC_LOCKED);
+            line(s, crate::string_registry::text!(S_MAGIC_LOCKED));
             set_frame(s, door, f ^ 8);
         } else {
             if find_child(&mut s.objects, door, TRAP as i16, TRAP_QUALITY) != -1 {
                 spring_trap(s, door);
             } else {
-                line(s, S_OPENED);
+                line(s, crate::string_registry::text!(S_OPENED));
             }
             set_frame(s, door, f ^ 4);
         }
     } else if f < 12 {
         if key {
-            line(s, S_UNLOCKED);
+            line(s, crate::string_registry::text!(S_UNLOCKED));
             set_frame(s, door, f ^ 0xc);
         } else if lock {
-            line(s, S_MAGIC_LOCKED);
+            line(s, crate::string_registry::text!(S_MAGIC_LOCKED));
             set_frame(s, door, f ^ 4);
         } else {
-            line(s, S_LOCKED_PLAIN);
+            line(s, crate::string_registry::text!(S_LOCKED_PLAIN));
         }
     } else if unlock {
-        line(s, S_UNLOCKED);
+        line(s, crate::string_registry::text!(S_UNLOCKED));
         set_frame(s, door, f ^ 8);
     } else {
-        line(s, S_MAGIC_LOCKED);
+        line(s, crate::string_registry::text!(S_MAGIC_LOCKED));
     }
 }
 
@@ -194,7 +198,7 @@ pub fn chest(s: &mut State, chest: Slot, key: bool, lock: bool, unlock: bool) {
         if key || lock || unlock {
             no_effect(s);
         } else {
-            line(s, S_CLOSED);
+            line(s, crate::string_registry::text!(S_CLOSED));
             set_frame(s, chest, 1);
         }
     } else if !chest_locked(f) {
@@ -202,32 +206,32 @@ pub fn chest(s: &mut State, chest: Slot, key: bool, lock: bool, unlock: bool) {
             if find_child(&mut s.objects, chest, TRAP as i16, TRAP_QUALITY) != -1 {
                 spring_trap(s, chest);
             } else {
-                line(s, S_OPENED);
+                line(s, crate::string_registry::text!(S_OPENED));
             }
             set_frame(s, chest, 0);
             let (x, y) = (s.objects.x(chest), s.objects.y(chest));
             search(s, chest, x, y);
         } else if key {
-            line(s, S_LOCKED);
+            line(s, crate::string_registry::text!(S_LOCKED));
             set_frame(s, chest, 2);
         } else if lock {
-            line(s, S_MAGIC_LOCKED);
+            line(s, crate::string_registry::text!(S_MAGIC_LOCKED));
             set_frame(s, chest, 3);
         } else {
             no_effect(s);
         }
     } else if f == 2 {
         if key {
-            line(s, S_UNLOCKED);
+            line(s, crate::string_registry::text!(S_UNLOCKED));
             set_frame(s, chest, 1);
         } else if lock {
-            line(s, S_MAGIC_LOCKED);
+            line(s, crate::string_registry::text!(S_MAGIC_LOCKED));
             set_frame(s, chest, 3);
         } else {
             no_effect(s);
         }
     } else if unlock {
-        line(s, S_UNLOCKED);
+        line(s, crate::string_registry::text!(S_UNLOCKED));
         set_frame(s, chest, 1);
     } else {
         no_effect(s);
@@ -307,11 +311,11 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
     {
         return;
     }
-    line(s, S_SEARCHING);
+    line(s, crate::string_registry::text!(S_SEARCHING));
     let mut obj = obj;
     if kind == SECRET_DOOR {
         if f & 1 == 0 {
-            line(s, S_SECRET_DOOR);
+            line(s, crate::string_registry::text!(S_SECRET_DOOR));
             set_frame(s, obj, f ^ 1);
             refresh(s);
             found = true;
@@ -345,9 +349,9 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
                     d = next_child(&mut s.objects);
                 }
                 if found && d >= 0 {
-                    line(s, S_COMMA);
+                    line(s, crate::string_registry::text!(S_COMMA));
                 } else if found && d == -1 {
-                    line(s, S_AND);
+                    line(s, crate::string_registry::text!(S_AND));
                 }
                 name_prefix(s, c);
                 let name = crate::objects::shown_name(s, c).into_bytes();
@@ -357,7 +361,16 @@ pub fn search(s: &mut State, obj: Slot, x: u16, y: u16) {
             }
         }
     }
-    line(s, if found { S_DOT } else { S_NOTHING_DOT });
+    line(
+        s,
+        crate::string_registry::choose(
+            (if found { S_DOT } else { S_NOTHING_DOT }) as i64,
+            &[
+                crate::string_registry::text!(0x00128436),
+                crate::string_registry::text!(0x00128440),
+            ],
+        ),
+    );
 }
 
 /// Whether the search moves content `c` out: not a spell or trap (0x129544 passes over those,
@@ -395,7 +408,17 @@ fn article_of(s: &mut State, tile: u16) {
         0xc0 => S_THE,
         _ => return,
     };
-    line(s, at);
+    line(
+        s,
+        crate::string_registry::choose(
+            (at) as i64,
+            &[
+                crate::string_registry::text!(S_A),
+                crate::string_registry::text!(S_AN),
+                crate::string_registry::text!(S_THE),
+            ],
+        ),
+    );
 }
 
 /// Original: 0x129382 (objects: print the count or article in front of `slot`'s name; returns
@@ -420,7 +443,11 @@ pub fn name_prefix(s: &mut State, slot: Slot) -> u16 {
             return 1;
         }
     };
-    queue_at(s, S_COUNT, vec![PrintArg::Word(n)]);
+    queue_at(
+        s,
+        crate::string_registry::text!(S_COUNT),
+        vec![PrintArg::Word(n)],
+    );
     n
 }
 
@@ -447,19 +474,19 @@ pub fn spring_trap(s: &mut State, obj: Slot) {
     let victim = Slot::from(victim);
     match s.rng.range(0, 3) {
         0 => {
-            line(s, S_ACID);
+            line(s, crate::string_registry::text!(S_ACID));
             let n = s.rng.range(1, 20);
             seams::hurt(s, victim, n as i16);
             queue(s, b"\n".to_vec(), Vec::new());
             seams::wound_text(s, victim);
         }
         1 => {
-            line(s, S_POISON);
+            line(s, crate::string_registry::text!(S_POISON));
             s.actors.attrs.status[victim as usize] |= 0x08;
             seams::flash(s, victim);
         }
         2 => {
-            line(s, S_BOMB);
+            line(s, crate::string_registry::text!(S_BOMB));
             for a in seams::blast(s, bx, by, 0x17e) {
                 if a < ACTOR_SLOTS as Slot {
                     let n = s.rng.range(1, 20);
@@ -470,7 +497,7 @@ pub fn spring_trap(s: &mut State, obj: Slot) {
             }
         }
         3 => {
-            line(s, S_GAS);
+            line(s, crate::string_registry::text!(S_GAS));
             for a in seams::blast(s, bx, by, 0x17c) {
                 if a < ACTOR_SLOTS as Slot {
                     s.actors.attrs.status[a as usize] |= 0x08;
@@ -525,7 +552,7 @@ pub fn blast_doors(s: &mut State, x: u16, y: u16) {
             if d >= 0 && frame(s, d) & 0xc != 0xc {
                 remove(s, d);
                 refresh(s);
-                line(s, S_DOOR_BLOWN);
+                line(s, crate::string_registry::text!(S_DOOR_BLOWN));
             }
             cy = cy.wrapping_add(1);
         }

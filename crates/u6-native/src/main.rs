@@ -16,6 +16,9 @@
 //! `--wav PATH` writes the audio of the run (each tick's length at 44.1 kHz, 16-bit stereo) and
 //! prints its RMS and peak.
 //!
+//! `--turns original|quick|fast|instant` changes turn playback waits only (default original).
+//! During a world turn, Space or Escape skips its remaining drawing waits.
+//!
 //! `--save-dir DIR` keeps the game's saves in `DIR/savegame/` (the original's PLAYER-disk
 //! layout; an original `savegame/` directory copied there loads as it is): the boot reads the
 //! saved state from there, and every Save the game makes is written there after its tick.
@@ -26,6 +29,10 @@
 //! frame's budget lasts (`pace`). `=` or numpad `+` is faster, `-` or numpad `-` slower,
 //! through 1×, 1.5×, 2×, 3×, 4×, 6×, 8× and Max (as many steps as the budget holds); the title
 //! shows a speed other than 1×. A mouse button held paces at 1×, so a click walks as at 1×.
+//! The window presents smooth map motion between those steps using the page's shared presenter;
+//! the game state and its published frames stay on the fixed step. Held keys, held-pointer walks
+//! and Go Here supply continuous party cadence. Go Here shares the held key's 150 ms minimum
+//! wall-clock step interval, including at Max and with Instant turn playback.
 //!
 //! Headless mode never opens a window or reads a clock: it runs N ticks of `HEADLESS_TICK_MS`
 //! (the same fixed step), delivering the `--keys` one per tick while the game has no input
@@ -61,6 +68,7 @@ use u6_intake::{InputFile, intake};
 
 mod audio;
 mod pace;
+mod presentation;
 mod saves;
 use audio::{Audio, Output, WAV_RATE};
 use saves::DirStore;
@@ -79,6 +87,7 @@ struct Args {
     save_dir: Option<PathBuf>,
     wav: Option<PathBuf>,
     game_first: bool,
+    turns: u6_core::turn_speed::TurnSpeed,
     /// `--png-every N:prefix`: also write the frame every N ticks to `prefix-<tick>.png`.
     png_every: Option<(u32, PathBuf)>,
 }
@@ -207,6 +216,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--save-dir" => parsed.save_dir = Some(value("a directory")?.into()),
             "--wav" => parsed.wav = Some(value("a path")?.into()),
             "--game-first" => parsed.game_first = true,
+            "--turns" => {
+                parsed.turns = match value("original, quick, fast or instant")?.as_str() {
+                    "original" => u6_core::turn_speed::TurnSpeed::Original,
+                    "quick" => u6_core::turn_speed::TurnSpeed::Quick,
+                    "fast" => u6_core::turn_speed::TurnSpeed::Fast,
+                    "instant" => u6_core::turn_speed::TurnSpeed::Instant,
+                    _ => return Err("--turns must be original, quick, fast or instant".into()),
+                };
+            }
             "--png-every" => {
                 let v = value("N:prefix")?;
                 let (n, prefix) = v.split_once(':').ok_or(format!("bad --png-every {v:?}"))?;
@@ -370,6 +388,22 @@ fn write_png(path: &Path, rgba: &[u8]) -> Result<(), String> {
     writer.finish().map_err(|e| e.to_string())
 }
 
+/// End owns the original 320 × 200 scene, also in Wide: fit it to the window height and
+/// centre it on black margins. No stale map or panel pixels are displayed alongside it.
+fn upscale_ending(rgba: &[u8], out: &mut [u32]) {
+    let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
+    let shown_w = h * 320 / 200;
+    let left = (w - shown_w) / 2;
+    out.fill(0);
+    for y in 0..h {
+        for x in 0..shown_w {
+            let source = ((y * 200 / h) * WIDTH + x * 320 / shown_w) * 4;
+            let p = &rgba[source..source + 4];
+            out[y * w + left + x] = u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]);
+        }
+    }
+}
+
 /// Nearest-neighbour SCALE x upscale of an RGBA8 frame into minifb's 0RGB pixels.
 fn upscale(rgba: &[u8], out: &mut [u32]) {
     let out_w = WIDTH * SCALE;
@@ -510,7 +544,7 @@ impl HeldKeys {
 
 /// One frame's keys from the window ([`window_keys`]): each press routed to the game, as the
 /// window key, the game key and whether minifb's own repeat sent it; the keys let go; whether
-/// a modifier is down ([`modifier_down`]) and the window is active (minifb's `is_active`); the
+/// a modifier is down ([`modifier_down`]) and the window is active ([`window_active`]); the
 /// time of the poll that read them.
 struct WindowFrame<'a> {
     presses: &'a [(minifb::Key, Key, bool)],
@@ -531,6 +565,9 @@ fn window_keys(
     was_active: &mut bool,
 ) {
     for &(key, k, repeat) in frame.presses {
+        if !frame.active {
+            continue;
+        }
         if repeat && frame.modifier && k.is_direction() {
             continue;
         }
@@ -560,14 +597,52 @@ fn modifier_down(is_down: impl Fn(minifb::Key) -> bool) -> bool {
     .any(is_down)
 }
 
-/// Spec 19 O1b: whether the window lost the focus since the frame before (`was`, then kept as
-/// `active` for the next): an edge, not the state. minifb 0.29's macOS `is_active` reads true
-/// until the window first becomes or resigns main and false ever after (spec 19's native
-/// limitation), so releasing on the state would let go of every key held every frame there.
+/// The OS window's keyboard focus. minifb 0.29's macOS main-window observer records the
+/// same value on become and resign, and its getter inverts it. Read NSWindow's actual key
+/// status there; other backends keep minifb's normal getter. Called only on the window thread.
+fn window_active(window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: minifb's macOS get_window_handle returns the live OSXWindow (an NSWindow),
+        // borrowed for this call; isKeyWindow takes no arguments and returns Objective-C BOOL.
+        let native = unsafe {
+            window
+                .get_window_handle()
+                .cast::<objc2::runtime::AnyObject>()
+                .as_ref()
+        };
+        native.is_some_and(|native| unsafe { objc2::msg_send![native, isKeyWindow] })
+    }
+    #[cfg(not(target_os = "macos"))]
+    window.is_active()
+}
+
+/// Spec 19 O1b: release keys once on each loss of the window's actual keyboard focus.
 fn focus_lost(was: &mut bool, active: bool) -> bool {
     let lost = *was && !active;
     *was = active;
     lost
+}
+
+/// Ctrl-only representative action state at the window boundary.
+#[derive(Default)]
+struct ControlKey {
+    blocked: bool,
+}
+
+impl ControlKey {
+    fn sample(&mut self, active: bool, ctrl: bool, other_modifier: bool) -> bool {
+        if !active {
+            self.blocked = true;
+            return false;
+        }
+        // minifb may never see a key-up outside its window. Returning with that stale bit
+        // cannot restore a hover/click action: observe Ctrl released before a new press.
+        if !ctrl {
+            self.blocked = false;
+        }
+        !self.blocked && ctrl && !other_modifier
+    }
 }
 
 /// What a window key does.
@@ -620,9 +695,21 @@ impl Walk<'_> {
 /// several steps adds at most one); the store writes what a Save in the step committed, and the
 /// sound machine replays the step's calls (after every step: the call log holds one step's).
 /// False once the game ended.
+#[cfg(test)]
 fn window_step(
     engine: &mut Engine,
     pending: &mut Vec<InputEvent>,
+    walk: &mut Walk<'_>,
+    saves: Option<&mut Saves>,
+    audio: Option<&mut Audio>,
+) -> Result<bool, String> {
+    window_step_controls(engine, pending, &mut Vec::new(), walk, saves, audio)
+}
+
+fn window_step_controls(
+    engine: &mut Engine,
+    pending: &mut Vec<InputEvent>,
+    controls: &mut Vec<(usize, bool)>,
     walk: &mut Walk<'_>,
     saves: Option<&mut Saves>,
     audio: Option<&mut Audio>,
@@ -631,7 +718,14 @@ fn window_step(
         pending.push(press);
     }
     let takes = engine.prompt_takes();
-    engine.tick(pending, STEP_MS);
+    // Spec 21 S3: Go Here shares the held walk's wall-clock cadence. Stops still reach the
+    // engine every tick; only its next travel-generated press waits for the interval.
+    engine.set_travel_due(walk.keys.last_step.is_none_or(|last| {
+        walk.now.saturating_duration_since(last).as_millis()
+            >= u128::from(u6_core::engine::MIN_STEP_MS)
+    }));
+    engine.tick_controls(pending, &[], controls, STEP_MS);
+    controls.clear();
     if engine.prompt_takes() != takes {
         walk.keys.last_step = Some(walk.now);
     }
@@ -667,6 +761,7 @@ fn sample_mouse(
 }
 
 fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String> {
+    engine.set_context_menu(true);
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
     let mut sound = match Output::open() {
         Ok(out) => Audio::or_silent(&engine, out.rate).map(|audio| (audio, out)),
@@ -676,26 +771,57 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         }
     };
     let mut pacer = Pacer::new();
-    let mut window = Window::new(&pace::title(pacer.speed()), w, h, WindowOptions::default())
-        .map_err(|e| e.to_string())?;
+    let mut window = Window::new(
+        &format!(
+            "{} — Turns: {}",
+            pace::title(pacer.speed()),
+            engine.io().turn_speed().name()
+        ),
+        w,
+        h,
+        WindowOptions::default(),
+    )
+    .map_err(|e| e.to_string())?;
     window.set_target_fps(60);
-    let mut rgba = Vec::new();
     let mut screen = vec![0u32; w * h];
-    // The engine frame `screen` shows (`Engine::frame_version`; none yet: the window opens black).
-    let mut shown = None;
-    let mut last = Instant::now();
+    let mut presentation = presentation::Presentation::new(&mut engine);
+    let started = Instant::now();
+    let mut last = started;
     let mut mouse = None;
     let mut pending: Vec<InputEvent> = Vec::new();
     let mut keys = HeldKeys::default();
-    let mut active = window.is_active();
+    let mut active = window_active(&window);
+    let mut control = false;
+    let mut control_key = ControlKey::default();
+    let mut controls = Vec::new();
     while window.is_open() {
+        let focused = window_active(&window);
         let ctrl =
             window.is_key_down(minifb::Key::LeftCtrl) || window.is_key_down(minifb::Key::RightCtrl);
-        let modifier = modifier_down(|k| window.is_key_down(k));
+        let modifier = !focused || modifier_down(|k| window.is_key_down(k));
+        let quick = control_key.sample(
+            focused,
+            ctrl,
+            [
+                minifb::Key::LeftAlt,
+                minifb::Key::RightAlt,
+                minifb::Key::LeftSuper,
+                minifb::Key::RightSuper,
+            ]
+            .into_iter()
+            .any(|k| window.is_key_down(k)),
+        );
+        if quick != control {
+            controls.push((pending.len(), quick));
+            control = quick;
+        }
         let pressed_at = Instant::now();
         let mut speed = pacer.speed();
         let mut presses = Vec::new();
         for key in window.get_keys_pressed(KeyRepeat::Yes) {
+            if !focused {
+                continue;
+            }
             // Spec 19 O1b: a press minifb's own repeat sent (the key held past its delay) goes
             // as a repeat, which the key's release takes back.
             let repeat = !window.is_key_pressed(key, KeyRepeat::No);
@@ -711,13 +837,17 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
             presses: &presses,
             releases: &releases,
             modifier,
-            active: window.is_active(),
+            active: focused,
             at: pressed_at,
         };
         window_keys(&mut keys, &mut pending, &frame, &mut active);
         if speed != pacer.speed() {
             pacer.set_speed(speed);
-            window.set_title(&pace::title(speed));
+            window.set_title(&format!(
+                "{} — Turns: {}",
+                pace::title(speed),
+                engine.io().turn_speed().name()
+            ));
             if let Some((_, out)) = sound.as_mut() {
                 out.set_speed(speed);
             }
@@ -725,8 +855,8 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         // The mouse, once per frame when it changed.
         let now = sample_mouse(
             window.get_mouse_pos(MouseMode::Clamp),
-            window.get_mouse_down(MouseButton::Left),
-            window.get_mouse_down(MouseButton::Right),
+            focused && window.get_mouse_down(MouseButton::Left),
+            focused && window.get_mouse_down(MouseButton::Right),
             mouse,
         );
         if now != mouse {
@@ -739,6 +869,8 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         // pending or taken).
         let held = mouse.is_some_and(|(_, _, buttons)| buttons != 0);
         let frame_at = Instant::now();
+        // Menu gestures and travel use real elapsed time even at 8x/Max engine speed.
+        engine.set_wall_clock(frame_at.duration_since(started).as_millis() as u64);
         // Spec 19 O1c: the held walk at the frame's time, paused while a modifier is down.
         let mut walk = Walk {
             keys: &mut keys,
@@ -747,32 +879,32 @@ fn run_window(mut engine: Engine, mut saves: Option<Saves>) -> Result<(), String
         };
         let wall_dt_ms = frame_at.duration_since(last).as_secs_f64() * 1000.0;
         last = frame_at;
-        let steps = pace::run_frame(
+        presentation.frame(wall_dt_ms);
+        presentation.observe(&engine, walk.keys, modifier, pacer.carried_ms());
+        pace::run_frame(
             &mut pacer,
             wall_dt_ms,
             held,
             || frame_at.elapsed().as_secs_f64() * 1000.0,
             || {
-                window_step(
+                let going = window_step_controls(
                     &mut engine,
                     &mut pending,
+                    &mut controls,
                     &mut walk,
                     saves.as_mut(),
                     sound.as_mut().map(|(audio, _)| audio),
-                )
+                )?;
+                presentation.observe(&engine, walk.keys, modifier, 0.0);
+                Ok::<_, String>(going)
             },
         )?;
         if let Some((audio, out)) = sound.as_mut() {
             out.top_up(audio);
         }
         print_log(&mut engine);
-        // A frame whose steps composed no new picture, or that ran none, shows the picture it
-        // had (spec 06 O1).
-        if steps > 0 && shown != Some(engine.frame_version()) {
-            engine.frame().write_rgba(&mut rgba);
-            upscale(&rgba, &mut screen);
-            shown = Some(engine.frame_version());
-        }
+        presentation.observe(&engine, walk.keys, modifier, pacer.carried_ms());
+        presentation.draw(&mut engine, &pacer, &mut screen);
         window
             .update_with_buffer(&screen, w, h)
             .map_err(|e| e.to_string())?;
@@ -803,6 +935,7 @@ fn run(args: Args) -> Result<(), String> {
     match &args.headless_png {
         Some(path) => {
             let mut engine = boot(zip, args.seed.unwrap_or(0), saves.as_ref(), args.game_first)?;
+            engine.io().set_turn_speed(args.turns);
             if std::env::var_os("U6_WINDOW_CACHE").is_some_and(|v| v == "off") {
                 engine.io().set_window_cache(false);
             }
@@ -861,6 +994,7 @@ fn run(args: Args) -> Result<(), String> {
         None => {
             let seed = args.seed.unwrap_or_else(clock_seed);
             let engine = boot(zip, seed, saves.as_ref(), args.game_first)?;
+            engine.io().set_turn_speed(args.turns);
             run_window(engine, saves)
         }
     }
@@ -883,6 +1017,22 @@ mod tests {
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args(list.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn turn_speed_argument_is_explicit_and_defaults_to_original() {
+        use u6_core::turn_speed::TurnSpeed;
+        assert_eq!(args(&[]).unwrap().turns, TurnSpeed::Original);
+        for (name, speed) in [
+            ("original", TurnSpeed::Original),
+            ("quick", TurnSpeed::Quick),
+            ("fast", TurnSpeed::Fast),
+            ("instant", TurnSpeed::Instant),
+        ] {
+            assert_eq!(args(&["--turns", name]).unwrap().turns, speed);
+        }
+        assert!(args(&["--turns", "unknown"]).is_err());
+        assert!(args(&["--turns"]).is_err());
     }
 
     /// Spec 19 O1b: Ctrl-S held into its repeats, Ctrl let go first (S's next repeat routes as
@@ -1019,10 +1169,8 @@ mod tests {
         );
     }
 
-    /// Spec 19 O1b: the window releases its held keys when it loses the focus, once: on minifb's
-    /// macOS states (true at first, false from the first main-window change on, whatever the
-    /// focus) once at that change and never again; on a platform whose state follows the focus
-    /// at each loss.
+    /// Spec 19 O1b: the window releases its held keys once at each actual focus loss,
+    /// never repeatedly while inactive, and never on gaining the focus.
     #[test]
     fn the_keys_are_released_once_at_each_loss_of_focus() {
         let lost = |states: &[bool]| -> Vec<usize> {
@@ -1034,7 +1182,7 @@ mod tests {
         assert_eq!(
             lost(&[true, true, false, false, false, false]),
             [2],
-            "macOS"
+            "one loss, then inactive"
         );
         assert_eq!(lost(&[true, false, false, true, true, false]), [1, 5]);
         assert_eq!(
@@ -1042,6 +1190,55 @@ mod tests {
             [] as [usize; 0],
             "never had it"
         );
+    }
+
+    #[test]
+    fn control_cannot_resume_from_stale_key_state_after_blur() {
+        let mut control = ControlKey::default();
+        assert!(control.sample(true, true, false));
+        assert!(!control.sample(false, true, false));
+        assert!(
+            !control.sample(true, true, false),
+            "key-up may have happened outside the window"
+        );
+        assert!(
+            !control.sample(true, false, false),
+            "observe release before rearming"
+        );
+        assert!(
+            control.sample(true, true, false),
+            "fresh press works after focus returns"
+        );
+        assert!(
+            !control.sample(true, true, true),
+            "Alt/Super never enable representative actions"
+        );
+        assert!(
+            control.sample(true, true, false),
+            "releasing Alt restores Ctrl-only"
+        );
+    }
+
+    #[test]
+    fn inactive_window_repeats_cannot_rearm_a_held_walk() {
+        use minifb::Key as K;
+        let mut keys = HeldKeys::default();
+        let t = Instant::now();
+        keys.press(K::Left, Key::Left, false, false, t);
+        let mut was = true;
+        let mut pending = Vec::new();
+        for i in 0..3 {
+            let frame = WindowFrame {
+                presses: &[(K::Left, Key::Left, true)],
+                releases: &[],
+                modifier: false,
+                active: false,
+                at: t,
+            };
+            window_keys(&mut keys, &mut pending, &frame, &mut was);
+            assert!(keys.keys.is_empty(), "inactive frame {i}");
+        }
+        assert_eq!(pending, vec![InputEvent::Release(Key::Left)]);
     }
 
     #[test]
@@ -1488,11 +1685,10 @@ mod tests {
     /// prompt ([`prompt_reader`], 20 ms frames at 1×): the left arrow pressed at frame 0 walks
     /// (frames 0, 8, 16); the window loses the focus at frame 20: the arrow's release is queued
     /// and no paced press follows; it regains the focus at 40 with the arrow pressed again
-    /// (40, 48), and loses it again at 50: released again, nothing after. On minifb's macOS
-    /// states (spec 19's native limitation: false from the first main-window change on) the
-    /// second loss is not seen, so the arrow walks on until its release reaches the window.
+    /// (40, 48), and loses it again at 50: released again, nothing after. When the window
+    /// stays inactive, a stale press reported at frame 40 cannot restart the held walk.
     #[test]
-    fn a_held_walk_ends_at_each_loss_of_focus_that_is_seen() {
+    fn a_held_walk_ends_at_each_loss_of_focus_and_stays_stopped_while_inactive() {
         use minifb::Key as K;
         use std::cell::Cell;
         use std::rc::Rc;
@@ -1538,14 +1734,10 @@ mod tests {
         let (reads, releases) = run(&follows);
         assert_eq!(reads, [0, 8, 16, 40, 48], "no paced press after a loss");
         assert_eq!(releases, [20, 50], "the release at each loss");
-        let macos = |f: u64| f < 20;
-        let (reads, releases) = run(&macos);
-        assert_eq!(releases, [20], "macOS: only the first change is seen");
-        assert_eq!(
-            reads,
-            [0, 8, 16, 40, 48, 56, 64, 72],
-            "macOS: the second loss unseen, the walk goes on"
-        );
+        let stays_inactive = |f: u64| f < 20;
+        let (reads, releases) = run(&stays_inactive);
+        assert_eq!(releases, [20], "one release while continuously inactive");
+        assert_eq!(reads, [0, 8, 16], "inactive presses cannot restart walking");
     }
 
     /// A frame's input goes to its first step only, and a frame that runs no step keeps it
@@ -1638,6 +1830,27 @@ mod tests {
             sample_mouse(Some((0.0, 0.0)), false, false, release),
             Some((0, 0, 0))
         );
+    }
+
+    #[test]
+    fn ending_display_fits_the_original_scene_and_clears_wide_margins() {
+        let mut rgba = vec![0; WIDTH * HEIGHT * 4];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let i = (y * WIDTH + x) * 4;
+                rgba[i] = if x < 320 && y < 200 { 23 } else { 255 };
+            }
+        }
+        let mut out = vec![0xffffffff; WIDTH * HEIGHT * SCALE * SCALE];
+        upscale_ending(&rgba, &mut out);
+        let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
+        let shown = h * 320 / 200;
+        let left = (w - shown) / 2;
+        for row in out.chunks(w) {
+            assert!(row[..left].iter().all(|&p| p == 0));
+            assert!(row[left..left + shown].iter().all(|&p| p == 23 << 16));
+            assert!(row[left + shown..].iter().all(|&p| p == 0));
+        }
     }
 
     #[test]

@@ -37,14 +37,14 @@ use crate::converse::Msg;
 use crate::engine::{Engine, Io};
 use crate::state::State;
 
-/// Port-only (spec 07 HD0): the HD frame of an engine's published frame, on or off, at 2× or
-/// 4×. On, [`HdView::present`] composes it when the screen frame ([`Engine::screen_version`]:
-/// the published frame, spec 23's history view and spec 17's menu over it, and the view's stamp)
-/// or the setting changed since the frame it holds; off, it does nothing (the pack included:
-/// nothing of it runs). Spec 11 Design 7: the published frame is the screen without the pointer
-/// sprite ([`Engine::published_frame`]), so the HD frame and its glyph list are the screen as the
-/// game drew it, and a move of the sprite alone composes nothing; the platform draws the sprite
-/// over the HD frame ([`Engine::sprite`]). Spec 17 Presentation and spec 23 Decision 12: the
+/// Port-only (spec 07 HD0): the HD frame of an engine's published frame, on or off, at 2× or 4×.
+/// On, [`HdView::present`] composes it when the screen frame ([`Engine::screen_version`]: the
+/// published frame, spec 23's history view and spec 17's menu over it, each change of either a new
+/// version) or the setting changed since the frame it holds; off, it does nothing (the pack
+/// included: nothing of it runs). Spec 11 Design 7: the published frame is the screen without the
+/// pointer sprite ([`Engine::published_frame`]), so the HD frame and its glyph list are the screen
+/// as the game drew it, and a move of the sprite alone composes nothing; the platform draws the
+/// sprite over the HD frame ([`Engine::sprite`]). Spec 17 Presentation and spec 23 Decision 12: the
 /// frame composed is the screen frame ([`Engine::screen_frame`]), the published frame with the
 /// message history the player scrolled back to over it and the context menu over that, the one
 /// composition the shown frame is made from too.
@@ -55,10 +55,10 @@ pub struct HdView {
     version: u64,
     compositor: Compositor,
     images: ImageCache,
-    /// What the frame holds: the screen frame's version and the message history's view stamp
-    /// ([`Engine::screen_version`], [`Engine::view_version`]; `None` for the black frame before a
-    /// start) and `version`; `None` before the first composition and after a start.
-    holds: Option<(Option<(u64, u64)>, u64)>,
+    /// What the frame holds: the screen frame's version ([`Engine::screen_version`]; `None` for
+    /// the black frame before a start) and `version`; `None` before the first composition and
+    /// after a start.
+    holds: Option<(Option<u64>, u64)>,
 }
 
 impl Default for HdView {
@@ -94,6 +94,12 @@ impl HdView {
 
     pub fn on(&self) -> bool {
         self.on
+    }
+
+    /// Moves at every change of the switch, the scale, the pack or the font mode: what the
+    /// images of one composition are made under.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Spec 07 H2: the pack whose images go in front of MMPX (`None`: none). The setting moves,
@@ -157,10 +163,7 @@ impl HdView {
         if !self.on {
             return false;
         }
-        let key = (
-            engine.map(|e| (e.screen_version(), e.view_version().1)),
-            self.version,
-        );
+        let key = (engine.map(Engine::screen_version), self.version);
         if self.holds == Some(key) {
             return false;
         }
@@ -175,6 +178,27 @@ impl HdView {
         };
         self.holds = Some(key);
         wrote
+    }
+
+    /// Port-only (spec 20 Design 5): composes a layer of a slide of `engine`'s map
+    /// ([`crate::gfx::motion::slide_layers`]) at the scale set, in the published frame's palette,
+    /// from the engine's images ([`Compositor::compose_layer`]) into `out`; nothing (`out` empty)
+    /// with HD off.
+    pub fn compose_layer(
+        &mut self,
+        engine: &Engine,
+        layer: &u6_render::motion::LayerPixels,
+        out: &mut Vec<u32>,
+    ) {
+        out.clear();
+        if !self.on {
+            return;
+        }
+        let state = engine.state();
+        let mut images = self.images.images(&state, engine.io());
+        let palette = engine.published_frame().palette;
+        self.compositor
+            .compose_layer(layer, &palette, &mut images, self.scale, out);
     }
 
     /// The HD frame: `WIDTH·S × HEIGHT·S` packed RGBA words (`u6_render::hd`), the last

@@ -647,6 +647,42 @@ fn a_press_inside_the_window_while_scrolled_back_returns_to_live_and_is_not_the_
     assert_eq!(presses(&log.borrow()), [0, POINTER_RIGHT, 0]);
 }
 
+/// Round 5 (opus SHOULD 3): with the context menu on, the presses it counts as the game's
+/// ([`Engine::game_presses`]) are those the view passed on: a left press in the window off the bar
+/// while scrolled back, the history's, counts none; the same press at the live bottom counts one.
+#[test]
+fn the_menus_count_of_the_games_presses_leaves_out_a_press_the_history_takes() {
+    let (mut e, log) = recorded();
+    e.set_context_menu(true);
+    assert!(e.wheel(IN.0, IN.1, -3));
+    let before = e.game_presses();
+    let mut counts = Vec::new();
+    for ev in [
+        at(IN, POINTER_LEFT),
+        at(IN, 0),
+        at(IN, POINTER_LEFT),
+        at(IN, 0),
+    ] {
+        e.tick(&[ev], 16);
+        counts.push(e.game_presses() - before);
+    }
+    assert_eq!(
+        e.history_offset(),
+        0,
+        "the fixture: live after the first press"
+    );
+    assert_eq!(
+        counts,
+        [0, 0, 1, 1],
+        "the history's press and its release count none; at the live bottom the press counts one"
+    );
+    assert_eq!(
+        presses(&log.borrow()),
+        [0, POINTER_LEFT, 0],
+        "the fixture: as the game took them"
+    );
+}
+
 #[test]
 fn the_wheel_over_anything_but_the_window_does_nothing() {
     let mut e = engine(game_state(), 25, 0, false);
@@ -1381,6 +1417,41 @@ fn a_keyword_drawn_over_is_not_kept_and_its_cells_take_their_patch() {
     );
 }
 
+/// A foreign window updates the shadow through the same draw-plus-note path as `print::cell`,
+/// without updating the message window's keyword spans. A retained span must still name the
+/// shadow's cell codes and ink, not only pixels that agree with the now-updated shadow.
+#[test]
+fn a_keyword_overwritten_through_note_is_not_kept() {
+    for (code, ink, kept) in [(0x61, ALERT, 1), (0x62, ALERT, 0), (0x61, INK, 0)] {
+        let mut ui = game_state().ui;
+        let m = *ui.text.window(WindowId::Messages);
+        let mut fb = Framebuffer::new();
+        fb.clear(m.bg);
+        let original = crate::ui::text::TextWindow { fg: ALERT, ..m };
+        for k in 4..8u16 {
+            let at = (u16::from(m.x) + k, u16::from(m.y));
+            text::draw_char(&mut fb, ui.font.as_ref(), None, &original, 0x61, at.0, at.1);
+            scrollback::note(&mut ui, &original, 0x61, at, CellKind::Char);
+        }
+        let foreign = crate::ui::text::TextWindow { fg: ink, ..m };
+        let at = (u16::from(m.x) + 5, u16::from(m.y));
+        text::draw_char(&mut fb, ui.font.as_ref(), None, &foreign, code, at.0, at.1);
+        scrollback::note(&mut ui, &foreign, code, at, CellKind::Char);
+        scrollback::scrolled(&mut ui, &fb, &m, vec![span(4, 4, ALERT, None, false)]);
+        let line = ui.scrollback.lines().back().unwrap();
+        assert_eq!(
+            line.spans.len(),
+            kept,
+            "only a span matching the shadow survives"
+        );
+        assert_eq!((line.cells[5].code, line.cells[5].fg), (code, ink));
+        assert!(
+            line.patch.is_empty(),
+            "the updated shadow reproduces the foreign drawing"
+        );
+    }
+}
+
 /// A keyword span (spec 22) of `cells` cells in `ink` at column `col` of a row about to scroll off.
 fn span(col: u8, cells: usize, ink: u8, joined: Option<Vec<u16>>, continued: bool) -> KeySpan {
     KeySpan {
@@ -1401,12 +1472,25 @@ fn a_kept_rest_is_linked_only_to_a_continued_span_of_its_ink_on_the_line_before(
     let mut ui = game_state().ui;
     let w = *ui.text.window(WindowId::Messages);
     let other = *ui.text.window(WindowId::Status);
-    // A frame all the window's paper: each span's (blank) cells show their drawing, so it is kept.
+    // Each requested span is drawn and noted before its row is kept; linking is checked only
+    // for spans whose codes, ink and pixels still match the shadow.
     let mut fb = Framebuffer::new();
     fb.clear(w.bg);
     // The lines the last scroll kept.
     let kept = std::cell::Cell::new(0);
     let mut keep_in = |win: &crate::ui::text::TextWindow, spans: Vec<KeySpan>| {
+        fb.clear(w.bg);
+        for span in &spans {
+            let ink = crate::ui::text::TextWindow { fg: span.ink, ..w };
+            for (i, &code) in span.cells.iter().enumerate() {
+                let at = (
+                    u16::from(w.x) + u16::from(span.col) + i as u16,
+                    u16::from(w.y),
+                );
+                text::draw_char(&mut fb, ui.font.as_ref(), None, &ink, code, at.0, at.1);
+                scrollback::note(&mut ui, &ink, code, at, CellKind::Char);
+            }
+        }
         let before = ui.scrollback.total();
         scrollback::scrolled(&mut ui, &fb, win, spans);
         kept.set(ui.scrollback.total() - before);
@@ -1579,56 +1663,19 @@ fn a_paced_press_and_a_repeat_taken_back_at_the_command_prompt_return_to_live() 
     assert_eq!(text_at(e.frame(), 22), "k0", "and the game took it");
 }
 
-/// The keypad's direction keys by walk direction (`walk::DX8`, `walk::DY8`: 0 north, then
-/// clockwise), as the travel presses them.
-const STEPS: [Key; 8] = [
-    Key::Up,
-    Key::UpRight,
-    Key::Right,
-    Key::DownRight,
-    Key::Down,
-    Key::DownLeft,
-    Key::Left,
-    Key::UpLeft,
-];
-
 #[test]
 fn a_travel_step_leaves_the_view_where_it_is_and_a_player_key_returns_it() {
     // opus S1 (round 4): M4's step (spec 21) is a key the engine adds, not the player's input
     // (Decisions 5 and 6). An open window with leader 1 alone (as spec 21's crafted maps), a game
     // that prints 25 lines, then has the command loop's shape: at the prompt it reads a key,
     // steps the party with a direction key and takes 100 ms for the turn.
-    use crate::actors::walk::tests::{creature_tiles, link_objects};
+    use crate::actors::travel::tests::{room, stand_in_loop};
     use crate::geom;
-    use u6_formats::position::Position;
-    let mut s = game_state();
-    creature_tiles(&mut s);
-    s.map.world.surface = vec![0; u6_formats::map::SURFACE_CHUNKS.pow(2)];
-    s.map.window_tiles = vec![0; crate::map::WINDOW_CELLS];
-    s.map.window_origin = [0, 0];
-    s.map.window_key = [0, 0, 0];
-    s.actors.party.members[0] = 1;
-    s.actors.party.size = 1;
     let (x, y) = (geom::LEAD + 1, geom::LEAD + 3);
-    s.map.centre = Position { x, y, z: 0 };
-    s.map.view_offset = [
-        geom::view_offset(x, 0, geom::HALF_W as u16),
-        geom::view_offset(y, 0, geom::HALF_H as u16),
-    ];
-    s.objects.type_frame[1] = 0x17a;
-    s.objects.location[1] = Position { x, y, z: 0 };
-    s.actors.attrs.status[1] = 0x80;
-    s.actors.worktype[1] = 2;
-    s.actors.movement_points[1] = 30;
+    let mut s = room((x, y));
+    s.ui = game_state().ui;
     s.ui.input.accept = true;
-    let mut formation = vec![0; 28];
-    formation[12] = 1;
-    formation[13] = 2;
-    s.actors.game = crate::actors::GameTables {
-        formation,
-        ..crate::actors::GameTables::default()
-    };
-    link_objects(&mut s);
+    s.main.reading = 0;
     let taken = Rc::new(RefCell::new(Vec::new()));
     let log = taken.clone();
     let game = move |st: Rc<RefCell<State>>, io: Rc<Io>| async move {
@@ -1637,24 +1684,14 @@ fn a_travel_step_leaves_the_view_where_it_is_and_a_player_key_returns_it() {
             io.present();
             io.vblank().await;
         }
-        loop {
-            {
-                let mut s = st.borrow_mut();
-                s.main.reading = 1;
-                s.ui.input.in_wait = true;
-            }
-            let k = io.next_key().await;
-            {
-                let mut s = st.borrow_mut();
-                s.main.reading = 0;
-                s.ui.input.in_wait = false;
-                if let Some(d) = STEPS.iter().position(|&step| step == k) {
-                    crate::actors::party::player_step(&mut s, d as u16);
-                }
-            }
-            log.borrow_mut().push(k);
-            io.sleep(100).await;
-        }
+        stand_in_loop(
+            st,
+            io,
+            Box::new(|_, _| {}),
+            0,
+            Box::new(move |_, n| log.borrow_mut().push(n)),
+        )
+        .await;
     };
     let mut e = Engine::with_game(s, Files::default(), game);
     for _ in 0..30 {
@@ -1668,11 +1705,7 @@ fn a_travel_step_leaves_the_view_where_it_is_and_a_player_key_returns_it() {
             break;
         }
     }
-    assert_eq!(
-        *taken.borrow(),
-        [Key::Right; 2],
-        "the game took the travel's steps"
-    );
+    assert_eq!(*taken.borrow(), [1, 2], "the game took the travel's steps");
     assert_eq!(e.travel_log().len(), 2, "the travel's keys");
     assert!(e.travel_active(), "still travelling");
     assert_eq!(
@@ -1795,8 +1828,8 @@ fn the_view_adds_only_what_the_history_no_longer_holds() {
 /// the map, the screen frame shows the kept lines in the window and the menu's box, and outside
 /// both it is the published frame; the HD frame (2×, no pack: a pixel is a 2 × 2 block of its
 /// colour) shows both, every pixel of the window and of the box; a wheel with the menu open
-/// composes the HD frame again (the view's stamp in its key) with the menu still over it; the
-/// menu closed, the HD frame shows the history alone.
+/// composes the HD frame again (the screen frame's version, its one key, moved with the view)
+/// with the menu still over it; the menu closed, the HD frame shows the history alone.
 #[test]
 fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
     use crate::hd::HdView;
@@ -1905,7 +1938,7 @@ fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
     assert!(e.context_menu().is_some(), "the menu still open");
     assert!(
         hd.present(Some(&e), &Framebuffer::new()),
-        "the wheel with the menu open: composed again"
+        "the wheel with the menu open: the screen version moved, composed again"
     );
     screen_shows(&e, 4);
     assert_eq!(hd_is_screen(&e, &hd), None, "4 back: the HD frame");
@@ -1923,4 +1956,130 @@ fn the_hd_frame_shows_the_history_view_and_an_open_menu() {
         "the box gone"
     );
     assert_eq!(hd_is_screen(&e, &hd), None, "closed: the HD frame");
+}
+
+/// Round 5 (gpt d SHOULD 1): the one composition's order where the layers overlap. Scrolled back
+/// with the menu open over the message window and the pointer sprite over the menu (over the
+/// window too), the screen frame is the published frame with the history's window over it and
+/// the menu's box over that, and the shown frame is the screen frame with the sprite's pixels over
+/// it. The expected frames are built here from their parts in that order: the history alone (the
+/// screen frame scrolled back before the menu opens), the menu alone (drawn as it is open on a
+/// copy of the published frame) and the sprite's own shape.
+#[test]
+fn where_the_layers_overlap_the_menu_is_over_the_history_and_the_sprite_over_both() {
+    use crate::ui::menu::{Entry, Kind, LOOK, Menu, Section};
+    use crate::ui::pointer::{Shape, SpriteFrame};
+    let n = 30u16;
+    // The command read up (A4-0x7a2c), which an open menu needs to stay open; a pointer shape of
+    // 16 × 4 pixels of value 1, shown.
+    let mut s = game_state();
+    s.main.reading = 1;
+    let shape = Shape {
+        dx: 0,
+        dy: 0,
+        rows: vec![[1; 16]; 4],
+    };
+    s.ui.pointer.tables.shapes = vec![shape; 10];
+    s.ui.pointer.shown = true;
+    let mut e = Engine::with_game(s, Files::default(), talker(n, 0));
+    e.set_context_menu(true);
+    for _ in 0..usize::from(n) + 4 {
+        e.tick(&[], 16);
+    }
+    assert!(e.wheel(IN.0, IN.1, -3));
+    let history = e.screen_frame().clone();
+    let published = e.published_frame().clone();
+    let menu = Menu {
+        kind: Kind::Map,
+        cell: Some((1, 1)),
+        underlined: None,
+        sections: vec![Section {
+            object: -1,
+            kind: None,
+            name: String::new(),
+            entries: vec![Entry {
+                code: LOOK,
+                reason: None,
+                theft: false,
+            }],
+        }],
+        go_here: None,
+    };
+    let press = (X.start as i16 + 8, Y.start as i16 + 4);
+    let open = crate::ui::popup::Open::new(&menu, press, &e.state(), &[]);
+    let (x0, y0, x1, y1) = open.rect();
+    let (tx0, ty0, ..) = open.text_rect();
+    e.popup_mut().show(open);
+    // The pointer in the menu's text area, the sprite's 16 × 4 pixels there.
+    let pointer = ((tx0 + 4) as i16, (ty0 + 2) as i16);
+    e.tick(&[at(pointer, 0)], 16);
+    assert_eq!(e.history_offset(), 3, "still scrolled back");
+    assert!(e.context_menu().is_some(), "the menu open");
+    let mut alone = published.clone();
+    let now = e.popup_mut().open().expect("open").clone();
+    now.draw(&mut alone, &e.state());
+    let in_box =
+        |x: usize, y: usize| (x0..=x1).contains(&(x as i32)) && (y0..=y1).contains(&(y as i32));
+    let in_window = |x: usize, y: usize| X.contains(&x) && Y.contains(&y);
+    let (px, py) = (pointer.0 as usize, pointer.1 as usize);
+    let in_sprite = |x: usize, y: usize| (px..px + 16).contains(&x) && (py..py + 4).contains(&y);
+    let ink = SpriteFrame::colour_index(1);
+    // The fixture: the box over the window where the history shows something else than the menu,
+    // and the sprite inside the box and the window, its colour not the menu's there.
+    let (mut covered, mut hidden) = (0, 0);
+    for y in 0..u6_render::HEIGHT {
+        for x in 0..u6_render::WIDTH {
+            if in_box(x, y) && in_window(x, y) {
+                covered += 1;
+                hidden += usize::from(history.get(x, y) != alone.get(x, y));
+            }
+            if in_sprite(x, y) {
+                assert!(
+                    in_box(x, y) && in_window(x, y),
+                    "the sprite over the menu and the window"
+                );
+                assert_ne!(alone.get(x, y), ink, "the sprite's colour not the menu's");
+            }
+        }
+    }
+    assert!(
+        covered > 0 && hidden * 2 > covered,
+        "the box over the window: {hidden} of {covered} pixels differ from the history"
+    );
+    // Built in order: the published frame, the window of the history, the box of the menu, the
+    // sprite.
+    let mut want = published.clone();
+    for y in 0..u6_render::HEIGHT {
+        for x in 0..u6_render::WIDTH {
+            let v = if in_box(x, y) {
+                alone.get(x, y)
+            } else if in_window(x, y) {
+                history.get(x, y)
+            } else {
+                published.get(x, y)
+            };
+            want.set(x, y, v.expect("a frame pixel"));
+        }
+    }
+    let mut shown = want.clone();
+    for y in py..py + 4 {
+        for x in px..px + 16 {
+            shown.set(x, y, ink.expect("the sprite's colour"));
+        }
+    }
+    let first_off = |got: &Framebuffer, want: &Framebuffer| {
+        (0..u6_render::HEIGHT)
+            .flat_map(|y| (0..u6_render::WIDTH).map(move |x| (x, y)))
+            .find(|&(x, y)| got.get(x, y) != want.get(x, y))
+    };
+    assert_eq!(
+        first_off(e.screen_frame(), &want),
+        None,
+        "the screen frame: published, history, menu"
+    );
+    assert_eq!(
+        first_off(e.frame(), &shown),
+        None,
+        "the shown frame: the sprite over all"
+    );
 }

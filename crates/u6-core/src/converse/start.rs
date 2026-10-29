@@ -220,6 +220,7 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
             .collect();
         c.npc_name = name;
         c.active = true;
+        crate::ui::talk::choices::start(s);
         seams::panel(s)
     });
     if !cx.cv(|c| c.by_spell) {
@@ -247,6 +248,7 @@ pub async fn converse(cx: &Cx<'_>, talker: i16, target: i16) {
     }
     input_loop(cx, npc).await;
     cx.st(|s| {
+        crate::ui::talk::choices::finish(s, cx.io);
         speech::end(s);
         s.converse.active = false;
         s.converse.bye = false;
@@ -428,6 +430,18 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
                     a
                 });
                 let up = |b: u8| u16::from(b.to_ascii_uppercase());
+                let answers: Vec<_> = allowed
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                let yes_no = crate::ui::talk::choices::answers_enabled()
+                    && answers.contains(&b'y')
+                    && answers.contains(&b'n')
+                    && answers.iter().all(|b| matches!(b, b'y' | b'n'));
+                if yes_no {
+                    cx.st(|s| s.ui.choices.yes_no = true);
+                }
                 let key = loop {
                     let key = seams::read_key(cx).await;
                     if allowed
@@ -438,6 +452,9 @@ async fn input_loop(cx: &Cx<'_>, npc: i16) {
                         break key;
                     }
                 };
+                if yes_no {
+                    cx.st(|s| crate::ui::talk::choices::end_answer(s, cx.io));
+                }
                 if key >= 0x20 {
                     let text = format_one(&cx.msg(Msg::FormatChar), &[key as u8]);
                     seams::print(cx, &text).await;

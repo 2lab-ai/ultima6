@@ -7,7 +7,7 @@
 
 use super::iter::{begin_area, flags2, next_in_area, tile_of};
 use super::moves::moves_with_actor;
-use super::{ACTOR_SLOTS, Slot, seams};
+use super::{ACTOR_SLOTS, NONE, Slot, seams};
 use crate::geom::{self, HALF_H, HALF_W, VIEW_H, VIEW_W};
 use crate::state::State;
 
@@ -69,6 +69,14 @@ pub struct DrawLists {
     /// around the draws of an object in 0x10e81e's object pass, so the light overlays and the
     /// flashes are never still.
     pub tag_still: bool,
+    /// Port-only (spec 20), no original address: per node, the object slot its tile is drawn for
+    /// ([`NONE`] for a light overlay or a flash), which smooth motion tracks
+    /// ([`crate::gfx::motion`]). [`add_tile`] writes it on the node it links from
+    /// [`DrawLists::tag_slot`]. [`DRAW_NODES`] entries.
+    pub node_slot: Vec<Slot>,
+    /// Port-only (spec 20): what [`add_tile`] writes into [`DrawLists::node_slot`]; the object's
+    /// slot around its draws in 0x10e81e's object pass, else [`NONE`].
+    pub tag_slot: Slot,
 }
 
 impl Default for DrawLists {
@@ -83,6 +91,8 @@ impl Default for DrawLists {
             anim_188: [0; 2],
             node_still: vec![false; DRAW_NODES],
             tag_still: false,
+            node_slot: vec![NONE; DRAW_NODES],
+            tag_slot: NONE,
         }
     }
 }
@@ -207,6 +217,7 @@ pub fn add_tile(s: &mut State, word: u16, cx: i16, cy: i16, mode: u16) {
     d.node_next[0] = d.node_next[usize::from(node)];
     d.node_tile[usize::from(node)] = word;
     d.node_still[usize::from(node)] = d.tag_still;
+    d.node_slot[usize::from(node)] = d.tag_slot;
     let after = read(d, at);
     d.node_next[usize::from(node)] = after;
     match at {
@@ -337,6 +348,7 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
     let cy = wy.wrapping_sub(ly) + HALF_H as i16;
     let z = o.z(c);
     s.objects.draw.tag_still = !(actor || moves_with_actor(kind));
+    s.objects.draw.tag_slot = c;
     if effect != 0 {
         add_object_tiles(s, tile, effect, cx, cy);
     }
@@ -365,6 +377,7 @@ fn draw_object(s: &mut State, c: Slot, lx: i16, ly: i16, saw_188: &mut u16) {
         }
     }
     s.objects.draw.tag_still = false;
+    s.objects.draw.tag_slot = NONE;
 }
 
 /// The second pass of 0x10e81e over the view's cells (view flags and light overlays).

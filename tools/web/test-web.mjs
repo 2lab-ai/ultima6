@@ -26,7 +26,7 @@
 // the actor windows, the active one marked, the side panel's own window in another mode or a
 // conversation), the remembered sight (spec 18: on in the page, off in the harness, grey on
 // the canvas where the engine's frame remembers a cell out of sight, back after a reload from
-// the file a Save stored beside the save), and the system's pointer
+// the file a Save stored beside the save)), smooth motion (spec 20): slides in every layout while keeping game timing, and the system's pointer
 // (hidden over the canvas while a game runs where the engine's sprite is under the mouse, in
 // every layout, windowed and fullscreen, the context menu's arrow included while it takes the
 // pointer; kept in the launcher, with the engine's pointer hidden, over the speed badge, in the
@@ -48,7 +48,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { loadavg, tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as h from './harness.mjs';
@@ -423,7 +423,7 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
     await page.keyboard.press('Tab');
     order.push((await h.state(page)).focused);
   }
-  assert.deepEqual(order, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'settings', 'picker'], 'the toolbar, then the picker');
+  assert.deepEqual(order, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'turns', 'settings', 'picker'], 'the toolbar, including turn playback, then the picker');
   await page.keyboard.press('Enter');
   const chooser = await chosen;
   await chooser.setFiles(h.HFES);
@@ -1458,6 +1458,110 @@ async function menuPage(env, viewport = null) {
   return opened;
 }
 
+// Ctrl representatives are painted by the engine, and pointer/key modifier edges must agree.
+const quickView = (page) => page.evaluate(() => {
+  const view = globalThis.__shownGame.quick_action_view();
+  return view ? JSON.parse(view) : null;
+});
+for (const layout of ['original', 'wide']) {
+  test(`Ctrl representative actions (${layout}): hover label, key release, Alt exclusion, target change, blur, Settings, right-click and re-entry`, async (env) => {
+    const { page } = layout === 'wide' ? await bootWide(env) : await menuPage(env);
+    const hero = layout === 'wide' ? WIDE_HERO : HERO;
+    const points = [];
+    for (let dy = -4; dy <= 4; dy += 1) for (let dx = -4; dx <= 4; dx += 1) points.push([hero[0]+16*dx, hero[1]+16*dy]);
+    const menus = await h.contextMenus(page, points);
+    const i = menus.findIndex((m, n) => (points[n][0] !== hero[0] || points[n][1] !== hero[1]) && m?.sections.some((section) => section.entries.some((e) => e.code === 0x83)));
+    assert.ok(i >= 0, 'a person in view');
+    const at = points[i];
+    await page.mouse.move(...await h.screenPoint(page, ...at));
+    await page.keyboard.down('Control');
+    await page.waitForFunction(() => globalThis.__shownGame.quick_action_view() !== '');
+    const view = await quickView(page);
+    assert.equal(view.rows.filter((r) => r.kind === 'entry').length, 1, 'one representative');
+    assert.ok([0x81,0x83].includes(view.rows.find((r) => r.kind === 'entry').code), 'person Talk or current hostile Attack');
+    assert.equal(await h.menuView(page), null, 'the full menu stays closed');
+    await keepFrame(page.locator('#screen-box'), `control-person-${layout}-page.png`);
+    await page.keyboard.up('Control');
+    await h.waitTicks(page, 2);
+    assert.equal(await quickView(page), null, 'key release removes stationary hover');
+    await page.keyboard.down('Alt');
+    await h.waitTicks(page, 2);
+    assert.equal(await quickView(page), null, 'Alt alone is not Ctrl');
+    await page.keyboard.up('Alt');
+    await page.keyboard.down('Control');
+    await h.waitTicks(page, 2);
+    assert.ok(await quickView(page), 'stationary re-entry');
+    const before = await page.evaluate(() => ({ presses: globalThis.__taken.length, asked: globalThis.__shownGame.go_here_asked() }));
+    await page.mouse.down();
+    // A world action may not be substituted for the target captured at mouse-down.
+    await page.mouse.move(...await h.screenPoint(page, ...hero));
+    await page.mouse.up();
+    await h.waitTicks(page, 3);
+    const after = await page.evaluate(() => ({ presses: globalThis.__taken.length, asked: globalThis.__shownGame.go_here_asked() }));
+    assert.deepEqual(after, before, 'changed target executed nothing');
+    await page.mouse.move(...await h.screenPoint(page, ...at));
+    await h.waitTicks(page, 2);
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await h.waitTicks(page, 2);
+    assert.equal(await quickView(page), null, 'blur releases Ctrl');
+    await page.keyboard.up('Control');
+    await page.keyboard.down('Control');
+    await h.waitTicks(page, 2);
+    assert.ok(await quickView(page));
+    await h.rightPress(page, ...at);
+    await page.mouse.up({ button:'right' });
+    assert.ok(await h.menuView(page), 'right-click still opens the full menu');
+    assert.equal(await quickView(page), null, 'only the full menu is drawn');
+    await page.keyboard.up('Control');
+    await page.keyboard.press('Escape');
+    await h.menuClosed(page);
+    await page.locator('#settings').click();
+    await page.waitForFunction(() => !document.getElementById('setup').hidden);
+    await page.keyboard.down('Control');
+    await h.waitTicks(page, 2);
+    assert.equal(await quickView(page), null, 'Ctrl in Settings exposes no world action');
+    await page.keyboard.up('Control');
+    await page.click('#setup-ok');
+    await page.waitForFunction(() => document.getElementById('setup').hidden);
+    await page.focus('#screen');
+    await page.mouse.move(...await h.screenPoint(page, ...at));
+    await page.keyboard.down('Control');
+    await page.waitForFunction(() => globalThis.__shownGame.quick_action_view() !== '');
+    assert.ok(await quickView(page), 'Ctrl hover resumes after closing Settings');
+    await page.keyboard.up('Control');
+    await h.waitTicks(page, 2);
+    assert.equal(await quickView(page), null, 'the new hover releases normally');
+    console.log(`  receipt: ${layout}: representative, modifier/cancellation, full menu and Settings re-entry checks passed`);
+  }, { needs: h.haveHfes });
+}
+
+test('Ctrl representative actions (door): hover Use and a left click execute the existing command once; cancelled capture does not use', async (env) => {
+  const { page } = await menuPage(env);
+  const door = await besideClosedDoor(page);
+  const at = viewCell(door.col, door.row);
+  const before = await sectionAt(page, door.col, door.row, door.object);
+  await page.mouse.move(...await h.screenPoint(page, ...at));
+  await page.keyboard.down('Control');
+  await page.waitForFunction(() => globalThis.__shownGame.quick_action_view() !== '');
+  assert.deepEqual((await quickView(page)).rows.filter((r)=>r.kind==='entry').map((r)=>r.code),[USE]);
+  await keepFrame(page.locator('#screen-box'), 'control-use-original-page.png');
+  await page.mouse.down();
+  await page.evaluate(() => document.getElementById('screen').dispatchEvent(new PointerEvent('pointercancel',{bubbles:true})));
+  await page.mouse.up();
+  await h.waitTicks(page, 3);
+  assert.equal((await sectionAt(page, door.col, door.row, door.object)).kind[1], before.kind[1], 'cancelled capture leaves the door closed');
+  await page.keyboard.up('Control');
+  await page.keyboard.down('Control');
+  await page.mouse.click(...await h.screenPoint(page, ...at));
+  await page.keyboard.up('Control');
+  await h.waitPrompt(page);
+  await page.waitForFunction(([x,y,object,frame])=>{
+    const m=JSON.parse(globalThis.__shownGame.context_menu(x,y)||'null');
+    return m?.sections.find((s)=>s.object===object)?.kind[1] === (frame^4);
+  },[...at,door.object,before.kind[1]],{timeout:30_000});
+  console.log('  receipt: representative Use opened one door; capture cancellation did not');
+}, { needs: h.haveHfes });
+
 // Spec 17 Presentation (unit M3): the menu is the engine's, drawn in the frame; the page keeps
 // no element for it. The canvas as it is now, kept in the page (its pixels are the user's game:
 // never returned), for `menuPixels`; with it the engine's frame and its published frame (the
@@ -1740,7 +1844,7 @@ test('the context menu (spec 17, unit M3): a right press at the prompt opens the
 
   const look = rowOf(view, LOOK);
   assert.ok(look >= 0 && view.rows[look].enabled, 'Look offered, able to run');
-  const lines = () => page.evaluate(() => globalThis.__shownGame.message_lines());
+  const lines = () => page.evaluate(() => globalThis.__shownGame.lines_finished());
   const lines0 = await lines();
   await page.mouse.click(...(await h.screenPoint(page, ...h.rowPoint(view, look))));
   await h.menuClosed(page);
@@ -1748,7 +1852,7 @@ test('the context menu (spec 17, unit M3): a right press at the prompt opens the
   await h.waitTicks(page, 20);
   assert.notEqual(await page.evaluate(() => document.getElementById('screen').dataset.prompt), '1', 'Look runs: it waits on what it shows');
   const lines1 = await lines();
-  console.log(`  receipt: Look: message lines ${lines0} -> ${lines1}`);
+  console.log(`  receipt: Look: message lines finished ${lines0} -> ${lines1}`);
   assert.ok(lines1 > lines0, 'Look printed what it sees');
   await page.keyboard.press('Space');
   await h.waitPrompt(page);
@@ -2012,7 +2116,9 @@ test('the context menu (spec 17, unit M3) in Wide: a right press opens the engin
 // cancel or a press outside never does. Any other entry is one of the map commands (Attack..Use,
 // 0x81..0x88: a map menu's), each of which prints when it runs: from the command prompt (up
 // before the click, round 3, gpt d SHOULD 3) the prompt goes for its run and the message scroll
-// grows (round 3, opus S2: leaving the prompt alone is no receipt, a run held up leaves it too).
+// grows (round 3, opus S2: leaving the prompt alone is no receipt, a run held up leaves it too),
+// by its finished lines (round 6: `Game.lines_finished` only grows; the lines the scroll keeps
+// stop at 64, so a wait on them hung once the scroll was full).
 async function menuVisibleAndChosen(page, view, where) {
   const rects = await visibleMenu(page, view);
   console.log(`  receipt: ${where}: menu ${rects.menu} in the visible canvas ${rects.visible} (viewport ${rects.viewport}); hidden frame rects given ${JSON.stringify(rects.hidden)}`);
@@ -2024,7 +2130,7 @@ async function menuVisibleAndChosen(page, view, where) {
   assert.ok(px >= vx && py >= vy && px < vx + vw && py < vy + vh, `${where}: its last entry that can run inside it`);
   const ran = () => page.evaluate(() => {
     const g = globalThis.__shownGame;
-    return { asked: g.go_here_asked(), lines: g.message_lines(), prompt: document.getElementById('screen').dataset.prompt };
+    return { asked: g.go_here_asked(), lines: g.lines_finished(), prompt: document.getElementById('screen').dataset.prompt };
   });
   const before = await ran();
   await page.mouse.click(px, py);
@@ -2040,9 +2146,10 @@ async function menuVisibleAndChosen(page, view, where) {
     assert.equal(before.prompt, '1', `${where}: the command prompt up before the click`);
     await page.waitForFunction(() => document.getElementById('screen').dataset.prompt !== '1', null, { timeout: 10_000, polling: 'raf' });
     const left = await ran();
-    await page.waitForFunction((l) => globalThis.__shownGame.message_lines() > l, before.lines, { timeout: 10_000, polling: 'raf' });
+    console.log(`  receipt: ${where}: command ${code} chosen: waiting for the message lines finished to pass ${before.lines}`);
+    await page.waitForFunction((l) => globalThis.__shownGame.lines_finished() > l, before.lines, { timeout: 10_000, polling: 'raf' });
     const after = await ran();
-    console.log(`  receipt: ${where}: command ${code} chosen: the prompt ${before.prompt} -> ${left.prompt}, message lines ${before.lines} -> ${after.lines}`);
+    console.log(`  receipt: ${where}: command ${code} chosen: the prompt ${before.prompt} -> ${left.prompt}, message lines finished ${before.lines} -> ${after.lines}`);
     assert.equal(after.asked, before.asked, `${where}: no travel asked`);
   }
   return rects;
@@ -2622,7 +2729,7 @@ function watchWalk(page) {
       log.now = now;
       Object.getPrototypeOf(this).set_clock.call(this, now);
     };
-    const row = (game) => [globalThis.__clock, game.leader_position().join(','), game.at_prompt(), log.now, game.prompt_takes(), game.keys_pending()];
+    const row = (game) => [globalThis.__clock, game.leader_position().join(','), game.command_prompt(), log.now, game.prompt_takes(), game.keys_pending()];
     g.step = function (ms) {
       Object.getPrototypeOf(this).step.call(this, ms);
       log.steps.push(row(this));
@@ -2787,6 +2894,17 @@ async function heldNoRepeat(page, key) {
 // press still due would be taken in it.
 const COOLDOWN_MS = 2 * MIN_STEP_MS;
 
+// Every position change is filtered: a resurrection can also be the first one of a hold.
+const walkedTwice = (w) => w.held.filter((s) => s.leader !== h.WAKE_CELL).length >= 2 && w.paced.length >= 2;
+
+test('the held-walk witness counts two walked cells, excluding a first or later resurrection', async () => {
+  const receipt = (cells, takes = 2) => ({ held: cells.map((leader) => ({ leader })), paced: Array(takes).fill({}) });
+  assert.equal(walkedTwice(receipt([h.WAKE_CELL, 'walk-a'])), false, 'a first resurrection is not a walk');
+  assert.equal(walkedTwice(receipt(['walk-a', h.WAKE_CELL])), false, 'a later resurrection is not a walk');
+  assert.equal(walkedTwice(receipt(['walk-a', 'walk-b'], 1)), false, 'two cells alone do not prove two paced takes');
+  assert.equal(walkedTwice(receipt([h.WAKE_CELL, 'walk-a', 'walk-b'])), true, 'two real walks and two paced takes');
+});
+
 // The start fight as booted, on the browser's own clock, arrows (left first) held with no browser
 // repeat until one walks two cells or more with two paced takes or more: on every hold the press
 // itself is taken by the first step after its keydown (the first-step deadline, round 5 d-1), at
@@ -2808,7 +2926,7 @@ test('a held arrow with no browser repeat walks on at every command prompt once 
   await started(page, FILES);
   const keys = ['ArrowLeft', ...h.STEPS.map((s) => s.key).filter((k) => k !== 'ArrowLeft')];
   // Two cells or more walked (a wake onto the wake cell is no cell walked, as `walkLine` counts).
-  const walks = (w) => w.held.length >= 1 && 1 + w.held.slice(1).filter((s) => s.leader !== h.WAKE_CELL).length >= 2 && w.paced.length >= 2;
+  const walks = walkedTwice;
   const holds = [];
   for (let round = 0; round < h.STEP_ROUNDS && !holds.some(walks); round += 1) {
     if (round > 0) await h.passTurn(page);
@@ -3151,11 +3269,11 @@ test('the focus leaving the canvas while an arrow is held lets it go: the hero w
   await h.runFrames(page, 10);
   await page.evaluate(() => {
     const g = globalThis.__shownGame;
-    const log = { prompts: 0, taken: 0, up: g.at_prompt() };
+    const log = { prompts: 0, taken: 0, up: g.command_prompt() };
     window.__k2focus = log;
     g.step = function (ms) {
       Object.getPrototypeOf(this).step.call(this, ms);
-      const up = this.at_prompt();
+      const up = this.command_prompt();
       if (up) log.prompts += 1;
       else if (log.up) log.taken += 1;
       log.up = up;
@@ -3527,6 +3645,102 @@ async function bootGame(env, init, arg) {
   await page.focus('#screen');
   return page;
 }
+
+test('turn playback (spec 19 O3): original by default; quick, fast and instant change independently of Speed; reload keeps the choice in Original and Wide', async (env) => {
+  for (const layout of ['original', 'wide']) {
+    const { context, page } = await h.openPage(env, { layout });
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    const read = async () => {
+      // Restore can finish before the first game presentation; wait for that signal, not an
+      // arbitrary number of RAF callbacks (the harness callback can precede the page's).
+      await page.waitForFunction(() => globalThis.__shownGame !== undefined, null, { polling: 'raf' });
+      return page.evaluate(() => ({
+        selected: Number(document.getElementById('turns').value),
+        engine: globalThis.__shownGame.turn_speed(),
+        speed: globalThis.__shownGame.speed(),
+      }));
+    };
+    assert.deepEqual(await read(), { selected: 1, engine: 1, speed: 1 });
+    for (const k of [2, 4, 0, 1, 2]) {
+      await page.selectOption('#turns', String(k));
+      assert.deepEqual(await read(), { selected: k, engine: k, speed: 1 });
+      assert.equal(await page.evaluate(() => localStorage.getItem('u6.turns')), String(k));
+    }
+    await page.reload();
+    await started(page, FILES);
+    assert.deepEqual(await read(), { selected: 2, engine: 2, speed: 1 });
+    await page.evaluate(() => localStorage.setItem('u6.turns', 'invalid'));
+    await page.reload();
+    await started(page, FILES);
+    assert.deepEqual(await read(), { selected: 1, engine: 1, speed: 1 });
+    console.log(`  receipt: ${layout}: all turn choices, independent speed, reload and invalid fallback passed`);
+    await context.close();
+  }
+}, { needs: h.haveHfes });
+
+// A fixed seed and virtual display give every factor the same command in the same world.
+// The core receipt compares full state/RNG; this receipt drives the actual page and input path.
+test('turn playback (spec 19 O3/O5): every factor shortens a real turn in Original and Wide; skip consumes Space, Escape and their repeats', async (env) => {
+  for (const mode of ['original', 'wide']) {
+    const times = new Map();
+    for (const factor of [1, 2, 4, 0]) {
+      const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+      await page.selectOption('#turns', String(factor));
+      const before = await page.evaluate(() => ({ at: __clock, takes: __shownGame.prompt_takes() }));
+      await page.keyboard.press('Space');
+      const result = await page.evaluate((base) => {
+        const g = __shownGame;
+        for (let n = 0; n < 60_000; n += 1) {
+          __display.run();
+          if (g.prompt_takes() > base.takes && g.command_prompt() && g.keys_pending() === 0) {
+            return { ms: __clock - base.at, takes: g.prompt_takes() - base.takes, speed: g.speed(), sliding: g.sliding() };
+          }
+        }
+        return null;
+      }, before);
+      assert.ok(result, `${mode}: a turn finishes`);
+      assert.equal(result.takes, 1, `${mode}: the command is taken exactly once`);
+      assert.equal(result.speed, 1, `${mode}: Speed is unchanged`);
+      if (factor === 0) assert.equal(result.sliding, false, `${mode}: instant snaps motion`);
+      times.set(factor, result.ms);
+      if (factor === 2) await keepFrame(page.locator('body'), `turns-quick-${mode}.png`);
+      await context.close();
+    }
+    // Exact schedule scaling and its per-wait frame floor are checked in the core receipts.
+    // Here even a long fight must observably speed up at every setting through the live page.
+    for (const [slower, faster] of [[1, 2], [2, 4], [4, 0]]) {
+      assert.ok(times.get(faster) < times.get(slower), `${mode}: each faster factor shortens the same turn`);
+    }
+    for (const key of ['Space', 'Escape']) {
+      const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+      const before = await page.evaluate(() => ({ at: __clock, takes: __shownGame.prompt_takes() }));
+      await page.keyboard.press('Space');
+      await h.runFrames(page, 8);
+      assert.equal(await page.evaluate(() => __shownGame.command_prompt()), false, `${mode}: a turn is playing`);
+      await page.keyboard.down(key);
+      await h.runFramesToPrompt(page, 60_000);
+      const after = await page.evaluate(() => ({ at: __clock, takes: __shownGame.prompt_takes(), queued: __shownGame.keys_pending() }));
+      assert.equal(after.takes - before.takes, 1, `${mode}: skip is not a second command`);
+      assert.equal(after.queued, 0, `${mode}: skip leaves no queued command`);
+      assert.equal(await page.evaluate(() => __shownGame.sliding()), false, `${mode}: skipped playback leaves no slide running`);
+      assert.ok(after.at - before.at < times.get(1), `${mode}: skip ends the remaining waits`);
+      await page.keyboard.down(key); // an OS repeat after the turn must remain consumed
+      await h.runFrames(page, 30);
+      assert.equal(await page.evaluate(() => __shownGame.prompt_takes()), after.takes, `${mode}: held skip cannot become a future command`);
+      await page.keyboard.up(key);
+      await h.runFrames(page, 2);
+      assert.equal(await page.evaluate(() => __shownGame.keys_pending()), 0);
+      await page.keyboard.press(key);
+      await h.runFramesToPrompt(page, 60_000);
+      assert.equal(await page.evaluate(() => __shownGame.prompt_takes()), after.takes + 1,
+        `${mode}: a new ${key} at the next prompt is an ordinary command`);
+      await context.close();
+    }
+    console.log(`  receipt: ${mode}: original/quick/fast/instant ${[1, 2, 4, 0].map(k => times.get(k)).join('/')} ms; Space/Escape and held repeats consumed`);
+  }
+}, { needs: h.haveHfes });
 
 // On the real clock, about `ms` of wall time from one display frame to a later one: the wall
 // time between them, the steps run and the clock advanced in it, and whether any time was lost
@@ -4166,7 +4380,7 @@ async function bootHd(env, foreign, init = watchMedia) {
     const url = r.url();
     if (!url.startsWith(env.server.url) && !url.startsWith('data:') && !url.startsWith('blob:')) foreign.push(url);
   });
-  if (init) await context.addInitScript(init);
+  for (const script of (Array.isArray(init) ? init : [init]).filter(Boolean)) await context.addInitScript(script);
   await h.load(page, env);
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
@@ -4315,6 +4529,104 @@ test('the MMPX notice ships with the site: NOTICE.txt is the repository\'s NOTIC
   assert.equal(link, '/NOTICE.txt', 'linked from the footer');
 });
 
+
+// Original-layout B reference. Capture the real canvas BEFORE asking the engine for full
+// layers; the reference never draws into #screen and never advances the display or engine.
+// Existing canvasShowsGame remains the Off/base-frame oracle.
+async function assertFrozenBFrame(page, label) {
+  const r = await page.evaluate(async () => {
+    const { shown_map } = await import('/pkg/u6_web.js');
+    const g = globalThis.__shownGame, c = document.getElementById('screen');
+    const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    const state = () => JSON.stringify([globalThis.__ticks, globalThis.__clock,
+      window.__display.frames, g.presentation_ms(), Array.from(g.leader_position()),
+      Array.from(g.slide_centre()), Array.from(g.footstep_poses())]);
+    const before = state();
+    const actual = c.getContext('2d').getImageData(0, 0, c.width, c.height).data.slice();
+    const size = [c.width, c.height];
+    const hd = g.hd_on(), s = hd ? g.hd_scale() : 1;
+    // The page may have acknowledged patches already. Force full reference buffers only
+    // AFTER the screen snapshot, rather than interpreting patch payloads as full images.
+    g.slide_reset();
+    g.present();
+    const w = g.width() * s, h = g.height() * s;
+    const expected = document.createElement('canvas');
+    expected.width = w; expected.height = h;
+    const ctx = expected.getContext('2d');
+    const rgba = new Uint8ClampedArray(hd ? g.hd_frame_rgba() : g.frame_rgba());
+    ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+    const base = document.createElement('canvas');
+    base.width = w; base.height = h;
+    base.getContext('2d').drawImage(expected, 0, 0);
+    let full = true, actorLayers = 0;
+    if (hd) {
+      const placed = Array.from(g.slide());
+      const [mx, my, mw, mh] = Array.from(shown_map(), v => v * s);
+      ctx.save(); ctx.beginPath(); ctx.rect(mx, my, mw, mh); ctx.clip();
+      ctx.imageSmoothingEnabled = false;
+      for (let n = 0; n < placed.length; n += 3) {
+        const id = placed[n], [lw, lh] = g.slide_layer_size(id);
+        const length = g.slide_layer_len(id), ptr = g.slide_layer_ptr(id);
+        const valid = g.slide_layer_patch(id).length === 0 && length === lw * lh * s * s * 4;
+        full &&= valid;
+        if (!valid) continue;
+        // Re-read memory.buffer after getters: a wasm allocation may grow it.
+        const pixels = new Uint8ClampedArray(window.__wasmMemory.buffer, ptr, length).slice();
+        const layer = document.createElement('canvas');
+        layer.width = lw * s; layer.height = lh * s;
+        layer.getContext('2d').putImageData(new ImageData(pixels, layer.width, layer.height), 0, 0);
+        ctx.drawImage(layer, placed[n + 1] * s, placed[n + 2] * s);
+        actorLayers += Number(g.slide_layer_role(id) === 2);
+      }
+      ctx.restore();
+      // Independent nearest-neighbour pointer composition, after all map layers.
+      const [px, py, pw, ph] = g.hd_pointer();
+      if (pw && ph) {
+        const pointer = document.createElement('canvas');
+        pointer.width = pw; pointer.height = ph;
+        pointer.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(g.hd_pointer_rgba()), pw, ph), 0, 0);
+        for (const target of [ctx, base.getContext('2d')]) {
+          target.imageSmoothingEnabled = false;
+          target.drawImage(pointer, px * s, py * s, pw * s, ph * s);
+        }
+      }
+    }
+    const want = ctx.getImageData(0, 0, w, h).data;
+    const basePixels = base.getContext('2d').getImageData(0, 0, w, h).data;
+    let posedPixels = 0;
+    if (hd) for (let i = 0; i < want.length; i += 4) {
+      if (want[i] !== basePixels[i] || want[i + 1] !== basePixels[i + 1]
+        || want[i + 2] !== basePixels[i + 2] || want[i + 3] !== basePixels[i + 3]) posedPixels++;
+    }
+    return {
+      correct: size[0] === w && size[1] === h && same(actual, want),
+      hd, full, actorLayers, posedPixels, poseCount: g.footstep_poses().length / 3,
+      defaultB: g.motion() && g.footstep_pattern() === 2,
+      stable: before === state(),
+      actionStable: window.__hdBArmed === null || window.__hdBArmed === before,
+      screenUntouched: same(actual, c.getContext('2d').getImageData(0, 0, ...size).data),
+      baseRejected: hd && posedPixels > 0 ? !same(actual, basePixels) : true,
+    };
+  });
+  assert.ok(r.defaultB && r.poseCount > 0, label + ': default B has an observed pose');
+  assert.ok(!r.hd || r.actorLayers > 0, label + ': HD includes an actual posed actor layer');
+  assert.ok(r.full, label + ': every reference layer is full and correctly sized');
+  assert.ok(r.stable && r.actionStable, label + ': no tick, clock, phase or world movement');
+  assert.ok(r.screenUntouched, label + ': reference did not repaint the tested canvas');
+  assert.ok(r.correct, label + ': the first canvas equals base plus B layers plus pointer');
+  assert.ok(r.baseRejected, label + ': a base-only reference rejects a visibly posed canvas');
+  return r;
+}
+
+async function armFrozenBFrame(page) {
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    window.__hdBArmed = JSON.stringify([globalThis.__ticks, globalThis.__clock,
+      window.__display.frames, g.presentation_ms(), Array.from(g.leader_position()),
+      Array.from(g.slide_centre()), Array.from(g.footstep_poses())]);
+  });
+}
+
 // Page init script: every read and write of the page's storage throws (a browser that refuses
 // it), and the page's media queries are kept (`watchMedia`). The one read let through is the
 // screen layout the harness keeps (h.openPage: Original, spec 10 Design 7), so the page stays
@@ -4332,33 +4644,77 @@ function storageThrows() {
 
 test('HD: Settings\' "HD on" works from the keyboard (Space); with storage that throws HD is on, switches, and nothing is kept across a reload; no page error', async (env) => {
   const foreign = [];
-  const page = await bootHd(env, foreign, storageThrows);
+  const page = await bootHd(env, foreign, [storageThrows, wasmMemoryHook]);
   const errors = [];
   page.on('pageerror', () => errors.push(1));
   await h.waitPrompt(page);
   let shown = await hdShown(page);
   assert.ok(shown.stored === 'unreadable', 'the storage throws');
   assert.ok(shown.pressed === 'true' && shown.width === 1280, 'on by default');
+  // An idle engine frame can already equal B's neutral pose. Start a real walk and freeze
+  // on a lifted B frame, so omitting its layers cannot pass this first-paint regression.
+  await h.virtualDisplay(page, 60);
+  let lifted = false;
+  for (const key of ['ArrowDown', 'ArrowRight', 'ArrowLeft', 'ArrowUp']) {
+    await h.runFramesToPrompt(page, 60_000);
+    await page.keyboard.down(key);
+    lifted = await page.evaluate(() => {
+      const g = globalThis.__shownGame;
+      for (let n = 0; n < 2000; n += 1) {
+        window.__display.run();
+        if (g.sliding() && Array.from(g.footstep_poses()).some((v, i) => i % 3 === 2 && v > 0)) return true;
+      }
+      return false;
+    });
+    await page.keyboard.up(key);
+    if (lifted) break;
+  }
+  assert.ok(lifted, 'precondition: a real walk presents a lifted B pose');
   await page.click('#settings');
   await page.focus('#hd');
+  await page.evaluate(() => { window.__hdBArmed = null; });
+  let posed = (await assertFrozenBFrame(page, 'initial B display')).posedPixels;
+  assert.ok(posed > 0, 'precondition: the lifted B canvas visibly differs from the unposed base');
+  // Every action below is observed without running one RAF. Rebuilding reference layers
+  // happens only after the actual canvas has been captured inside assertFrozenBFrame.
+  await armFrozenBFrame(page);
   await page.keyboard.press('Space');
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'false' && shown.width === 320, 'Space: off');
-  assert.ok(await canvasShowsGame(page), 'off: the RGBA frame');
+  await assertFrozenBFrame(page, 'off first synchronous draw');
+  await armFrozenBFrame(page);
   await page.keyboard.press('Space');
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'true' && shown.width === 1280, 'Space again: on');
-  assert.ok(await canvasShowsGame(page), 'on: the HD frame');
+  posed += (await assertFrozenBFrame(page, 'on first synchronous draw')).posedPixels;
+  // Use real box geometry and the page's resize handler. No virtual RAF or engine tick is
+  // allowed while waiting for the browser's resize event; numeric polling does not run RAF.
+  for (const [width, pixels] of [[700, 640], [1024, 1280], [700, 640]]) {
+    await armFrozenBFrame(page);
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForFunction(w => document.getElementById('screen').width === w,
+      pixels, { timeout: 10_000, polling: 10 });
+    assert.equal((await hdShown(page)).width, pixels, 'the resized box selects its HD scale');
+    posed += (await assertFrozenBFrame(page, 'scale ' + pixels + ' first synchronous draw')).posedPixels;
+  }
+  await armFrozenBFrame(page);
   await page.keyboard.press('Space');
   assert.equal((await hdShown(page)).pressed, 'false', 'off again');
+  await assertFrozenBFrame(page, 'off before reload');
   await page.reload();
   await started(page, FILES);
   await h.waitPrompt(page);
   shown = await hdShown(page);
-  assert.ok(shown.pressed === 'true' && shown.width === 1280, 'nothing kept: on after the reload');
-  assert.ok(await canvasShowsGame(page), 'the HD frame');
+  assert.ok(shown.stored === 'unreadable', 'storage still throws after reload');
+  assert.ok(shown.pressed === 'true' && shown.width === 640, 'nothing kept: on after reload in the smaller box');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 1);
+  await page.evaluate(() => { window.__hdBArmed = null; });
+  posed += (await assertFrozenBFrame(page, 'B after reload')).posedPixels;
+  assert.ok(posed > 0, 'the reference observed B pixels different from the unposed HD base');
   assert.equal(errors.length, 0, 'no page error');
   assert.equal(foreign.length, 0, 'no request to another origin');
+  console.log('  receipt: unreadable storage keeps default B; HD off/on and S4→S2→S4→S2 first paints match full composition with zero engine steps; reload restores HD+B; unposed base rejected');
 }, { needs: h.haveHfes });
 
 test('HD: a pointer on a game pixel reaches the game at that pixel with HD off, at 2x and at 4x; a click on the Look icon is Look in each', async (env) => {
@@ -5068,9 +5424,9 @@ const pageShown = (page) => page.evaluate(() => {
   };
 });
 
-const CONTROL_KEYS = ['keyWalk', 'keyCommands', 'keyCombat', 'keyPass', 'keySave', 'keySpeed', 'keyOpening'];
+const CONTROL_KEYS = ['keyWalk', 'keyCommands', 'keyCombat', 'keyPass', 'keySave', 'keySpeed', 'keyTurnSkip', 'keyOpening'];
 
-test('the page: titled "Ultima VI"; under the game screen one toolbar of exactly Fullscreen, Mute, Voices (and its chip), the Speed group and Settings, the only buttons shown outside Settings; no "What this version does", hint, NPC bundles, Game strings, HD button or page note; Settings holds "HD on" and a closed "Kept in this browser" group of the five forget buttons; the footer links the MMPX notice and the voice model\'s licence and notice; the controls are closed and list the keys in the page\'s language', async (env) => {
+test('the page: titled "Ultima VI"; under the game screen one toolbar of exactly Fullscreen, Mute, Voices (and its chip), the Speed and Turns groups and Settings, the only buttons shown outside Settings; no "What this version does", hint, NPC bundles, Game strings, HD button or page note; Settings holds "HD on" and a closed "Kept in this browser" group of the five forget buttons; the footer links the MMPX notice and the voice model\'s licence and notice; the controls are closed and list the keys in the page\'s language', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const { LICENSE_URL, NOTICE_URL } = await import('../../site/voice/model.js');
   const { page } = await h.openPage(env);
@@ -5079,7 +5435,7 @@ test('the page: titled "Ultima VI"; under the game screen one toolbar of exactly
   assert.deepEqual([p.title, p.h1], ['Ultima VI', 'Ultima VI'], 'the title');
   assert.equal(p.toolbars, 1, 'one toolbar');
   assert.equal(p.afterScreen, 'playback', 'right under the game screen');
-  assert.deepEqual(p.toolbar, ['fullscreen', 'mute', 'voices', 'voice-chip', 'speed-group', 'settings'], 'its controls, in order');
+  assert.deepEqual(p.toolbar, ['fullscreen', 'mute', 'voices', 'voice-chip', 'speed-group', 'turns-group', 'settings'], 'its controls, in order');
   assert.deepEqual(p.buttons, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'settings'], 'the only buttons shown');
   assert.deepEqual(p.gone, [], 'the removed parts are gone');
   assert.equal(p.hint, 0, 'no hint paragraph');
@@ -9283,8 +9639,15 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (Wi
   assert.ok(await canvasShowsGame(page), 'the RGBA frame');
   const identity = await page.evaluate(() => [globalThis.__u6Layout.toGame(88.5, 88.5), globalThis.__u6Layout.toCanvas(88, 88)]);
   assert.deepEqual(identity, [[88, 88], [88.5, 88.5]], 'the page\'s map: the canvas is the frame');
+  // Settings is a modal input boundary. Verify its guard before testing the game's mapping.
+  const beforePointer = await page.evaluate(() => globalThis.__pointerAt);
+  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  assert.deepEqual(await page.evaluate(() => globalThis.__pointerAt), beforePointer, 'Settings blocks pointer moves into the game');
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
   await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
   await page.waitForFunction(() => globalThis.__pointerAt?.[0] === 88 && globalThis.__pointerAt[1] === 88, null, { timeout: 5000 });
+  await page.click('#settings');
   await page.click('#hd');
   s = await layoutShown(page);
   assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720, 'HD on: the HD layout again');
@@ -10538,7 +10901,11 @@ test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pa
   // the Look no rect the page copied meets a source of the band (its pieces' `from`, the x4
   // frame's rects that paint the paper whole) and the x4 frame under them stays as it was, so a
   // whole repaint could only be the page's own.
+  // fontOnOff leaves Settings open; close it before sending a world pointer move.
+  await page.click('#setup-ok');
+  await h.waitSettled(page);
   await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
+  assert.deepEqual(await page.evaluate(() => globalThis.__pointerAt), [88, 88], 'the closed Settings lets the pointer reach the map');
   await h.runFrames(page, 10);
   await page.evaluate(() => {
     const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
@@ -11490,10 +11857,10 @@ const TITLE_CLEAR = 4;
 // the page's default), the pixel font kept (as `bootLayout`: a listed cell is flat paper in the
 // HD frame), the user's disks started in `game`, the canvas focused. `init` runs in the page
 // before its scripts. Also: the paths of the engine glue the page asked for.
-async function bootWide(env, { fresh = false, init = null, width = 1400, height = 900 } = {}) {
+async function bootWide(env, { fresh = false, init = null, width = 1400, height = 900, motion = 'off' } = {}) {
   const { context, page } = fresh
-    ? await h.openPage(env, { layout: null, font: 'pixel' })
-    : await h.openWide(env, { width, height, font: 'pixel' });
+    ? await h.openPage(env, { layout: null, font: 'pixel', motion })
+    : await h.openWide(env, { width, height, font: 'pixel', motion });
   if (fresh) await page.setViewportSize({ width, height });
   if (init) await context.addInitScript(init);
   const glues = [];
@@ -11506,6 +11873,7 @@ async function bootWide(env, { fresh = false, init = null, width = 1400, height 
   await started(page, FILES);
   await page.focus('#screen');
   await h.waitPrompt(page);
+  await page.waitForFunction(() => globalThis.__u6Layout.composeMedianMs !== null, null, { timeout: 30_000 });
   return { context, page, glues };
 }
 
@@ -12244,14 +12612,161 @@ test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on bl
   console.log(`  receipt: ${lines.join('; ')}; a key reached the game in each: pass`);
 }, { needs: h.haveHfes });
 
-// A timing: it needs a lightly loaded runner. On a machine busy with other work the median grows
-// with the load (three runs of 60 are taken and the least kept, which only the load raises), and
-// a failure prints the medians measured: read them against the machine's load before choosing 2.
-test('Wide layout (spec 13 Design 6, spec 14 Design 1): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the Wide frame, its size read from the engine: spec 14\'s 912 x 408, the median of 60, the least of up to three runs of 60: the machine\'s load only adds; a lightly loaded runner) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt, with the frame\'s size)', async (env) => {
+// Force slow 4× composition without changing the compositor's output or depending on host load.
+// The observer hook runs after present(), before the page begins its per-frame calibration.
+test('Wide automatic scale: a slow whole composition selects S 2 and preserves the shown pixels', async (env) => {
+  const { page } = await bootWide(env, { init: () => {
+    let shown;
+    Object.defineProperty(globalThis, '__shownGame', {
+      get: () => shown,
+      set: (game) => {
+        shown = game;
+        if (game.__slowCompose) return;
+        game.__slowCompose = true;
+        const compose = game.set_hd.bind(game);
+        game.set_hd = (on, scale) => {
+          const start = performance.now();
+          const result = compose(on, scale);
+          if (on && scale === 4) while (performance.now() - start < 9) { /* fixed slow host */ }
+          return result;
+        };
+      },
+    });
+  } });
+  const s = await wideShown(page);
+  assert.equal(s.layoutScale, 2, 'above 8 ms the page chooses S 2');
+  assert.equal(s.scale, 2, 'the engine uses the chosen scale');
+  assert.ok(await page.evaluate(() => globalThis.__u6Layout.composeMedianMs > 8), 'the full composition exceeded the unchanged budget');
+  await h.virtualDisplay(page, 60);
+  await h.runFrames(page, 2);
+  const shown = await wideCheck(page, true);
+  for (const [name, r] of Object.entries(shown.windows)) {
+    assert.ok(r.compared > 0 && r.differ === 0, `${name}: the canvas shows the S 2 frame pixels`);
+  }
+  assert.ok(shown.map.compared > 50 && shown.map.differ === 0, 'the map shows the S 2 frame pixels');
+  await page.click('#settings');
+  await page.click('#hd');
+  await h.runFrames(page, 2);
+  assert.equal((await wideShown(page)).hd, false, 'HD can be switched off after calibration');
+  await page.click('#hd');
+  await h.runFrames(page, 2);
+  assert.equal((await wideShown(page)).scale, 2, 'HD reentry keeps the measured scale');
+  console.log('  receipt: forced slow S 4; chosen S 2; window and map pixels agree; HD off/on: pass');
+}, { needs: h.haveHfes });
+
+// The B actor-layer rebuild is part of the same composition budget. Slow only present(),
+// leaving set_hd's base cost alone, and observe the actual canvas draws through calibration.
+test('Wide automatic scale: slow default B layers choose S 2 with matching layers on the first draw and HD reentry', async (env) => {
+  const init = () => {
+    let shown, pending = false;
+    const receipt = { sampleBuilds: 0, drawnLayers: 0, wholeLayers: 0, patchRects: 0, mismatchedLayers: 0, mismatches: [] };
+    globalThis.__wideLayerReceipt = receipt;
+    Object.defineProperty(globalThis, '__shownGame', {
+      get: () => shown,
+      set: (game) => {
+        shown = game;
+        if (game.__slowLayers) return;
+        game.__slowLayers = true;
+        const set = game.set_hd.bind(game), present = game.present.bind(game);
+        game.set_hd = (on, scale) => {
+          const before = game.hd_scale();
+          const result = set(on, scale);
+          if (on && before === 2 && scale === 4) pending = true;
+          if (!on || scale === 2) pending = false;
+          return result;
+        };
+        game.present = () => {
+          const start = performance.now();
+          const result = present();
+          if (game.hd_on() && game.hd_scale() === 4) {
+            if (pending) { receipt.sampleBuilds += 1; pending = false; }
+            while (performance.now() - start < 9) { /* fixed slow B layers */ }
+          }
+          return result;
+        };
+      },
+    });
+    const draw = CanvasRenderingContext2D.prototype.drawImage;
+    CanvasRenderingContext2D.prototype.drawImage = function (...args) {
+      if (this.canvas.id === 'screen' && shown?.hd_on()) {
+        const scale = shown.hd_scale(), placed = shown.slide();
+        for (let i = 0; i < placed.length; i += 3) {
+          const id = placed[i], [w, h] = shown.slide_layer_size(id);
+          receipt.drawnLayers += 1;
+          const patch = shown.slide_layer_patch(id);
+          // Changed layers intentionally have no full RGBA buffer. Check every changed
+          // rectangle at the actual draw scale, or the whole buffer when supplied whole.
+          const lengths = [];
+          if (patch.length === 0) {
+            receipt.wholeLayers += 1;
+            lengths.push([shown.slide_layer_len(id), w * scale * h * scale * 4]);
+          } else {
+            for (let k = 0; k < patch[2]; k += 1) {
+              const [, , rw, rh] = patch.slice(3 + k * 4, 7 + k * 4);
+              receipt.patchRects += 1;
+              lengths.push([shown.slide_patch_len(id, k), rw * scale * rh * scale * 4]);
+            }
+          }
+          for (const [length, expected] of lengths) if (length !== expected) {
+            receipt.mismatchedLayers += 1;
+            if (receipt.mismatches.length < 6) receipt.mismatches.push({ program: shown.program(),
+              role: shown.slide_layer_role(id), w, h, length, expected, scale,
+              poses: shown.footstep_poses().length / 3,
+              calibrated: Number.isFinite(globalThis.__u6Layout?.composeMedianMs) });
+          }
+        }
+      }
+      return draw.apply(this, args);
+    };
+  };
+  const { page } = await bootWide(env, { motion: 'on',
+    init: `(${wasmMemoryHook.toString()})();(${init.toString()})();` });
+  assert.deepEqual(await page.evaluate(() => [__shownGame.motion(), __shownGame.footstep_pattern()]), [true, 2], 'calibration retains default B');
+  const s = await wideShown(page);
+  assert.equal(s.layoutScale, 2, 'slow B layers select S 2');
+  assert.equal(s.scale, 2, 'the engine uses that scale');
+  const initial = await page.evaluate(() => ({ ...__wideLayerReceipt, median: __u6Layout.composeMedianMs }));
+  assert.equal(initial.sampleBuilds, 6, 'one warmup and five measured S 4 layer builds');
+  assert.ok(initial.median > 8, 'present cost enters the unchanged 8 ms budget');
+  assert.ok(initial.drawnLayers > 0, 'actual canvas draws show B layers');
+  if (initial.mismatchedLayers) console.log(`  receipt: B scale buffer mismatches ${JSON.stringify(initial.mismatches)}`);
+  assert.ok(initial.wholeLayers > 0, 'actual draws check whole layer buffers');
+  assert.equal(initial.mismatchedLayers, 0, 'all calibration and first chosen-scale draws have correctly scaled layers');
+  await h.virtualDisplay(page, 60);
+  await page.mouse.move(5, 5);
+  await h.runFrames(page, 2);
+  await installFootstepProbe(page);
+  const first = await page.evaluate(() => __footstepProbe());
+  assert.ok(first.pose && first.checked >= 8 && first.different === 0, 'chosen S 2 actually draws the selected B bitmap');
+  const windows = (await wideCheck(page, true)).windows;
+  for (const [name, r] of Object.entries(windows)) {
+    assert.ok(r.compared > 0 && r.differ === 0, `${name}: the S 2 window pixels remain correct`);
+  }
+  await page.click('#settings');
+  await page.click('#hd');
+  await h.runFrames(page, 2);
+  assert.equal((await wideShown(page)).hd, false, 'HD switches off after B calibration');
+  await page.click('#hd');
+  await h.runFrames(page, 2);
+  assert.equal((await wideShown(page)).scale, 2, 'HD reentry keeps the selected scale');
+  const again = await page.evaluate(() => ({ ...__footstepProbe(), ...__wideLayerReceipt }));
+  assert.ok(again.pose && again.checked >= 8 && again.different === 0, 'HD reentry draws the B bitmap at S 2');
+  assert.equal(again.mismatchedLayers, 0, 'no draw reads stale-scale layers, including HD reentry');
+  console.log(`  receipt: slow B present; ${initial.sampleBuilds} S 4 layer builds; chosen S 2; ${again.drawnLayers} layers at actual draws, no stale-scale buffer; B canvas samples ${first.checked}/${again.checked}, 0 pixel mismatches; HD off/on: pass`);
+}, { needs: h.haveHfes });
+
+// Report the current host load with the timing. A loaded receipt is not an idle baseline.
+// Three runs of 60 keep the least median; the page has already applied its measured fallback.
+test('Wide layout (spec 13 Design 6, spec 14 Design 1): the compositor\'s time per frame at S 4 on a game frame (a whole composition of the Wide frame, its size read from the engine: spec 14\'s 912 x 408, the median of 60, the least of up to three runs of 60: the machine\'s load only adds; host load recorded) and the scale the Wide layout asks: while it asks 4 that median is within 8 ms (above, it is to ask 2); asking 2, the median is printed (receipt, with the frame\'s size)', async (env) => {
   // The page's own frames run between the runs (the display stays real: a virtual one would
   // stop the clock the runs read).
-  const { page } = await bootWide(env);
+  const { page } = await bootWide(env, { motion: 'on' });
+  assert.deepEqual(await page.evaluate(() => [globalThis.__shownGame.motion(), globalThis.__shownGame.footstep_pattern()]), [true, 2], 'the budget includes default B gait');
   const { layoutScale: scale, frame } = await wideShown(page);
+  const calibrated = await page.evaluate(() => globalThis.__u6Layout.composeMedianMs);
+  assert.ok(Number.isFinite(calibrated) && calibrated > 0, 'the page measured the full game composition');
+  assert.equal(scale, calibrated > 8 ? 2 : 4, 'the unchanged 8 ms budget selects the runtime scale');
+  const hostLoad = loadavg();
   assert.deepEqual(frame, WIDE_FRAME, 'spec 14\'s frame composed');
   const medians = [];
   for (let run = 0; run < 3; run += 1) {
@@ -12260,8 +12775,10 @@ test('Wide layout (spec 13 Design 6, spec 14 Design 1): the compositor\'s time p
       const times = [];
       for (let i = 0; i < 60; i += 1) {
         g.set_hd(true, 2);
+        g.present(); // include rebuilt B actor layers after each scale change
         const t0 = performance.now();
         g.set_hd(true, 4);
+        g.present();
         times.push(performance.now() - t0);
       }
       times.sort((a, b) => a - b);
@@ -12280,7 +12797,7 @@ test('Wide layout (spec 13 Design 6, spec 14 Design 1): the compositor\'s time p
   // needs no time (the receipt says the median at S 4).
   const runs = medians.map((v) => v.toFixed(2)).join(', ');
   if (scale === 4) assert.ok(median <= 8, `S 4: the median ${median.toFixed(2)} ms (runs: ${runs}) within 8 ms (above it on a lightly loaded runner, the Wide layout is to ask 2: site/app.js WIDE_S)`);
-  console.log(`  receipt: the compositor at S 4, a whole composition of the Wide frame (${frame.join(' x ')}) on a game frame: median ${median.toFixed(2)} ms (runs: ${medians.map((m) => m.toFixed(2)).join(', ')}); the Wide layout asks S ${scale}`);
+  console.log(`  receipt: host load ${hostLoad.map((n) => n.toFixed(2)).join(', ')} (not an idle baseline while loaded); calibration ${calibrated.toFixed(2)} ms; the compositor at S 4, a whole composition of the Wide frame (${frame.join(' x ')}) on a game frame: median ${median.toFixed(2)} ms (runs: ${medians.map((m) => m.toFixed(2)).join(', ')}); the Wide layout asks S ${scale}`);
 }, { needs: h.haveHfes });
 
 // Waits for the page's next load after `act` (a choice that loads the page again), without
@@ -13546,6 +14063,1206 @@ test('remembered sight (spec 18, saved with the game): a dropped savegame folder
   console.log(`  receipt: spec 18 sight file past a block's limit: ${big.zeros} bytes taken with ${fill.length} files filling the save's ${SAVE_MAX} bytes`);
 }, { needs: h.haveHfes });
 
+/// The stored sight files, each as its length and whether every byte of it is 0 (read in the page:
+/// its bytes are not handed over).
+const storedSights = (page) => page.evaluate(() => new Promise((done, fail) => {
+  const req = indexedDB.open('ultima6-port', 1);
+  req.onerror = () => fail(req.error);
+  req.onsuccess = () => {
+    const db = req.result;
+    const get = db.transaction('files').objectStore('files')
+      .getAll(IDBKeyRange.bound('save:', 'save:￿'));
+    get.onsuccess = () => {
+      db.close();
+      done(get.result.filter((f) => /(^|\/)savegame\/u6sight$/i.test(f.path))
+        .map((f) => ({ length: f.bytes.length, zeros: f.bytes.every((b) => b === 0) })));
+    };
+    get.onerror = () => fail(get.error);
+  };
+}));
+
+test('remembered sight (spec 18, saved with the game): a dropped savegame folder holding the save\'s own sight file and, last, one of exactly the largest size the page takes: that last one alone is read and stored, the save\'s own left unread (synthetic sight bytes: the last within the limit is the one taken, whether or not it reads as a memory, since neither the page nor the engine reads a candidate\'s bytes to choose it); load state refuses it (malformed), so the game starts from the folder with nothing remembered out of sight where the save stands, where the save\'s own memory showed what the room\'s door showed', async (env) => {
+  const { page } = await h.openPage(env, { memory: 'on' });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await walkSouth(page, 10);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  await useSouth(page);
+  await h.waitFrames(page, 2);
+  const at = (await atPrompt(page)).leader;
+  await page.focus('#screen');
+  await h.press(page, 'Control+s', 30);
+  await h.press(page, 'y', 60);
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  await h.waitSettled(page);
+  // The control: where the save stands, the memory its Save wrote shows out of sight.
+  const shown = (await memoryShown(page)).flagged;
+  assert.ok(shown >= 256, 'the save\'s own memory: a cell\'s worth of remembered pixels where it stands');
+  const folder = asFolder(await h.savedFiles(page));
+  const own = folder.find(({ name }) => isSight(name));
+  assert.ok(own && own.bytes.length < SIGHT_MAX, 'the Save stored its own sight file, under the limit');
+  await forgetVia(page, '#forget-save');
+  await h.waitSettled(page);
+  const last = { name: 'LAST/SAVEGAME/U6SIGHT', zeros: SIGHT_MAX };
+  const from = (await h.log(page)).length;
+  await h.dropFiles(page, [], [...folder, last]);
+  const s = await started(page, FILES);
+  assert.deepEqual((await readSince(page, from)).filter(isSight), [last.name], 'the last sight file, at the limit, read alone');
+  assert.ok(!s.status.includes('Left out'), 'nothing left out');
+  assert.equal((await atPrompt(page)).leader, at, 'the folder resumes where it was saved');
+  const after = (await memoryShown(page)).flagged;
+  assert.equal(after, 0, 'that one refused (malformed): nothing remembered out of sight where the save stands');
+  assert.deepEqual(await storedSights(page), [{ length: SIGHT_MAX, zeros: true }], 'the stored save holds that one alone');
+  console.log(`  receipt: spec 18 sight file at the limit: the last of 2 sight files, ${SIGHT_MAX} bytes, read and stored alone; remembered pixels where the save stands: ${shown} with its own memory, ${after} after the start`);
+}, { needs: h.haveHfes });
+
+// --- smooth motion (spec 20) ------------------------------------------------------------------
+// The harness keeps it off (`openPage`'s `motion`), so every other test reads the engine's frame
+// after a step; here it is on, and a run with it off is the control: the same seed (the page's
+// clock seed, app.js clockSeed, from a fixed Date.now) and the same inputs at the same frames of
+// the same virtual 60 Hz display, so both games run the same steps. The party walks to the
+// room's door ten cells south of the start cell (as the remembered sight's test) at 8x, opens it,
+// then at 1x steps south through the doorway, four more cells by key and five by click. With
+// U6_MOTION_FRAMES set, the doorway step's first, middle and last frames of the slide are kept
+// there as PNG files of the canvas (the owner's game shown, written outside the repository).
+
+const MOTION_DIRS = [
+  { key: 'ArrowDown', dx: 0, dy: 1 },
+  { key: 'ArrowRight', dx: 1, dy: 0 },
+  { key: 'ArrowLeft', dx: -1, dy: 0 },
+  { key: 'ArrowUp', dx: 0, dy: -1 },
+];
+
+// A gated page of `mode` with `opts` (h.openPage's): 'original' and 'hd' the Original layout, 'layout'
+// the HD layout (spec 10: the 1280 x 720 canvas composed from the x4 frame), in a 1400 x 900 window
+// as `bootLayout`'s, 'wide' the Wide build.
+async function motionOpen(env, mode, opts) {
+  if (mode === 'wide') return h.openWide(env, opts);
+  const opened = await h.openPage(env, { ...opts, layout: mode === 'layout' ? 'hd' : 'original' });
+  if (mode === 'layout') await opened.page.setViewportSize({ width: 1400, height: 900 });
+  return opened;
+}
+
+// A gated page of `mode` ('original': HD off; 'hd': HD on, the Original layout; 'layout': the HD
+// layout; 'wide': the Wide build; `motionOpen`) with smooth motion `motion`, seeded from `seedTime`,
+// on a virtual 60 Hz display from its boot, the wasm memory kept (`wasmMemoryHook`), at the game's
+// prompt.
+async function motionPage(env, mode, motion, seedTime) {
+  const opts = { motion: motion ? 'on' : 'off', font: 'pixel' };
+  const { context, page } = await motionOpen(env, mode, opts);
+  await context.addInitScript((t) => { Date.now = () => t; }, seedTime);
+  await context.addInitScript(wasmMemoryHook);
+  if (mode === 'original') {
+    await context.addInitScript(() => {
+      try {
+        if (localStorage.getItem('u6.hd') === null) localStorage.setItem('u6.hd', 'off');
+      } catch {
+        // An opaque origin (about:blank) has no storage.
+      }
+    });
+  }
+  await h.load(page, env);
+  await h.virtualDisplay(page, 60, { loop: false });
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await page.focus('#screen');
+  await h.runFramesToPrompt(page, 60_000);
+  const shown = await page.evaluate(() => [globalThis.__shownGame.hd_on(), globalThis.__shownGame.motion(), document.body.dataset.layout]);
+  const layout = { original: 'original', hd: 'original', layout: 'hd', wide: 'wide' }[mode];
+  assert.deepEqual(shown, [mode !== 'original', motion, layout], `${mode}: HD, motion and the layout`);
+  return { context, page };
+}
+
+// These legacy interpolation oracles compare the untouched engine pixels, or require no
+// layers at rest. Gait deliberately replaces idle humanoid pixels. Keep it Off only here;
+// the separate B tests below exercise the default and the performance tests keep it on.
+async function interpolationOnly(page) {
+  await page.evaluate((baseline) => {
+    const g = globalThis.__shownGame;
+    if (baseline && !g.set_footstep_pattern) return; // saved pre-gait W3 artifact only
+    g.set_footstep_pattern(0);
+  }, Boolean(process.env.U6_W3_BASELINE));
+}
+
+const motionLeader = async (page) => (await h.state(page)).leader;
+
+// On the virtual display: `key` pressed, then frames until the prompt (`runFramesToPrompt`).
+async function motionKey(page, key) {
+  await page.keyboard.press(key);
+  await h.runFramesToPrompt(page, 60_000);
+}
+
+// The leader `cells` south of where it is (the remembered sight's `walkSouth`, on the virtual
+// display): south first, a pass where a key walked nothing; bounded.
+async function motionWalkSouth(page, cells) {
+  const at = async () => (await motionLeader(page)).split(',').map(Number);
+  const [sx, sy] = await at();
+  const to = [sx, sy + cells];
+  for (let tries = 0; tries < 160; tries += 1) {
+    const [x, y] = await at();
+    if (x === to[0] && y === to[1]) return;
+    const key = y < to[1] ? 'ArrowDown' : x < to[0] ? 'ArrowRight' : x > to[0] ? 'ArrowLeft' : 'ArrowUp';
+    await motionKey(page, key);
+    const [nx, ny] = await at();
+    if (nx === x && ny === y) await motionKey(page, 'Space');
+  }
+  assert.fail(`the party did not reach the cell ${cells} south of the start`);
+}
+
+// Keeps in the page the shown map as the canvas shows it now: per game pixel of the shown map, the
+// canvas pixel that shows it (with HD and the Original layout the top-left device pixel of its
+// S x S block; in Wide where the layout maps its centre, `__u6Layout.toCanvas`), none where a
+// window covers it.
+const motionReference = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+  const L = globalThis.__u6Layout;
+  const wide = ['hd', 'wide'].includes(document.body.dataset.layout);
+  const s = c.width / g.width();
+  const covered = (x, y) => L.windows.some(({ outer: [wx, wy, ww, wh] }) => x >= wx && x < wx + ww && y >= wy && y < wy + wh);
+  const at = new Int32Array(mw * mh).fill(-1);
+  for (let y = 0; y < mh; y += 1) {
+    for (let x = 0; x < mw; x += 1) {
+      let p;
+      if (wide) {
+        const q = L.toCanvas(mx + x, my + y);
+        p = q && !covered(q[0], q[1]) ? [Math.floor(q[0]), Math.floor(q[1])] : null;
+      } else p = [(mx + x) * s, (my + y) * s];
+      if (p && p[0] >= 0 && p[1] >= 0 && p[0] < c.width && p[1] < c.height) at[y * mw + x] = (p[1] * c.width + p[0]) * 4;
+    }
+  }
+  globalThis.__motionMap = () => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const out = new Int32Array(mw * mh);
+    for (let i = 0; i < out.length; i += 1) out[i] = at[i] < 0 ? -1 : (d[at[i]] << 16) | (d[at[i] + 1] << 8) | d[at[i] + 2];
+    return { out, mw, mh };
+  };
+  globalThis.__motionRef = globalThis.__motionMap();
+});
+
+// Frames after a step's prompt is back for five, in both runs: every frame at the prompt draws from
+// the game's RNG (its idle animation), so the runs see the same frames; 30 at 60 Hz cover the end
+// of a slide that began at the step's picture (360 ms of the clock from it, some 100 ms of which
+// lie before the prompt).
+const MOTION_TAIL = 30;
+
+// On the virtual display after an input toward (dx, dy): frames until the prompt is back for five
+// frames (at most `max`), then `MOTION_TAIL` more. Per frame, how far the shown map has moved along
+// the step from the reference (`motionReference`): the d in 0..16 whose shift (the map at x showing
+// what the reference showed at x + d·dx, y + d·dy) matches most of the map less a cell at each
+// edge. Also the frames from the input to the prompt, whether a slide still ran after the last
+// frame, and with `keep` the canvas's PNG of the slide's first frame and of each frame after it
+// whose d changed.
+const motionFrames = (page, dx, dy, keep, max = 3000) => page.evaluate(([ax, ay, keepPng, limit, tail]) => {
+  const v = window.__display;
+  const c = document.getElementById('screen');
+  const g = globalThis.__shownGame;
+  const ref = globalThis.__motionRef;
+  const offsets = [];
+  const kept = [];
+  let prompt = null;
+  let run = 0;
+  let after = null;
+  for (let f = 0; f < limit && (after === null || f < after + tail); f += 1) {
+    v.run();
+    const at = c.dataset.prompt === '1' && c.dataset.keys === '0';
+    if (at && prompt === null) prompt = f + 1;
+    run = at ? run + 1 : 0;
+    if (run >= 5 && after === null) after = f + 1;
+    const now = globalThis.__motionMap();
+    let best = [-1, 0];
+    for (let d = 0; d <= 16; d += 1) {
+      let same = 0;
+      for (let y = 16; y < now.mh - 16; y += 2) {
+        for (let x = 16; x < now.mw - 16; x += 2) {
+          const [p, q] = [now.out[y * now.mw + x], ref.out[(y + d * ay) * ref.mw + x + d * ax]];
+          same += p >= 0 && p === q ? 1 : 0;
+        }
+      }
+      if (same > best[0]) best = [same, d];
+    }
+    // The slide's first frame, then each frame whose d changed.
+    const first = g.sliding() && !kept.some(([, , slide]) => slide);
+    if (keepPng && (first || (kept.length > 0 && best[1] !== offsets.at(-1)))) kept.push([best[1], c.toDataURL('image/png'), g.sliding()]);
+    offsets.push(best[1]);
+  }
+  return { offsets, prompt, kept, leader: c.dataset.leader, sliding: g.sliding(), atPrompt: c.dataset.prompt === '1' };
+}, [dx, dy, keep, max, MOTION_TAIL]);
+
+// The frames a step's map was seen moving through, each value with its run: `0x26 1 2 ... 16x40`.
+const runsOf = (offsets) => {
+  const out = [];
+  for (const d of offsets) {
+    if (out.length > 0 && out.at(-1)[0] === d) out.at(-1)[1] += 1;
+    else out.push([d, 1]);
+  }
+  return out.map(([d, n]) => (n > 1 ? `${d}x${n}` : `${d}`)).join(' ');
+};
+
+// One step by `how` ('key': the arrow; 'click': the map cell beside the leader's that way): the
+// directions of `dirs` in order, a pass after a round of them blocked, at most `rounds` rounds.
+// Returns the step's direction, its frames (`motionFrames`) and the leader before and after.
+async function motionStep(page, how, mode, { keep = false, dirs = MOTION_DIRS, rounds = 4 } = {}) {
+  for (let round = 0; round < rounds; round += 1) {
+    if (round > 0) await motionKey(page, 'Space');
+    for (const dir of dirs) {
+      const from = await motionLeader(page);
+      await motionReference(page);
+      if (how === 'key') await page.keyboard.press(dir.key);
+      else {
+        const [cx, cy] = mode === 'wide' ? [320 + 18 * 16 + 8, 10 * 16 + 8] : [88, 88];
+        await page.mouse.click(...(await h.screenPoint(page, cx + 16 * dir.dx, cy + 16 * dir.dy)));
+      }
+      const frames = await motionFrames(page, dir.dx, dir.dy, keep);
+      assert.ok(frames.prompt !== null && frames.atPrompt, `${mode}: the prompt came back after a ${how} step`);
+      if (frames.leader !== from) return { dir, from, to: frames.leader, ...frames };
+    }
+  }
+  assert.fail(`${mode}: no ${how} step walked in ${rounds} rounds`);
+}
+
+// A whole run: the door reached at 8x and opened, then at 1x the doorway step and four more by
+// key, five by click. Returns the steps.
+async function motionRun(env, mode, motion, seedTime) {
+  const { context, page } = await motionPage(env, mode, motion, seedTime);
+  await interpolationOnly(page);
+  await page.evaluate(() => globalThis.__shownGame.set_speed(8));
+  await motionWalkSouth(page, 10);
+  // Use, the cross-hair one cell south (the target wait, not the prompt), Enter: the door opens.
+  for (const key of ['u', 'ArrowDown']) {
+    await page.keyboard.press(key);
+    await h.runFrames(page, 20);
+  }
+  await motionKey(page, 'Enter');
+  await page.evaluate(() => globalThis.__shownGame.set_speed(1));
+  await h.runFramesToPrompt(page, 60_000);
+  const steps = [];
+  const door = await motionStep(page, 'key', mode, { keep: motion, dirs: [MOTION_DIRS[0]], rounds: 12 });
+  steps.push({ how: 'key', ...door });
+  for (let i = 0; i < 4; i += 1) steps.push({ how: 'key', ...(await motionStep(page, 'key', mode)) });
+  for (let i = 0; i < 5; i += 1) steps.push({ how: 'click', ...(await motionStep(page, 'click', mode)) });
+  const scale = await page.evaluate(() => (globalThis.__shownGame.hd_on() ? globalThis.__shownGame.hd_scale() : 1));
+  await context.close();
+  return Object.assign(steps, { scale });
+}
+
+for (const mode of ['original', 'hd', 'layout', 'wide']) {
+  test(`smooth motion (spec 20), ${mode}: by key and by click, every step's map passes through in-between positions on the virtual 60 Hz display (offsets printed per frame), the doorway step's frames kept; the steps and the frames to the prompt are those of the same run with it off, which shows none`, async (env) => {
+    const seedTime = Date.now();
+    const on = await motionRun(env, mode, true, seedTime);
+    const off = await motionRun(env, mode, false, seedTime);
+    assert.deepEqual(on.map((s) => [s.how, s.from, s.to]), off.map((s) => [s.how, s.from, s.to]), `${mode}: the same steps with it off`);
+    assert.equal(on[0].dir.key, 'ArrowDown', `${mode}: the first step goes south through the doorway`);
+    console.log(`  receipt: ${mode} at S ${on.scale}`);
+    on.forEach((s, i) => {
+      const label = `${mode} step ${i + 1} (${s.how} ${s.dir.key})`;
+      console.log(`  receipt: ${label}: map offset by frame on ${runsOf(s.offsets)}; off ${runsOf(off[i].offsets)}; frames to the prompt ${s.prompt}, off ${off[i].prompt}`);
+      const between = s.offsets.filter((d) => d > 0 && d < 16).length;
+      assert.ok(between > 0, `${label}: in-between positions`);
+      assert.ok(s.offsets.at(-1) === 16 && off[i].offsets.at(-1) === 16, `${label}: a whole cell at the end, on and off`);
+      assert.ok(!s.sliding, `${label}: the slide over by the end of the tail`);
+      assert.ok(off[i].offsets.every((d) => d === 0 || d === 16), `${label}: off, no in-between position`);
+      assert.ok(Math.abs(s.prompt - off[i].prompt) <= 1, `${label}: the prompt within a display frame of the run with it off`);
+    });
+    const kept = on[0].kept;
+    const pick = (want) => kept.reduce((a, b) => (Math.abs(b[0] - want) < Math.abs(a[0] - want) ? b : a));
+    assert.ok(kept.length > 2, `${mode}: the doorway step's slide kept`);
+    const frames = { t0: kept[0], mid: pick(8), end: kept.at(-1) };
+    assert.ok(frames.t0[0] <= 1 && frames.mid[0] > 0 && frames.mid[0] < 16 && frames.end[0] === 16, `${mode}: the doorway step's first, middle and last frames`);
+    const dir = process.env.U6_MOTION_FRAMES;
+    if (dir) {
+      await mkdir(dir, { recursive: true });
+      for (const [name, [d, url]] of Object.entries(frames)) {
+        await writeFile(join(dir, `${mode}-doorway-${name}.png`), Buffer.from(url.split(',')[1], 'base64'));
+        console.log(`  receipt: ${mode} doorway frame ${name}: offset ${d} kept`);
+      }
+    }
+  }, { needs: h.haveHfes });
+}
+
+// Keeps in the page `__motionRing()`: the canvas pixels of the ring two canvas pixels outside the
+// shown map's rect on the canvas (the frame's border round it, in the Wide layouts the layout's
+// own, the windows left out), the rect found as `motionReference` maps the map; and counts the
+// page's draws of a slide (each one reads Game.slide) in `__slideCalls` and keeps every draw of a
+// canvas onto another in `__slideDraws` while it is an array (a frame of `motionUntil`).
+const motionRing = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+  const L = globalThis.__u6Layout;
+  const wide = ['hd', 'wide'].includes(document.body.dataset.layout);
+  const s = c.width / g.width();
+  const covered = (x, y) => L.windows.some(({ outer: [wx, wy, ww, wh] }) => x >= wx && x < wx + ww && y >= wy && y < wy + wh);
+  // The map's rect on the canvas: its corner pixels' centres where the layout puts them, half a
+  // game pixel out (in the Wide layouts the frame round the map is the layout's own).
+  let [l, t, r, b] = [mx * s, my * s, (mx + mw) * s, (my + mh) * s];
+  if (wide) {
+    // The map pixels the layout puts on the canvas, their centres' bounds.
+    let box = null;
+    for (let y = my; y < my + mh; y += 1) {
+      for (let x = mx; x < mx + mw; x += 1) {
+        const q = L.toCanvas(x, y);
+        if (q) box = box ? [Math.min(box[0], q[0]), Math.min(box[1], q[1]), Math.max(box[2], q[0]), Math.max(box[3], q[1])] : [q[0], q[1], q[0], q[1]];
+      }
+    }
+    if (!box) return 0;
+    const [kx, ky] = [c.width / g.width(), c.height / g.height()];
+    [l, t, r, b] = [box[0] - kx / 2, box[1] - ky / 2, box[2] + kx / 2, box[3] + ky / 2];
+  }
+  [l, t, r, b] = [Math.floor(l) - 2, Math.floor(t) - 2, Math.ceil(r) + 1, Math.ceil(b) + 1];
+  const ring = [];
+  for (let x = l; x <= r; x += 1) ring.push([x, t], [x, b]);
+  for (let y = t; y <= b; y += 1) ring.push([l, y], [r, y]);
+  const at = [];
+  for (const [x, y] of ring) {
+    if (wide && covered(x, y)) continue;
+    if (x >= 0 && y >= 0 && x < c.width && y < c.height) at.push((y * c.width + x) * 4);
+  }
+  globalThis.__motionRing = () => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    return at.map((i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+  };
+  const proto = Object.getPrototypeOf(g);
+  if (!proto.__counted) {
+    const slide = proto.slide;
+    proto.slide = function () {
+      globalThis.__slideCalls += 1;
+      return slide.call(this);
+    };
+    proto.__counted = true;
+  }
+  // Every draw of a canvas onto another (not takeLayer's shift of a layer over itself), in
+  // order, with its destination canvas and place: whether its source is the slide's static layer
+  // (its size the static layer's at a whole scale, the static layer found by its role,
+  // Game.slide_layer_role 0; no other canvas the page draws has its proportions), its scale then,
+  // whether the context drew it untransformed, and its arguments, its source's size and the
+  // context's transform (to map it).
+  const canvas2d = CanvasRenderingContext2D.prototype;
+  if (!canvas2d.__countedStatic) {
+    const draw = canvas2d.drawImage;
+    canvas2d.drawImage = function (source, ...rest) {
+      if (source instanceof HTMLCanvasElement && source !== this.canvas && Array.isArray(globalThis.__slideDraws)) {
+        const g = globalThis.__shownGame;
+        const roles = g ? Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i)) : [];
+        const size = roles.includes(0) ? g.slide_layer_size(roles.indexOf(0)) : [];
+        const isStatic = size.length === 2 && source.width > 0 && source.width % size[0] === 0
+          && source.width / size[0] === source.height / size[1];
+        const m = this.getTransform();
+        globalThis.__slideDraws.push({
+          source, target: this.canvas, x: rest[0], y: rest[1], isStatic,
+          scale: isStatic ? source.width / size[0] : 0,
+          plain: m.isIdentity && rest.length === 2,
+          args: rest.slice(0, 8), size: [source.width, source.height], m: [m.a, m.b, m.c, m.d, m.e, m.f],
+        });
+      }
+      return draw.call(this, source, ...rest);
+    };
+    canvas2d.__countedStatic = true;
+  }
+  globalThis.__slideCalls = 0;
+  globalThis.__slideDraws = null;
+  return at.length;
+});
+
+// On the virtual display: frames until `until` (`'sliding'`: a slide drawn from layers;
+// `'settled'`: the prompt back for five frames and no slide), at most `max`. Per frame with a slide
+// placed: whether the ring (`motionRing`) differs from `ref`; the frame's draws of the slide's
+// static layer canvas that reach the screen (drawn onto the screen canvas, or onto a canvas drawn
+// onto the screen after it in that frame: the compositing of Wide and of the HD layout), each of
+// which must lie untransformed at Game.slide's first triple times its scale (else a misplaced
+// draw); each draw of such a canvas onto the screen after it that takes the shown map, which must
+// put that map's pixels where the layout puts them (its source and target rects through the
+// context's transform, against the layout's toCanvas at the corners and middle of the part it
+// takes; else a misplaced draw, as is a draw onto a canvas no such draw takes to the screen); and
+// whether the static layer's destination moved along `dir`
+// (dx, dy) since the last such draw, which a slide toward -dir does (the camera's offset from rest
+// shrinking toward the new cell). Returns the frames, the frames with a slide placed, those that
+// drew the static layer onto the screen, those that drew it moved along `dir`, the misplaced
+// draws, the draws onto the screen checked so, the static layer's draws onto another canvas, the
+// ring's differing frames, the newest layers version, whether `until` was met and the leader.
+const motionUntil = (page, until, ref, max = 3000, dir = [0, 0]) => page.evaluate(([want, base, limit, [dx, dy]]) => {
+  const v = window.__display;
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  let [frames, sliding, drawn, along, misplaced, finals, indirect, ring, run] = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  let place = null;
+  const L = globalThis.__u6Layout;
+  const [mx, my, mw, mh] = g.width() === 320 ? [8, 8, 160, 160] : [328, 8, 576, 320];
+  // Where draw `d` (of a canvas `k` device pixels a game pixel) puts the shown map's game pixels
+  // it takes, against the layout: [checked, off by more than a canvas pixel].
+  const mapped = (d, k) => {
+    const a = d.args;
+    const [w, h] = d.size;
+    const [sx, sy, sw, sh, dx, dy, dw, dh] = a.length >= 8 ? a : a.length >= 4 ? [0, 0, w, h, ...a] : [0, 0, w, h, a[0], a[1], w, h];
+    const [ta, tb, tc, td, te, tf] = d.m;
+    const to = (u, v) => {
+      const [x, y] = [dx + ((u - sx) * dw) / sw, dy + ((v - sy) * dh) / sh];
+      return [ta * x + tc * y + te, tb * x + td * y + tf];
+    };
+    const [gx0, gy0] = [Math.max(mx, Math.ceil(sx / k)), Math.max(my, Math.ceil(sy / k))];
+    const [gx1, gy1] = [Math.min(mx + mw, Math.floor((sx + sw) / k)) - 1, Math.min(my + mh, Math.floor((sy + sh) / k)) - 1];
+    if (gx0 > gx1 || gy0 > gy1) return [false, false];
+    let [checked, off] = [false, false];
+    for (const [gx, gy] of [[gx0, gy0], [gx1, gy1], [gx0, gy1], [gx1, gy0], [(gx0 + gx1) >> 1, (gy0 + gy1) >> 1]]) {
+      const q = L.toCanvas(gx, gy);
+      if (!q) continue;
+      const p = to((gx + 0.5) * k, (gy + 0.5) * k);
+      checked = true;
+      off ||= Math.abs(p[0] - q[0]) > 1 || Math.abs(p[1] - q[1]) > 1;
+    }
+    return [checked, off];
+  };
+  const met = () => (want === 'sliding' ? g.sliding() && g.slide().length > 0 : run >= 5 && !g.sliding());
+  while (frames < limit && !met()) {
+    globalThis.__slideDraws = [];
+    v.run();
+    frames += 1;
+    run = c.dataset.prompt === '1' && c.dataset.keys === '0' ? run + 1 : 0;
+    const placed = g.slide();
+    const draws = globalThis.__slideDraws;
+    const onScreen = (d, i) => d.target === c || draws.some((e, j) => j > i && e.source === d.target && e.target === c);
+    const shown = draws.map((d, i) => [d, i]).filter(([d, i]) => d.isStatic && onScreen(d, i)).map(([d]) => d);
+    if (placed.length > 0) {
+      sliding += 1;
+      const taken = new Set();
+      for (const [d, i] of draws.map((e, j) => [e, j]).filter(([e]) => e.target === c)) {
+        const under = draws.find((e, j) => j < i && e.isStatic && e.target === d.source);
+        if (!under) continue;
+        const [checked, off] = mapped(d, under.scale);
+        if (checked) taken.add(d.source);
+        finals += checked ? 1 : 0;
+        misplaced += off ? 1 : 0;
+      }
+      if (shown.length > 0) {
+        drawn += 1;
+        // The static layer's triple, found by its role (Game.slide_layer_role 0).
+        const roles = Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i));
+        let at = null;
+        for (let k = 0; k + 2 < placed.length && at === null; k += 3) if (roles[placed[k]] === 0) at = [placed[k + 1], placed[k + 2]];
+        misplaced += shown.filter((d) => !(at && d.plain && d.x === at[0] * d.scale && d.y === at[1] * d.scale)).length;
+        // A draw onto another canvas reaches the screen only through a draw checked above.
+        const via = shown.filter((d) => d.target !== c);
+        indirect += via.length;
+        misplaced += via.filter((d) => !taken.has(d.target)).length;
+        const d = shown[0];
+        if (place && (d.x - place[0]) * dx + (d.y - place[1]) * dy > 0) along += 1;
+        place = [d.x, d.y];
+      }
+      ring += globalThis.__motionRing().some((p, i) => p !== base[i]) ? 1 : 0;
+    } else place = null;
+  }
+  globalThis.__slideDraws = null;
+  return { frames, sliding, drawn, along, misplaced, finals, indirect, ring, layers: g.slide_layers_version(), met: met(), leader: c.dataset.leader };
+}, [until, ref, max, dir]);
+
+for (const mode of ['hd', 'layout', 'wide']) {
+  test(`smooth motion (spec 20 Design 5), ${mode} in fullscreen: a key pressed while a step's slide runs is taken (the party walks back on a slide of its own, the map drawn moving back); the border round the shown map keeps its pixels in every frame of the slides; once settled the page draws no slide (60 frames)`, async (env) => {
+    const { context, page } = await motionPage(env, mode, true, Date.now());
+    await interpolationOnly(page);
+    await page.click('#fullscreen');
+    await waitFull(page, 'on');
+    await page.focus('#screen');
+    await h.runFramesToPrompt(page, 60_000);
+    assert.ok((await motionRing(page)) > 100, `${mode}: the ring found`);
+    const ref = await page.evaluate(() => globalThis.__motionRing());
+    const from = await motionLeader(page);
+    let step = null;
+    for (const dir of MOTION_DIRS) {
+      await page.keyboard.press(dir.key);
+      const out = await motionUntil(page, 'sliding', ref, 600);
+      if (out.met && (await motionLeader(page)) !== from) {
+        step = { dir, out };
+        break;
+      }
+      await motionUntil(page, 'settled', ref);
+    }
+    assert.ok(step, `${mode}: a step slid`);
+    // A few frames more of the step's slide, its map drawn moving.
+    const out = await motionUntil(page, 'none', ref, 4, [-step.dir.dx, -step.dir.dy]);
+    // The way back, pressed while the slide runs.
+    const back = MOTION_DIRS.find((d) => d.dx === -step.dir.dx && d.dy === -step.dir.dy);
+    assert.ok(await page.evaluate(() => globalThis.__shownGame.sliding()), `${mode}: the key comes during the slide`);
+    await page.keyboard.press(back.key);
+    // The return step's slide: the static layer moving along the step's own way (the camera
+    // coming back), other layers than the step's.
+    const after = await motionUntil(page, 'settled', ref, 3000, [step.dir.dx, step.dir.dy]);
+    assert.ok(after.met, `${mode}: settled`);
+    assert.equal(await motionLeader(page), from, `${mode}: the key taken, the party back`);
+    assert.ok(out.drawn > 0 && out.along > 0, `${mode}: the step's slide drawn moving its way`);
+    assert.ok(after.along > 2 && after.layers > out.layers, `${mode}: the return step's own slide drawn, moving back`);
+    assert.equal(step.out.ring + out.ring + after.ring, 0, `${mode}: the border's pixels in every frame of the slides`);
+    assert.equal(step.out.misplaced + out.misplaced + after.misplaced, 0, `${mode}: each draw of the static layer where Game.slide places it, and each draw of it onto the screen where the layout puts the map`);
+    const [finals, indirect] = [step.out.finals + out.finals + after.finals, step.out.indirect + out.indirect + after.indirect];
+    assert.ok(indirect === 0 || finals > 0, `${mode}: draws onto the screen of the canvas the static layer went onto, checked`);
+    // The HD layout composes the slide in its ×4 frame first, Wide in its frame canvas: the
+    // draws onto the screen of those are what the checks above see there.
+    if (mode !== 'hd') assert.ok(indirect > 0, `${mode}: the static layer goes onto the layout's frame canvas first`);
+    const settled = await page.evaluate(() => {
+      const g = globalThis.__shownGame;
+      globalThis.__slideCalls = 0;
+      const version = g.slide_version();
+      for (let i = 0; i < 60; i += 1) window.__display.run();
+      return [globalThis.__slideCalls, g.slide_version() === version, g.sliding()];
+    });
+    assert.deepEqual(settled, [0, true, false], `${mode}: no slide drawn once settled`);
+    console.log(`  receipt: ${mode} in fullscreen: ${step.out.sliding + out.sliding + after.sliding} frames with a slide placed, ${step.out.drawn + out.drawn + after.drawn} of them drawing the static layer canvas, ${indirect} of those onto another canvas, ${finals} draws of that canvas onto the screen where the layout puts the map, ${after.along} of the return step's drawing it moved back; the border unchanged in all; the second key during the slide taken; 0 slide draws in 60 frames once settled`);
+    await context.close();
+  }, { needs: h.haveHfes });
+}
+
+// The static layer's offset from its rest place in the slide the page draws: from
+// `placed` (Game.slide's (layer, x, y) triples) and `roles` (Game.slide_layer_role of each layer),
+// the triple of the static words (role 0) less the rest place, a cell up and left of the frame
+// layer's (the cursor and the border, role 1, drawn at rest); null with no slide placed.
+const staticOffset = (placed, roles, origins) => {
+  const at = (role) => {
+    for (let k = 0; k + 2 < placed.length; k += 3) if (roles[placed[k]] === role) return [placed[k + 1], placed[k + 2]];
+    return null;
+  };
+  const [s, f] = [at(0), at(1)];
+  const index = roles.findIndex((role) => role === 0);
+  const origin = origins?.[index] ?? (f ? [f[0]-16,f[1]-16] : null);
+  return s && origin ? [s[0]-origin[0],s[1]-origin[1]] : null;
+};
+
+// One display frame of the virtual display in the page (`motionRing` installed): the leader, the
+// slide placed (Game.slide) with its layers' roles, whether the frame drew the static layer onto
+// the screen (onto the screen canvas, or onto a canvas drawn onto it after), how many of those
+// draws lie elsewhere than Game.slide's static triple (found by its role) times their scale, or
+// transformed (`misplaced`, as `motionUntil` counts them), the layers version, and whether the
+// engine's frame shows the old cell through a foreign picture (Game.old_cell, round 13).
+const runSlideFrame = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
+  const g = globalThis.__shownGame;
+  globalThis.__slideDraws = [];
+  window.__display.run();
+  const draws = globalThis.__slideDraws;
+  globalThis.__slideDraws = null;
+  const onScreen = (d, k) => d.target === c || draws.some((e, j) => j > k && e.source === d.target && e.target === c);
+  const roles = Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i));
+  const placed = g.slide();
+  let at = null;
+  for (let k = 0; k + 2 < placed.length && at === null; k += 3) if (roles[placed[k]] === 0) at = [placed[k + 1], placed[k + 2]];
+  const shown = draws.filter((d, k) => d.isStatic && onScreen(d, k));
+  const misplaced = shown.filter((d) => !(at && d.plain && d.x === at[0] * d.scale && d.y === at[1] * d.scale)).length;
+  return [c.dataset.leader, placed, roles, shown.length > 0, misplaced, g.slide_layers_version(), g.old_cell(), roles.map((_,i)=>Array.from(g.slide_layer_origin(i)))];
+});
+
+// Round 13 (gpt b S1): the pixels of the map on the canvas (HD on, the Original layout: the canvas
+// is the HD frame's size) that differ from the game's HD frame there, the pointer's box left out
+// (the page draws the pointer over the frame): 0 when the engine's frame reached the canvas whole
+// (no slide drawn over it, none left from one).
+const mapOffHd = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const c = document.getElementById('screen');
+  const s = g.hd_scale();
+  const [mx, my, mw, mh] = [8, 8, 160, 160].map((v) => v * s);
+  const shown = c.getContext('2d').getImageData(mx, my, mw, mh).data;
+  const hd = g.hd_frame_rgba();
+  const w = g.width() * s;
+  const p = g.hd_pointer();
+  const inPointer = (x, y) => p[2] > 0 && x >= p[0] * s && x < (p[0] + p[2]) * s && y >= p[1] * s && y < (p[1] + p[3]) * s;
+  let off = 0;
+  for (let y = 0; y < mh; y += 1) {
+    for (let x = 0; x < mw; x += 1) {
+      if (inPointer(mx + x, my + y)) continue;
+      const [i, j] = [(y * mw + x) * 4, ((my + y) * w + mx + x) * 4];
+      if (shown[i] !== hd[j] || shown[i + 1] !== hd[j + 1] || shown[i + 2] !== hd[j + 2]) off += 1;
+    }
+  }
+  return off;
+});
+
+// One step's frames, as the native receipt counts them (u6-web `Progress`, the same rules), on the
+// static layer's placement: `frame(off, shown, old)` with its offset from rest (null: no slide
+// placed, the HD frame shown), whether the frame's picture reached the screen (the static layer
+// drawn onto it; a frame with no slide placed shows the HD frame) and whether that HD frame shows
+// the old cell through a foreign picture (Game.old_cell, round 13). Off rest, held at rest,
+// moving (drawn closer to rest along the step than on the step's last frame that reached the
+// screen, which lay between the step's two cells too: the map moving against the step, `k`
+// pixels behind it with 0 < k <= 16), backward (round 13: a frame that reached the screen
+// farther from rest than the last that did, the HD frame at rest included, once the step's slide
+// began: a frame at rest before its first frame off rest is its onset, round 12, review gpt b S3)
+// and stray (off rest, not between the two cells). And the jump (round 12, opus S1): the largest
+// drop of k between two frames that reached the screen, from 16 (the old cell) to the first; a
+// frame with no slide placed after the slide began counts as at rest (0), one before it is not
+// counted, one showing the old cell counts as 16. `close()` at the step's end (the next step, or
+// the end of the hold): once its slide began the map must stand at rest (k 0), else the step is
+// `unfinished`. So a slide frozen at its start, run backward, past rest, snapped or cut short
+// (16, 15, 14, then the HD frame: a jump of 14), or drawn in steps over the bound fails the
+// receipt, and one frozen short of rest after it moved (16, 15, 14 and 14 on) is unfinished.
+const progress = (dir) => {
+  const p = { dir, frames: 0, offRest: 0, held: 0, moving: 0, backward: 0, stray: 0, oldCell: 0, before: null, began: false, last: 16, jump: 0, unfinished: false };
+  // The map is drawn k pixels along the step from rest: the static layer at k · dir.
+  const behind = ([x, y]) => {
+    const k = dir[0] !== 0 ? x * dir[0] : y * dir[1];
+    return k >= 1 && k <= 16 && x === k * dir[0] && y === k * dir[1] ? k : null;
+  };
+  p.frame = (off, shown, old = false) => {
+    p.frames += 1;
+    let k = null;
+    if (off === null && old) {
+      p.oldCell += 1;
+      k = 16;
+    } else if (off !== null && off[0] === 0 && off[1] === 0) {
+      p.held += 1;
+      k = 0;
+    } else if (off !== null) {
+      p.offRest += 1;
+      k = behind(off);
+      if (k === null) {
+        p.stray += 1;
+        if (shown) p.before = null;
+        return;
+      }
+    }
+    if (!shown) return;
+    if (k !== null && k > 0 && p.before !== null && p.before > k && p.before <= 16) p.moving += 1;
+    if (k !== null && p.began && k > p.last) p.backward += 1;
+    p.before = k;
+    p.began ||= k !== null && k > 0;
+    const at = k ?? (p.began ? 0 : null);
+    if (at !== null && p.began) {
+      p.jump = Math.max(p.jump, p.last - at);
+      p.last = at;
+    }
+  };
+  p.close = () => {
+    p.unfinished = p.began && p.last !== 0;
+  };
+  return p;
+};
+
+// The largest jump a slide at speed `rate` on 60 Hz frames may make (u6-web `jump_bound`):
+// ceil(16 · Δ / D), Δ the engine ms a display frame runs, D the slide's 360 ms; 1 at 1× (round 13,
+// opus N4: round 12's + 1 was slack).
+const jumpBound = (rate) => Math.ceil((16 * rate * (1000 / 60)) / 360);
+
+// Round 13 (opus N3): the hand-made frames of u6-web's `the_step_receipt_counts_the_jump_onset_and_
+// frames_not_shown` through `progress`, each closed: a frame is k pixels behind rest (null: the HD
+// frame), shown or not, the old cell or not. Returns the cases that fail, by label.
+const progressCases = () => {
+  const run = (frames) => {
+    const p = progress([1, 0]);
+    for (const [k, shown = true, old = false] of frames) p.frame(k === null ? null : [k, 0], shown, old);
+    p.close();
+    return p;
+  };
+  const ks = (list) => list.map((k) => [k]);
+  const smooth = [];
+  for (let f = 0; f <= 22; f += 1) smooth.push([Math.max(0, Math.round(16 - (16 * f * (1000 / 60)) / 360))]);
+  smooth.push([null]);
+  const cases = [
+    ['the bounds', () => jumpBound(1) === 1 && jumpBound(4) === 3 && jumpBound(8) === 6],
+    ['smooth', () => { const p = run(smooth); return p.jump <= 1 && p.moving >= 2 && p.backward === 0 && p.stray === 0 && !p.unfinished && p.oldCell === 0; }],
+    ['4 px steps jump 4', () => run(ks([16, 12, 8, 4, 0, null])).jump === 4],
+    ['cut short: 14', () => run(ks([15, 14, null, null])).jump === 14],
+    ['frozen: none moving', () => run(ks([12, 12, 12])).moving === 0],
+    ['stopped short of rest', () => { const p = run(ks([16, 15, 14, 14, 14])); return p.unfinished && p.moving === 2 && p.backward === 0 && p.jump === 1; }],
+    ['backward', () => run(ks([10, 12])).backward === 1],
+    ['back off rest after reaching it', () => run(ks([15, 0, 10])).backward === 1],
+    ['back off rest after the HD frame', () => run(ks([15, 0, null, 10])).backward === 1],
+    ['a frame not shown is not backward', () => { const p = run([[15], [16, false], [14]]); return p.backward === 0 && p.moving === 1; }],
+    ['onset after a frame at rest', () => { const p = run(ks([null, 0, 15, 14])); return p.backward === 0 && p.moving === 1 && p.jump === 1; }],
+    ['against the frame shown', () => { const p = run([[15], [13, false], [14]]); return p.moving === 1 && p.backward === 0 && p.jump === 1; }],
+    ['the old cell through a foreign picture', () => { const p = run([[15], [14], [null, true, true], [null, true, true], [null]]); return p.oldCell === 2 && p.backward === 1 && p.jump === 16 && !p.unfinished; }],
+  ];
+  return cases.filter(([, ok]) => !ok()).map(([label]) => label);
+};
+
+// The median and the range of `values` (shares), as percents.
+const sharesLine = (values) => {
+  const v = [...values].sort((a, b) => a - b);
+  const pc = (x) => Math.round(100 * x);
+  return v.length === 0 ? '-' : `median ${pc(v[v.length >> 1])}% (${pc(v[0])}% to ${pc(v.at(-1))}%)`;
+};
+
+// W3's held-walk receipt below replaces per-publication rest with actual target passage,
+// continuous retargeting and release rest. Progress remains the strict single-tap oracle.
+
+// One fresh tapped step, sampled from its first frame through rest. A blocked arrow tries
+// the next way; a pass after four blocked arrows keeps the bounded fixture moving.
+const slidAt1x = (p) => p.moving >= 2 && p.backward === 0 && p.stray === 0 && p.jump <= jumpBound(1) && !p.unfinished;
+async function motionTapReceipt(page) {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    if (attempt > 0 && attempt % 4 === 0) await motionKey(page, 'Space');
+    const start = await motionLeader(page);
+    await page.keyboard.press(MOTION_DIRS[attempt % 4].key);
+    let step = null;
+    for (let f = 0; f < 1200; f += 1) {
+      const [now, placed, roles, drawn, , , old, origins] = await runSlideFrame(page);
+      if (now !== start && step === null) {
+        const [a, b] = [start, now].map((v) => v.split(',').map(Number));
+        step = progress([b[0] - a[0], b[1] - a[1]]);
+      }
+      if (step) step.frame(staticOffset(placed, roles, origins), placed.length === 0 || drawn, old);
+      const ready = await page.evaluate(() => document.getElementById('screen').dataset.prompt === '1' && !globalThis.__shownGame.sliding());
+      if (f > 2 && ready) break;
+    }
+    if (step) { step.close(); return step; }
+  }
+  assert.fail('a fresh tapped step after the menu');
+}
+
+// Spec 20 with spec 17 (round 12), in the page (HD on, 1×, the virtual 60 Hz display, the fixed
+// seed, out of the start fight): keys tapped (a step down, a pass, a step up, a pass, by turns)
+// until the prompt is back with a slide still placed and the menu's gate open (Game.context_menu
+// on the hero not empty), then a right press on the hero. The first frame with the menu open
+// places no slide and draws none (Game.slide empty, Game.sliding false, no draw of the static
+// layer): the page shows the engine's HD frame with the menu; that frame is written for the
+// dispatcher to read (U6_FRAMES_DIR, as keepFrame has it). The press let go and Escape pressed,
+// over 60 frames no slide is placed or drawn again and the menu is closed at the end.
+test('smooth motion (spec 20) with the in-game menu (spec 17): a right press during a slide opens the menu over the engine\'s frame, the slide ended at once, none after it closes (frame kept)', async (env) => {
+  const { context, page } = await motionPage(env, 'hd', true, 1_700_000_000_000);
+  await interpolationOnly(page);
+  assert.ok((await motionRing(page)) > 100, 'the ring found');
+  await motionKey(page, 'b');
+  const ready = () => page.evaluate(([hx, hy]) => {
+    const g = globalThis.__shownGame;
+    const c = document.getElementById('screen');
+    return [c.dataset.prompt === '1' && c.dataset.keys === '0' && g.context_menu(hx, hy) !== '', g.sliding() && g.slide().length > 0, g.prompt_takes()];
+  }, HERO);
+  let [taps, found] = [0, false];
+  while (taps < 24 && !found) {
+    const key = ['ArrowDown', 'Space', 'ArrowUp', 'Space'][taps % 4];
+    taps += 1;
+    const [, , takes] = await ready();
+    await page.keyboard.press(key);
+    for (let f = 0; f < 1200; f += 1) {
+      await runSlideFrame(page);
+      const [gate, sliding, now] = await ready();
+      if (now <= takes || !gate) continue;
+      found = sliding;
+      break;
+    }
+  }
+  assert.ok(found, `a prompt with a slide placed (${taps} keys tapped)`);
+  await page.mouse.move(...(await h.screenPoint(page, ...HERO)));
+  await page.mouse.down({ button: 'right' });
+  let opened = null;
+  for (let f = 0; f < 8 && opened === null; f += 1) {
+    const [, placed, , drawn] = await runSlideFrame(page);
+    const view = await h.menuView(page);
+    if (view) {
+      opened = { placed, drawn, sliding: await page.evaluate(() => globalThis.__shownGame.sliding()) };
+      assert.equal(await mapOffHd(page), 0, 'the menu first frame replaces the slide with the engine frame');
+    } else {
+      assert.ok(placed.length > 0 && await page.evaluate(() => globalThis.__shownGame.sliding()), 'the slide still runs on every frame before the menu opens');
+    }
+  }
+  assert.ok(opened, 'the menu open');
+  assert.deepEqual([opened.placed.length, opened.drawn, opened.sliding], [0, false, false], 'the menu\'s first frame: no slide placed, drawn or running');
+  const kept = await keepFrame(page.locator('#screen'), 'menu-during-slide-hd.png');
+  await page.mouse.up({ button: 'right' });
+  let [after, open] = [0, 0];
+  for (let f = 0; f < 60; f += 1) {
+    if (f === 6) await page.keyboard.press('Escape');
+    const [, placed, , drawn] = await runSlideFrame(page);
+    const sliding = await page.evaluate(() => globalThis.__shownGame.sliding());
+    after += placed.length > 0 || drawn || sliding ? 1 : 0;
+    open += (await h.menuView(page)) ? 1 : 0;
+  }
+  assert.equal(after, 0, 'no slide placed, drawn or running again');
+  assert.ok(open >= 6 && (await h.menuView(page)) === null, `the menu open, then closed by Escape (${open} frames open)`);
+  const resumed = await motionTapReceipt(page);
+  assert.ok(slidAt1x(resumed), 'a fresh step after Escape slides and ends at rest');
+  console.log(`  receipt: a right press during a slide in the page (${taps} keys tapped to one): the menu's first frame placed and drew no slide; 0 frames of a slide in the 60 after, the menu closed by Escape, a new step slid (${resumed.moving} moving frames, jump ${resumed.jump}, unfinished ${resumed.unfinished}); the frame ${kept ? 'written' : 'not written'}`);
+  await context.close();
+}, { needs: h.haveHfes });
+
+async function quietMotionPage(page) {
+  await motionKey(page, 'b');
+  await page.keyboard.press('Control+s');
+  await h.runFrames(page, 60);
+  await page.keyboard.press('y');
+  await h.runFramesToPrompt(page, 60_000);
+  await page.waitForFunction(() => document.body.dataset.saved === '1', null, { timeout: 60_000 });
+  const changed = await page.evaluate(() => new Promise((done, fail) => {
+    const req = indexedDB.open('ultima6-port', 1);
+    req.onerror = () => fail(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('files', 'readwrite');
+      const store = tx.objectStore('files');
+      const get = store.get('save:savegame/objlist');
+      let edits = 0;
+      get.onsuccess = () => {
+        const file = get.result;
+        if (!file || file.bytes.length < 0x900) { tx.abort(); return; }
+        const bytes = file.bytes.slice();
+        // saveload/objlist.rs: actor status at 0x0800, party bit 0x80, inactive bit 0x10.
+        for (let i = 0x800; i < 0x900; i += 1) if ((bytes[i] & 0x80) === 0) {
+          bytes[i] |= 0x10;
+          edits += 1;
+        }
+        store.put({ ...file, bytes }, 'save:savegame/objlist');
+      };
+      tx.oncomplete = () => { db.close(); done(edits); };
+      tx.onerror = tx.onabort = () => { db.close(); fail(new Error('quiet fixture save unavailable')); };
+    };
+  }));
+  assert.ok(changed > 0, 'the quiet fixture changed nonparty status');
+  await page.reload();
+  await started(page, FILES);
+  await h.virtualDisplay(page, 60);
+  await page.focus('#screen');
+  await h.runFramesToPrompt(page, 60_000);
+  if (await page.evaluate(() => globalThis.__shownGame.combat_mode())) await motionKey(page, 'b');
+  await h.runFrames(page, 60);
+}
+
+// Go here starts a new slide after the menu, sampled from the choosing press itself, in a
+// synthetic quiet fixture: the actual initial fight correctly refuses travel while foes remain.
+test('smooth motion (spec 20), Go here from the menu: the travel first step slides and ends at rest', async (env) => {
+  const { context, page } = await motionPage(env, 'hd', true, 1_700_000_000_000);
+  // Save after the initial assault has spawned, then make nonparty actors inactive in a
+  // copy of that disposable browser save (native in_the_castle's fixture). Changing the disk's
+  // initial objlist instead would let the assault spawn new active actors over it. No user's
+  // files or game bytes leave the disposable page's memory and IndexedDB.
+  await quietMotionPage(page);
+  assert.ok((await motionRing(page)) > 100, 'the ring found');
+  const points = [[120, 88], [56, 88], [88, 120], [88, 56], [120, 120], [56, 56]];
+  const menus = await h.contextMenus(page, points);
+  const index = menus.findIndex((m) => m?.go_here?.enabled);
+  console.log(`  receipt: travel fixture: ${menus.filter(Boolean).length} menus; reasons ${JSON.stringify(menus.map((m) => m?.go_here?.reason ?? null))}; combat ${await page.evaluate(() => globalThis.__shownGame.combat_mode())}`);
+  assert.ok(index >= 0, 'a nearby cell with Go here enabled');
+  await page.mouse.move(...(await h.screenPoint(page, ...points[index])));
+  await page.mouse.down({ button: 'right' });
+  let view = null;
+  for (let f = 0; f < 8 && view === null; f += 1) {
+    await runSlideFrame(page);
+    view = await h.menuView(page);
+  }
+  assert.ok(view, 'the menu open');
+  await page.mouse.up({ button: 'right' });
+  await h.runFrames(page, 4);
+  const row = rowOf(view, GO_HERE);
+  assert.ok(row >= 0 && view.rows[row].enabled, 'Go here enabled in the drawn menu');
+  const before = await motionLeader(page);
+  const asked = await page.evaluate(() => globalThis.__shownGame.go_here_asked());
+  await page.mouse.move(...(await h.screenPoint(page, ...h.rowPoint(view, row))));
+  await page.mouse.down();
+  let [first, leader, quiet] = [null, before, 0];
+  for (let f = 0; f < 1800; f += 1) {
+    if (f === 4) await page.mouse.up();
+    const [now, placed, roles, drawn, , , old, origins] = await runSlideFrame(page);
+    if (now !== leader) {
+      if (first !== null) break;
+      const [a, b] = [leader, now].map((v) => v.split(',').map(Number));
+      first = progress([b[0] - a[0], b[1] - a[1]]);
+      leader = now;
+    }
+    if (first) first.frame(staticOffset(placed, roles, origins), placed.length === 0 || drawn, old);
+    const idle = await page.evaluate(() => {
+      const g = globalThis.__shownGame;
+      return !g.travel_active() && g.at_prompt() && !g.sliding();
+    });
+    quiet = idle ? quiet + 1 : 0;
+    if (first && quiet >= 30) break;
+  }
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => globalThis.__shownGame.go_here_asked()), asked + 1, 'the menu asked travel exactly once');
+  assert.ok(first, 'the travel first step happened');
+  first.close();
+  assert.ok(slidAt1x(first), 'the travel first step slides and ends at rest');
+  console.log(`  receipt: Go here from the menu: ${first.moving} moving frames, backward ${first.backward}, stray ${first.stray}, jump ${first.jump}, unfinished ${first.unfinished}`);
+  await context.close();
+}, { needs: h.haveHfes });
+
+// Spec 20 Design 1 (rounds 10–11, review gpt b, opus S4): the held walk on the browser's own clock
+// (no virtual display) in the start room of the receipt above (HD on, 1×, the same fixed seed, out
+// of the start fight by B), with smooth motion on and then off: each way held in turn with no
+// browser repeat (as `heldNoRepeat`) until the leader stepped four times, or 30 s of the game's
+// clock, or 2 s with no step, then let up. K2's instrument (`watchWalk`, `walkReceipt`: the late
+// steps, the paced takes and their waits from the prompt coming back) plus, per step of the
+// leader, its time on the page's clock and the engine's, both read at the last row of the frame
+// each end lies in (round 12, opus S3), the ms the pace dropped (Game.dropped_ms) and clamped
+// (Game.clamped_ms: a frame past CAP_MS, a host stall) meanwhile, and whether the party was in
+// combat mode then (Game.combat_mode). Asserted in both runs: no step left the prompt up with a
+// paced press due (`late` 0), and each paced step's engine ms within two display frames of its
+// wall ms less the ms clamped; the ms dropped and the times themselves are printed, not bounded. `delayMs` (the control, U6_DELAY_TAKE_MS, test-only): each
+// time the prompt comes back during the hold the page runs no engine step for that many ms of its
+// clock, a held press waiting at a ready prompt.
+async function realClockHold(page, key, delayMs = 0) {
+  await h.waitPrompt(page);
+  await watchWalk(page);
+  await page.evaluate((delay) => {
+    const g = globalThis.__shownGame;
+    const watched = g.step;
+    // One row per row of the log so far (the frames between the two hooks' installs too).
+    const extra = window.__k2.steps.map(() => [g.dropped_ms(), g.combat_mode(), g.clamped_ms()]);
+    window.__k2.extra = extra;
+    g.step = function (ms) {
+      watched.call(this, ms);
+      extra.push([this.dropped_ms(), this.combat_mode(), this.clamped_ms()]);
+    };
+    if (delay > 0) {
+      // Under watchWalk's hook, so the log still gets its row of each frame.
+      const proto = Object.getPrototypeOf(g);
+      const real = proto.step;
+      const takes = g.prompt_takes();
+      let upSince = null;
+      proto.step = function (ms) {
+        const log = window.__k2;
+        if (log && this.prompt_takes() > takes && this.command_prompt()) {
+          upSince ??= log.now;
+          if (log.now - upSince < delay) return;
+        } else upSince = null;
+        real.call(this, ms);
+      };
+      window.__k2.realStep = [proto, real];
+    }
+  }, delayMs);
+  await page.keyboard.down(key);
+  const t0 = await page.evaluate(() => globalThis.__clock);
+  try {
+    await page.waitForFunction((from) => {
+      const s = window.__k2.steps;
+      let n = 0;
+      for (let i = 1; i < s.length; i += 1) if (s[i][1] !== s[i - 1][1]) n += 1;
+      const ran = globalThis.__clock - from;
+      return n >= 4 || ran >= 30_000 || (n === 0 && ran >= 2_000);
+    }, t0, { timeout: 180_000, polling: 'raf' });
+  } finally {
+    await page.keyboard.up(key);
+    await page.evaluate(() => {
+      const kept = window.__k2.realStep;
+      if (kept) kept[0].step = kept[1];
+    });
+  }
+  await coolDown(page, COOLDOWN_MS);
+  await h.waitPrompt(page);
+  const extra = await page.evaluate(() => window.__k2.extra);
+  const log = await unwatchWalk(page);
+  const released = log.releaseIndex ?? log.steps.length;
+  // The last row of the display frame row `i` is in (a frame's rows share its clock, log.now): a
+  // step's two ends are read there (round 12, opus S3), so a frame that runs k steps after the
+  // step's own row does not read as k - 1 steps of lag.
+  const frameEnd = (i) => {
+    let j = i;
+    while (j + 1 < log.steps.length && log.steps[j + 1][3] === log.steps[i][3]) j += 1;
+    return j;
+  };
+  const steps = [];
+  let from = frameEnd(0);
+  for (let i = 1; i < released; i += 1) {
+    if (log.steps[i][1] === log.steps[i - 1][1]) continue;
+    const end = frameEnd(i);
+    const [a, b] = [log.steps[from], log.steps[end]];
+    steps.push({ wall: b[3] - (a[3] ?? b[3]), engine: b[0] - a[0], dropped: extra[end][0] - extra[from][0], clamped: extra[end][2] - extra[from][2], combat: extra[i][1] });
+    from = end;
+  }
+  return { key, steps, w: walkReceipt(log) };
+}
+
+test('smooth motion (spec 20 Design 1), the held walk on the real clock in the start room, motion on and off: per step its time, the ms dropped and combat mode (receipt)', async (env) => {
+  const lines = [];
+  const runs = {};
+  for (const motion of [true, false]) {
+    const { context, page } = await motionOpen(env, 'hd', { motion: motion ? 'on' : 'off', font: 'pixel' });
+    await context.addInitScript((t) => { Date.now = () => t; }, 1_700_000_000_000);
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await page.focus('#screen');
+    await h.waitPrompt(page);
+    await h.press(page, 'b', 20);
+    const shown = await page.evaluate(() => [globalThis.__shownGame.hd_on(), globalThis.__shownGame.motion()]);
+    assert.deepEqual(shown, [true, motion], `motion ${motion}: HD on, motion as set`);
+    const holds = [];
+    const delay = Number(process.env.U6_DELAY_TAKE_MS ?? 0);
+    for (const dir of MOTION_DIRS) {
+      const hold = await realClockHold(page, dir.key, delay);
+      holds.push(hold);
+      if (hold.steps.length >= 3) break;
+    }
+    await context.close();
+    runs[motion] = holds;
+    for (const { key, steps, w } of holds) {
+      const paced = steps.slice(1);
+      const mean = (k) => (paced.length === 0 ? '-' : Math.round(paced.reduce((a, s) => a + s[k], 0) / paced.length));
+      lines.push(`motion ${motion ? 'on' : 'off'}, ${key} held: ${steps.length} steps; per step (wall ms, engine ms, ms dropped, ms the pace clamped, combat) ${JSON.stringify(steps.map((s) => [Math.round(s.wall), s.engine, Math.round(s.dropped), Math.round(s.clamped), s.combat ? 1 : 0]))}; the paced steps' mean ${mean('wall')} wall ms, ${mean('engine')} engine ms; late ${w.late}; paced takes ${w.paced.length}, waits from the prompt back ${w.paced.map((p) => Math.round(p.wait)).join(', ') || '-'} ms; the longest frame ${Math.round(w.longestFrame)} ms`);
+    }
+  }
+  for (const line of lines) console.log(`  receipt: ${line}`);
+  const frame = 1000 / 60;
+  for (const motion of [true, false]) {
+    assert.ok(runs[motion].some((hold) => hold.steps.length >= 2), `motion ${motion}: a hold walked`);
+    for (const { key, steps, w } of runs[motion]) {
+      assert.equal(w.late, 0, `motion ${motion}, ${key}: no step left the prompt up with a paced press due`);
+      // The wall ms less those the pace clamped (a host stall past CAP_MS, pacer.rs), not the
+      // engine's lag.
+      const off = steps.slice(1).filter((st) => Math.abs(st.wall - st.clamped - st.engine) > 2 * frame);
+      assert.equal(off.length, 0, `motion ${motion}, ${key}: each paced step's engine ms within two frames of its wall ms less the ms the pace clamped (${off.length} not)`);
+    }
+  }
+}, { needs: h.haveHfes });
+
+// Spec 20 with spec 23 (round 10), in the page ('original': HD off; 'hd': HD on, the Original
+// layout; the virtual 60 Hz display, 1×, a fixed seed, out of the start fight, after six passes):
+// a step taken, and once its slide runs the message history wheeled three lines back through the
+// game's API (a key is the player's input and returns the view to the live bottom). Every frame
+// of the slide from then on shows over the message window what the first frame after the slide
+// shows (the history, still three lines back), not the live window the slide's first frame
+// showed. The frame in the middle of the slide is written for the dispatcher to read
+// (U6_FRAMES_DIR, as keepFrame has it): with HD the static layer half a cell off rest, without it
+// the slide's 11th frame of about 22.
+test('smooth motion (spec 20) with the message history (spec 23): a step\'s slide while the history is scrolled back shows the history over the message window, Original and HD (frames kept)', async (env) => {
+  const lines = [];
+  for (const mode of ['original', 'hd']) {
+    const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+    await motionKey(page, 'b');
+    for (let i = 0; i < 6; i += 1) await motionKey(page, 'Space');
+    // The message window's pixels on the canvas (frame rect 176, 112, 136 x 80 at the canvas's
+    // scale), as one hash; whether a slide runs; with HD how far the static layer is off rest.
+    const look = async () => {
+      const seen = await page.evaluate(() => {
+        const g = globalThis.__shownGame;
+        const c = document.getElementById('screen');
+        const s = c.width / g.width();
+        const d = c.getContext('2d').getImageData(176 * s, 112 * s, 136 * s, 80 * s).data;
+        let hash = 2166136261;
+        for (let i = 0; i < d.length; i += 1) if (i % 4 !== 3) hash = Math.imul(hash ^ d[i], 16777619) >>> 0;
+        const roles = Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i));
+        return { hash, sliding: g.sliding(), placed: g.slide(), roles, origins: roles.map((_,i)=>Array.from(g.slide_layer_origin(i))), offset: g.history_offset(), leader: c.dataset.leader };
+      });
+      const off = staticOffset(seen.placed, seen.roles, seen.origins);
+      return { ...seen, off: off === null ? 0 : Math.max(Math.abs(off[0]), Math.abs(off[1])) };
+    };
+    let stepped = false;
+    for (const dir of MOTION_DIRS) {
+      const from = await motionLeader(page);
+      await page.keyboard.press(dir.key);
+      for (let f = 0; f < 600 && !stepped; f += 1) {
+        await page.evaluate(() => window.__display.run());
+        const now = await look();
+        stepped = now.leader !== from && now.sliding;
+      }
+      if (stepped) break;
+      await h.runFramesToPrompt(page, 60_000);
+    }
+    assert.ok(stepped, `${mode}: a step slid`);
+    const live = await look();
+    assert.ok(await page.evaluate(() => globalThis.__shownGame.wheel(200, 150, -3)), `${mode}: the wheel over the message window`);
+    const during = [];
+    let [settled, kept] = [null, false];
+    // The slide, then the picture held at rest until the turn's picture or command prompt: the
+    // first frame with neither is the engine's frame with the history over it.
+    for (let f = 0; f < 600 && settled === null; f += 1) {
+      await page.evaluate(() => window.__display.run());
+      const now = await look();
+      if (!now.sliding) {
+        settled = now;
+        break;
+      }
+      during.push(now);
+      const middle = mode === 'hd' ? now.off === 8 : during.length === 11;
+      if (!kept && middle) kept = await keepFrame(page.locator('#screen'), `slide-history-back-${mode}.png`);
+    }
+    await context.close();
+    assert.ok(settled !== null && during.length >= 3, `${mode}: frames of the slide after the wheel, then the slide over`);
+    assert.ok([...during, settled].every((x) => x.offset === 3), `${mode}: the history three lines back throughout`);
+    assert.notEqual(settled.hash, live.hash, `${mode}: the history's window is not the live one`);
+    const same = during.filter((x) => x.hash === settled.hash).length;
+    assert.equal(same, during.length, `${mode}: every frame of the slide shows the history over the message window`);
+    lines.push(`${mode}: ${during.length} frames of the slide after the wheel, each with the history over the message window; a mid-slide frame ${kept ? 'written' : 'not written'}`);
+  }
+  for (const line of lines) console.log(`  receipt: ${line}`);
+}, { needs: h.haveHfes });
+
+// Page init script: per display frame of the page's loop (`frame`) while `__slideTimes` is an
+// array, [the frame's wall ms less the ms its steps and its present took (the page's own: the
+// slide's layers taken, the draws), whether a slide was drawn or put back (Game.slide_version
+// moved), whether the slide's layers were made again (Game.slide_layers_version moved), the ms its
+// present took (the wasm's: the HD frame's composition and the layers made), whether the static
+// layer came whole (not as changes: the first after the page took none)].
+function timeSlideFrames() {
+  window.__slideTimes = null;
+  const raf = window.requestAnimationFrame.bind(window);
+  let wrapped = null;
+  let stepMs = 0;
+  window.requestAnimationFrame = (callback) => raf((now) => {
+    const g = globalThis.__shownGame;
+    if (callback.name !== 'frame' || !Array.isArray(window.__slideTimes) || !g) return callback(now);
+    const proto = Object.getPrototypeOf(g);
+    if (wrapped !== proto) {
+      const step = proto.step;
+      proto.step = function (ms) {
+        const t = performance.now();
+        step.call(this, ms);
+        stepMs += performance.now() - t;
+      };
+      wrapped = proto;
+    }
+    const [slide, layers, present] = [g.slide_version(), g.slide_layers_version(), globalThis.__presentMs];
+    stepMs = 0;
+    const t = performance.now();
+    const out = callback(now);
+    const presentMs = globalThis.__presentMs - present;
+    const ms = performance.now() - t - stepMs - presentMs;
+    const made = g.slide_layers_version() !== layers;
+    const whole = made && g.slide_layer_count() > 0 && g.slide_layer_patch(0).length === 0;
+    window.__slideTimes.push([ms, g.slide_version() !== slide, made, presentMs, whole]);
+    return out;
+  });
+}
+
+// The page's cost per display frame of a slide (spec 20 Design 5): the party walks on the real
+// display (h.stepOnce) until the page drew `slides` frames of slides and made the layers as changes
+// `builds` times, at most `deadline` ms, each frame timed (`timeSlideFrames`); returns the line and
+// the rows.
+async function slideCost(page, label, { slides = 60, builds = 20, deadline = 300_000 } = {}) {
+  await page.evaluate(() => { window.__slideTimes = []; });
+  const end = Date.now() + deadline;
+  let walked = 0;
+  const counts = () => page.evaluate(() => window.__slideTimes.reduce((c, r) => [c[0] + (r[1] && !r[2] ? 1 : 0), c[1] + (r[2] && !r[4] ? 1 : 0)], [0, 0]));
+  for (let c = [0, 0]; (c[0] < slides || c[1] < builds) && Date.now() < end; c = await counts()) {
+    await h.stepOnce(page);
+    walked += 1;
+  }
+  const times = await page.evaluate(() => {
+    const t = window.__slideTimes;
+    window.__slideTimes = null;
+    return t;
+  });
+  const stats = (rows, k = 0) => {
+    const v = rows.map((r) => r[k]).sort((a, b) => a - b);
+    return v.length === 0 ? 'none' : `${v.length}: median ${quantile(v, 0.5).toFixed(2)} ms, p95 ${quantile(v, 0.95).toFixed(2)} ms, max ${v.at(-1).toFixed(2)} ms`;
+  };
+  const sliding = times.filter((r) => r[1] && !r[2]);
+  const made = times.filter((r) => r[2] && !r[4]);
+  const first = times.filter((r) => r[2] && r[4]);
+  const whole = made.map((r) => [r[0] + r[3]]);
+  assert.ok(sliding.length >= slides && made.length >= builds, `${label}: the page drew slides and made their layers in the steps started within the deadline`);
+  const line = `${label}: ${walked} steps; frames drawing a slide: page ${stats(sliding)}, present ${stats(sliding, 3)}; frames making the layers as changes: whole ${stats(whole)}, present (the HD frame and the layers) ${stats(made, 3)}, page (the changes taken, the draws) ${stats(made)}; frames making them whole: ${stats(first.map((r) => [r[0] + r[3]]))}; other frames: page ${stats(times.filter((r) => !r[1] && !r[2]))}`;
+  return { line, sliding, made, whole };
+}
+
+test('smooth motion (spec 20 Design 5), the page\'s cost per display frame of a slide with HD on: Original at its S, the HD layout and Wide at S 4, the party walking on the real display in the fight and out of combat; the slide drawn from layers made once a publication, their making split between the present and the page (receipt)', async (env) => {
+  const lines = [];
+  for (const mode of ['hd', 'layout', 'wide']) {
+    const { context, page } = await motionOpen(env, mode, { motion: 'on', font: 'pixel' });
+    await context.addInitScript(timeSlideFrames);
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await page.focus('#screen');
+    await h.waitPrompt(page);
+    const s = await page.evaluate(() => globalThis.__shownGame.hd_scale());
+    const name = { hd: 'Original HD', layout: 'HD 16:9 layout', wide: 'Wide' }[mode];
+    lines.push((await slideCost(page, `${name} at S ${s}, in the fight`)).line);
+    // Combat broken off (B): the steps out of combat mode slide from their early pictures.
+    await h.press(page, 'b', 20);
+    await h.waitPrompt(page);
+    lines.push((await slideCost(page, `${name} at S ${s}, out of combat`)).line);
+    await context.close();
+  }
+  for (const line of lines) console.log(`  receipt: ${line}`);
+}, { needs: h.haveHfes });
+
 // --- the message history (spec 23) --------------------------------------------------------------
 // The message window keeps the lines it scrolled off; the wheel over it shows them, with the
 // engine's scrollbar in its last cell column. Passes at the prompt fill the window past its rows.
@@ -13995,9 +15712,8 @@ async function clickTalkFixture() {
   return [...table, ...body];
 }
 
-// The Name button's middle (spec 22 Contract 2: Job then Name, each its word between blank cells,
-// centred on the Status window's last row, cols 0x16..0x26, row 12, one cell between them).
-const NAME_BUTTON = [33 * 8 + 4, 12 * 8 + 4];
+// Initial grid: End, Name, Job in three five-cell columns on row 9.
+const NAME_BUTTON = [30 * 8 + 4, 9 * 8 + 4];
 
 for (const layout of ['original', 'wide']) {
   test(`Conversation by click (spec 22, ${layout}; the user's disks, the test's own conversation): while the game reads the player's words the Job and Name buttons are drawn below the portrait in the frame; a touch on Name the browser cancels, before or after the game took its press, and with the pointer back over Name in the same frame, is released off every target and types nothing (the input line as before it), while at the prompt a cancelled touch is released where it was; in the Wide layout a window dragged by its title strip during the read and cancelled keeps its place and the next move reaches the game at its own pixel; a press on Name in the canvas answers as typing name and Enter does: the conversation ends with the same message-window pixels (the prompt's cursor cell aside), and no key was sent for the press`, async (env) => {
@@ -14081,7 +15797,7 @@ for (const layout of ['original', 'wide']) {
       await page.keyboard.press('2');
       await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
       await h.waitFrames(page, 2);
-      const cells = await region(30 * 8, 12 * 8, 36 * 8, 13 * 8);
+      const cells = await region(28 * 8, 9 * 8, 33 * 8, 10 * 8);
       await page.mouse.move(...(await h.screenPoint(page, ...NAME_BUTTON)));
       await h.waitTaken(page);
       await h.waitFrames(page, 2);
@@ -14858,6 +16574,565 @@ test('the system\'s pointer, the stylesheet\'s scope: only the canvas hides it: 
   await waitFull(page, 'off');
   console.log('  receipt: the stylesheet hides the system\'s pointer on the canvas only: the chooser, its OK, the letterbox and the Exit button keep it: pass');
 }, { needs: h.haveHfes });
+
+// W3: the measured canvas placements, their actual draw calls, and per-track timing.
+// Baseline mode uses the same receipt against the saved pre-W3 Wasm (no timing API).
+for (const mode of ['hd', 'wide']) {
+  test(`continuous walk W3, ${mode}: actual cadence and world-pixel continuity at 1/4/8`, async (env) => {
+    assert.deepEqual(progressCases(), [], 'the tap oracle still catches frozen, cut, and old-cell frames');
+    for (const speed of [1, 4, 8]) {
+      const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+      await quietMotionPage(page);
+      await interpolationOnly(page);
+      await motionRing(page);
+      await page.evaluate((rate) => globalThis.__shownGame.set_speed(rate), speed);
+      const dropChangedDraw = process.env.U6_W3_DRAW_MUTATION === 'first-changed';
+      assert.ok(!process.env.U6_W3_DRAW_MUTATION || dropChangedDraw, 'known W3 draw mutation');
+      // Observe the frame already on the canvas before the key event. Off may not have been
+      // presented yet: an unchanged first callback need not draw these same layers again.
+      const initial = await page.evaluate((mutate) => {
+        const g = globalThis.__shownGame, c = document.getElementById('screen');
+        const read = () => {
+          const placed = g.slide();
+          let place = null;
+          for (let i = 0; i < placed.length; i += 3) if (g.slide_layer_role(placed[i]) === 0) {
+            place = [placed[i + 1], placed[i + 2]];
+          }
+          return { place, layers: g.slide_layers_version(), slide: g.slide_version(), frame: g.frame_version() };
+        };
+        const initial = read();
+        globalThis.__w3InitialPixels = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        globalThis.__w3DroppedDraws = 0;
+        if (mutate) {
+          // Negative control: omit the actual first changed static-layer draw, before the
+          // observer records it. Exported positions and all engine state stay untouched.
+          const proto = CanvasRenderingContext2D.prototype, draw = proto.drawImage;
+          proto.drawImage = function (source, ...args) {
+            const current = read();
+            const roles = Array.from({ length: g.slide_layer_count() }, (_, i) => g.slide_layer_role(i));
+            const size = roles.includes(0) ? g.slide_layer_size(roles.indexOf(0)) : [];
+            const scale = size.length === 2 && source instanceof HTMLCanvasElement ? source.width / size[0] : 0;
+            const changed = JSON.stringify(current.place) !== JSON.stringify(initial.place) || current.layers !== initial.layers;
+            if (globalThis.__w3DroppedDraws === 0 && changed && current.place && scale > 0
+                && source !== this.canvas && source.height === size[1] * scale && args.length === 2
+                && args[0] === current.place[0] * scale && args[1] === current.place[1] * scale) {
+              globalThis.__w3DroppedDraws += 1;
+              return;
+            }
+            return draw.call(this, source, ...args);
+          };
+        }
+        return initial;
+      }, dropChangedDraw);
+      await page.keyboard.down('ArrowDown');
+      const r = await page.evaluate(([rate, keep, initial]) => {
+        const g = globalThis.__shownGame;
+        const c = document.getElementById('screen');
+        const base = Array.from(g.leader_position());
+        let at = base, before = null, lastStep = null, released = false, tail = 0;
+        let steps = 0, moving = 0, stationary = 0, stop = 0, longest = 0, maxJump = 0, maxLag = 0, missed = 0, old = 0, misplaced = 0, maxHistory = 0, maxPixels = 0, resets = 0;
+        let previousPlace = initial.place, previousLayers = initial.layers;
+        const gaps = [], frames = [], targets = [], pictures = [], missingDraws = [];
+        let firstObservation = null;
+        let passed = 0, retargeted = 0, settleVelocity = 0;
+        for (let f = 0; f < 2400; f += 1) {
+          if (!released && (steps >= 7 || f >= 1800)) { settleVelocity = 16 / 360; g.key_up('ArrowDown'); released = true; }
+          const prior = { placed: Array.from(g.slide()), layers: g.slide_layers_version(),
+            slide: g.slide_version(), frame: g.frame_version(), scale: g.hd_scale() };
+          globalThis.__slideDraws = [];
+          window.__display.run();
+          const draws = globalThis.__slideDraws;
+          globalThis.__slideDraws = null;
+          const now = Array.from(g.leader_position());
+          if (now.some((v,i) => v !== at[i])) {
+            steps += 1;
+            if (lastStep !== null) gaps.push((f-lastStep)*1000/60);
+            lastStep = f;
+            if (targets.length) retargeted += 1;
+            targets.push((now[1]-base[1])*16);
+            at = now;
+          }
+          const placed = Array.from(g.slide());
+          const roles = Array.from({length:g.slide_layer_count()},(_,i)=>g.slide_layer_role(i));
+          let off = [0,0], staticPlace = null;
+          for (let i=0;i<placed.length;i+=3) if(roles[placed[i]]===0) {
+            const origin = g.slide_layer_origin ? Array.from(g.slide_layer_origin(placed[i])) : [g.width()===320?-16:304,-16];
+            off=[placed[i+1]-origin[0],placed[i+2]-origin[1]];
+            staticPlace=[placed[i+1],placed[i+2]];
+          }
+          const onScreen = (d,i)=>d.target===c || draws.some((e,j)=>j>i && e.source===d.target && e.target===c);
+          const shown = draws.filter((d,i)=>d.isStatic && onScreen(d,i));
+          const drawn = shown.length > 0;
+          misplaced += shown.filter(d=>!(staticPlace && d.plain && d.x===staticPlace[0]*d.scale && d.y===staticPlace[1]*d.scale)).length;
+          const resources=Array.from(g.slide_resources());
+          maxHistory=Math.max(maxHistory,resources[0]);maxPixels=Math.max(maxPixels,resources[1]);resets=Math.max(resets,resources[2]);
+          const layers=g.slide_layers_version();
+          if (f === 0) {
+            const pixels = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+            firstObservation = { samePlacement: JSON.stringify(staticPlace) === JSON.stringify(initial.place),
+              sameLayers: layers === initial.layers, drawn,
+              sameCanvas: pixels.length === globalThis.__w3InitialPixels.length
+                && pixels.every((v, i) => v === globalThis.__w3InitialPixels[i]) };
+            delete globalThis.__w3InitialPixels;
+          }
+          if (staticPlace && (JSON.stringify(staticPlace)!==JSON.stringify(previousPlace) || layers!==previousLayers) && !drawn) {
+            missed+=1;
+            missingDraws.push({ f, steps, previousPlace, previousLayers, prior, staticPlace, layers,
+              slide: g.slide_version(), frame: g.frame_version(), scale: g.hd_scale(),
+              draws: draws.length, staticDraws: draws.filter(d=>d.isStatic).length, shown: shown.length });
+          }
+          previousPlace=staticPlace;previousLayers=layers;
+          const shownCentre=g.slide_centre ? Array.from(g.slide_centre()) : now;
+          const world=(shownCentre[1]-base[1])*16-off[1];
+          const lag=Math.abs(off[1]);
+          const allTimings = g.slide_timings ? Array.from(g.slide_timings()) : [-1,0,360,0,-16];
+          let timing=[];
+          for(let i=0;i<allTimings.length;i+=5)if(allTimings[i]===-1)timing=allTimings.slice(i,i+5);
+          const velocity=timing.length===5 ? Math.max(Math.abs(timing[3]),Math.abs(timing[4]))/Math.max(timing[2],0.001) : 0;
+          const engine=g.presentation_ms();
+          if (before) {
+            const delta=world-before.world;
+            if (!released && steps>=3) {
+              moving+=delta!==0?1:0;stationary+=delta===0?1:0;
+              stop=delta===0?stop+1:0;longest=Math.max(longest,stop);maxLag=Math.max(maxLag,lag);
+            }
+            maxJump=Math.max(maxJump,Math.abs(delta));
+            const bound=Math.ceil(Math.max(velocity,before.velocity,settleVelocity)*(engine-before.engine));
+            if (Math.abs(delta)>bound && steps>0) frames.push({f,delta,bound});
+            while(targets.length && targets[0]>=Math.min(world,before.world) && targets[0]<=Math.max(world,before.world)) {targets.shift();passed+=1;}
+          }
+          before={world,velocity,engine};
+          old+=g.old_cell()?1:0;
+          if (keep && pictures.length<3 && steps>=2 && off[1]>0 && off[1]<16 && drawn) pictures.push(c.toDataURL('image/png'));
+          if(released){tail=g.sliding()?0:tail+1;if(tail>=60)break;}
+        }
+        return {initial,firstObservation,droppedDraws:globalThis.__w3DroppedDraws,steps,gaps:gaps.map(Math.round),moving,stationary,longestMs:Math.round(longest*1000/60),maxJump,maxLag,missed,missingDraws,misplaced,maxHistory,maxPixels,resets,old,violations:frames,passed,retargeted,pending:targets.length,tail,pictures};
+      },[speed,Boolean(process.env.U6_MOTION_FRAMES),initial]);
+      const { pictures, ...receipt } = r;
+      console.log(`  receipt: W3 ${mode} ${speed}x ${process.env.U6_W3_BASELINE ? 'baseline' : 'adaptive'} ${JSON.stringify(receipt)}`);
+      assert.ok(r.steps>=3 && r.tail>=60,'held steps and final release rest');
+      assert.equal(r.droppedDraws, dropChangedDraw ? 1 : 0, 'draw mutation only drops one actual changed placement');
+      if (r.firstObservation.samePlacement && r.firstObservation.sameLayers && !r.firstObservation.drawn) {
+        assert.ok(r.firstObservation.sameCanvas, 'an unchanged first callback preserves the observed canvas');
+      }
+      assert.equal(r.missed,0,'every changed placement is drawn');
+      assert.equal(r.misplaced,0,'each static draw is at its actual exported placement');
+      assert.equal(r.resets,0,'ordinary cadence never exhausts the resource budget');
+      assert.ok(r.longestMs<=50,'ordinary quiet has no per-cell dwell beyond three display frames');
+      assert.equal(r.old,0,'no old-cell frame');
+      assert.equal(r.pending,0,'every earlier camera target actually passed');
+      assert.deepEqual(r.violations,[],'actual distance/duration jump bounds');
+      if(mode==='hd') assert.equal(await mapOffHd(page),0,'release replaces the slide with the exact engine map');
+      if(process.env.U6_MOTION_FRAMES){await mkdir(process.env.U6_MOTION_FRAMES,{recursive:true});for(let i=0;i<pictures.length;i+=1)await writeFile(join(process.env.U6_MOTION_FRAMES,`w3-${mode}-${speed}-${i}.png`),Buffer.from(pictures[i].split(',')[1],'base64'));}
+      await context.close();
+    }
+  },{needs:h.haveHfes});
+}
+
+// B gait has a visual contract separate from the Off interpolation oracle. A reference
+// canvas paints the exported actor bitmap at its unmodified placement through the map's
+// actual high-quality transform. The page's own draw is compared independently against it.
+// A five-source-pixel opaque footprint and the same two-pixel guard around later occluders
+// exclude background mixing, not colour detail. These rules precede all actual-pixel reads.
+// No pixels, hashes, actor names or original data are printed by this test.
+async function installFootstepProbe(page) {
+  await page.evaluate(() => {
+    const g = globalThis.__shownGame;
+    const slot = g.panel_view()[2];
+    const c = document.getElementById('screen');
+    const L = globalThis.__u6Layout;
+    const source = document.createElement('canvas'), reference = document.createElement('canvas');
+    let oldActor = null;
+    globalThis.__footstepStepMs = 0;
+    const clock = Performance.prototype.now.bind(performance); // virtualDisplay overrides only the instance method
+    globalThis.__footstepNow = clock;
+    const step = g.step;
+    g.step = function (ms) {
+      const t = clock();
+      try { return step.call(this, ms); } finally { globalThis.__footstepStepMs += clock() - t; }
+    };
+    const hash = (bytes) => bytes.reduce((h, v) => Math.imul(h ^ v, 16777619) >>> 0, 2166136261);
+    globalThis.__footstepProbe = () => {
+      const poses = Array.from(g.footstep_poses());
+      let pose = null;
+      for (let i = 0; i < poses.length; i += 3) if (poses[i] === slot) pose = poses.slice(i + 1, i + 3);
+      if (!pose) return { pose: null, count: poses.length / 3, layers: g.slide().length };
+      const scale = g.hd_scale();
+      const map = L.regions[0];
+      const placed = Array.from(g.slide());
+      const layers = [];
+      for (let i = 0; i < placed.length; i += 3) {
+        const id = placed[i];
+        const [w, h] = g.slide_layer_size(id);
+        const role = g.slide_layer_role(id);
+        layers.push({ id, role, slot: g.slide_layer_slot(id), x: placed[i + 1], y: placed[i + 2], w: w * scale, h: h * scale,
+          pixels: role >= 2 ? new Uint8Array(globalThis.__wasmMemory.buffer, g.slide_layer_ptr(id), g.slide_layer_len(id)).slice() : null });
+      }
+      const actor = layers.find((l) => l.slot === slot && l.role === 2);
+      if (!actor) throw new Error('eligible pose has no actor layer');
+      const st = layers.find((l) => l.role === 0);
+      const so = st ? g.slide_layer_origin(st.id) : [0, 0];
+      const camera = st ? [st.x - so[0], st.y - so[1]] : [0, 0];
+      const origin = g.slide_layer_origin(actor.id);
+      const offset = [actor.x - origin[0] - camera[0], actor.y - origin[1] - camera[1]];
+      const centre = g.slide_centre();
+      const world = [centre[0] * 16 + offset[0], centre[1] * 16 + offset[1]];
+      let left = actor.w, top = actor.h, right = -1, bottom = -1;
+      const d = actor.pixels;
+      for (let y = 0; y < actor.h; y += 1) for (let x = 0; x < actor.w; x += 1) if (d[(y * actor.w + x) * 4 + 3]) {
+        left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x); bottom = Math.max(bottom, y);
+      }
+      const shape = [];
+      for (let y = top; y <= bottom; y += 1) for (let x = left; x <= right; x += 1) {
+        const i = (y * actor.w + x) * 4;
+        shape.push(d[i], d[i + 1], d[i + 2], d[i + 3]);
+      }
+      const pointer = g.hd_pointer();
+      const later = layers.slice(layers.indexOf(actor) + 1).filter((l) => l.pixels);
+      const samples = [];
+      for (let y = top + 1; y < bottom; y += 1) for (let x = left + 1; x < right; x += 1) {
+        let opaque = true;
+        for (let dy = -2; dy <= 2; dy += 1) for (let dx = -2; dx <= 2; dx += 1) {
+          const xx = x + dx, yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= actor.w || yy >= actor.h || d[(yy * actor.w + xx) * 4 + 3] !== 255) opaque = false;
+        }
+        if (!opaque) continue;
+        const gx = actor.x + (x + 0.5) / scale, gy = actor.y + (y + 0.5) / scale;
+        if (pointer.length >= 4 && gx >= pointer[0] && gx < pointer[0] + pointer[2] && gy >= pointer[1] && gy < pointer[1] + pointer[3]) continue;
+        if (later.some((l) => {
+          const px = Math.floor((gx - l.x) * scale), py = Math.floor((gy - l.y) * scale);
+          for (let dy = -2; dy <= 2; dy += 1) for (let dx = -2; dx <= 2; dx += 1) {
+            const xx = px + dx, yy = py + dy;
+            if (xx >= 0 && yy >= 0 && xx < l.w && yy < l.h && l.pixels[(yy * l.w + xx) * 4 + 3]) return true;
+          }
+          return false;
+        })) continue;
+        const q = L.toCanvas(gx - 0.5, gy - 0.5);
+        if (!q || L.windows.some(({ outer: [wx, wy, ww, wh] }) => q[0] >= wx && q[0] < wx + ww && q[1] >= wy && q[1] < wy + wh)) continue;
+        samples.push([Math.floor(q[0]), Math.floor(q[1])]);
+      }
+      let checked = 0, different = 0;
+      const actual = [];
+      if (samples.length) {
+        const x0 = Math.min(...samples.map((p) => p[0])), y0 = Math.min(...samples.map((p) => p[1]));
+        const w = Math.max(...samples.map((p) => p[0])) - x0 + 1, h = Math.max(...samples.map((p) => p[1])) - y0 + 1;
+        if (source.width !== g.width() * scale || source.height !== g.height() * scale) {
+          source.width = g.width() * scale; source.height = g.height() * scale; oldActor = null;
+        }
+        const src = source.getContext('2d');
+        if (oldActor) src.clearRect(...oldActor);
+        oldActor = [actor.x * scale, actor.y * scale, actor.w, actor.h];
+        src.putImageData(new ImageData(new Uint8ClampedArray(d), actor.w, actor.h), oldActor[0], oldActor[1]);
+        if (reference.width !== c.width || reference.height !== c.height) { reference.width = c.width; reference.height = c.height; }
+        const ref = reference.getContext('2d');
+        ref.clearRect(x0, y0, w, h);
+        ref.save(); ref.beginPath(); ref.rect(x0, y0, w, h); ref.clip();
+        ref.imageSmoothingEnabled = true; ref.imageSmoothingQuality = 'high';
+        ref.drawImage(source, ...map.from.map((v) => v * scale), ...map.to);
+        ref.restore();
+        const expected = ref.getImageData(x0, y0, w, h).data;
+        const shown = c.getContext('2d').getImageData(x0, y0, w, h).data;
+        for (const [x, y] of samples) {
+          const k = ((y - y0) * w + x - x0) * 4;
+          if (expected[k + 3] !== 255) continue; // reference-only: no background-dependent filter sample
+          checked += 1;
+          different += [0, 1, 2, 3].some((ch) => shown[k + ch] !== expected[k + ch]) ? 1 : 0;
+          actual.push(shown[k], shown[k + 1], shown[k + 2]);
+        }
+      }
+      return { pose, world, moving: offset.some((v) => v !== 0), scale, checked, different,
+        shape: hash(shape), actual: hash(actual), top: origin[1] * scale + top + pose[1] * scale };
+    };
+  });
+}
+
+// Test-only negative controls corrupt the actual canvas draw, leaving the exported poses,
+// layers and placements (the probe's oracle) untouched. Each must make the pixel assertion
+// fail; use U6_FOOTSTEP_MUTATION=pose|lift|shift with the focused test, never in a normal gate.
+async function mutateFootstepCanvas(page, kind) {
+  assert.ok(['pose', 'lift', 'shift'].includes(kind), 'known footstep raster mutation');
+  await page.evaluate((mutation) => {
+    const g = globalThis.__shownGame;
+    const slot = g.panel_view()[2];
+    const proto = CanvasRenderingContext2D.prototype;
+    const draw = proto.drawImage;
+    let neutral = null;
+    proto.drawImage = function (source, ...args) {
+      if (source instanceof HTMLCanvasElement && source !== this.canvas && args.length === 2) {
+        const s = g.hd_scale(), placed = g.slide(), poses = g.footstep_poses();
+        let pose = null;
+        for (let i = 0; i < poses.length; i += 3) if (poses[i] === slot) pose = [poses[i + 1], poses[i + 2]];
+        if (pose) for (let i = 0; i < placed.length; i += 3) {
+          const id = placed[i], size = g.slide_layer_size(id);
+          if (g.slide_layer_role(id) !== 2 || g.slide_layer_slot(id) !== slot
+              || source.width !== size[0] * s || source.height !== size[1] * s
+              || args[0] !== placed[i + 1] * s || args[1] !== placed[i + 2] * s) continue;
+          if (pose[0] === 1 && pose[1] === 0) {
+            neutral = document.createElement('canvas');
+            neutral.width = source.width; neutral.height = source.height;
+            draw.call(neutral.getContext('2d'), source, 0, 0);
+          }
+          if (mutation === 'pose' && pose[0] !== 1 && neutral) source = neutral;
+          if (mutation === 'lift' && pose[1] > 0) args[1] += pose[1] * s;
+          if (mutation === 'shift') args[0] += s;
+          break;
+        }
+      }
+      return draw.call(this, source, ...args);
+    };
+  }, kind);
+}
+
+// Run real page paint callbacks on the virtual display. Timing covers present and draw, excluding engine steps and the
+// expensive test probe or screenshot encoding. Only counts/coordinates leave in the receipt.
+async function footstepFrames(page, count, { walk = false, keep = false } = {}) {
+  return page.evaluate(({ count, walk, keep }) => {
+    const g = globalThis.__shownGame;
+    const c = document.getElementById('screen');
+    const first = Array.from(g.leader_position());
+    const rows = [], pictures = [], times = [];
+    let previous = globalThis.__footstepProbe(), distance = 0, steps = 0, tail = 0, released = !walk;
+    let before = first, peak = false, mismatchPicture = null;
+    for (let f = 0; f < count; f += 1) {
+      if (walk && !released && steps >= 4) { g.key_up('ArrowDown'); released = true; }
+      const t = globalThis.__footstepNow(), stepped = globalThis.__footstepStepMs;
+      window.__display.run();
+      times.push(globalThis.__footstepNow() - t - (globalThis.__footstepStepMs - stepped));
+      const row = globalThis.__footstepProbe();
+      const now = Array.from(g.leader_position());
+      if (now.some((v, i) => v !== before[i])) steps += 1;
+      before = now;
+      if (row.pose) {
+        const delta = previous.pose ? Math.max(...row.world.map((v, i) => Math.abs(v - previous.world[i]))) : 0;
+        distance = row.moving && delta <= 32 ? (distance + delta) % 16 : 0;
+        row.expected = [[1, 0, 1, 2][Math.floor(distance / 4)], [0, 0, 1, 2, 2, 2, 1, 0][distance % 8]];
+      } else distance = 0;
+      previous = row;
+      rows.push(row);
+      if (keep && row.different > 0 && !mismatchPicture) mismatchPicture = c.toDataURL('image/png');
+      peak ||= Boolean(walk && row.pose?.[1] === 2);
+      if (keep && peak && pictures.length < 5) pictures.push(c.toDataURL('image/png'));
+      if (walk && released) { tail = g.sliding() ? 0 : tail + 1; if (tail >= 60) break; }
+    }
+    times.sort((a, b) => a - b);
+    return { rows, pictures, mismatchPicture, steps, tail, medianMs: times[Math.floor(times.length / 2)], p95Ms: times[Math.floor(times.length * 0.95)] };
+  }, { count, walk, keep });
+}
+
+function assertFootstepPixels(rows, label, { neutral = false, walk = false } = {}) {
+  const visible = rows.filter((r) => r.pose);
+  console.log(`  receipt: ${label}: ${visible.length}/${rows.length} posed frames, minimum ${Math.min(...visible.map((r) => r.checked))} canvas samples, ${visible.reduce((n, r) => n + r.different, 0)} pixel mismatches, ${visible.filter((r) => JSON.stringify(r.pose) !== JSON.stringify(r.expected)).length} distance-pose mismatches`);
+  assert.ok(visible.length >= 60, `${label}: eligible humanoid actually presented`);
+  assert.ok(visible.every((r) => r.checked >= 8), `${label}: visible actor pixels sampled on every canvas frame`);
+  assert.equal(visible.reduce((n, r) => n + r.different, 0), 0, `${label}: actual canvas pixels equal the selected pose bitmap`);
+  assert.ok(visible.every((r) => JSON.stringify(r.pose) === JSON.stringify(r.expected)), `${label}: phase and lift follow displayed world distance`);
+  if (neutral) {
+    assert.equal(visible.length, rows.length, `${label}: neutral humanoid remains visible every frame`);
+    assert.ok(visible.every((r) => r.pose[0] === 1 && r.pose[1] === 0), `${label}: neutral phase and no lift`);
+    assert.equal(new Set(visible.map((r) => r.shape)).size, 1, `${label}: actor bitmap frozen while idle`);
+    assert.equal(new Set(visible.map((r) => r.actual)).size, 1, `${label}: actual visible actor pixels frozen while idle`);
+  }
+  if (walk) {
+    assert.deepEqual([...new Set(visible.map((r) => r.pose[0]))].sort(), [0, 1, 2], `${label}: all three walk frames shown`);
+    assert.deepEqual([...new Set(visible.map((r) => r.pose[1]))].sort(), [0, 1, 2], `${label}: planted, rising and 2-pixel apex shown`);
+    // For each facing/phase the normalized bitmap is stable; lifting moves its top by the
+    // exported lift at the HD scale. Raster bounds move with the body, so restore its
+    // layer origin too; that excludes the camera and actor track translation. The quiet
+    // fixture walks only south.
+    const moving = visible.filter((r) => r.moving);
+    assert.equal(new Set(moving.map((r) => r.shape)).size, 3, `${label}: three distinct actor bitmaps reach the canvas`);
+    for (const phase of [0, 1, 2]) {
+      const same = moving.filter((r) => r.pose[0] === phase);
+      assert.equal(new Set(same.map((r) => `${r.shape}/${r.top}`)).size, 1, `${label}: phase ${phase} image moves upward by exactly its lift`);
+    }
+    assert.ok(visible.slice(-30).every((r) => r.pose[0] === 1 && r.pose[1] === 0), `${label}: release settles neutral`);
+  }
+}
+
+for (const mode of ['layout', 'wide']) {
+  test(`footstep B browser, ${mode}: actual canvas idle freeze, distance phases and lift, settle, menu and save-reader reentry`, async (env) => {
+    const hostLoad = loadavg();
+    const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+    await quietMotionPage(page);
+    // A deterministic S2 correctness receipt, independent of the host-load calibration.
+    // This optional test-only adapter keeps the actual page's HD frame/layers at S2; it
+    // does not change the production fallback, map transform, or any pixel/time assertion.
+    if (process.env.U6_FOOTSTEP_SCALE) {
+      assert.equal(process.env.U6_FOOTSTEP_SCALE, '2', 'only the S2 fallback override is supported');
+      assert.equal(mode, 'wide', 'S2 override uses the Wide focused test');
+      await page.evaluate(() => {
+        const g = globalThis.__shownGame, set = g.set_hd;
+        g.set_hd = function (on) { return set.call(this, on, 2); };
+        g.set_hd(true, 2);
+      });
+    }
+    assert.deepEqual(await page.evaluate(() => [globalThis.__shownGame.motion(), globalThis.__shownGame.footstep_pattern()]), [true, 2], 'B is the fresh game default');
+    await page.mouse.move(...(await h.screenPoint(page, 240, 180)));
+    await h.runFrames(page, 2);
+    await installFootstepProbe(page);
+    const idle = await footstepFrames(page, 180);
+    assertFootstepPixels(idle.rows, `${mode} idle`, { neutral: true });
+    await keepFrame(page.locator('#screen'), `footstep-b-${mode}-idle.png`);
+    if (process.env.U6_FOOTSTEP_MUTATION) await mutateFootstepCanvas(page, process.env.U6_FOOTSTEP_MUTATION);
+    await page.keyboard.down('ArrowDown');
+    const walking = await footstepFrames(page, 1800, { walk: true, keep: Boolean(process.env.U6_FRAMES_DIR) });
+    await page.keyboard.up('ArrowDown');
+    assert.ok(walking.steps >= 4 && walking.tail >= 60, 'four held steps followed by rest');
+    if (walking.mismatchPicture) await keepFrame({ screenshot: async () => Buffer.from(walking.mismatchPicture.split(',')[1], 'base64') }, `footstep-b-${mode}-mismatch.png`);
+    for (let i = 0; i < walking.pictures.length; i += 1) {
+      await keepFrame({ screenshot: async () => Buffer.from(walking.pictures[i].split(',')[1], 'base64') }, `footstep-b-${mode}-apex-${i}.png`);
+    }
+    assertFootstepPixels(walking.rows, `${mode} walking`, { walk: true });
+    await keepFrame(page.locator('#screen'), `footstep-b-${mode}-settled.png`);
+    await h.runFramesToPrompt(page, 60_000);
+    const hero = mode === 'wide' ? WIDE_HERO : HERO;
+    await page.mouse.move(...(await h.screenPoint(page, ...hero)));
+    await page.mouse.down({ button: 'right' });
+    await h.runFrames(page, 4);
+    assert.ok(await h.menuView(page), 'context menu opens');
+    assert.deepEqual(await page.evaluate(() => Array.from(globalThis.__shownGame.footstep_poses())), [], 'menu removes gait poses');
+    await page.mouse.up({ button: 'right' });
+    await page.keyboard.press('Escape');
+    await h.runFrames(page, 4);
+    await page.mouse.move(...(await h.screenPoint(page, 240, 180)));
+    await h.runFrames(page, 2);
+    assertFootstepPixels((await footstepFrames(page, 90)).rows, `${mode} menu return`, { neutral: true });
+    await page.keyboard.press('Control+s');
+    await h.runFrames(page, 30);
+    assert.equal(await promptNow(page), '0', 'save confirmation reader is active');
+    assertFootstepPixels((await footstepFrames(page, 90)).rows, `${mode} reader`, { neutral: true });
+    await page.keyboard.press('n');
+    await h.runFramesToPrompt(page, 60_000);
+    await page.keyboard.down('ArrowDown');
+    const resumed = await footstepFrames(page, 1800, { walk: true });
+    await page.keyboard.up('ArrowDown');
+    assert.ok(resumed.steps >= 4 && resumed.tail >= 60, 'fresh walk after save reader closes');
+    assertFootstepPixels(resumed.rows, `${mode} resumed`, { walk: true });
+    await keepFrame(page.locator('#screen'), `footstep-b-${mode}-reentry.png`);
+    console.log(`  receipt: B2 ${mode}, S ${idle.rows.find((r) => r.pose).scale}, host load ${hostLoad.map((v) => v.toFixed(2)).join('/')}: idle ${idle.rows.length}, walk ${walking.rows.length}, reentry ${resumed.rows.length} frames; all pose canvas pixels exact; idle present+draw median/p95 ${idle.medianMs.toFixed(2)}/${idle.p95Ms.toFixed(2)} ms, walk ${walking.medianMs.toFixed(2)}/${walking.p95Ms.toFixed(2)} ms`);
+    assert.ok(idle.medianMs <= 8 && walking.medianMs <= 8, 'B2 actual present and canvas draw medians stay within 8 ms');
+    await context.close();
+  }, { needs: h.haveHfes });
+}
+
+// Unlike the settled-menu check above, interrupt a real B step while its feet are lifted.
+// The first menu paint must end motion; closing it must show neutral pixels immediately,
+// with no old motion over the following frames, before a fresh key starts a new walk.
+for (const mode of ['layout', 'wide']) {
+  test(`footstep B active menu, ${mode}: lifted slide interruption, first menu paint, neutral close and fresh-key canvas reentry`, async (env) => {
+    const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
+    await quietMotionPage(page);
+    assert.deepEqual(await page.evaluate(() => [globalThis.__shownGame.motion(), globalThis.__shownGame.footstep_pattern()]), [true, 2], 'active-menu case keeps default B');
+    const hero = mode === 'wide' ? WIDE_HERO : HERO;
+    await page.mouse.move(...(await h.screenPoint(page, 240, 180)));
+    await h.runFrames(page, 2);
+    await installFootstepProbe(page);
+    await page.evaluate(() => {
+      const probe = globalThis.__footstepProbe, g = globalThis.__shownGame;
+      globalThis.__footstepProbe = () => ({ ...probe(), sliding: g.sliding(), old: g.old_cell() });
+    });
+    const from = await motionLeader(page);
+    await page.keyboard.down('ArrowDown');
+    const approach = await page.evaluate(([hx, hy]) => {
+      const g = globalThis.__shownGame, c = document.getElementById('screen');
+      const rows = [];
+      const counts = { frames: 0, sliding: 0, moving: 0, lifted: 0, prompt: 0, gate: 0, movingGate: 0, liftedGate: 0 };
+      const phases = new Set();
+      let previous = globalThis.__footstepProbe(), distance = 0, found = false;
+      for (let f = 0; f < 1200; f += 1) {
+        window.__display.run();
+        const row = globalThis.__footstepProbe();
+        if (row.pose) {
+          const delta = previous.pose ? Math.max(...row.world.map((v, i) => Math.abs(v - previous.world[i]))) : 0;
+          distance = row.moving && delta <= 32 ? (distance + delta) % 16 : 0;
+          row.expected = [[1, 0, 1, 2][Math.floor(distance / 4)], [0, 0, 1, 2, 2, 2, 1, 0][distance % 8]];
+        } else distance = 0;
+        previous = row;
+        rows.push(row);
+        const prompt = c.dataset.prompt === '1', gate = g.context_menu(hx, hy) !== '';
+        counts.frames += 1;
+        counts.sliding += Number(row.sliding);
+        counts.moving += Number(row.moving === true);
+        counts.lifted += Number(row.pose?.[1] > 0);
+        counts.prompt += Number(prompt);
+        counts.gate += Number(gate);
+        counts.movingGate += Number(row.sliding && row.moving && gate);
+        counts.liftedGate += Number(row.pose?.[1] > 0 && gate);
+        if (row.pose) phases.add(row.pose.join('/'));
+        found = Boolean(row.sliding && row.moving && row.pose?.[1] > 0
+          && prompt && gate);
+        if (found) break;
+      }
+      return { rows, found, counts, phases: [...phases].sort() };
+    }, hero);
+    console.log(`  receipt: B2 ${mode} active-menu approach: ${JSON.stringify(approach.counts)}; phase/lift states ${approach.phases.join(',')}`);
+    assert.ok(approach.found, 'a prompt permits the menu while a B step is moving with nonzero lift');
+    assert.notEqual(await motionLeader(page), from, 'the pre-menu key really moved the leader');
+    const visible = approach.rows.filter((r) => r.pose);
+    assert.ok(visible.length > 0 && new Set(visible.map((r) => r.world.join(','))).size > 1, 'displayed world position really changed before the menu');
+    assert.ok(visible.every((r) => r.checked >= 8 && r.different === 0), 'every pre-menu actor canvas sample equals its selected bitmap');
+    assert.ok(visible.every((r) => JSON.stringify(r.pose) === JSON.stringify(r.expected)), 'pre-menu B phase and lift follow displayed distance');
+    await keepFrame(page.locator('#screen'), `footstep-b-active-menu-${mode}-moving.png`);
+    await page.mouse.move(...(await h.screenPoint(page, ...hero)));
+    await keepCanvas(page);
+    assert.ok(await page.evaluate(() => globalThis.__shownGame.sliding()), 'the right press happens before the slide ends');
+    await page.mouse.down({ button: 'right' });
+    let opened = null;
+    for (let f = 0; f < 8 && opened === null; f += 1) {
+      await h.runFrames(page, 1);
+      const view = await h.menuView(page);
+      if (view) {
+        opened = view;
+        assert.deepEqual(await page.evaluate(() => {
+          const g = globalThis.__shownGame;
+          return [Array.from(g.footstep_poses()), g.sliding(), g.slide().length, g.old_cell()];
+        }), [[], false, 0, false], 'first menu frame has no gait pose, slide or old cell');
+      } else {
+        assert.ok(await page.evaluate(() => globalThis.__shownGame.sliding()), 'motion remains active on every frame before the menu opens');
+      }
+    }
+    assert.ok(opened, 'the right press opens the actual menu during the slide');
+    const pixels = await menuPixels(page, opened);
+    const heads = pixels.rows.filter((r) => r.kind === 'head');
+    const entries = pixels.rows.filter((r) => r.kind === 'entry' && r.enabled);
+    assert.ok(heads.length > 0 && heads.every((r) => r.head > 0), 'first menu canvas paint contains each heading in its colour');
+    assert.ok(entries.length > 0 && entries.every((r) => r.ink > 0), 'first menu canvas paint contains each enabled entry in ink');
+    await keepFrame(page.locator('#screen'), `footstep-b-active-menu-${mode}-open.png`);
+    await page.keyboard.up('ArrowDown');
+    await page.mouse.up({ button: 'right' });
+    for (let f = 0; f < 6; f += 1) {
+      await h.runFrames(page, 1);
+      assert.ok(await h.menuView(page), 'menu remains open until Escape');
+      assert.deepEqual(await page.evaluate(() => {
+        const g = globalThis.__shownGame;
+        return [Array.from(g.footstep_poses()), g.sliding(), g.slide().length, g.old_cell()];
+      }), [[], false, 0, false], 'open menu never resumes the interrupted gait');
+    }
+    await page.mouse.move(...(await h.screenPoint(page, 240, 180)));
+    await page.keyboard.press('Escape');
+    let closed = null;
+    for (let f = 0; f < 8 && closed === null; f += 1) {
+      await h.runFrames(page, 1);
+      if ((await h.menuView(page)) === null) closed = await page.evaluate(() => globalThis.__footstepProbe());
+    }
+    assert.ok(closed, 'Escape closes the menu');
+    assert.deepEqual([closed.pose, closed.sliding, closed.old], [[1, 0], false, false], 'the very first closed-menu frame is neutral without old motion');
+    assert.ok(closed.checked >= 8 && closed.different === 0, 'the first closed-menu canvas shows the neutral bitmap');
+    const neutral = await footstepFrames(page, 90);
+    assertFootstepPixels(neutral.rows, `${mode} interrupted-menu return`, { neutral: true });
+    assert.ok(neutral.rows.every((r) => !r.sliding && !r.old && r.world.every((v, i) => v === closed.world[i])), 'no old slide, old cell or displayed displacement after closing');
+    await keepFrame(page.locator('#screen'), `footstep-b-active-menu-${mode}-closed.png`);
+    await page.keyboard.down('ArrowDown');
+    const resumed = await footstepFrames(page, 1800, { walk: true });
+    await page.keyboard.up('ArrowDown');
+    assert.ok(resumed.steps >= 4 && resumed.tail >= 60, 'a fresh key after interruption walks four steps and settles');
+    assertFootstepPixels(resumed.rows, `${mode} interrupted-menu fresh key`, { walk: true });
+    assert.ok(resumed.rows.every((r) => !r.old), 'the fresh walk never exposes the interrupted old cell');
+    await keepFrame(page.locator('#screen'), `footstep-b-active-menu-${mode}-reentry.png`);
+    console.log(`  receipt: B2 ${mode} active-menu: ${visible.length} pre-menu canvas frames; lifted moving step interrupted; first menu paint has ${heads.length} visible headings and ${entries.length} ink entries, no gait; first close and ${neutral.rows.length} subsequent frames neutral; ${resumed.steps} fresh steps and ${resumed.tail} settled frames`);
+    await context.close();
+  }, { needs: h.haveHfes });
+}
 
 const filter = process.argv[2];
 const env = await h.setup();

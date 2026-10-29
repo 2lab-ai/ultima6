@@ -60,11 +60,17 @@ fn caster_member(s: &State) -> (u16, bool) {
 /// The selection's name and a newline, or `Msg::Nothing`.
 async fn name_or_nothing(state: &RefCell<State>, io: &Io, none: bool) {
     if none {
-        say(state, io, FMT_S_NL, Msg::Nothing).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_S_NL),
+            Msg::Nothing,
+        )
+        .await;
     } else {
         let sel = state.borrow().ui.input.selection;
         print_name(state, io, sel).await;
-        print_at(state, io, NEWLINE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     }
 }
 
@@ -95,7 +101,7 @@ async fn shoot(state: &RefCell<State>, io: &Io, caster: u16, tile: u16) -> bool 
 pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
     let (caster, member) = caster_member(&state.borrow());
     if member {
-        say(state, io, FMT_S, Msg::OnWhat).await;
+        say(state, io, crate::string_registry::text!(FMT_S), Msg::OnWhat).await;
     }
     if pre == 0 {
         state.borrow_mut().ui.input.target_pending = 1;
@@ -107,11 +113,23 @@ pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
     let reached = shoot(state, io, caster, 0x17f).await;
     let sel = state.borrow().ui.input.selection;
     if missing(&state.borrow()) || sel < 0x100 {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     if !reached {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
         return;
     }
     let kind = state.borrow().objects.kind(sel);
@@ -130,7 +148,13 @@ pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
             .unwrap_or(0)
     };
     if weight == 0 {
-        print_at(state, io, MSG_NOT_POSSIBLE, &[]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(MSG_NOT_POSSIBLE),
+            &[],
+        )
+        .await;
         return;
     }
     let (ox, oy) = {
@@ -139,17 +163,27 @@ pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
         s.ui.input.target_pending = 0;
         (s.objects.x(sel), s.objects.y(sel))
     };
-    print_at(state, io, MSG_DIRECTION, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_DIRECTION), &[]).await;
     if crate::ui::wait::read_key(state, io).await != 0x80 {
-        print_at(state, io, MSG_NOWHERE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NOWHERE), &[]).await;
         return;
     }
     let dir = state.borrow().ui.input.direction;
-    let at = crate::image::A4.wrapping_sub(DIRECTION_NAMES) + 4 * (dir as u32);
     // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of it
     // when it has one ([`super::tables::LABELS`], [`crate::locale::shown`]).
-    let name = crate::locale::shown(&state.borrow(), crate::main_loop::pointed_string(io, at));
-    print_at(state, io, FMT_S_NL, &[Arg::Str(&name)]).await;
+    let name = crate::locale::shown(
+        &state.borrow(),
+        crate::string_registry::text_table!(DIRECTION_NAMES)
+            .get(dir as usize)
+            .map_or_else(Vec::new, |text| text.io(io)),
+    );
+    print_at(
+        state,
+        io,
+        crate::string_registry::text!(FMT_S_NL),
+        &[Arg::Str(&name)],
+    )
+    .await;
     let blocked = {
         let mut s = state.borrow_mut();
         let d = usize::from(dir as u16 & 7);
@@ -168,7 +202,13 @@ pub async fn telekinesis(state: &RefCell<State>, io: &Io, pre: i16) {
         }
     };
     if blocked {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
     }
 }
 
@@ -195,7 +235,7 @@ fn close_victim(s: &mut State) {
 pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
     let (caster, member) = caster_member(&state.borrow());
     if member {
-        say(state, io, FMT_S, Msg::OnWhom).await;
+        say(state, io, crate::string_registry::text!(FMT_S), Msg::OnWhom).await;
     }
     if pre == 0 {
         let mode = {
@@ -212,11 +252,23 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
     let reached = shoot(state, io, caster, 0x18b).await;
     let victim = state.borrow().ui.input.selection;
     if missing(&state.borrow()) || victim >= 0x100 {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     if !reached {
-        say(state, io, FMT_NL_S_NL, Msg::Blocked).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Blocked,
+        )
+        .await;
         return;
     }
     let home = {
@@ -230,7 +282,7 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
     };
     crate::ui::panels::inventory(state, io).await;
     state.borrow_mut().ui.panel.mode = 0x92;
-    print_at(state, io, MSG_WHICH, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_WHICH), &[]).await;
     if state.borrow().ui.input.targeting != 0 {
         state.borrow_mut().ui.input.targeting = 2;
         crate::ui::cursor::panel_cursor(state, io, 1);
@@ -241,7 +293,13 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
     name_or_nothing(state, io, key != 0x8e || obj == -1).await;
     let carried = obj >= 0x100 && state.borrow().objects.status(obj) & 0x18 != 0;
     if !carried {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         close_victim(&mut state.borrow_mut());
         return;
     }
@@ -258,7 +316,13 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
         w > i16::from(s.actors.attrs.strength[usize::from(caster)]) * 0x14
     };
     if too_heavy {
-        print_at(state, io, MSG_CANT_CARRY, &[]).await;
+        print_at(
+            state,
+            io,
+            crate::string_registry::text!(MSG_CANT_CARRY),
+            &[],
+        )
+        .await;
     } else {
         let (kind, tile) = {
             let s = state.borrow();
@@ -280,7 +344,13 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
         // The victim's flash (0x119526) is drawn before the caster's panel (0x119598).
         super::effects::settle(state, io).await;
         seams::inventory_of(state, io, caster).await;
-        say(state, io, FMT_NL_S_NL, Msg::Success).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::Success,
+        )
+        .await;
         let mut s = state.borrow_mut();
         s.actors.karma = s.actors.karma.wrapping_sub(5);
     }
@@ -306,7 +376,7 @@ pub async fn pickpocket(state: &RefCell<State>, io: &Io, pre: i16) {
 pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
     state.borrow_mut().ui.panel.mode = 0x92;
     crate::ui::panels::inventory(state, io).await;
-    say(state, io, FMT_S, Msg::OnWhat).await;
+    say(state, io, crate::string_registry::text!(FMT_S), Msg::OnWhat).await;
     if pre == 0 {
         state.borrow_mut().ui.input.target_pending = 1;
         crate::ui::wait::read_key(state, io).await;
@@ -314,7 +384,13 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
     let wand = state.borrow().ui.input.selection;
     name_or_nothing(state, io, wand == -1).await;
     if state.borrow().objects.kind(wand) != WAND {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     let full = {
@@ -328,7 +404,7 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
         n == 10
     };
     if full {
-        print_at(state, io, MSG_FULL, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_FULL), &[]).await;
         return;
     }
     {
@@ -352,13 +428,13 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
     }
     super::book::draw_book_page(state, io).await;
     state.borrow_mut().ui.panel.mode = super::BOOK_PANEL;
-    print_at(state, io, MSG_WITH, &[]).await;
+    print_at(state, io, crate::string_registry::text!(MSG_WITH), &[]).await;
     let key = crate::ui::wait::read_key(state, io).await;
     let caster = super::cast::caster(&state.borrow());
     seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
     let line = state.borrow().ui.input.selection;
     if key & 0xff != crate::ui::wait::REPEAT || line == -1 {
-        print_at(state, io, MSG_NONE, &[]).await;
+        print_at(state, io, crate::string_registry::text!(MSG_NONE), &[]).await;
     } else {
         let (spell, word) = {
             let s = state.borrow();
@@ -376,7 +452,19 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
         {
             let syl = state.borrow().magic.tables.syllable(c).to_vec();
             let fmt = if i == 0 { FMT_S } else { FMT_SPACE_S };
-            print_at(state, io, fmt, &[Arg::Str(&syl)]).await;
+            print_at(
+                state,
+                io,
+                crate::string_registry::choose(
+                    (fmt) as i64,
+                    &[
+                        crate::string_registry::text!(0x001158b0),
+                        crate::string_registry::text!(0x00115a62),
+                    ],
+                ),
+                &[Arg::Str(&syl)],
+            )
+            .await;
         }
         crate::objects::add_to_owner(
             &mut state.borrow_mut(),
@@ -385,7 +473,7 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
             u16::from(spell) << 8 | 1,
         );
     }
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
 }
 
 /// Original: 0x119dbc (magic: Seance: talk with the dead)
@@ -394,12 +482,12 @@ pub async fn enchant(state: &RefCell<State>, io: &Io, pre: i16) {
 /// (0x153, 0x162, 0x155, 0x154): `Msg::NoEffect`. Else its name, and the leader talks with the
 /// person the body's quality names (0x1125b8) with A4+0x1821 set around the conversation.
 pub async fn seance(state: &RefCell<State>, io: &Io, pre: i16) {
-    say(state, io, FMT_S, Msg::OnWhom).await;
+    say(state, io, crate::string_registry::text!(FMT_S), Msg::OnWhom).await;
     if pre == 0 {
         state.borrow_mut().ui.input.target_pending = 1;
         crate::ui::wait::read_key(state, io).await;
     }
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     let caster = super::cast::caster(&state.borrow());
     seams::flash_actor(&mut state.borrow_mut(), io, caster, 0);
     let (sel, kind) = {
@@ -408,11 +496,17 @@ pub async fn seance(state: &RefCell<State>, io: &Io, pre: i16) {
         (sel, s.objects.kind(sel))
     };
     if sel == -1 || !matches!(kind, 0x153 | 0x162 | 0x155 | 0x154) {
-        say(state, io, FMT_NL_S_NL, Msg::NoEffect).await;
+        say(
+            state,
+            io,
+            crate::string_registry::text!(FMT_NL_S_NL),
+            Msg::NoEffect,
+        )
+        .await;
         return;
     }
     print_name(state, io, sel).await;
-    print_at(state, io, NEWLINE, &[]).await;
+    print_at(state, io, crate::string_registry::text!(NEWLINE), &[]).await;
     let (talker, whom) = {
         let mut s = state.borrow_mut();
         s.converse.by_spell = true;

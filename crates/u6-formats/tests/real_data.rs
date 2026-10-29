@@ -1,7 +1,7 @@
 //! Real-data checks against the unpacked Amiga files (formats.md "Measured" and "Proof" lines).
 //!
 //! Runs only when the data directory exists (`U6_DATA_DIR`, default
-//! `/Users/zhugehyuk/Games/ultima6/unpacked`); otherwise each test prints a skip line and passes.
+//! `$U6_DATA_ROOT/unpacked` (default `~/Games/ultima6/unpacked`)); otherwise each test prints a skip line and passes.
 //! The game data is third-party content: it is only read here, never copied into the repo, and
 //! the tests print numbers only. No expected value is a number taken from the files: each check
 //! compares a parser with this file's own minimal readers of the raw bytes at the offsets the
@@ -28,15 +28,16 @@ use u6_formats::tileflag::{TILE_COUNT, TileFlags};
 use u6_testkit::Quiet;
 use u6_testkit::assert_same;
 
-const DEFAULT_DIR: &str = "/Users/zhugehyuk/Games/ultima6/unpacked";
+fn default_dir() -> std::path::PathBuf {
+    u6_testkit::data_path_with("U6_DATA_DIR", "unpacked")
+}
 const D1: &str = "d1/INSTALL";
 const D2: &str = "d2/DATA1";
 const D3: &str = "d3/DATA2";
 
 fn data_dir() -> Option<PathBuf> {
-    let dir =
-        std::env::var_os("U6_DATA_DIR").map_or_else(|| PathBuf::from(DEFAULT_DIR), PathBuf::from);
-    if dir.is_dir() {
+    let dir = default_dir();
+    if u6_testkit::available(dir.is_dir(), "U6_DATA_DIR unpacked files") {
         Some(dir)
     } else {
         println!("skip: {} not found", dir.display());

@@ -44,7 +44,7 @@ pub(super) const PRINTED: &[u32] = &[
 /// The eating line (0x12cf52); a counted stack (0x10cef2 ≠ 0) with more than one loses one,
 /// anything else is removed; a carried one redraws the inventory.
 pub async fn eat(ux: Ux<'_>, obj: Slot) {
-    ux.print(STR_EAT, &[]).await;
+    ux.print(crate::string_registry::text!(STR_EAT), &[]).await;
     let mut s = ux.s();
     let carried = s.objects.place(obj) != 0;
     let kind = s.objects.kind(obj);
@@ -69,7 +69,8 @@ pub async fn drink(ux: Ux<'_>, obj: Slot) {
             *b = b.wrapping_add(1);
         }
     }
-    ux.print(STR_DRINK, &[]).await;
+    ux.print(crate::string_registry::text!(STR_DRINK), &[])
+        .await;
     let mut s = ux.s();
     if s.ui.panel.mode == 0x92 {
         seams::redraw_inventory(&mut s);
@@ -103,7 +104,8 @@ pub async fn fill_bucket(ux: Ux<'_>, which: Bucket) {
         (m, crate::objects::find_child(&mut s.objects, m, 0xb2, 0))
     };
     if bucket == -1 {
-        ux.print(STR_NEED_BUCKET, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NEED_BUCKET), &[])
+            .await;
         return;
     }
     let heavy = {
@@ -117,7 +119,17 @@ pub async fn fill_bucket(ux: Ux<'_>, which: Bucket) {
             Bucket::Water => STR_WATER_HEAVY,
             Bucket::Milk => STR_MILK_HEAVY,
         };
-        ux.print(msg, &[]).await;
+        ux.print(
+            crate::string_registry::choose(
+                (msg) as i64,
+                &[
+                    crate::string_registry::text!(STR_WATER_HEAVY),
+                    crate::string_registry::text!(STR_MILK_HEAVY),
+                ],
+            ),
+            &[],
+        )
+        .await;
         return;
     }
     {
@@ -129,7 +141,11 @@ pub async fn fill_bucket(ux: Ux<'_>, which: Bucket) {
         };
         crate::objects::add_to_owner(&mut s, member, full, 1);
     }
-    ux.say(FMT_NL_LINE, MSG_DONE).await;
+    ux.say(
+        crate::string_registry::text!(FMT_NL_LINE),
+        crate::string_registry::pointer!(MSG_DONE),
+    )
+    .await;
 }
 
 /// Original: 0x12d452 (objects: churn: a bucket of milk 0xb4 becomes butter 0x60 and an empty
@@ -142,7 +158,8 @@ pub async fn churn(ux: Ux<'_>) {
         (m, crate::objects::find_child(&mut s.objects, m, 0xb4, 0))
     };
     if milk == -1 {
-        ux.print(STR_NEED_MILK, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NEED_MILK), &[])
+            .await;
         return;
     }
     {
@@ -151,7 +168,11 @@ pub async fn churn(ux: Ux<'_>) {
         crate::objects::add_to_owner(&mut s, member, 0x60, 1);
         crate::objects::add_to_owner(&mut s, member, 0xb2, 1);
     }
-    ux.say(FMT_NL_LINE, MSG_DONE).await;
+    ux.say(
+        crate::string_registry::text!(FMT_NL_LINE),
+        crate::string_registry::pointer!(MSG_DONE),
+    )
+    .await;
 }
 
 /// Original: 0x12d4bc (objects: a beehive fills a honey jar: 0xb7 → jar of honey 0xb8)
@@ -163,7 +184,8 @@ pub async fn honey(ux: Ux<'_>) {
         crate::objects::find_child(&mut s.objects, m, 0xb7, 0)
     };
     if jar == -1 {
-        ux.print(STR_NEED_JAR, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NEED_JAR), &[])
+            .await;
         return;
     }
     {
@@ -171,7 +193,11 @@ pub async fn honey(ux: Ux<'_>) {
         let tf = s.objects.tf(jar);
         super::set_tf(&mut s, jar, (tf & 0xfc00).wrapping_add(0xb8));
     }
-    ux.say(FMT_NL_LINE, MSG_DONE).await;
+    ux.say(
+        crate::string_registry::text!(FMT_NL_LINE),
+        crate::string_registry::pointer!(MSG_DONE),
+    )
+    .await;
     seams::redraw_inventory(&mut ux.s());
 }
 
@@ -201,7 +227,11 @@ pub async fn honey(ux: Ux<'_>) {
 /// [`crate::magic::heal`], and the original bounds the same status read itself in 0x1225c0
 /// (`< 0x100` before its `& 0x10`).
 pub async fn potion(ux: Ux<'_>, obj: Slot) {
-    ux.say(FMT_STR, MSG_ON_WHOM).await;
+    ux.say(
+        crate::string_registry::text!(FMT_STR),
+        crate::string_registry::pointer!(MSG_ON_WHOM),
+    )
+    .await;
     {
         let mut s = ux.s();
         s.ui.input.target_pending = 1;
@@ -218,14 +248,22 @@ pub async fn potion(ux: Ux<'_>, obj: Slot) {
         (s.ui.input.selection, x, y)
     };
     if who == -1 || tx == -1 || ty == -1 {
-        ux.say(FMT_LINE, MSG_NOTHING).await;
+        ux.say(
+            crate::string_registry::text!(FMT_LINE),
+            crate::string_registry::pointer!(MSG_NOTHING),
+        )
+        .await;
         return;
     }
     ux.name(who).await;
     ux.put(b'\n').await;
     let a = who as usize;
     if ux.s().actors.attrs.status.get(a).copied().unwrap_or(0) & 0x80 == 0 {
-        ux.say(FMT_LINE, MSG_NO_EFFECT).await;
+        ux.say(
+            crate::string_registry::text!(FMT_LINE),
+            crate::string_registry::pointer!(MSG_NO_EFFECT),
+        )
+        .await;
         return;
     }
     let frame = ux.s().objects.tf(obj) >> 10;
@@ -288,7 +326,11 @@ pub async fn potion(ux: Ux<'_>, obj: Slot) {
         _ => {}
     }
     if no_effect {
-        ux.say(FMT_NL_LINE, MSG_NO_EFFECT).await;
+        ux.say(
+            crate::string_registry::text!(FMT_NL_LINE),
+            crate::string_registry::pointer!(MSG_NO_EFFECT),
+        )
+        .await;
     }
     let mut s = ux.s();
     crate::objects::remove(&mut s, obj);
@@ -299,7 +341,8 @@ pub async fn potion(ux: Ux<'_>, obj: Slot) {
 
 /// Original: 0x12e912 (objects: study a scroll: hidden `&` text shows from now on, A4-0x7b26)
 pub async fn study_scroll(ux: Ux<'_>) {
-    ux.print(STR_STUDY, &[]).await;
+    ux.print(crate::string_registry::text!(STR_STUDY), &[])
+        .await;
     if let Some(w) = ux.s().actors.objlist_tail.get_mut(0x5e..0x60) {
         w.copy_from_slice(&[0, 1]);
     }
@@ -307,7 +350,8 @@ pub async fn study_scroll(ux: Ux<'_>) {
 
 /// Original: 0x13051a (objects: the mouse squeaks, the line 0x12cf80)
 pub async fn squeak(ux: Ux<'_>) {
-    ux.print(STR_SQUEAK, &[]).await;
+    ux.print(crate::string_registry::text!(STR_SQUEAK), &[])
+        .await;
 }
 
 /// Original: 0x130526 (objects: a fan turns the wind one step clockwise, the line 0x12cf8a,
@@ -317,7 +361,8 @@ pub async fn fan(ux: Ux<'_>) {
         let mut s = ux.s();
         s.actors.wind = s.actors.wind.wrapping_add(1) & 7;
     }
-    ux.print(STR_BREEZE, &[]).await;
+    ux.print(crate::string_registry::text!(STR_BREEZE), &[])
+        .await;
     crate::actors::clock::tick(&mut ux.s(), 0);
     ux.flush().await;
 }

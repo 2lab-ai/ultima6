@@ -13,7 +13,6 @@
 use crate::engine::Io;
 use crate::objects::Slot;
 use crate::state::State;
-use crate::todo_stub;
 
 // ---- combat -----------------------------------------------------------------------------------
 
@@ -223,12 +222,4 @@ pub(crate) async fn wait_vblanks(io: &Io, n: u16) {
     for _ in 0..=n {
         io.vblank().await;
     }
-}
-
-/// 0x133d1e then 0x13513a: the ending after the Codex vanished (the vortex cube 0x1303f4 calls
-/// 0x133d1e after removing the Codex, 0x13513a after the vanishing line and a key; the end
-/// sequence does not return to play). Not ported: false. The cube asks before it removes the
-/// Codex and refuses while this is false, so nothing is destroyed for an ending that cannot run.
-pub(crate) fn ending_ported() -> bool {
-    todo_stub!("0x13513a the ending (usecmd seam)", false)
 }

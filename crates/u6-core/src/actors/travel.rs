@@ -476,7 +476,9 @@ pub struct Polled<'a> {
     pub foreign: bool,
     /// Spec 21's merge contract with the context menu (spec 17): the menu took new input in this
     /// tick (its [`crate::ui::popup::Popup::took_new_input`]; `input` is then what the menu passed
-    /// on, without what it took): a stop, as the player's input is.
+    /// on, without what it took), or after the choice of "Go here" that started the travel in it
+    /// ([`crate::ui::popup::GoHere::later`]; `input` then what it passed on after the choice): a
+    /// stop, as the player's input is.
     pub menu: bool,
     /// Spec 21 S3: a step is due on the platform's clock
     /// ([`crate::engine::Engine::set_travel_due`]: [`crate::engine::MIN_STEP_MS`] since the prompt
@@ -488,8 +490,10 @@ pub struct Polled<'a> {
 impl Polled<'_> {
     /// A key, a repeat or text, a pointer button that was up before going down, a key in the
     /// queue the travel did not press, or new input the context menu took. No wildcard arm: an
-    /// event kind added later (K2's `Paced`) is decided here (spec 21 Stops 5).
-    fn stops(&self) -> bool {
+    /// event kind added later (K2's `Paced`) is decided here (spec 21 Stops 5). Read at a tick's
+    /// press of the travel and, in the tick that chose "Go here", over the events after the choice
+    /// (`engine.rs` `start_go_here`).
+    pub(crate) fn stops(&self) -> bool {
         if self.foreign || self.menu {
             return true;
         }
@@ -598,6 +602,15 @@ impl Travel {
         self.target
     }
 
+    /// The actual current leg, or the next planned leg before the first press. The path's
+    /// last entry remains the pressed leg until its landing is acknowledged by `next`.
+    /// Reading it neither plans a route nor consumes a step, and does not aim at the goal
+    /// directly: a route can first walk away from its destination around an obstruction.
+    pub(crate) fn continuous_direction(&self) -> Option<(i32, i32)> {
+        let d = usize::from(*self.path.last()?);
+        Some((i32::from(DX8[d]), i32::from(DY8[d])))
+    }
+
     /// The one new plan of a blockage, from `here`; false when it was made already or finds no
     /// way.
     fn replan(&mut self, s: &State, here: (u16, u16)) -> bool {
@@ -688,4 +701,4 @@ impl Travel {
 
 #[cfg(test)]
 #[path = "travel_tests.rs"]
-mod tests;
+pub(crate) mod tests;

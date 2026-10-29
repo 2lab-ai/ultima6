@@ -212,6 +212,7 @@ static NEXT_IO: AtomicU64 = AtomicU64::new(1);
 /// screen buffers and the file layer. Nothing else in the core touches time, input or files.
 pub struct Io {
     events: RefCell<VecDeque<InputEvent>>,
+    pub(crate) playback: crate::turn_speed::Playback,
     pointer: Cell<Pointer>,
     now_ms: Cell<u64>,
     generation: Cell<u64>,
@@ -238,6 +239,21 @@ pub struct Io {
     window_cache: Cell<bool>,
     /// Port-only: [`Io::set_sight_memory`].
     sight_memory: Cell<bool>,
+    /// Port-only: [`Io::set_motion`].
+    motion: Cell<bool>,
+    attacks: RefCell<Vec<(u64, u6_render::motion::attacks::Strike)>>,
+    /// Port-only (spec 20): the framed renders kept since the last one a publication showed,
+    /// oldest first, at most [`SHOTS`] ([`crate::gfx::motion`]).
+    shots: RefCell<VecDeque<Rc<crate::gfx::motion::Shot>>>,
+    /// Port-only (spec 20): the framed render kept last.
+    last_shot: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
+    /// Port-only (spec 20 Design 4): the early picture of the leader's step made in this poll.
+    preview: RefCell<Option<Rc<crate::gfx::motion::Shot>>>,
+    /// Port-only (spec 20 Design 4): [`Io::warm_early_picture`] answered.
+    warmed: Cell<bool>,
+    /// Port-only (spec 20): [`Io::break_motion`] ran and the engine queued no publication with a
+    /// scene since (an early picture is one, [`Published::preview`]).
+    motion_break: Cell<bool>,
     /// Port (spec 19 O1c): [`Io::prompt_takes`].
     prompt_takes: Cell<u64>,
     /// Port-only (spec 23): [`Io::history_offset`].
@@ -248,6 +264,7 @@ impl Io {
     pub(crate) fn new(files: Files) -> Self {
         Self {
             events: RefCell::new(VecDeque::new()),
+            playback: crate::turn_speed::Playback::default(),
             pointer: Cell::new(Pointer::default()),
             now_ms: Cell::new(0),
             generation: Cell::new(0),
@@ -263,6 +280,13 @@ impl Io {
             back_writes: Cell::new(0),
             window_cache: Cell::new(true),
             sight_memory: Cell::new(false),
+            motion: Cell::new(false),
+            attacks: RefCell::new(Vec::new()),
+            shots: RefCell::new(VecDeque::new()),
+            last_shot: RefCell::new(None),
+            preview: RefCell::new(None),
+            warmed: Cell::new(false),
+            motion_break: Cell::new(false),
             prompt_takes: Cell::new(0),
             history_offset: Cell::new(0),
         }
@@ -290,6 +314,20 @@ impl Io {
     pub(crate) fn count_prompt_take(&self) {
         self.prompt_takes
             .set(self.prompt_takes.get().wrapping_add(1));
+    }
+
+    /// Spec 19 O3: presentation waits only; survives a launcher hand-over, never saved.
+    pub fn set_turn_speed(&self, speed: crate::turn_speed::TurnSpeed) {
+        self.playback.speed.set(speed);
+    }
+
+    pub fn turn_speed(&self) -> crate::turn_speed::TurnSpeed {
+        self.playback.speed.get()
+    }
+
+    /// The chosen speed, or instant for the remainder of a skipped world turn.
+    pub fn playback_speed(&self) -> crate::turn_speed::TurnSpeed {
+        self.playback.speed()
     }
 
     /// Milliseconds of accumulated tick time (monotonic).
@@ -578,6 +616,109 @@ impl Io {
         self.sight_memory.get()
     }
 
+    /// Port-only (spec 20): the `Io`'s side of [`Engine::set_motion`]: with `on` each framed
+    /// render of the map window keeps its scene ([`crate::gfx::motion::Shot`]); off (the default)
+    /// nothing is kept and what was is dropped.
+    pub(crate) fn set_motion(&self, on: bool) {
+        self.motion.set(on);
+        if !on {
+            self.shots.borrow_mut().clear();
+            self.last_shot.borrow_mut().take();
+            self.attacks.borrow_mut().clear();
+            self.preview.borrow_mut().take();
+        }
+    }
+
+    /// A physical attack reached its existing display playback. This queues no input or wait.
+    pub(crate) fn strike(&self, strike: u6_render::motion::attacks::Strike) {
+        if self.motion() {
+            let mut attacks = self.attacks.borrow_mut();
+            if attacks.len() == PUBLISHED {
+                attacks.clear();
+            }
+            attacks.push((self.now_ms(), strike));
+        }
+    }
+
+    /// Display cues since the last platform draw, bounded independently of actor count.
+    pub fn take_attacks(&self) -> Vec<(u64, u6_render::motion::attacks::Strike)> {
+        std::mem::take(&mut *self.attacks.borrow_mut())
+    }
+
+    /// [`Io::set_motion`].
+    pub fn motion(&self) -> bool {
+        self.motion.get()
+    }
+
+    /// Port-only (spec 20): keeps the shot of a framed render just presented, the oldest dropped
+    /// past [`SHOTS`].
+    pub(crate) fn keep_shot(&self, shot: Rc<crate::gfx::motion::Shot>) {
+        *self.last_shot.borrow_mut() = Some(Rc::clone(&shot));
+        let mut shots = self.shots.borrow_mut();
+        shots.push_back(shot);
+        while shots.len() > SHOTS {
+            shots.pop_front();
+        }
+    }
+
+    /// Port-only (spec 20): the game shown is another (load state 0x105350,
+    /// [`crate::saveload::restore::load_state`], whose forgotten remembered sight the scenes kept
+    /// so far name; a new process taking over, [`crate::main_loop::take_over`]), or the platform
+    /// missed what the engine queued for it (the queue past [`PUBLISHED`],
+    /// [`Engine::queue_motion`]): the shots kept are dropped, and until the engine queues a
+    /// publication with a scene ([`Engine::tick`]; an early picture is one) every scene kept
+    /// snaps, the early picture's included, and an unchanged picture is published again: no slide
+    /// crosses it.
+    pub(crate) fn break_motion(&self) {
+        self.set_motion_break(true);
+        self.shots.borrow_mut().clear();
+        self.last_shot.borrow_mut().take();
+        self.attacks.borrow_mut().clear();
+        self.preview.borrow_mut().take();
+    }
+
+    /// Port-only (spec 20): whether an [`Io::break_motion`] is pending.
+    pub(crate) fn motion_break(&self) -> bool {
+        self.motion_break.get()
+    }
+
+    /// Port-only (spec 20): the one write of the break: set by [`Io::break_motion`], ended by the
+    /// engine when it queues a publication with a scene ([`Engine::tick`]). A queued early picture
+    /// that snaps ends it too: a platform's presenter starts again from it even where it shows no
+    /// slides (u6-render `Presenter::preview`).
+    fn set_motion_break(&self, on: bool) {
+        self.motion_break.set(on);
+    }
+
+    /// Port-only (spec 20 Design 4): true the first time it is asked: the first framed render
+    /// with smooth motion on makes and drops a copy of the state, so the heap holds a state's worth
+    /// before the first step's early picture copies it ([`crate::gfx::motion::preview`]). Without
+    /// it that step's tick grew the wasm memory (192–256 KiB) and took 3.7–4.0 ms, against about
+    /// 0.6 ms for the steps after; with it 1.0–1.2 ms (wasm, Original, 8×).
+    pub(crate) fn warm_early_picture(&self) -> bool {
+        !self.warmed.replace(true)
+    }
+
+    /// Port-only (spec 20): the framed render kept last ([`Io::keep_shot`]).
+    pub(crate) fn last_shot(&self) -> Option<Rc<crate::gfx::motion::Shot>> {
+        self.last_shot.borrow().clone()
+    }
+
+    /// Port-only (spec 20 Design 4): keeps the early picture of the leader's step
+    /// ([`crate::gfx::motion::preview`]) for the engine to hand over after this poll.
+    pub(crate) fn keep_preview(&self, shot: Rc<crate::gfx::motion::Shot>) {
+        *self.preview.borrow_mut() = Some(shot);
+    }
+
+    /// Port-only (spec 20): the oldest shot kept whose shown map hashes to `hash`, taken with
+    /// the shots kept before it: publications show the renders in their order, so of renders A, B,
+    /// A a publication of A takes the first and leaves B for the next.
+    fn take_shot(&self, hash: u64) -> Option<Rc<crate::gfx::motion::Shot>> {
+        let mut shots = self.shots.borrow_mut();
+        let i = shots.iter().position(|s| s.hash == hash)?;
+        shots.drain(..=i).next_back()
+    }
+
     /// Port-only (spec 07 HD0): every pixel of the back buffer's, the screen's and the published
     /// frame's source planes classic, the colours untouched ([`Framebuffer::reset_src`]; the
     /// shown frame follows at its next sync from the published one). It counts as a write of the
@@ -660,6 +801,8 @@ impl Drop for OwnedKeys<'_> {
 thread_local! {
     /// The `Io` of the engine that is polling (set by [`Engine::tick`] around its poll).
     static CURRENT: RefCell<Option<Rc<Io>>> = const { RefCell::new(None) };
+    // A read-only prediction must never use the polling engine’s buffers or input.
+    static PREDICTION_IO: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 /// Runs `f` with the `Io` of the engine that is polling, or returns `None` outside a poll.
@@ -669,8 +812,52 @@ thread_local! {
 /// game poll, so it reaches the same buffers the async code draws on, in call order. It never
 /// waits; anything that waits (a more prompt, a key) stays on the async path.
 pub fn with_current_io<R>(f: impl FnOnce(&Io) -> R) -> Option<R> {
+    if PREDICTION_IO.with(|p| {
+        if p.get().is_some() {
+            p.set(Some(true));
+            true
+        } else {
+            false
+        }
+    }) {
+        return None;
+    }
     let io = CURRENT.with(|c| c.borrow().clone())?;
     Some(f(&io))
+}
+
+/// Runs a synchronous prediction without access to the polling engine's I/O. An attempted
+/// access makes the result unknown (`None`), including read-only access: callers must fall
+/// back conservatively instead of trusting a branch that ran without its requested I/O.
+/// The guard restores the previous scope even on panic; nested attempts invalidate both.
+pub(crate) fn predict_without_io<R>(f: impl FnOnce() -> R) -> Option<R> {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PREDICTION_IO.with(|p| {
+                let attempted = p.get() == Some(true);
+                p.set(self.0.map(|old| old || attempted));
+            });
+        }
+    }
+    let _restore = Restore(PREDICTION_IO.with(|p| p.replace(Some(false))));
+    let value = f();
+    (PREDICTION_IO.with(Cell::get) == Some(false)).then_some(value)
+}
+
+/// Only `clock::date_line` may omit its known UI-only queue while predicting a turn on a
+/// copy. This grants no I/O access: every other attempted access still invalidates prediction.
+pub(crate) fn prediction_omits_date_line(state: &State) -> bool {
+    if !PREDICTION_IO.with(|p| p.get().is_some()) {
+        return false;
+    }
+    // Only immutable file bytes leave this boundary, never a live buffer/input handle.
+    // The date proof uses registered image reads and cloned locale counters; no Io is made.
+    CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|io| crate::actors::clock::date_preview_safe(state, &io.files))
+    })
 }
 
 /// Runs `f` with `io` as the current `Io`, restoring the previous one afterwards.
@@ -813,6 +1000,34 @@ pub(crate) const KEY_RING: usize = 49;
 /// keys: more than a line of the conversation takes ([`crate::converse::INPUT_MAX`] bytes).
 const TEXT_RING: usize = KEY_RING;
 
+/// Port-only (spec 20): the framed renders an [`Io`] keeps at most until a publication shows one
+/// of them: more than a fight's turn records before its playback shows them.
+pub(crate) const SHOTS: usize = 64;
+
+/// Port-only (spec 20): the publications [`Engine::take_motion`] holds at most; past it they give
+/// way to one foreign publication, and the game shown breaks as at a load
+/// ([`Engine::queue_motion`]). A tick
+/// queues at most two (its early picture and its own), and a page takes them at each present,
+/// after at most [`crate::pacer::MAX_STEPS`] ticks, so a page never meets it; a host that ticks
+/// longer without taking them does.
+pub(crate) const PUBLISHED: usize = 256;
+const _: () = assert!(2 * crate::pacer::MAX_STEPS as usize <= PUBLISHED);
+
+/// Port-only (spec 20): a publication whose shown map changed ([`Engine::take_motion`]).
+#[derive(Clone, Debug)]
+pub struct Published {
+    /// The engine time it was published at ([`Io::now_ms`] at the end of its tick).
+    pub time_ms: u64,
+    /// The framed render whose picture it shows; `None` for a foreign picture (a missile, a
+    /// flash, a quake, a frame a fight plays back of no render kept, the map overview).
+    pub shot: Option<Rc<crate::gfx::motion::Shot>>,
+    /// Spec 20 Design 4: not a picture the engine published but the early picture of the
+    /// leader's step ([`crate::gfx::motion::preview`]): its scene, ahead of the engine's own
+    /// picture. It is a publication with a scene all the same: queued, it ends an
+    /// [`Io::break_motion`].
+    pub preview: bool,
+}
+
 /// The game future type the engine retains.
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -827,6 +1042,8 @@ pub struct Engine {
     /// Port (spec 21): the party's travel to a pressed cell, while it walks
     /// ([`crate::actors::travel`]); engine state, never saved.
     travel: Option<crate::actors::travel::Travel>,
+    /// Presentation identity: only an accepted new route changes it, never a step or replan.
+    travel_session: u64,
     /// Port (spec 21): why the last travel ended.
     travel_end: Option<crate::actors::travel::End>,
     /// Port (spec 21): the key the travel pressed last while it still waits in the queue (the
@@ -879,6 +1096,10 @@ pub struct Engine {
     src_shows: u64,
     sprite: Option<crate::ui::pointer::SpriteFrame>,
     stubs: Rc<StubLog>,
+    /// Port-only (spec 20): the hash of the shown map last published with the switch on.
+    motion_map: Option<u64>,
+    /// Port-only (spec 20): [`Engine::take_motion`]'s publications.
+    motion: Vec<Published>,
     /// Port-only (spec 23): the message history the player looks at, drawn over the published
     /// frame into the screen frame `layer` while scrolled back, under the context menu
     /// ([`crate::ui::scrollback::View`]).
@@ -946,6 +1167,7 @@ impl Engine {
             finished: false,
             ticks: 0,
             travel: None,
+            travel_session: 0,
             travel_end: None,
             travel_own: None,
             #[cfg(test)]
@@ -971,6 +1193,8 @@ impl Engine {
             src_shows: 0,
             sprite: None,
             stubs,
+            motion_map: None,
+            motion: Vec::new(),
             view: crate::ui::scrollback::View::default(),
             view_shown: 0,
         }
@@ -995,7 +1219,9 @@ impl Engine {
     /// ends the travel when the menu took new input); queued as the player's keys are, but neither
     /// the menu's input nor the player's input to the message history's view (spec 23 Decision 6:
     /// it leaves the view where it is). "Go here" chosen in this input starts its travel after
-    /// that ([`Engine::travel_to`]), so its first step is the next tick's.
+    /// that ([`Engine::travel_to`]), so its first step is the next tick's, and the travel's stops
+    /// are read over what came after the choice in this input ([`Engine::start_go_here`]): a key, a
+    /// press, a menu opened after it end the travel at once, as in the next tick.
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
         self.tick_dismissing(input, &[], elapsed_ms);
     }
@@ -1005,17 +1231,28 @@ impl Engine {
     /// open context menu where it stands (before `input[i]` for index `i`, after them all for
     /// `input.len()`; ascending), as [`Engine::dismiss_context_menu`] does at once.
     pub fn tick_dismissing(&mut self, input: &[InputEvent], dismissals: &[usize], elapsed_ms: u32) {
+        self.tick_controls(input, dismissals, &[], elapsed_ms);
+    }
+
+    /// Ordered Ctrl-only changes for the representative action (spec 17).
+    pub fn tick_controls(
+        &mut self,
+        input: &[InputEvent],
+        dismissals: &[usize],
+        controls: &[(usize, bool)],
+        elapsed_ms: u32,
+    ) {
         let menu = self.popup.on();
         let through;
         let (input, took) = if menu {
             let (_, quiet) = self.menu_gate();
             let now = self.wall_ms.unwrap_or_else(|| self.io.now_ms());
-            through = self.popup.input_with(
+            through = self.popup.input_controls(
                 &self.state.borrow(),
                 &self.io,
                 input,
                 quiet,
-                now,
+                (now, controls),
                 dismissals,
             );
             (through.as_slice(), self.popup.took_new_input())
@@ -1023,12 +1260,7 @@ impl Engine {
             (input, false)
         };
         let step = self.travel_press(input, took);
-        // Spec 21's merge contract: "Go here" chosen in this input starts travel to its cell
-        // after this tick's press of the travel under way; a cell refused now starts none.
-        if let Some(cell) = self.popup.take_go_here() {
-            self.go_here.asked.push(cell);
-            let _ = self.travel_to((cell.0 as u16, cell.1 as u16));
-        }
+        self.start_go_here(input);
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -1060,6 +1292,26 @@ impl Engine {
                 } else {
                     e
                 };
+                // Spec 19 O5: only a new physical press during a world turn's drawing wait.
+                // Readers (a dialogue, more prompt, target or command) keep their own keys.
+                if player && self.io.playback.suppress_repeat(e) {
+                    continue;
+                }
+                if player
+                    && game
+                    && !s.ui.input.in_wait
+                    && !s.ui.input.line_input
+                    && matches!(
+                        e,
+                        InputEvent::Key(Key::Space | Key::Char(' ') | Key::Escape)
+                    )
+                    && self.io.playback.skip()
+                {
+                    if let InputEvent::Key(key) = e {
+                        self.io.playback.suppress_until_release(key);
+                    }
+                    continue;
+                }
                 // Spec 17: what of the player's input the menu let through reaches the game, as
                 // the view passes it on (a press the history takes comes with no button).
                 if menu && player {
@@ -1123,8 +1375,20 @@ impl Engine {
             }
         }
         self.popup.after_poll(&self.state.borrow());
+        let (_, quiet) = self.menu_gate();
+        self.popup
+            .refresh_quick(&self.state.borrow(), &self.io, quiet);
         self.ticks += 1;
         self.io.generation.set(self.io.generation() + 1);
+        let preview = self.io.preview.borrow_mut().take();
+        if let Some(shot) = preview {
+            self.io.set_motion_break(false);
+            self.queue_motion(Published {
+                time_ms: self.io.now_ms(),
+                shot: Some(shot),
+                preview: true,
+            });
+        }
         let version = self.io.front_version.get();
         let presented = version != self.published_front;
         // The published frame is the one buffer synced from the screen, and the shown frame the
@@ -1141,6 +1405,9 @@ impl Engine {
                 .sync_from(&mut self.io.front.borrow_mut());
             self.published_front = version;
             self.published_version += 1;
+            if self.io.motion() {
+                self.match_motion();
+            }
             self.view.publish(&self.state.borrow().ui.scrollback);
         } else if sources {
             let mut front = self.io.front.borrow_mut();
@@ -1164,6 +1431,9 @@ impl Engine {
     /// arrow over the open menu, else (a press it took, held) in the game's own shape.
     fn sprite_now(&self) -> Option<crate::ui::pointer::SpriteFrame> {
         let s = self.state.borrow();
+        if s.main.program == main_loop::Program::End {
+            return None; // End's copper points at an empty sprite (end 0x10d342).
+        }
         let ptr = &s.ui.pointer;
         match self.popup.pointer() {
             Some(p) => {
@@ -1201,7 +1471,7 @@ impl Engine {
         if layered || src_only || first {
             self.layer.sync_from(&mut self.io.published.borrow_mut());
             self.draw_view();
-            if let Some(open) = self.popup.open() {
+            if let Some(open) = self.popup.drawn() {
                 open.draw(&mut self.layer, &self.state.borrow());
             }
             self.drawn_popup = drawn;
@@ -1239,6 +1509,80 @@ impl Engine {
                 self.src_shows += 1;
             }
         }
+    }
+
+    /// Port-only (spec 20): the publication just made, when its shown map changed (or after an
+    /// [`Io::break_motion`] until one with a scene is queued): with the shot whose picture it is
+    /// ([`Io::take_shot`]), or foreign.
+    fn match_motion(&mut self) {
+        let hash = crate::gfx::motion::shown_hash(&self.io.published.borrow());
+        if self.motion_map == Some(hash) && !self.io.motion_break() {
+            return;
+        }
+        self.motion_map = Some(hash);
+        let shot = self.io.take_shot(hash);
+        if shot.is_some() {
+            self.io.set_motion_break(false);
+        }
+        self.queue_motion(Published {
+            time_ms: self.io.now_ms(),
+            shot,
+            preview: false,
+        });
+    }
+
+    /// Port-only (spec 20): queues `publication` for the platform ([`Engine::take_motion`]). Past
+    /// [`PUBLISHED`] the whole queue gives way to one foreign publication now, and the game shown
+    /// breaks there as at a load ([`Io::break_motion`]): the platform sees none of what was
+    /// queued, its presenter ends every slide at the foreign one, and the scenes kept after it
+    /// snap until one is queued. So no slide crosses a publication dropped (one that ended a
+    /// break included), and none runs from a scene before the queue into one after it.
+    fn queue_motion(&mut self, publication: Published) {
+        self.motion.push(publication);
+        if self.motion.len() > PUBLISHED {
+            self.motion.clear();
+            self.motion.push(Published {
+                time_ms: self.io.now_ms(),
+                shot: None,
+                preview: false,
+            });
+            self.io.break_motion();
+        }
+    }
+
+    /// Port-only (spec 20, the Bounds receipts): every shot motion holds in the engine now: the
+    /// framed renders kept ([`SHOTS`]), the one kept last, the early picture made, and the
+    /// publications queued ([`PUBLISHED`]); a shot held in two places is listed twice.
+    #[cfg(test)]
+    pub(crate) fn motion_shots(&self) -> Vec<Rc<crate::gfx::motion::Shot>> {
+        let io = &self.io;
+        let mut out: Vec<_> = io.shots.borrow().iter().cloned().collect();
+        out.extend(io.last_shot.borrow().clone());
+        out.extend(io.preview.borrow().clone());
+        out.extend(self.motion.iter().filter_map(|p| p.shot.clone()));
+        out
+    }
+
+    /// Port-only (spec 20): with `on` each framed render of the map window keeps its scene
+    /// ([`crate::gfx::motion::Shot`]), and the engine hands a platform, with each publication
+    /// whose shown map changed, the scene it shows ([`Engine::take_motion`]); off (the default)
+    /// nothing is kept, and what was (renders, publications not taken yet, the last picture
+    /// published) is dropped, so on again starts afresh. Either way the state, the authoritative
+    /// RNG and the frames published are the same: the page turns it on and slides between the
+    /// scenes; the tests, the oracle comparisons and the receipts run with it off.
+    pub fn set_motion(&mut self, on: bool) {
+        self.io.set_motion(on);
+        if !on {
+            self.motion.clear();
+        }
+        self.motion_map = None;
+    }
+
+    /// Port-only (spec 20): the publications since the previous call whose shown map changed, in
+    /// order, with the scene each shows (with [`Engine::set_motion`] on; none with it off). A
+    /// platform's presenter slides between them ([`u6_render::motion::Presenter`]).
+    pub fn take_motion(&mut self) -> Vec<Published> {
+        std::mem::take(&mut self.motion)
     }
 
     /// Spec 23: the view over the screen frame (synced from the published frame just now, the
@@ -1291,8 +1635,9 @@ impl Engine {
 
     /// Port-only (spec 23): moves whenever the published frame was synced again or the message
     /// history shown over it changed ([`Engine::published_version`] and the view's stamp). The
-    /// screen frame ([`Engine::screen_version`]) moves with both.
-    pub fn view_version(&self) -> (u64, u64) {
+    /// screen frame ([`Engine::screen_version`]) moves with both (tests).
+    #[cfg(test)]
+    pub(crate) fn view_version(&self) -> (u64, u64) {
         (self.published_version, self.view.stamp())
     }
 
@@ -1304,14 +1649,98 @@ impl Engine {
     pub fn travel_to(&mut self, target: (u16, u16)) -> Result<(), crate::actors::travel::Reason> {
         let travel = crate::actors::travel::Travel::start(&self.state.borrow(), target)?;
         self.travel = Some(travel);
+        self.travel_session = self.travel_session.wrapping_add(1);
         self.travel_end = None;
         self.travel_own = None;
         Ok(())
     }
 
+    /// Spec 21's merge contract: the choices of "Go here" in this input (the events the context
+    /// menu passed on, `through`), each in turn, after this tick's press of the travel under way:
+    /// recorded ([`Engine::go_here_asked`]) and given to [`Engine::travel_to`]; a travel it starts
+    /// ends at once (`Input`, before its first step) on a stop after the choice in the same input,
+    /// as the next tick's press would end it: [`crate::actors::travel::Polled`]'s over the events
+    /// from the choice's place on, from the game's pointer buttons, with the menu's new input
+    /// after the choice (a menu opened after it, open or closed again). The choice's own events
+    /// lie before that place; its tail passes on as a button-less move or not at all.
+    fn start_go_here(&mut self, through: &[InputEvent]) {
+        use crate::actors::travel::{End, Polled};
+        for choice in self.popup.take_go_here() {
+            let (x, y) = choice.cell;
+            self.go_here.asked.push(choice.cell);
+            if self.travel_to((x as u16, y as u16)).is_err() {
+                continue;
+            }
+            let after = Polled {
+                input: &through[choice.at..],
+                buttons: self.io.handler_pointer().buttons,
+                queued: false,
+                foreign: false,
+                menu: choice.later,
+                due: true,
+            };
+            if after.stops() {
+                self.travel = None;
+                self.travel_end = Some(End::Input);
+            }
+        }
+    }
+
     /// Port (spec 21): a travel walks.
     pub fn travel_active(&self) -> bool {
         self.travel.is_some()
+    }
+
+    /// Presentation identity of the active route. Corners and replanning keep it; a new
+    /// accepted destination replaces it. Stop, arrival and Restore leave no active identity.
+    pub fn travel_session(&self) -> Option<u64> {
+        self.travel.as_ref().map(|_| self.travel_session)
+    }
+
+    /// Presentation-only direction of an accepted held-pointer walk or an active travel.
+    /// Physical keys and their precedence remain the platform's responsibility. A world turn
+    /// keeps its session between command prompts; target readers, modals and consumed clicks
+    /// do not become walks. This reads existing input/route state without advancing it.
+    pub fn continuous_walk_direction(&self) -> Option<(i32, i32)> {
+        let s = self.state.borrow();
+        let input = &s.ui.input;
+        if self.finished
+            || s.main.program != main_loop::Program::Game
+            || self.context_menu_open()
+            || self.context_menu_waits()
+            || input.line_input
+            || input.targeting != 0
+            || input.target_pending != 0
+            || s.ui.talk.reading
+            || (input.in_wait && !command_prompt(&s))
+        {
+            return None;
+        }
+        if let Some(travel) = &self.travel {
+            return travel.continuous_direction();
+        }
+        let pointer = self.io.handler_pointer();
+        if !matches!(pointer.buttons, POINTER_LEFT | POINTER_RIGHT)
+            || self.popup.pointer().is_some()
+            || self.popup.quick().is_some()
+            || self.view.holding()
+            || s.actors.work.mouse_walk == 0
+            || s.ui.pointer.press_code != crate::ui::wait::WALK
+            || s.ui.pointer.walk_due.is_none()
+            || !crate::ui::pointer::in_shown_map(pointer.x, pointer.y)
+        {
+            return None;
+        }
+        let direction =
+            crate::inventory::direction_to(s.inventory.pointer_origin, pointer.x, pointer.y);
+        let d = usize::try_from(direction).ok()?;
+        if s.actors.work.step_blocked != 0 && input.direction == direction {
+            return None;
+        }
+        Some((
+            i32::from(crate::actors::walk::DX8[d]),
+            i32::from(crate::actors::walk::DY8[d]),
+        ))
     }
 
     /// Port (spec 21): why the last travel ended (`None` while one walks or before any).
@@ -1379,8 +1808,13 @@ impl Engine {
     /// platform's clock: a platform that steps the game faster than 1× gives it, false until
     /// [`MIN_STEP_MS`] of its clock passed since the command prompt last took a press
     /// ([`Engine::prompt_takes`]: the travel's own key is one, as a held key's paced press), so a
-    /// travel walks as a held arrow does. True by default (every prompt; the native window's 1×
-    /// and the headless runs); the stops stay at once either way.
+    /// travel walks as a held arrow does. True by default: at every prompt, as the headless runs
+    /// have it (the native window has speeds but starts no travel). The stops
+    /// [`crate::actors::travel::Travel::next`] tests before the step (the input, the program, a
+    /// Restore, another prompt) stay at once either way; those it reads at the step (`Gone` with no
+    /// leader, `Displaced` by another leader, level or cell, `Arrived`, `Combat`, `Foe`, `Party`,
+    /// `Blocked`) only when one is due, so [`Engine::travel_end`] can come up to [`MIN_STEP_MS`]
+    /// late.
     pub fn set_travel_due(&mut self, due: bool) {
         self.travel_due = due;
     }
@@ -1396,7 +1830,7 @@ impl Engine {
     /// the arrow at the context menu's pointer while the menu takes the pointer), if any: its top
     /// left in frame pixels and its rows of values 0..=3 (0 clear). Port-only use (spec 11
     /// Design 7): a platform that shows the HD frame, composed without it
-    /// ([`Engine::published_frame`]), draws it over that frame itself.
+    /// ([`Engine::screen_frame`]), draws it over that frame itself.
     pub fn sprite(&self) -> Option<&crate::ui::pointer::SpriteFrame> {
         self.sprite.as_ref()
     }
@@ -1422,8 +1856,9 @@ impl Engine {
         self.src_shows
     }
 
-    /// The last published frame (320×200 indices plus the palette), the context menu over it
-    /// while one is open ([`Engine::screen_frame`]), with the pointer sprite.
+    /// The last published frame (320×200 indices plus the palette) with the message history the
+    /// player scrolled back to and the context menu over it ([`Engine::screen_frame`]), and the
+    /// pointer sprite over those.
     pub fn frame(&self) -> &Framebuffer {
         &self.shown
     }
@@ -1444,15 +1879,17 @@ impl Engine {
         self.published_version
     }
 
-    /// Port-only (spec 17 Presentation): the published frame with the context menu drawn over
-    /// it, without the pointer sprite: what [`Engine::frame`] is composed from, and the HD frame.
-    /// The published frame itself while no menu is open.
+    /// Port-only (spec 17 Presentation, spec 23 Decision 3): the published frame with the message
+    /// history the player scrolled back to over it (spec 23: nothing at the live bottom) and the
+    /// context menu over that, without the pointer sprite: what [`Engine::frame`] is composed from,
+    /// and the HD frame. The published frame itself at the live bottom with no menu open.
     pub fn screen_frame(&self) -> &Framebuffer {
         &self.layer
     }
 
     /// Port-only (spec 17): changes whenever [`Engine::screen_frame`] was synced again for a
-    /// change: a publish ([`Engine::published_version`]) or a change of the drawn menu; 0 before.
+    /// change: a publish ([`Engine::published_version`]), a change of the drawn menu or of the
+    /// message history's view (its stamp); 0 before.
     pub fn screen_version(&self) -> u64 {
         self.layer_version
     }
@@ -1574,14 +2011,34 @@ impl Engine {
         self.popup.open().map(crate::ui::popup::Open::view)
     }
 
+    /// Port-only (spec 17, spec 20): whether a context menu is open (drawn in the screen frame),
+    /// as [`Engine::context_menu`] is some, without making its view: a platform's smooth motion
+    /// ends every slide while one is.
+    pub fn context_menu_open(&self) -> bool {
+        self.popup.open().is_some()
+    }
+
+    /// Port-only (spec 23): the message history's view the screen frame draws over the published
+    /// frame ([`crate::ui::scrollback::draw_view`]), read-only: a platform's or a test's own
+    /// composition of the frame.
+    pub fn history_view(&self) -> &crate::ui::scrollback::View {
+        &self.view
+    }
+
+    /// The Ctrl representative action drawn in the game frame, without game text.
+    pub fn quick_action(&self) -> Option<crate::ui::popup::View> {
+        self.popup.quick().map(crate::ui::popup::Open::view)
+    }
+
     /// The context menu itself (tests).
     #[cfg(test)]
     pub(crate) fn popup_mut(&mut self) -> &mut crate::ui::popup::Popup {
         &mut self.popup
     }
 
-    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, each given to
-    /// [`Engine::travel_to`] (spec 21) as it was chosen, refused or not.
+    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, every choice as it was
+    /// made: given to [`Engine::travel_to`] (spec 21), refused or not, and kept when a stop after
+    /// the choice in the same input ended its travel at once ([`Engine::start_go_here`]).
     pub fn go_here_asked(&self) -> &crate::ui::popup::Travel {
         &self.go_here
     }
@@ -1706,6 +2163,80 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_pointer_direction_requires_an_accepted_world_walk() {
+        let e = engine_with(|_, _| std::future::pending());
+        let (x, y) = crate::ui::pointer::LEADER_PIXEL;
+        {
+            let mut s = e.state.borrow_mut();
+            s.main.program = main_loop::Program::Game;
+            s.inventory.pointer_origin = (x, y);
+            s.actors.work.mouse_walk = 1;
+            s.ui.pointer.press_code = crate::ui::wait::WALK;
+            s.ui.pointer.walk_due = Some(660);
+        }
+        let base = e.state.borrow().clone();
+        e.io.pointer.set(Pointer {
+            x: x as i16,
+            y: y as i16 + 48,
+            buttons: POINTER_LEFT,
+        });
+        assert_eq!(
+            e.continuous_walk_direction(),
+            Some((0, 1)),
+            "a world turn keeps the accepted session"
+        );
+        assert!(
+            *e.state.borrow() == base,
+            "query leaves whole State and RNG unchanged"
+        );
+        e.io.pointer.set(Pointer {
+            x: x as i16 + 48,
+            y: y as i16,
+            buttons: POINTER_LEFT,
+        });
+        assert_eq!(
+            e.continuous_walk_direction(),
+            Some((1, 0)),
+            "current handler direction before its next walk sample"
+        );
+        let deny: &[fn(&mut State)] = &[
+            |s| s.main.program = main_loop::Program::U,
+            |s| s.actors.work.mouse_walk = 0,
+            |s| s.ui.pointer.press_code = crate::ui::wait::REPEAT,
+            |s| s.ui.pointer.walk_due = None,
+            |s| s.ui.input.line_input = true,
+            |s| s.ui.input.targeting = 1,
+            |s| s.ui.input.target_pending = 1,
+            |s| s.ui.talk.reading = true,
+            |s| s.ui.input.in_wait = true,
+            |s| {
+                s.actors.work.step_blocked = 1;
+                s.ui.input.direction = 2;
+            },
+        ];
+        for (i, change) in deny.iter().enumerate() {
+            *e.state.borrow_mut() = base.clone();
+            change(&mut e.state.borrow_mut());
+            let before = e.state.borrow().clone();
+            assert_eq!(e.continuous_walk_direction(), None, "non-walk boundary {i}");
+            assert!(*e.state.borrow() == before, "boundary query is read-only");
+        }
+        *e.state.borrow_mut() = base;
+        for (px, py, buttons) in [(x, y, 1), (0, 0, 1), (x, y + 48, 0), (x, y + 48, 3)] {
+            e.io.pointer.set(Pointer {
+                x: px as i16,
+                y: py as i16,
+                buttons,
+            });
+            assert_eq!(
+                e.continuous_walk_direction(),
+                None,
+                "hero/off-map/released/both buttons are not walking"
+            );
+        }
+    }
 
     fn key(c: char) -> InputEvent {
         InputEvent::Key(Key::Char(c))
@@ -2328,6 +2859,40 @@ mod tests {
     }
 
     #[test]
+    fn a_prediction_cannot_touch_current_io_and_restores_nested_scopes() {
+        let io = Rc::new(Io::new(Files::default()));
+        scoped_io(&io, || {
+            let result = predict_without_io(|| {
+                with_current_io(|_| panic!("prediction reached the live I/O"));
+                7
+            });
+            assert_eq!(result, None);
+            assert_eq!(predict_without_io(|| 7), Some(7));
+            assert_eq!(
+                predict_without_io(|| predict_without_io(|| 5)),
+                Some(Some(5))
+            );
+            assert_eq!(
+                predict_without_io(|| predict_without_io(|| with_current_io(|_| 9))),
+                None
+            );
+            assert_eq!(
+                with_current_io(|current| std::ptr::eq(current, io.as_ref())),
+                Some(true)
+            );
+            let panic = std::panic::catch_unwind(|| {
+                predict_without_io(|| panic!("prediction unwind control"));
+            });
+            assert!(panic.is_err());
+            assert_eq!(predict_without_io(|| 11), Some(11));
+            assert_eq!(
+                with_current_io(|current| std::ptr::eq(current, io.as_ref())),
+                Some(true)
+            );
+        });
+    }
+
+    #[test]
     fn the_published_frame_is_the_screen_without_the_sprite() {
         // Port (spec 11 Design 7): the shown frame is the published one with the sprite drawn
         // over it; the published frame stays the screen as the game drew it, and its version
@@ -2472,5 +3037,387 @@ mod tests {
         assert_eq!(e.ticks(), 3);
         // Input after the end is still only queued.
         assert_eq!(e.io().pending_events(), 1);
+    }
+    /// A game that paints a new pixel of the shown map in each of its first `paints` frames, then
+    /// presents the same picture every frame.
+    fn painting_game(paints: usize) -> Engine {
+        engine_with(move |_state, io| async move {
+            let (x0, y0, _, _) = crate::geom::SHOWN;
+            let mut n = 0;
+            loop {
+                if n < paints {
+                    io.draw(|fb| fb.set(usize::from(x0) + n, usize::from(y0), 1));
+                }
+                io.present();
+                n += 1;
+                io.vblank().await;
+            }
+        })
+    }
+
+    /// A game whose every frame does as `mode` says: 0 presents the same picture, 1 paints a new
+    /// pixel of the shown map, presents and keeps a scene of its own for it (as a framed render
+    /// does, [`crate::gfx::motion::keep_scene`]), 2 paints a new pixel and presents with no scene
+    /// kept (a foreign picture).
+    fn scene_game(mode: Rc<Cell<u8>>) -> Engine {
+        engine_with(move |_state, io| async move {
+            let (x0, y0, _, _) = crate::geom::SHOWN;
+            let mut n = 0;
+            loop {
+                let m = mode.get();
+                if m != 0 {
+                    io.draw(|fb| {
+                        fb.set(
+                            usize::from(x0) + n % 64,
+                            usize::from(y0),
+                            1 + (n / 64) as u8,
+                        )
+                    });
+                    n += 1;
+                }
+                io.present();
+                if m == 1 {
+                    let scene = u6_render::motion::Scene {
+                        leader: None,
+                        centre: (0, 0, 0),
+                        origin: (0, 0),
+                        cols: 0,
+                        rows: 0,
+                        corner: (0, 0),
+                        cells: Vec::new(),
+                        placed: Vec::new(),
+                        snap: false,
+                    };
+                    crate::gfx::motion::keep_scene(&io, scene);
+                }
+                io.vblank().await;
+            }
+        })
+    }
+
+    /// [`scene_game`] with smooth motion on, a scene published and taken, then an unchanged
+    /// frame (nothing published), then a load's break ([`Io::break_motion`]); and its mode.
+    fn broken_scene_game() -> (Engine, Rc<Cell<u8>>) {
+        let mode = Rc::new(Cell::new(1u8));
+        let mut e = scene_game(Rc::clone(&mode));
+        e.set_motion(true);
+        e.tick(&[], 20);
+        let first = e.take_motion();
+        assert!(
+            first.len() == 1 && first[0].shot.is_some(),
+            "a scene published"
+        );
+        mode.set(0);
+        e.tick(&[], 20);
+        assert!(e.take_motion().is_empty(), "unchanged: nothing");
+        e.io().break_motion();
+        (e, mode)
+    }
+
+    /// Spec 20: while a load's break is pending an unchanged picture is published again (foreign:
+    /// the scenes kept were dropped), so the first scene after the load is not missed.
+    #[test]
+    fn with_the_break_pending_an_unchanged_picture_is_published() {
+        let (mut e, _mode) = broken_scene_game();
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert_eq!(p.len(), 1, "an unchanged picture published");
+        assert!(
+            p[0].shot.is_none(),
+            "foreign: no scene kept since the break"
+        );
+    }
+
+    #[test]
+    fn source_only_ui_does_not_publish_motion_but_breaks_and_unknown_maps_still_do() {
+        let mut e = engine_with(|_, io| async move {
+            let hash = crate::gfx::motion::shown_hash(&io.front.borrow());
+            io.keep_shot(crate::gfx::motion::Shot::for_test(hash));
+            io.present();
+            io.vblank().await;
+            std::future::pending::<()>().await;
+        });
+        e.enable_src_plane();
+        e.set_motion(true);
+        e.tick(&[], 20);
+        let first = e.take_motion();
+        assert!(first.len() == 1 && first[0].shot.is_some());
+        let version = e.published_version();
+        let source = crate::Src {
+            id: 42,
+            kind: u6_render::Kind::Glyph,
+            ..crate::Src::CLASSIC
+        };
+        e.io().draw(|f| f.set_src(0, 199, 0, source));
+        e.io().present_sources();
+        e.tick(&[], 20);
+        assert_eq!(e.published_version(), version + 1);
+        assert_eq!(e.published_frame().get(0, 199), Some(0));
+        assert_eq!(e.published_frame().src_at(0, 199), Some(source));
+        assert!(
+            e.take_motion().is_empty(),
+            "UI Src-only update retains the current motion"
+        );
+
+        e.io().break_motion();
+        e.io().present();
+        e.tick(&[], 20);
+        let broken = e.take_motion();
+        assert!(broken.len() == 1 && broken[0].shot.is_none());
+        assert!(
+            e.io().motion_break(),
+            "an explicit break is never swallowed as UI-only"
+        );
+
+        let hash = e.io().published(crate::gfx::motion::shown_hash);
+        e.io().keep_shot(crate::gfx::motion::Shot::for_test(hash));
+        e.io().present();
+        e.tick(&[], 20);
+        assert!(e.take_motion().iter().any(|p| p.shot.is_some()));
+        assert!(!e.io().motion_break());
+
+        let (x, y, _, _) = crate::geom::SHOWN;
+        e.io().draw(|f| f.set(usize::from(x), usize::from(y), 1));
+        e.io().present();
+        e.tick(&[], 20);
+        let unknown = e.take_motion();
+        assert!(unknown.len() == 1 && unknown[0].shot.is_none());
+    }
+
+    /// Spec 20: a publication without a scene leaves the break pending (only a scene handed over
+    /// ends it), and the next unchanged picture is published again.
+    #[test]
+    fn a_publication_without_a_scene_leaves_the_break_pending() {
+        let (mut e, mode) = broken_scene_game();
+        mode.set(2);
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert!(
+            p.len() == 1 && p[0].shot.is_none(),
+            "a foreign picture published"
+        );
+        assert!(e.io().motion_break(), "the break still pending");
+        mode.set(0);
+        e.tick(&[], 20);
+        assert_eq!(
+            e.take_motion().len(),
+            1,
+            "so an unchanged picture is published again"
+        );
+    }
+
+    /// Spec 20: the first scene published after the break snaps and ends it; an unchanged picture
+    /// after it is not published.
+    #[test]
+    fn a_published_scene_snaps_and_ends_the_break() {
+        let (mut e, mode) = broken_scene_game();
+        mode.set(1);
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert!(
+            p.len() == 1 && p[0].shot.as_ref().is_some_and(|s| s.scene.snap),
+            "the scene published, snapping"
+        );
+        assert!(!e.io().motion_break(), "the break ended");
+        mode.set(0);
+        e.tick(&[], 20);
+        assert!(
+            e.take_motion().is_empty(),
+            "then an unchanged picture: nothing"
+        );
+    }
+
+    /// Spec 20: an early picture queued ends the break, as a published scene does (a platform's
+    /// presenter starts again from one that snaps, u6-render `Presenter::preview`): with the
+    /// picture unchanged that tick publishes the early picture alone, and the next nothing.
+    #[test]
+    fn a_queued_early_picture_ends_the_break() {
+        let (mut e, _mode) = broken_scene_game();
+        let mut shot = crate::gfx::motion::Shot::for_test(1);
+        Rc::get_mut(&mut shot).expect("one owner").scene.snap = true;
+        e.io().keep_preview(shot);
+        e.tick(&[], 20);
+        let p = e.take_motion();
+        assert!(
+            p.len() == 1 && p[0].preview,
+            "the early picture alone published"
+        );
+        assert!(!e.io().motion_break(), "the break ended");
+        e.tick(&[], 20);
+        assert!(
+            e.take_motion().is_empty(),
+            "then an unchanged picture: nothing"
+        );
+    }
+
+    /// Spec 20: with [`PUBLISHED`] publications not taken, one more (a scene's, or an early
+    /// picture's) replaces the queue with one foreign publication at that time and breaks the
+    /// game shown as a load does. The break is pending (so after an early picture the unchanged
+    /// picture is published again, foreign too), and the next scene snaps and ends it.
+    #[test]
+    fn a_full_queue_gives_way_to_a_foreign_publication_and_breaks_the_game_shown() {
+        for early in [false, true] {
+            let mode = Rc::new(Cell::new(1u8));
+            let mut e = scene_game(Rc::clone(&mode));
+            e.set_motion(true);
+            for _ in 0..PUBLISHED {
+                e.tick(&[], 20);
+            }
+            assert!(!e.io().motion_break(), "early {early}: full, no break");
+            if early {
+                mode.set(0);
+                e.io().keep_preview(crate::gfx::motion::Shot::for_test(1));
+            }
+            e.tick(&[], 20);
+            assert!(e.io().motion_break(), "early {early}: past it, the break");
+            let now = e.io().now_ms();
+            let p = e.take_motion();
+            assert_eq!(p.len(), 1 + usize::from(early), "early {early}: the queue");
+            assert!(
+                p.iter()
+                    .all(|q| q.shot.is_none() && !q.preview && q.time_ms == now),
+                "early {early}: foreign publications only, at the tick's time"
+            );
+            mode.set(1);
+            e.tick(&[], 20);
+            let p = e.take_motion();
+            assert!(
+                p.len() == 1 && p[0].shot.as_ref().is_some_and(|s| s.scene.snap),
+                "early {early}: the next scene snaps"
+            );
+            assert!(!e.io().motion_break(), "early {early}: and ends the break");
+        }
+    }
+
+    /// Spec 20: after a queue past [`PUBLISHED`] (a scene's, or an early picture's, the scenes
+    /// before it not taken), the platform's take holds no scene that does not snap before the
+    /// first that does: nothing in it slides from a scene from before the queue.
+    #[test]
+    fn after_a_full_queue_no_scene_slides_before_one_snaps() {
+        for early in [false, true] {
+            let mode = Rc::new(Cell::new(1u8));
+            let mut e = scene_game(Rc::clone(&mode));
+            e.set_motion(true);
+            for _ in 0..PUBLISHED {
+                e.tick(&[], 20);
+            }
+            if early {
+                mode.set(0);
+                e.io().keep_preview(crate::gfx::motion::Shot::for_test(1));
+            }
+            e.tick(&[], 20);
+            mode.set(1);
+            e.tick(&[], 20);
+            e.tick(&[], 20);
+            let p = e.take_motion();
+            let scenes: Vec<bool> = (p.iter())
+                .filter_map(|q| q.shot.as_ref().map(|s| s.scene.snap))
+                .collect();
+            let first = scenes.iter().position(|&snap| snap);
+            assert!(first.is_some(), "early {early}: a scene that snaps");
+            assert!(
+                first == Some(0),
+                "early {early}: {} scenes that do not snap before the first that does",
+                first.unwrap_or(scenes.len())
+            );
+        }
+    }
+
+    /// Spec 20, a platform's side of a queue past [`PUBLISHED`] (a host that ticks on without
+    /// taking it): a presenter holds the scene published before a load (P0); after the load its
+    /// snapping scene, 255 foreign pictures and a scene go past the cap untaken. Fed the takes
+    /// from then on until a scene that snaps, the presenter never holds P0 beside a later scene.
+    #[test]
+    fn a_presenter_fed_past_a_full_queue_never_slides_from_the_scene_before_it() {
+        use u6_render::motion::Presenter;
+        let mode = Rc::new(Cell::new(1u8));
+        let mut e = scene_game(Rc::clone(&mode));
+        e.set_motion(true);
+        e.tick(&[], 20);
+        let mut p: Presenter<crate::gfx::motion::Shot> = Presenter::new();
+        let primed = e.take_motion().pop().and_then(|q| q.shot).expect("P0");
+        p.publish(Rc::clone(&primed), e.io().now_ms() as f64, true);
+        e.io().break_motion();
+        e.tick(&[], 20);
+        mode.set(2);
+        for _ in 0..PUBLISHED - 1 {
+            e.tick(&[], 20);
+        }
+        mode.set(1);
+        let (mut fed, mut snapped) = (0, false);
+        for _ in 0..8 {
+            e.tick(&[], 20);
+            for q in e.take_motion() {
+                let time = q.time_ms as f64;
+                match q.shot {
+                    None => p.foreign(),
+                    Some(shot) => {
+                        snapped |= shot.scene.snap;
+                        p.publish(shot, time, true);
+                    }
+                }
+                fed += 1;
+                let h = p.history();
+                assert!(
+                    !h.iter().any(|s| Rc::ptr_eq(s, &primed)) || h.len() == 1,
+                    "publication {fed}: P0 beside a later scene ({} held)",
+                    h.len()
+                );
+            }
+            if snapped {
+                break;
+            }
+        }
+        assert!(snapped, "a scene that snaps came");
+        assert!(
+            !p.history().iter().any(|s| Rc::ptr_eq(s, &primed)),
+            "P0 gone once it came"
+        );
+    }
+
+    /// Spec 20: the switch off drops what the engine held for the platform: the publications
+    /// queued before it are not handed over after it; on again the next publication is reported
+    /// though its picture is the one reported last before the switch went off, and the same
+    /// picture after it is not.
+    #[test]
+    fn smooth_motion_off_drops_the_queued_publications_and_on_reports_afresh() {
+        let mut e = painting_game(2);
+        e.set_motion(true);
+        e.tick(&[], 20);
+        e.tick(&[], 20);
+        assert_eq!(e.motion.len(), 2, "two pictures queued");
+        e.set_motion(false);
+        assert!(
+            e.take_motion().is_empty(),
+            "queued before the switch went off: dropped"
+        );
+        e.tick(&[], 20);
+        assert!(e.take_motion().is_empty(), "off: nothing");
+        e.set_motion(true);
+        assert!(e.motion_map.is_none(), "the last picture forgotten");
+        e.tick(&[], 20);
+        assert_eq!(
+            e.take_motion().len(),
+            1,
+            "on again: the unchanged picture reported afresh"
+        );
+        e.tick(&[], 20);
+        assert!(e.take_motion().is_empty(), "then the same picture: nothing");
+    }
+
+    /// Spec 20: a publication takes the oldest render kept of its picture, with the renders kept
+    /// before it: renders A, B, A published in that order are each their own render.
+    #[test]
+    fn a_publication_takes_the_oldest_render_of_its_picture() {
+        let io = Io::new(Files::default());
+        let shots: Vec<_> = [1, 2, 1].map(crate::gfx::motion::Shot::for_test).into();
+        for s in &shots {
+            io.keep_shot(Rc::clone(s));
+        }
+        for (i, hash) in [1, 2, 1].into_iter().enumerate() {
+            let taken = io.take_shot(hash).expect("kept");
+            assert!(Rc::ptr_eq(&taken, &shots[i]), "publication {i}: render {i}");
+        }
+        assert!(io.take_shot(1).is_none(), "none left");
     }
 }

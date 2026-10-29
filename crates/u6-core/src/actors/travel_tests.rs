@@ -77,7 +77,7 @@ fn open_map() -> State {
 
 /// [`open_map`] with the leader at `at` in the walled room `R..R + 8`, the window as 0x108d10
 /// left it (its key and view offset), so a step does not fill the window again.
-fn room(at: (u16, u16)) -> State {
+pub(crate) fn room(at: (u16, u16)) -> State {
     let mut s = open_map();
     for i in R - 1..=R + 8 {
         for (x, y) in [(i, R - 1), (i, R + 8), (R - 1, i), (R + 8, i)] {
@@ -530,43 +530,51 @@ fn stand_in(s: State, after: After) -> Engine {
 /// [`stand_in`] with `prompt` run at each read once the prompt is set (with the steps taken so
 /// far), and the read itself `lag` ms after it (the travel's key then waits in the queue).
 fn stand_in_with(s: State, prompt: After, lag: u32, after: After) -> Engine {
-    Engine::with_game(
-        s,
-        Files::default(),
-        move |st: Rc<RefCell<State>>, io: Rc<Io>| async move {
-            let mut n = 0;
-            loop {
-                {
-                    let mut s = st.borrow_mut();
-                    s.main.reading = 1;
-                    s.ui.input.in_wait = true;
-                    prompt(&mut s, n);
-                }
-                if lag > 0 {
-                    io.sleep(lag).await;
-                }
-                // The read as the command prompt's (spec 19 O1c): the drained take, counted,
-                // once a frame (`ui/keyread.rs` `poll`).
-                let k = loop {
-                    if let Some(k) = crate::ui::keyread::take_drained(&st, &io) {
-                        break k;
-                    }
-                    io.vblank().await;
-                };
-                {
-                    let mut s = st.borrow_mut();
-                    s.main.reading = 0;
-                    s.ui.input.in_wait = false;
-                    if let Some(d) = dir_of(k) {
-                        party::player_step(&mut s, u16::from(d));
-                        n += 1;
-                        after(&mut s, n);
-                    }
-                }
-                io.sleep(100).await;
+    Engine::with_game(s, Files::default(), move |st, io| {
+        stand_in_loop(st, io, prompt, lag, after)
+    })
+}
+
+/// The shared command loop of the crafted travel tests, also used after the history fixture
+/// prints its initial lines, so both exercise the command prompt's actual drained-key path.
+pub(crate) async fn stand_in_loop(
+    st: Rc<RefCell<State>>,
+    io: Rc<Io>,
+    prompt: After,
+    lag: u32,
+    after: After,
+) {
+    let mut n = 0;
+    loop {
+        {
+            let mut s = st.borrow_mut();
+            s.main.reading = 1;
+            s.ui.input.in_wait = true;
+            prompt(&mut s, n);
+        }
+        if lag > 0 {
+            io.sleep(lag).await;
+        }
+        // The read as the command prompt's (spec 19 O1c): the drained take, counted,
+        // once a frame (`ui/keyread.rs` `poll`).
+        let k = loop {
+            if let Some(k) = crate::ui::keyread::take_drained(&st, &io) {
+                break k;
             }
-        },
-    )
+            io.vblank().await;
+        };
+        {
+            let mut s = st.borrow_mut();
+            s.main.reading = 0;
+            s.ui.input.in_wait = false;
+            if let Some(d) = dir_of(k) {
+                party::player_step(&mut s, u16::from(d));
+                n += 1;
+                after(&mut s, n);
+            }
+        }
+        io.sleep(100).await;
+    }
 }
 
 /// Ticks of 20 ms with each of `inject` at its tick (from 1), until the travel ends or 400 ticks.
@@ -1359,7 +1367,8 @@ fn the_turn_holds_it_and_a_finished_game_or_another_program_ends_it() {
 
 /// Spec 21 S3: a step not due on the platform's clock (`Polled.due` false) holds the travel at
 /// the prompt with nothing read back (the same step pressed once it is due), and the stops stay
-/// at once: a key, or new input the context menu took, ends it while no step is due.
+/// at once: a key, or new input the context menu took, ends it while no step is due. So it holds
+/// with a press outstanding too, the leader on the cell it aimed at: due, that step lands.
 #[test]
 fn a_step_not_due_holds_it_and_the_stops_stay_at_once() {
     let prompt = room((R + 1, R + 3));
@@ -1395,6 +1404,26 @@ fn a_step_not_due_holds_it_and_the_stops_stay_at_once() {
         Next::Stop(End::Input),
         "the menu's new input"
     );
+    // Round 5 (opus SHOULD 2, gpt c SHOULD 1): with the first press outstanding and the leader on
+    // the cell it aimed at, a step not due reads nothing back either (no `pressed` taken, no path
+    // popped), however often it is asked; due, the step lands and the next is pressed.
+    let mut stepped = prompt.clone();
+    seams::move_object(&mut stepped, crate::objects::ObjectId(1), R + 2, R + 3, 0);
+    let before = t.clone();
+    assert!(
+        before.pressed.is_some(),
+        "the fixture: the first press outstanding"
+    );
+    let polls: Vec<(Next, bool)> = (0..5)
+        .map(|_| (t.next(&stepped, &not_due), t == before))
+        .collect();
+    let due = t.next(&stepped, &QUIET);
+    assert_eq!(
+        (polls, due, t.steps),
+        (vec![(Next::Hold, true); 5], Next::Press(Key::Right), 1),
+        "not due: held, nothing read back (the press still outstanding), each time; due: the step \
+         landed and the next pressed"
+    );
 }
 
 /// Spec 21's merge contract with unit M3 (the wiring round): the stand-in at its prompt with the
@@ -1403,8 +1432,20 @@ fn a_step_not_due_holds_it_and_the_stops_stay_at_once() {
 /// and the frame pixel of its Go here row. The menu's press, not a query's: the room has no map
 /// the menu could read.
 fn menu_over_the_room() -> (Engine, (i16, i16)) {
-    use crate::ui::menu::{Entry, GO_HERE, Kind, Menu};
     let s = room((R, R + 3));
+    let open = go_here_east(&s);
+    let (x0, y0, ..) = open.text_rect();
+    let mut e = stand_in(s, nothing());
+    e.set_context_menu(true);
+    e.tick(&[], 20);
+    e.popup_mut().show(open);
+    (e, ((x0 + 12) as i16, (y0 + 4) as i16))
+}
+
+/// The map menu [`menu_over_the_room`] shows on `s`, laid out for a press at frame pixel (40, 40):
+/// its one entry Go here to (R + 7, R + 3).
+fn go_here_east(s: &State) -> crate::ui::popup::Open {
+    use crate::ui::menu::{Entry, GO_HERE, Kind, Menu};
     let menu = Menu {
         kind: Kind::Map,
         cell: Some(((R + 7) as i16, (R + 3) as i16)),
@@ -1416,23 +1457,34 @@ fn menu_over_the_room() -> (Engine, (i16, i16)) {
             theft: false,
         }),
     };
-    let open = crate::ui::popup::Open::new(&menu, (40, 40), &s, &[]);
-    let (x0, y0, ..) = open.text_rect();
-    let mut e = stand_in(s, nothing());
-    e.set_context_menu(true);
-    e.tick(&[], 20);
-    e.popup_mut().show(open);
-    (e, ((x0 + 12) as i16, (y0 + 4) as i16))
+    crate::ui::popup::Open::new(&menu, (40, 40), s, &[])
 }
 
 fn ptr((x, y): (i16, i16), buttons: u8) -> InputEvent {
     InputEvent::Pointer { x, y, buttons }
 }
 
+/// What [`after_the_tail`] saw.
+#[derive(Debug)]
+struct Tail {
+    /// The leader's cell after each tick of the tail.
+    cells: Vec<(u16, u16)>,
+    /// The keys the travel pressed during the tail, each with its tick.
+    log: Vec<(u64, Key)>,
+    /// It still walked after the tail.
+    walking: bool,
+    /// The presses and the key events the menu let through to the game during the tail
+    /// ([`Engine::game_presses`], [`Engine::game_keys`]).
+    game: (u64, u64),
+    /// The cells Go here asked travel to, after the tail.
+    asked: usize,
+    /// How it ended at a later left press on the map (or at its end).
+    end: Option<End>,
+}
+
 /// [`menu_over_the_room`] with Go here chosen, then `tail` given a tick each (an empty list: a
-/// tick with none) with the travel walking: the keys it pressed during the tail, whether it still
-/// walked after it, and how it ended at a later left press on the map (or at its end).
-fn after_the_tail(choose: &[InputEvent], tail: &[&[InputEvent]]) -> (usize, bool, Option<End>) {
+/// tick with none) with the travel walking, then a later left press on the map.
+fn after_the_tail(choose: &[InputEvent], tail: &[&[InputEvent]]) -> Tail {
     let (mut e, _) = menu_over_the_room();
     e.tick(choose, 20);
     assert!(e.context_menu().is_none(), "chosen: closed");
@@ -1441,19 +1493,50 @@ fn after_the_tail(choose: &[InputEvent], tail: &[&[InputEvent]]) -> (usize, bool
         e.travel_log().is_empty(),
         "its first step is the next tick's"
     );
+    let game = (e.game_presses(), e.game_keys());
+    let mut cells = Vec::new();
     for events in tail {
         e.tick(events, 20);
+        cells.push(leader_at(&e.state()));
     }
-    let during = e.travel_log().len();
+    let log = e.travel_log().to_vec();
     let walking = e.travel_active();
+    let game = (e.game_presses() - game.0, e.game_keys() - game.1);
+    let asked = e.go_here_asked().asked.len();
     run(&mut e, &[(3, ptr((9, 9), POINTER_LEFT))]);
-    (during, walking, e.travel_end())
+    Tail {
+        cells,
+        log,
+        walking,
+        game,
+        asked,
+        end: e.travel_end(),
+    }
+}
+
+/// Round 5 (gpt c SHOULD 2): `tail` (`what`) after the choice `choose` against its control, the
+/// same choice and as many ticks with no input: the tail drives nothing, the leader on the same
+/// cells and the travel's keys at the same ticks; Go here was chosen once; none of the tail
+/// reached the game; still walking, and a later press ends it. The keys pressed during the tail.
+fn the_tail_is_inert(choose: &[InputEvent], tail: &[&[InputEvent]], what: &str) -> usize {
+    let quiet: Vec<&[InputEvent]> = vec![&[]; tail.len()];
+    let (got, control) = (after_the_tail(choose, tail), after_the_tail(choose, &quiet));
+    assert!(control.walking, "the fixture: the control walks");
+    assert_eq!(
+        (&got.cells, &got.log, got.walking),
+        (&control.cells, &control.log, true),
+        "{what}: the cells walked, the keys pressed and when, still walking"
+    );
+    assert_eq!(got.asked, 1, "{what}: Go here chosen once");
+    assert_eq!(got.game, (0, 0), "{what}: no press or key of it the game's");
+    assert_eq!(got.end, Some(End::Input), "{what}: a later press ends it");
+    got.log.len()
 }
 
 /// Spec 21's merge contract, the wiring round's first test: the choosing press's held moves and
 /// its release, which the menu swallows (its handler buttons read 0 after the choice, so a held
 /// move fed raw reads as a new press), are no stop: the travel the press started walks on through
-/// them, a later press on the map ends it.
+/// them, as with no input, and a later press on the map ends it.
 #[test]
 fn a_travel_the_menu_started_walks_through_the_choosing_presss_held_moves_and_release() {
     let (_, (gx, gy)) = menu_over_the_room();
@@ -1462,12 +1545,15 @@ fn a_travel_the_menu_started_walks_through_the_choosing_presss_held_moves_and_re
         .chain(std::iter::once([ptr((gx + 6, gy), 0)]))
         .collect();
     let tail: Vec<&[InputEvent]> = held.iter().map(|e| e.as_slice()).collect();
-    let (during, walking, end) = after_the_tail(&[ptr((gx, gy), POINTER_LEFT)], &tail);
+    let during = the_tail_is_inert(
+        &[ptr((gx, gy), POINTER_LEFT)],
+        &tail,
+        "the held moves and the release",
+    );
     assert!(
-        during >= 1 && walking,
+        during >= 1,
         "walked through the held moves and the release: {during} steps"
     );
-    assert_eq!(end, Some(End::Input), "a later press ends it");
 }
 
 /// The second: a double click on the entry (its second press within the window at the first's
@@ -1477,12 +1563,11 @@ fn a_travel_the_menu_started_walks_through_a_double_click_on_the_entry() {
     let (_, at) = menu_over_the_room();
     let (up, down) = ([ptr(at, 0)], [ptr(at, POINTER_LEFT)]);
     let tail: [&[InputEvent]; 4] = [&up, &[], &down, &up];
-    let (during, walking, end) = after_the_tail(&[ptr(at, POINTER_LEFT)], &tail);
+    let during = the_tail_is_inert(&[ptr(at, POINTER_LEFT)], &tail, "the double click");
     assert!(
-        during >= 1 && walking,
+        during >= 1,
         "walked through the double click: {during} steps"
     );
-    assert_eq!(end, Some(End::Input), "a later press ends it");
 }
 
 /// The third: Enter chose Go here and is held past its repeat delay (500 ms, 25 ticks, then a
@@ -1500,12 +1585,158 @@ fn a_travel_the_menu_started_walks_through_enter_held_past_its_repeat_delay() {
         tail.push(&[]);
     }
     tail.push(&release);
-    let (during, walking, end) = after_the_tail(&[InputEvent::Key(Key::Enter)], &tail);
+    let during = the_tail_is_inert(
+        &[InputEvent::Key(Key::Enter)],
+        &tail,
+        "Enter's repeats and release",
+    );
     assert!(
-        during >= 3 && walking,
+        during >= 3,
         "walked through Enter's repeats and release: {during} steps"
     );
-    assert_eq!(end, Some(End::Input), "a later press ends it");
+}
+
+/// Round 5 (opus NIT): the stop flag reaches the travel without the user's zip. A travel under way
+/// and then a menu shown over the room (as no input of the player can, since a menu opens only by
+/// new input): a key the menu takes is in none of the events it passes on, so only its flag
+/// ([`crate::ui::popup::Popup::took_new_input`] into `Polled.menu`) ends the travel, `Input`,
+/// before its first step.
+#[test]
+fn a_key_the_menu_takes_ends_a_travel_under_way_by_its_flag() {
+    let s = room((R, R + 3));
+    let open = go_here_east(&s);
+    let mut e = stand_in(s, nothing());
+    e.set_context_menu(true);
+    e.tick(&[], 20);
+    e.travel_to((R + 7, R + 3)).expect("reachable");
+    e.popup_mut().show(open);
+    let keys = e.game_keys();
+    e.tick(&[InputEvent::Key(Key::Down)], 20);
+    assert_eq!(
+        (e.travel_end(), e.travel_log().len()),
+        (Some(End::Input), 0),
+        "the flag ended it, before its first step"
+    );
+    assert_eq!(e.game_keys(), keys, "the fixture: the key the menu's");
+}
+
+/// What [`over_ticks`] left: the travel walking, how it ended, the keys it pressed with their
+/// ticks, the leader's cell, the presses and the key events the menu let through to the game.
+type Outcome = (bool, Option<End>, Vec<(u64, Key)>, (u16, u16), u64, u64);
+
+/// [`menu_over_the_room`] given `ticks` (a tick's input each), then ticks with no input to 60 in
+/// all; what it left, and the leader's cell and the presses the prompt took after the first tick.
+fn over_ticks(ticks: &[&[InputEvent]]) -> (Outcome, ((u16, u16), u64)) {
+    let (mut e, _) = menu_over_the_room();
+    let takes = e.prompt_takes();
+    let mut first = None;
+    for t in 0..60 {
+        e.tick(ticks.get(t).copied().unwrap_or(&[]), 20);
+        first.get_or_insert((leader_at(&e.state()), e.prompt_takes() - takes));
+    }
+    let outcome = (
+        e.travel_active(),
+        e.travel_end(),
+        e.travel_log().to_vec(),
+        leader_at(&e.state()),
+        e.game_presses(),
+        e.game_keys(),
+    );
+    (outcome, first.expect("ticked"))
+}
+
+/// Spec 21's merge contract (round 6, opus MUST A): the outcome of a choice of Go here does not
+/// hang on how the platform groups the events into ticks. Each input given in one tick and split
+/// at the choice into two ends the same: the travel walking or not, its end, the keys it pressed
+/// and when, the leader's cell, the presses and keys that reached the game. A key or a left press
+/// on the map after the choice ends the travel before its first step (`Input`), in the choice's
+/// tick as in the next; the choosing gesture's own tail (the press's release, Enter's release and
+/// its repeat, the menu's) is no stop: the travel walks as with the choice alone. The menu is
+/// shown over the room by the test and the stand-in opens none (B, a menu opened and closed after
+/// the choice in its tick: `popup_real`).
+#[test]
+fn a_stop_after_the_choice_in_its_tick_ends_the_travel_as_in_the_next() {
+    let (_, go) = menu_over_the_room();
+    let start = (R, R + 3);
+    let enter = InputEvent::Key(Key::Enter);
+    let right = InputEvent::Key(Key::Right);
+    let (press, release) = (ptr(go, POINTER_LEFT), ptr(go, 0));
+    let map = ptr((9, 9), POINTER_LEFT);
+    let (enter_up, enter_again) = (
+        InputEvent::Release(Key::Enter),
+        InputEvent::Repeat(Key::Enter),
+    );
+    // What, the choice, the rest of the input, whether it stops the travel.
+    let cases: [(&str, InputEvent, &[InputEvent], bool); 7] = [
+        ("Enter, then a direction key", enter, &[right], true),
+        (
+            "a press on Go here, its release, a left press on the map",
+            press,
+            &[release, map],
+            true,
+        ),
+        ("Enter alone (control)", enter, &[], false),
+        ("Enter and its release (control)", enter, &[enter_up], false),
+        (
+            "Enter and its repeat (control)",
+            enter,
+            &[enter_again],
+            false,
+        ),
+        ("a press on Go here alone (control)", press, &[], false),
+        (
+            "a press on Go here and its release (control)",
+            press,
+            &[release],
+            false,
+        ),
+    ];
+    let from = |c: (u16, u16)| {
+        (
+            i32::from(c.0) - i32::from(start.0),
+            i32::from(c.1) - i32::from(start.1),
+        )
+    };
+    // Every case printed (one tick, and whether the split gave the same), then the cases that
+    // broke the property or their expected end.
+    let mut wrong = Vec::new();
+    for (what, choice, rest, stops) in cases {
+        let all: Vec<InputEvent> = std::iter::once(choice)
+            .chain(rest.iter().copied())
+            .collect();
+        let (one, first) = over_ticks(&[&all]);
+        let (split, split_first) = over_ticks(&[&[choice], rest]);
+        let (walking, end, log, at, presses, keys) = &one;
+        let same = one == split;
+        println!(
+            "tick split: {what}: one tick: walking {walking}, end {:?}, {} steps, the leader {:?} \
+             from its start, game presses {presses}, game keys {keys}; after the choice's tick the \
+             leader {:?} from its start, the prompt took {}; split at the choice: the same {same} \
+             (walking {}, end {:?}, {} steps, the leader {:?}; after the choice's tick {:?}, the \
+             prompt took {})",
+            end.map(End::code),
+            log.len(),
+            from(*at),
+            from(first.0),
+            first.1,
+            split.0,
+            split.1.map(End::code),
+            split.2.len(),
+            from(split.3),
+            from(split_first.0),
+            split_first.1
+        );
+        let ended = (*walking, *end, log.len()) == (false, Some(End::Input), 0);
+        let walked = !log.is_empty() && *end != Some(End::Input);
+        if !same || (stops && !ended) || (!stops && !walked) {
+            wrong.push(what);
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "one tick and split at the choice differ, or the key or press after the choice did not \
+         end the travel before its first step, or a control's travel did not walk: {wrong:?}"
+    );
 }
 
 /// Real data: the user's zip, read only (counts printed only). Skips without it.
@@ -1516,14 +1747,12 @@ mod real {
     use crate::pacer::STEP_MS;
     use u6_testkit::Quiet;
 
-    const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
     fn files() -> Option<Files> {
-        if !std::path::Path::new(ZIP).exists() {
-            println!("real receipt: skipped ({ZIP} not present)");
+        if !u6_testkit::archive().exists() {
+            println!("real receipt: skipped (the archive (U6_ARCHIVE) not present)");
             return None;
         }
-        let data = std::fs::read(ZIP).quiet();
+        let data = std::fs::read(u6_testkit::archive()).quiet();
         let r = u6_intake::intake(vec![u6_intake::InputFile {
             name: "ultima-vi.zip".into(),
             data,
@@ -2035,4 +2264,85 @@ mod real {
         assert_eq!(columns[..3], [0, 0, 0], "plain, shift, control");
         assert_eq!(alt.len(), 2, "two codes in Alt");
     }
+}
+
+#[test]
+fn continuous_travel_direction_follows_the_route_around_an_obstruction() {
+    let mut s = open_map();
+    tile(&mut s, C + 1, C, WALL);
+    let mut travel = Travel::start(&s, (C + 2, C)).expect("route around the wall");
+    let before = travel.clone();
+    let direction = travel.continuous_direction();
+    assert!(
+        matches!(direction, Some((1, -1) | (1, 1))),
+        "first leg detours, not straight east toward the goal"
+    );
+    assert_eq!(travel, before, "the query neither advances nor replans");
+    let polled = Polled {
+        input: &[],
+        buttons: 0,
+        queued: false,
+        foreign: false,
+        menu: false,
+        due: true,
+    };
+    assert!(matches!(
+        travel.next(&s, &polled),
+        Next::Press(Key::UpRight | Key::DownRight)
+    ));
+    assert_eq!(
+        travel.continuous_direction(),
+        direction,
+        "the accepted leg remains current until acknowledged"
+    );
+    let (_, landing) = travel.pressed.expect("pressed leg");
+    put_leader(&mut s, landing);
+    assert!(matches!(
+        travel.next(&s, &polled),
+        Next::Press(Key::UpRight | Key::DownRight)
+    ));
+    assert_eq!(
+        travel.continuous_direction(),
+        direction.map(|(x, y)| (x, -y)),
+        "next leg turns back toward the destination"
+    );
+}
+
+#[test]
+fn a_route_session_changes_only_for_an_accepted_replacement_and_ends_on_stop() {
+    let mut engine = crate::Engine::with_game(open_map(), crate::Files::default(), |_, _| {
+        std::future::pending()
+    });
+    assert_eq!(engine.travel_session(), None);
+    engine.travel_to((C + 4, C)).expect("start");
+    let first = engine.travel_session();
+    let before = engine.state().clone();
+    assert!(engine.travel_to((C, C)).is_err());
+    assert_eq!(
+        engine.travel_session(),
+        first,
+        "a refused replacement keeps the route"
+    );
+    engine.tick(&[], 20);
+    assert_eq!(
+        engine.travel_session(),
+        first,
+        "pressing a route leg keeps its identity"
+    );
+    assert!(
+        *engine.state() == before,
+        "presentation metadata changes no authoritative State"
+    );
+    engine.travel_to((C, C + 4)).expect("replace");
+    assert_ne!(
+        engine.travel_session(),
+        first,
+        "accepted replacement has a fresh identity"
+    );
+    engine.tick(&[InputEvent::Key(Key::Escape)], 20);
+    assert_eq!(
+        engine.travel_session(),
+        None,
+        "Stop ends the route identity"
+    );
 }

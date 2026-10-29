@@ -53,15 +53,8 @@ impl<'a> Image<'a> {
     }
 
     /// The NUL-terminated string at `addr` (at most 256 bytes, Latin-1).
-    pub(crate) fn string(&self, addr: u32) -> Result<String, DefsError> {
-        let mut out = String::new();
-        for i in 0..256 {
-            match self.read(addr + i, 1)?[0] {
-                0 => break,
-                b => out.push(char::from(b)),
-            }
-        }
-        Ok(out)
+    pub(crate) fn string(&self, addr: crate::string_registry::Text) -> Result<String, DefsError> {
+        addr.latin1(|at, n| self.read(at, n))
     }
 
     /// Checks the layout the addresses below were measured on.
@@ -164,14 +157,14 @@ impl ObjectDefs {
             type_set_670c: words(TYPE_SET_670C, 9)?,
             monster_types: words(MONSTER_TYPES, 64)?,
             save_mode: words(SAVE_MODE, 1)?[0],
-            nothing_lower: img.string(STR_NOTHING_LOWER)?,
-            nothing: img.string(STR_NOTHING)?,
+            nothing_lower: img.string(crate::string_registry::text!(STR_NOTHING_LOWER))?,
+            nothing: img.string(crate::string_registry::text!(STR_NOTHING))?,
             articles: [
-                img.string(STR_A)?,
-                img.string(STR_AN)?,
-                img.string(STR_THE)?,
+                img.string(crate::string_registry::text!(STR_A))?,
+                img.string(crate::string_registry::text!(STR_AN))?,
+                img.string(crate::string_registry::text!(STR_THE))?,
             ],
-            count_format: img.string(STR_COUNT)?,
+            count_format: img.string(crate::string_registry::text!(STR_COUNT))?,
         })
     }
 
@@ -211,7 +204,11 @@ mod tests {
     fn hunks_are_placed_back_to_back_and_bss_reads_zero() {
         let f = tiny();
         let img = Image::parse(&f).unwrap();
-        assert_eq!(img.string(IMAGE_BASE).unwrap(), "ABC");
+        assert_eq!(
+            img.string(crate::string_registry::fixture((IMAGE_BASE) as i64, false))
+                .unwrap(),
+            "ABC"
+        );
         assert_eq!(
             img.read(IMAGE_BASE + 4, 4).unwrap(),
             [0x11, 0x22, 0x33, 0x44]

@@ -1,8 +1,6 @@
 //! Real data: the user's zip (skipped when absent; nothing is copied, only numbers asserted).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
-use std::path::Path;
-
 use u6_formats::gfx::TileKind;
 
 use crate::engine::Engine;
@@ -38,16 +36,17 @@ fn anim_tick(s: &mut State, g: &mut GfxState) {
     std::mem::swap(&mut s.gfx, g);
 }
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
 /// The flattened image REA reads (local, derived; only compared against, never copied).
-const IMAGE: &str = "/Users/zhugehyuk/Games/ultima6/re/game.bin";
+fn image() -> std::path::PathBuf {
+    u6_testkit::data_path_with("U6_GAME_BIN", "re/game.bin")
+}
 
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = u6_intake::intake(vec![u6_intake::InputFile {
         name: "ultima-vi.zip".into(),
         data,
@@ -59,7 +58,7 @@ fn files() -> Option<Files> {
 fn real_tables_match_the_image() {
     let Some(files) = files() else { return };
     let t = GameTables::from_game(files.get("game").quiet()).quiet();
-    if let Ok(img) = std::fs::read(IMAGE) {
+    if let Ok(img) = std::fs::read(image()) {
         let at = |a: usize, n: usize| img[a - 0x0010_0000..a - 0x0010_0000 + n].to_vec();
         let be = |v: &[u16]| v.iter().flat_map(|w| w.to_be_bytes()).collect::<Vec<_>>();
         assert_same!(
@@ -82,7 +81,8 @@ fn real_tables_match_the_image() {
             "the window colour, shown flag and dissolve words"
         );
     } else {
-        eprintln!("image comparison skipped: {IMAGE} not present");
+        u6_testkit::available(false, "U6_GAME_BIN flattened game image");
+        eprintln!("image comparison skipped: image data path not present");
     }
     // Shore merges: the source tiles, the 32 shore targets (graphics.md: tiles 16..48).
     let mut src: Vec<u16> = t.shore_src.iter().map(|w| w / 4).collect();

@@ -1653,3 +1653,49 @@ fn the_pointer_over_a_line_of_text_leaves_every_cell_listed_and_out_of_the_hd_fr
         }
     }
 }
+
+#[test]
+fn turn_speed_divides_the_held_pointer_cadence_but_keeps_one_press() {
+    use crate::turn_speed::TurnSpeed;
+    for (speed, gap) in [
+        (TurnSpeed::Original, 660),
+        (TurnSpeed::Quick, 330),
+        (TurnSpeed::Fast, 165),
+        (TurnSpeed::Instant, 1),
+    ] {
+        let mut s = st();
+        s.main.reading = 1;
+        let reads = Rc::new(RefCell::new(Vec::new()));
+        let out = reads.clone();
+        let mut e = Engine::with_game(s, Files::default(), move |st, io| async move {
+            for _ in 0..4 {
+                let code = wait::read_key(&st, &io).await;
+                out.borrow_mut().push((io.now_ms(), code));
+            }
+        });
+        e.io().set_turn_speed(speed);
+        e.tick(
+            &[InputEvent::Pointer {
+                x: SOUTH.0,
+                y: SOUTH.1,
+                buttons: 1,
+            }],
+            1,
+        );
+        for _ in 0..2500 {
+            if e.finished() {
+                break;
+            }
+            e.tick(&[], 1);
+        }
+        let got = reads.borrow();
+        assert_eq!(got.len(), 4);
+        assert!(got.iter().all(|(_, k)| *k == wait::WALK));
+        let gaps: Vec<_> = got.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert_eq!(
+            gaps,
+            vec![gap; 3],
+            "{speed:?}: held repeats follow the selected cadence"
+        );
+    }
+}

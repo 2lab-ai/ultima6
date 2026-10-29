@@ -7,15 +7,20 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Spec 13 Wide mode. u6-core's feature turns on u6-render's; this crate does not depend on it.
+# Spec 13 Wide mode. u6-core's feature turns on u6-render's too.
 wide = ["u6-core/wide"]
 
 [dependencies]
 u6-core.workspace = true
 u6-intake.workspace = true
+u6-render.workspace = true
 minifb = "0.29"
 png = "0.18"
 cpal = "0.18"
+
+# minifb 0.29's macOS focus getter is broken; read its NSWindow key status directly.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
 
 [dev-dependencies]
 # Content-free unwrap for the real-data tests (spec 01 §Rights).

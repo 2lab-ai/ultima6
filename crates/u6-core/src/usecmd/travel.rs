@@ -265,7 +265,8 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
         )
     };
     if crate::ui::globals::solo_member(&ux.s().actors) != -1 {
-        ux.print(STR_NOT_SOLO, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NOT_SOLO), &[])
+            .await;
         return;
     }
     if aboard(&ux.s()) && Slot::from(lead) == v {
@@ -289,7 +290,8 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
             if skiff {
                 leave_vessel(&mut ux.s(), false);
             } else {
-                ux.print(STR_ONLY_LAND, &[]).await;
+                ux.print(crate::string_registry::text!(STR_ONLY_LAND), &[])
+                    .await;
             }
         }
         ux.flush().await;
@@ -298,7 +300,7 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
     if matches!(vt, 0x19c | 0x19e) && super::quality(&ux.s(), v) != 0 {
         let q = super::quality(&ux.s(), v);
         if crate::converse::member_with_object(&mut ux.s(), 0x95, i16::from(q)) == -1 {
-            ux.print(STR_DEED, &[]).await;
+            ux.print(crate::string_registry::text!(STR_DEED), &[]).await;
             return;
         }
     }
@@ -308,7 +310,11 @@ pub async fn board(ux: Ux<'_>, obj: Slot) {
         dist(c.x as i16, vx) > 1 || dist(c.y as i16, vy) > 1
     };
     if far {
-        ux.say(FMT_BANG, MSG_OUT_OF_RANGE).await;
+        ux.say(
+            crate::string_registry::text!(FMT_BANG),
+            crate::string_registry::pointer!(MSG_OUT_OF_RANGE),
+        )
+        .await;
         return;
     }
     {
@@ -343,7 +349,19 @@ pub async fn mount(ux: Ux<'_>, obj: Slot) {
         None
     };
     if let Some(m) = msg {
-        ux.print(m, &[]).await;
+        ux.print(
+            crate::string_registry::choose(
+                (m) as i64,
+                &[
+                    crate::string_registry::text!(0x0012cdac),
+                    crate::string_registry::text!(0x0012cdbe),
+                    crate::string_registry::text!(0x0012cdee),
+                    crate::string_registry::text!(0x0012ce14),
+                ],
+            ),
+            &[],
+        )
+        .await;
         return;
     }
     let mut s = ux.s();
@@ -371,7 +389,19 @@ pub async fn balloon(ux: Ux<'_>) {
     for (i, (kind, msg)) in parts.into_iter().enumerate() {
         owners[i] = crate::converse::member_with_object(&mut ux.s(), kind as i16, 0);
         if owners[i] == -1 {
-            ux.print(msg, &[]).await;
+            ux.print(
+                crate::string_registry::choose(
+                    (msg) as i64,
+                    &[
+                        crate::string_registry::text!(STR_NO_BAG),
+                        crate::string_registry::text!(STR_NO_BASKET),
+                        crate::string_registry::text!(STR_NO_CAULDRON),
+                        crate::string_registry::text!(STR_NO_ROPE),
+                    ],
+                ),
+                &[],
+            )
+            .await;
         }
     }
     if owners.contains(&-1) {
@@ -392,7 +422,8 @@ pub async fn balloon(ux: Ux<'_>) {
             crate::objects::move_to(&mut s, b, x, y, zz);
         }
     }
-    ux.print(STR_DONE_BANG, &[]).await;
+    ux.print(crate::string_registry::text!(STR_DONE_BANG), &[])
+        .await;
 }
 
 /// Original: 0x12eb12 (objects: inflate a balloon: 0x1a4 becomes the balloon 0x1a7 next to the
@@ -431,8 +462,17 @@ pub async fn inflate(ux: Ux<'_>, obj: Slot) {
         }
         done
     };
-    ux.print(if done { STR_DONE_INFLATE } else { STR_NO_ROOM }, &[])
-        .await;
+    ux.print(
+        crate::string_registry::choose(
+            (if done { STR_DONE_INFLATE } else { STR_NO_ROOM }) as i64,
+            &[
+                crate::string_registry::text!(0x0012cbcc),
+                crate::string_registry::text!(0x0012cbd4),
+            ],
+        ),
+        &[],
+    )
+    .await;
     let mut s = ux.s();
     if s.ui.panel.mode == 0x92 {
         seams::inventory_contents(&mut s);
@@ -455,10 +495,12 @@ pub async fn orb(ux: Ux<'_>) {
         .get(5)
         .is_some_and(|&f| f & 0x20 != 0);
     if !knows {
-        ux.print(STR_CANT_FIGURE, &[]).await;
+        ux.print(crate::string_registry::text!(STR_CANT_FIGURE), &[])
+            .await;
         return;
     }
-    ux.print(STR_WHERE, &[]).await;
+    ux.print(crate::string_registry::text!(STR_WHERE), &[])
+        .await;
     {
         let mut s = ux.s();
         s.ui.input.target_pending = 1;
@@ -501,7 +543,8 @@ pub async fn orb(ux: Ux<'_>) {
     };
     match made {
         Some((gate, true, tx, ty)) => {
-            ux.print(STR_RED_GATE, &[]).await;
+            ux.print(crate::string_registry::text!(STR_RED_GATE), &[])
+                .await;
             {
                 let mut s = ux.s();
                 let zz = z(&s);
@@ -512,10 +555,20 @@ pub async fn orb(ux: Ux<'_>) {
             ux.refresh();
         }
         Some((gate, false, _, _)) => {
-            ux.say(FMT_LINE, MSG_FAILED).await;
+            ux.say(
+                crate::string_registry::text!(FMT_LINE),
+                crate::string_registry::pointer!(MSG_FAILED),
+            )
+            .await;
             crate::objects::remove(&mut ux.s(), gate);
         }
-        None => ux.say(FMT_LINE, MSG_FAILED).await,
+        None => {
+            ux.say(
+                crate::string_registry::text!(FMT_LINE),
+                crate::string_registry::pointer!(MSG_FAILED),
+            )
+            .await
+        }
     }
 }
 
@@ -539,18 +592,23 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
         view_at_centre(&mut s, ux.io);
         (c.x, c.y)
     };
-    ux.print(STR_DIRECTION, &[]).await;
+    ux.print(crate::string_registry::text!(STR_DIRECTION), &[])
+        .await;
     ux.s().ui.input.target_pending = 0;
     if ux.key().await != 0x80 {
-        ux.print(STR_NOWHERE, &[]).await;
+        ux.print(crate::string_registry::text!(STR_NOWHERE), &[])
+            .await;
         return;
     }
     let dir = ux.s().ui.input.direction;
     // Port (spec 08, slice K2; 2026-10-24): read for display, so the locale pack's label of it
     // when it has one ([`crate::magic::LABELS`], [`crate::locale::shown`]).
     let name = crate::locale::shown(&ux.s(), defs::direction_name(ux.io, dir));
-    ux.print(FMT_DIR, &[crate::ui::printf::Arg::Str(&name)])
-        .await;
+    ux.print(
+        crate::string_registry::text!(FMT_DIR),
+        &[crate::ui::printf::Arg::Str(&name)],
+    )
+    .await;
     let (dx, dy) = defs::direction(ux.io, dir);
     {
         let mut s = ux.s();
@@ -585,7 +643,11 @@ pub async fn telescope(ux: Ux<'_>, obj: Slot) {
         s.gfx.dissolve = 1;
         crate::gfx::refresh_view(&mut s, ux.io);
     }
-    ux.say(FMT_NL_LINE, MSG_DONE).await;
+    ux.say(
+        crate::string_registry::text!(FMT_NL_LINE),
+        crate::string_registry::pointer!(MSG_DONE),
+    )
+    .await;
 }
 
 /// 0x10e81e, 0x108f90, 0x102ef0 for the current centre.
@@ -626,19 +688,22 @@ pub async fn sextant_travel(ux: Ux<'_>) {
             s.ui.input.targeting = 0;
         }
     }
-    ux.print(STR_DEGREES, &[]).await;
-    ux.print(STR_LATITUDE, &[]).await;
+    ux.print(crate::string_registry::text!(STR_DEGREES), &[])
+        .await;
+    ux.print(crate::string_registry::text!(STR_LATITUDE), &[])
+        .await;
     let line = seams::read_line(ux.state, ux.io, 4).await;
     let lat = crate::objects::parse_answer(&ux.s(), &line, 1);
     if !(-0x2c..0x51).contains(&lat) {
-        ux.print(STR_ZERO, &[]).await;
+        ux.print(crate::string_registry::text!(STR_ZERO), &[]).await;
         return;
     }
-    ux.print(STR_LONGITUDE, &[]).await;
+    ux.print(crate::string_registry::text!(STR_LONGITUDE), &[])
+        .await;
     let line = seams::read_line(ux.state, ux.io, 4).await;
     let lon = crate::objects::parse_answer(&ux.s(), &line, 2);
     if !(-0x25..0x59).contains(&lon) {
-        ux.print(STR_ZERO, &[]).await;
+        ux.print(crate::string_registry::text!(STR_ZERO), &[]).await;
         return;
     }
     ux.put(b'\n').await;

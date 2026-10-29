@@ -3,21 +3,17 @@
 //! read here only, never copied, and the test prints numbers only).
 #![allow(clippy::disallowed_methods)] // tests may read files
 
-use std::path::Path;
-
 use u6_core::{Engine, Files, InputEvent, Key, State};
 use u6_formats::objlist::ObjList;
 use u6_intake::{InputFile, intake};
 use u6_testkit::Quiet;
 
-const ZIP: &str = "/Users/zhugehyuk/Games/ultima6/original/ultima-vi.zip";
-
 fn files() -> Option<Files> {
-    if !Path::new(ZIP).exists() {
-        eprintln!("skipped: {ZIP} not present");
+    if !u6_testkit::archive().exists() {
+        eprintln!("skipped: the archive (U6_ARCHIVE) not present");
         return None;
     }
-    let data = std::fs::read(ZIP).quiet();
+    let data = std::fs::read(u6_testkit::archive()).quiet();
     let r = intake(vec![InputFile {
         name: "ultima-vi.zip".into(),
         data,
