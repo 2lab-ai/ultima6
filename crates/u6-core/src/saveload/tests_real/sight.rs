@@ -65,6 +65,12 @@ impl Run {
     }
 }
 
+/// The cells sight file `file` holds by its header (the u32 at offset 36: spec 18, the format).
+fn header_cells(file: &[u8]) -> usize {
+    let count: [u8; 4] = file.get(36..40).and_then(|b| b.try_into().ok()).quiet();
+    u32::from_le_bytes(count) as usize
+}
+
 /// The back buffer's 16 × 16 pixels of every view cell out of sight now (its base tile
 /// [`NOT_VISIBLE`]), by view cell, off the view's edge (where the border covers it).
 fn out_of_sight(run: &Run) -> Vec<((usize, usize), Vec<u8>)> {
@@ -124,21 +130,23 @@ fn inner() -> impl Iterator<Item = (usize, usize)> {
     (1..VIEW_H - 1).flat_map(|row| (1..VIEW_W - 1).map(move |col| (col, row)))
 }
 
+/// The eight ways round a cell (x, y steps).
+const WAYS: [(i16, i16); 8] = [
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+    (1, 1),
+    (-1, -1),
+    (1, -1),
+    (-1, 1),
+];
+
 /// Places and arrow keys (north, east, south, west) whose step takes a cell in sight out of sight
 /// in the view, from `s`: the start, then the party teleported (0x1092fc) 8, 12, .. 60 cells off
 /// the start cell in each of eight ways, on its level (as `gfx::view`'s tests search), the step
 /// tried on a copy.
 fn hiding_steps(s: &State) -> impl Iterator<Item = ((u16, u16, u16), Key)> + '_ {
-    const WAYS: [(i16, i16); 8] = [
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (-1, -1),
-        (1, -1),
-        (-1, 1),
-    ];
     let c = s.map.centre;
     let offs = std::iter::once((0, 0)).chain(
         (8..64)
@@ -203,11 +211,12 @@ fn seen_and_saved(files: &Files) -> (Run, MemStore) {
 }
 
 /// Spec 18 (saved with the game: the round trip): a Save with something remembered writes
-/// [`SIGHT_FILE`] beside the objlist, bound to it, and the platform's flush stores it. A fresh
-/// engine booted from the stored files holds the same memory, byte for byte as the file says,
-/// and draws every view cell out of sight as before the reload, the remembered ones grey. A day
-/// later both draw the same fade, which shows less than the day before. A Restore in the session
-/// reads the same memory back from the last Save.
+/// [`SIGHT_FILE`] beside the objlist, bound to it, every cell remembered in it (its header's
+/// count), and the platform's flush stores it. A fresh engine booted from the stored files holds
+/// the same memory, byte for byte as the file says, and draws every view cell out of sight as
+/// before the reload, the remembered ones grey. A day later both draw the same fade, which shows
+/// less than the day before. A Restore in the session reads the same memory back from the last
+/// Save.
 #[test]
 fn real_the_remembered_sight_comes_back_with_its_save() {
     let Some(files) = archive("real_the_remembered_sight_comes_back_with_its_save") else {
@@ -223,6 +232,10 @@ fn real_the_remembered_sight_comes_back_with_its_save() {
     assert!(
         run.sight(&objlist).as_deref() == Some(saved.bytes()),
         "the memory as the Save left it"
+    );
+    assert!(
+        header_cells(saved.bytes()) == run.cells(),
+        "the file holds every cell remembered"
     );
     run.idle(8);
     let before = out_of_sight(&run);
@@ -278,11 +291,21 @@ fn real_the_remembered_sight_comes_back_with_its_save() {
 /// pixels and palette, and the cells held.
 type Booted = (usize, State, Vec<u8>, Vec<u6_render::Rgb>, usize);
 
-/// Boots `files` laid over with `store` ([`Booted`]).
-fn boot_from(files: &Files, store: &MemStore) -> Booted {
+/// `files` laid over with `store` ([`attach`]: the save's layer).
+fn laid(files: &Files, store: &MemStore) -> Files {
     let mut f = files.clone();
     attach(&mut f, store).quiet();
-    let mut run = Run::boot_seeing(f, false);
+    f
+}
+
+/// Boots `files` laid over with `store` ([`Booted`]).
+fn boot_from(files: &Files, store: &MemStore) -> Booted {
+    boot(laid(files, store))
+}
+
+/// Boots `files` ([`Booted`]).
+fn boot(files: Files) -> Booted {
+    let mut run = Run::boot_seeing(files, false);
     let read = run.cells();
     run.e.io().set_sight_memory(true);
     run.idle(8);
@@ -304,10 +327,12 @@ fn with_file(store: &MemStore, name: &str, bytes: Option<Vec<u8>>) -> MemStore {
 /// Spec 18 (saved with the game: another save's file, a malformed file): the port's save with its
 /// objlist changed after the file was written (a later save of the original over it: here one
 /// talk flag) boots with nothing remembered; so do the new game with a stored file of another
-/// game, and the port's save with its file truncated or of another version. Each boots to the
-/// same state and the same frames as the same files without the sight file (an original's save;
-/// that it boots as before C3 is round 1's scratch receipt against 54b9eea). A Save with the
-/// switch off from a fresh start (nothing ever remembered) writes the original's files alone.
+/// game, the port's save with its file truncated or of another version, and the port's save with
+/// its own file only in a layer other than the save's (a mod's, over it, under the file's bare
+/// name: not the save's file). Each boots to the same state and the same frames as the same files
+/// without the sight file (an original's save; that it boots as before C3 is round 1's scratch
+/// receipt against 54b9eea). A Save with the switch off from a fresh start (nothing ever
+/// remembered) writes the original's files alone.
 #[test]
 fn real_a_save_without_its_own_sight_file_boots_with_nothing_remembered() {
     let Some(files) =
@@ -328,31 +353,41 @@ fn real_a_save_without_its_own_sight_file_boots_with_nothing_remembered() {
     let only_file = MemStore {
         files: [(SIGHT_FILE.to_string(), file.clone())].into(),
     };
+    let mut modded = laid(&files, &plain);
+    modded.overlay("mod", [("MOD/U6SIGHT".to_string(), file.clone())].into());
     let cases = [
         (
             "the objlist changed after the file",
-            &original_later,
-            with_file(&original_later, SIGHT_FILE, Some(file.clone())),
+            laid(&files, &original_later),
+            laid(
+                &files,
+                &with_file(&original_later, SIGHT_FILE, Some(file.clone())),
+            ),
         ),
         (
             "a truncated file",
-            &plain,
-            with_file(&plain, SIGHT_FILE, Some(short)),
+            laid(&files, &plain),
+            laid(&files, &with_file(&plain, SIGHT_FILE, Some(short))),
         ),
         (
             "another version",
-            &plain,
-            with_file(&plain, SIGHT_FILE, Some(version)),
+            laid(&files, &plain),
+            laid(&files, &with_file(&plain, SIGHT_FILE, Some(version))),
         ),
         (
             "a new game with another game's file",
-            &MemStore::default(),
-            only_file,
+            files.clone(),
+            laid(&files, &only_file),
+        ),
+        (
+            "its own file in another layer than the save's",
+            laid(&files, &plain),
+            modded,
         ),
     ];
     let count = cases.len();
     for (what, without, with) in cases {
-        let (a, b) = (boot_from(&files, without), boot_from(&files, &with));
+        let (a, b) = (boot(without), boot(with));
         assert!(
             a.0 == 0 && b.0 == 0,
             "{what}: nothing remembered at the boot"
@@ -432,8 +467,9 @@ fn real_with_the_switch_off_a_save_writes_the_memory_it_loaded_again() {
 
 /// Spec 18 (saved with the game: the orders): Save A, then Save B with more seen: a Restore reads
 /// B's memory, and so does a boot from the store both were flushed into. Then the character `u`
-/// (a new game's objlist, a save generation of its own, no sight file): a Restore reads no
-/// memory, and a boot from the store (`u`'s objlist, A's and B's file still beside it) none.
+/// (a new game's objlist, a save generation of its own, no sight file, B's let go): a Restore
+/// reads no memory, and a boot from the store (`u`'s objlist, A's and B's file still beside it)
+/// none.
 #[test]
 fn real_the_last_saves_memory_comes_back_and_none_after_u() {
     let Some(files) = archive("real_the_last_saves_memory_comes_back_and_none_after_u") else {
@@ -471,6 +507,10 @@ fn real_the_last_saves_memory_comes_back_and_none_after_u() {
     let new_game = boot_objlist(&files).quiet().to_vec();
     assert!(new_game != objlist_b);
     run.command(Cmd::Handoff(new_game.clone()));
+    assert!(
+        run.e.state().saveload.sight.is_none(),
+        "u lets the last Save's file go"
+    );
     sync.flush(&run.e, &mut store).quiet();
     assert!(store.files[OBJLIST_FILE] == new_game, "u's objlist stored");
     assert!(
@@ -489,31 +529,72 @@ fn real_the_last_saves_memory_comes_back_and_none_after_u() {
     );
 }
 
-/// Spec 18 (saved with the game: a Restore without a file of its own): before any Save of the
-/// session, a Restore reads the platform's file; with none, or one it refuses (truncated), the
-/// memory the session gathered is forgotten whole, as before C3, and the two Restores leave the
-/// same state and frames.
+/// Takes `run` to places round where it stands (1 to 4 cells off in each of [`WAYS`], by
+/// teleport, 0x1092fc) and back, rendered at each, until a cell seen at one shows remembered out
+/// of sight where it stood; whether one did.
+fn seen_round(run: &mut Run) -> bool {
+    let at = run.e.state().map.centre;
+    let z = u16::from(at.z);
+    let mut offs = (1..=4).flat_map(|r| WAYS.map(|(x, y)| (x * r, y * r)));
+    offs.any(|(dx, dy)| {
+        let (x, y) = (at.x.wrapping_add_signed(dx), at.y.wrapping_add_signed(dy));
+        run.command(Cmd::Teleport(x, y, z));
+        run.idle(8);
+        run.command(Cmd::Teleport(at.x, at.y, z));
+        run.idle(8);
+        grey(&out_of_sight(run)) > 0
+    })
+}
+
+/// Spec 18 (saved with the game: a Restore before any Save): the player's reload, a walk, then a
+/// Restore (control-R). Before any Save of the session a Restore reads the platform's file: the
+/// stored save's own brings back the memory it holds, not the one the session gathered since the
+/// boot. With none, or one it refuses (truncated), the memory the session gathered is forgotten
+/// whole, as before C3, and the two Restores leave the same state and, with the switch on again,
+/// the same frames: a cell seen on the way shows out of sight where the save stands
+/// ([`seen_round`]), so a memory left over would show there.
 #[test]
-fn real_a_restore_without_its_own_sight_file_forgets_the_memory() {
-    let Some(files) = archive("real_a_restore_without_its_own_sight_file_forgets_the_memory")
+fn real_a_restore_before_any_save_reads_the_platforms_sight_file() {
+    let Some(files) = archive("real_a_restore_before_any_save_reads_the_platforms_sight_file")
     else {
         return;
     };
     let (_, store) = seen_and_saved(&files);
+    let (objlist, file) = (&store.files[OBJLIST_FILE], &store.files[SIGHT_FILE]);
     let plain = with_file(&store, SIGHT_FILE, None);
-    let mut short = store.files[SIGHT_FILE].clone();
+    let mut short = file.clone();
     short.pop();
     let refused = with_file(&store, SIGHT_FILE, Some(short));
+    // Booted from `st` (a reload), taken round and back, more seen, then the Restore with the
+    // switch off: whether a remembered cell showed back where it stood, the cells held then.
+    let restored = |st: &MemStore| {
+        let mut run = Run::boot_seeing(laid(&files, st), true);
+        let shown = seen_round(&mut run);
+        see_more(&mut run, 24);
+        let held = run.cells();
+        run.e.io().set_sight_memory(false);
+        (shown, held, run)
+    };
+    let (.., mut own) = restored(&store);
+    assert!(
+        own.sight(objlist).is_some_and(|m| m != *file),
+        "its own file: more seen since the boot"
+    );
+    own.command(Cmd::Restore);
+    assert!(
+        own.sight(objlist).as_ref() == Some(file),
+        "its own file: the Restore reads the platform's file"
+    );
     let mut after = Vec::new();
     for (what, st) in [("no file", &plain), ("a truncated file", &refused)] {
-        let mut f = files.clone();
-        attach(&mut f, st).quiet();
-        let mut run = Run::boot_seeing(f, true);
-        see_more(&mut run, 24);
-        assert!(run.cells() > 0, "{what}: cells seen in the session");
-        run.e.io().set_sight_memory(false);
+        let (shown, held, mut run) = restored(st);
+        assert!(
+            shown && held > 0,
+            "{what}: cells seen in the session, one out of sight where the save stands"
+        );
         run.command(Cmd::Restore);
         assert!(run.cells() == 0, "{what}: the Restore forgets them");
+        run.e.io().set_sight_memory(true);
         run.idle(8);
         let fb = run.e.frame();
         after.push((run.state(), fb.pixels().to_vec(), fb.palette.to_vec()));
@@ -522,5 +603,9 @@ fn real_a_restore_without_its_own_sight_file_forgets_the_memory() {
         after[0] == after[1],
         "the same state and frame after either Restore"
     );
-    println!("a Restore without its own file: the memory forgotten, 2 cases alike");
+    println!(
+        "a Restore before any Save: the stored file's {} cells read back; without one, the memory \
+         forgotten, 2 cases alike",
+        own.cells()
+    );
 }

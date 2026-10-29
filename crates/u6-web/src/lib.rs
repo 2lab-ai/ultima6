@@ -349,15 +349,9 @@ pub fn max_input_bytes() -> f64 {
     MAX_INPUT_BYTES as f64
 }
 
-/// [`MAX_SAVE_FILE_BYTES`] for the page (it leaves larger files of a dropped `savegame/` folder
-/// out before reading them; [`Game::load_save`] is the backstop).
-#[wasm_bindgen]
-pub fn max_save_file_bytes() -> f64 {
-    MAX_SAVE_FILE_BYTES as f64
-}
-
 /// [`save_file_limit`] of stored save file `path` (`savegame/<name>`) for the page, which leaves a
-/// larger file of a dropped `savegame/` folder out before reading it.
+/// larger file of a dropped `savegame/` folder out before reading it ([`Game::load_save`] is the
+/// backstop).
 #[wasm_bindgen]
 pub fn max_save_file_bytes_of(path: &str) -> f64 {
     save_file_limit(path) as f64
@@ -848,9 +842,11 @@ impl Game {
 
     /// Lists the files the Saves since the last reported commit wrote (`savegame/objlist` and
     /// the replaced blocks, the original's names); returns how many. Read them with
-    /// [`Game::save_path`] / [`Game::save_ptr`] / [`Game::save_len`].
+    /// [`Game::save_path`] / [`Game::save_ptr`] / [`Game::save_len`]. The last list is let go
+    /// first, so two lists never live together (spec 18, Bounds).
     pub fn save_collect(&mut self) -> u32 {
         let whole = self.save_whole;
+        self.save_out = Vec::new();
         self.save_out = self.engine.as_ref().map_or_else(Vec::new, |e| {
             let s = e.state();
             let files = if whole {
@@ -2740,6 +2736,29 @@ mod tests {
         assert!(whole.get(SIGHT_FILE).is_some_and(|b| b == &[5; 3]));
         assert!(whole.contains_key(OBJLIST_FILE));
         assert!(whole_save(&s, 1).is_empty(), "nothing saved since");
+    }
+
+    /// Spec 18 (saved with the game): the character `u` writes a new game's objlist over a Save's
+    /// (`u6_core::intro::handoff::apply`) and lets the Save's remembered sight go, bound to the
+    /// objlist it replaced: the whole save listed after the stored save was removed holds `u`'s
+    /// objlist and no sight file (synthetic state).
+    #[test]
+    fn after_u_the_whole_save_holds_no_sight_file() {
+        let mut s = u6_core::State::empty();
+        s.actors.party.names = vec![String::new(); 16];
+        s.saveload.generation = 1;
+        s.saveload.objlist = Some(vec![1; 4]);
+        s.saveload.sight = Some(u6_core::saveload::SavedSight::new(vec![5; 3]));
+        s.saveload.sight_gen = 1;
+        assert!(whole_save(&s, 0).contains_key(SIGHT_FILE), "after the Save");
+        let new_game = vec![0; 0x1c73];
+        u6_core::intro::handoff::apply(&mut s, &new_game);
+        let whole = whole_save(&s, 1);
+        assert!(
+            whole.get(OBJLIST_FILE) == Some(&new_game),
+            "after u: u's objlist"
+        );
+        assert!(!whole.contains_key(SIGHT_FILE), "after u: no sight file");
     }
 
     /// A game on synthetic state and no files: palette entry v = (v, 3v, 255 - v), then each step

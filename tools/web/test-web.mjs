@@ -13546,6 +13546,45 @@ test('remembered sight (spec 18, saved with the game): a dropped savegame folder
   console.log(`  receipt: spec 18 sight file past a block's limit: ${big.zeros} bytes taken with ${fill.length} files filling the save's ${SAVE_MAX} bytes`);
 }, { needs: h.haveHfes });
 
+/// The stored sight files, each as its length and whether every byte of it is 0 (read in the page:
+/// its bytes are not handed over).
+const storedSights = (page) => page.evaluate(() => new Promise((done, fail) => {
+  const req = indexedDB.open('ultima6-port', 1);
+  req.onerror = () => fail(req.error);
+  req.onsuccess = () => {
+    const db = req.result;
+    const get = db.transaction('files').objectStore('files')
+      .getAll(IDBKeyRange.bound('save:', 'save:￿'));
+    get.onsuccess = () => {
+      db.close();
+      done(get.result.filter((f) => /(^|\/)savegame\/u6sight$/i.test(f.path))
+        .map((f) => ({ length: f.bytes.length, zeros: f.bytes.every((b) => b === 0) })));
+    };
+    get.onerror = () => fail(get.error);
+  };
+}));
+
+test('remembered sight (spec 18, saved with the game): a dropped savegame folder holding the save\'s own sight file and, last, one of exactly the largest size the page takes: that last one alone is read and stored, the save\'s own left unread (synthetic sight bytes: the last within the limit is the one taken, whether or not it reads as a memory, since neither the page nor the engine reads a candidate\'s bytes to choose it)', async (env) => {
+  const { page } = await h.openPage(env, { memory: 'on' });
+  await h.load(page, env);
+  await page.setInputFiles('#picker', h.HFES);
+  await started(page, FILES);
+  await walkAndSave(page);
+  const folder = asFolder(await h.savedFiles(page));
+  const own = folder.find(({ name }) => isSight(name));
+  assert.ok(own && own.bytes.length < SIGHT_MAX, 'the Save stored its own sight file, under the limit');
+  await forgetVia(page, '#forget-save');
+  await h.waitSettled(page);
+  const last = { name: 'LAST/SAVEGAME/U6SIGHT', zeros: SIGHT_MAX };
+  const from = (await h.log(page)).length;
+  await h.dropFiles(page, [], [...folder, last]);
+  const s = await started(page, FILES);
+  assert.deepEqual((await readSince(page, from)).filter(isSight), [last.name], 'the last sight file, at the limit, read alone');
+  assert.ok(!s.status.includes('Left out'), 'nothing left out');
+  assert.deepEqual(await storedSights(page), [{ length: SIGHT_MAX, zeros: true }], 'the stored save holds that one alone');
+  console.log(`  receipt: spec 18 sight file at the limit: the last of 2 sight files, ${SIGHT_MAX} bytes, read and stored alone`);
+}, { needs: h.haveHfes });
+
 // --- the message history (spec 23) --------------------------------------------------------------
 // The message window keeps the lines it scrolled off; the wheel over it shows them, with the
 // engine's scrollbar in its last cell column. Passes at the prompt fill the window past its rows.
