@@ -897,9 +897,9 @@ impl Game {
     /// [paper, ink, heading], rows: [{kind: "head"|"entry"|"note", code: code | null, enabled,
     /// reason: code | null, theft, y}]}`, the box with its frame and the text area in frame
     /// pixels, the highlighted row's index, whether it is laid out and drawn in the Korean words
-    /// (the installed pack's language, `u6_core::ui::popup::korean`; no words), the colours its
-    /// text area is drawn in (0xRRGGBB, the game's palette now: the page's tests compare pixels
-    /// with them and report counts), each row's top pixel row; codes only
+    /// (the installed pack's language, `u6_core::locale::pack_is_korean`; no words), the colours
+    /// its text area is drawn in (0xRRGGBB, the game's palette now: the page's tests compare
+    /// pixels with them and report counts), each row's top pixel row; codes only
     /// ([`u6_core::Engine::context_menu`]).
     pub fn menu_view(&self) -> String {
         let Some(e) = self.engine.as_ref() else {
@@ -990,12 +990,13 @@ impl Game {
         self.engine.as_ref().map_or(0.0, |e| e.game_keys() as f64)
     }
 
-    /// Spec 17 (round 2): the lines the game's message scroll holds now (a count; a command
-    /// that prints, as Look, adds to it); 0 before a start.
-    pub fn message_lines(&self) -> f64 {
+    /// Spec 17 (round 6): the lines the game's message scroll finished since the start (a count
+    /// that only grows, `UiState::lines_finished`; a command that prints, as Look, adds to it;
+    /// the lines the scroll keeps stop at 64); 0 before a start.
+    pub fn lines_finished(&self) -> f64 {
         self.engine
             .as_ref()
-            .map_or(0.0, |e| e.state().ui.messages.len() as f64)
+            .map_or(0.0, |e| e.state().ui.lines_finished as f64)
     }
 
     /// The pointer's buttons as the game's input handler has them (bit 0 left, bit 1 right): the
@@ -5928,7 +5929,10 @@ mod tests {
     /// its last take, the fight's `b`, stands at the page clock's 0; the clock then starts at 16
     /// ms), each step after the one before to its arrival, and the first step of a travel started
     /// right after an ordinary command the prompt took (Space, a pass). The least gap of each
-    /// speed, printed.
+    /// speed, printed. The entry into clocked mode never happens in production (round 6, opus NIT
+    /// 4): the page gives `set_clock` before the first `step` of every frame (`site/app.js`), so no
+    /// take is stamped without its clock; its 160 ms holds only because `Game`'s clock starts at
+    /// 0.0, which is this test's `t = 0`.
     #[test]
     fn at_every_speed_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock() {
         use u6_core::actors::travel::{End, reachable};

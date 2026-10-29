@@ -995,8 +995,9 @@ impl Engine {
     /// ends the travel when the menu took new input); queued as the player's keys are, but neither
     /// the menu's input nor the player's input to the message history's view (spec 23 Decision 6:
     /// it leaves the view where it is). "Go here" chosen in this input starts its travel after
-    /// that ([`Engine::travel_to`]), so its first step is the next tick's, unless a menu is open
-    /// after the input (a right press after the choice opened one: no travel runs under a menu).
+    /// that ([`Engine::travel_to`]), so its first step is the next tick's, and the travel's stops
+    /// are read over what came after the choice in this input ([`Engine::start_go_here`]): a key, a
+    /// press, a menu opened after it end the travel at once, as in the next tick.
     pub fn tick(&mut self, input: &[InputEvent], elapsed_ms: u32) {
         self.tick_dismissing(input, &[], elapsed_ms);
     }
@@ -1024,15 +1025,7 @@ impl Engine {
             (input, false)
         };
         let step = self.travel_press(input, took);
-        // Spec 21's merge contract: "Go here" chosen in this input starts travel to its cell
-        // after this tick's press of the travel under way; a cell refused now starts none, and so
-        // does a menu open after the input (opened after the choice: no travel runs under it).
-        if let Some(cell) = self.popup.take_go_here() {
-            self.go_here.asked.push(cell);
-            if self.popup.open().is_none() {
-                let _ = self.travel_to((cell.0 as u16, cell.1 as u16));
-            }
-        }
+        self.start_go_here(input);
         {
             let mut events = self.io.events.borrow_mut();
             let count = |text: bool| {
@@ -1295,8 +1288,9 @@ impl Engine {
 
     /// Port-only (spec 23): moves whenever the published frame was synced again or the message
     /// history shown over it changed ([`Engine::published_version`] and the view's stamp). The
-    /// screen frame ([`Engine::screen_version`]) moves with both.
-    pub fn view_version(&self) -> (u64, u64) {
+    /// screen frame ([`Engine::screen_version`]) moves with both (tests).
+    #[cfg(test)]
+    pub(crate) fn view_version(&self) -> (u64, u64) {
         (self.published_version, self.view.stamp())
     }
 
@@ -1311,6 +1305,37 @@ impl Engine {
         self.travel_end = None;
         self.travel_own = None;
         Ok(())
+    }
+
+    /// Spec 21's merge contract: the choices of "Go here" in this input (the events the context
+    /// menu passed on, `through`), each in turn, after this tick's press of the travel under way:
+    /// recorded ([`Engine::go_here_asked`]) and given to [`Engine::travel_to`]; a travel it starts
+    /// ends at once (`Input`, before its first step) on a stop after the choice in the same input,
+    /// as the next tick's press would end it: [`crate::actors::travel::Polled`]'s over the events
+    /// from the choice's place on, from the game's pointer buttons, with the menu's new input
+    /// after the choice (a menu opened after it, open or closed again). The choice's own events
+    /// lie before that place; its tail passes on as a button-less move or not at all.
+    fn start_go_here(&mut self, through: &[InputEvent]) {
+        use crate::actors::travel::{End, Polled};
+        for choice in self.popup.take_go_here() {
+            let (x, y) = choice.cell;
+            self.go_here.asked.push(choice.cell);
+            if self.travel_to((x as u16, y as u16)).is_err() {
+                continue;
+            }
+            let after = Polled {
+                input: &through[choice.at..],
+                buttons: self.io.handler_pointer().buttons,
+                queued: false,
+                foreign: false,
+                menu: choice.later,
+                due: true,
+            };
+            if after.stops() {
+                self.travel = None;
+                self.travel_end = Some(End::Input);
+            }
+        }
     }
 
     /// Port (spec 21): a travel walks.
@@ -1464,7 +1489,7 @@ impl Engine {
 
     /// Port-only (spec 17): changes whenever [`Engine::screen_frame`] was synced again for a
     /// change: a publish ([`Engine::published_version`]), a change of the drawn menu or of the
-    /// message history's view (its stamp, [`Engine::view_version`]); 0 before.
+    /// message history's view (its stamp); 0 before.
     pub fn screen_version(&self) -> u64 {
         self.layer_version
     }
@@ -1592,9 +1617,9 @@ impl Engine {
         &mut self.popup
     }
 
-    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, each as it was chosen:
-    /// given to [`Engine::travel_to`] (spec 21), refused or not, unless a menu was open after the
-    /// input that chose it (then no travel starts).
+    /// Port-only (spec 17): the cells "Go here" asked travel to, in order, every choice as it was
+    /// made: given to [`Engine::travel_to`] (spec 21), refused or not, and kept when a stop after
+    /// the choice in the same input ended its travel at once ([`Engine::start_go_here`]).
     pub fn go_here_asked(&self) -> &crate::ui::popup::Travel {
         &self.go_here
     }

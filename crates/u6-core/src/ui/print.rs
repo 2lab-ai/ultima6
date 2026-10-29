@@ -50,7 +50,8 @@ fn code(c: i32) -> u16 {
     u16::try_from(c).unwrap_or(u16::MAX)
 }
 
-/// Port-side transcript of the message scroll: a finished line goes to `UiState::messages`.
+/// Port-side transcript of the message scroll: a finished line goes to `UiState::messages`,
+/// counted (`UiState::lines_finished`).
 fn transcript_end(s: &mut State) {
     let ui = &mut s.ui;
     if ui.text.current == WindowId::Messages {
@@ -61,6 +62,7 @@ fn transcript_end(s: &mut State) {
             .map(wide::cell_char)
             .collect();
         ui.messages.push(line);
+        ui.lines_finished += 1;
         let n = ui.messages.len();
         if n > TRANSCRIPT {
             ui.messages.drain(..n - TRANSCRIPT);

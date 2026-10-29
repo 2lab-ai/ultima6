@@ -1739,7 +1739,7 @@ test('the context menu (spec 17, unit M3): a right press at the prompt opens the
 
   const look = rowOf(view, LOOK);
   assert.ok(look >= 0 && view.rows[look].enabled, 'Look offered, able to run');
-  const lines = () => page.evaluate(() => globalThis.__shownGame.message_lines());
+  const lines = () => page.evaluate(() => globalThis.__shownGame.lines_finished());
   const lines0 = await lines();
   await page.mouse.click(...(await h.screenPoint(page, ...h.rowPoint(view, look))));
   await h.menuClosed(page);
@@ -1747,7 +1747,7 @@ test('the context menu (spec 17, unit M3): a right press at the prompt opens the
   await h.waitTicks(page, 20);
   assert.notEqual(await page.evaluate(() => document.getElementById('screen').dataset.prompt), '1', 'Look runs: it waits on what it shows');
   const lines1 = await lines();
-  console.log(`  receipt: Look: message lines ${lines0} -> ${lines1}`);
+  console.log(`  receipt: Look: message lines finished ${lines0} -> ${lines1}`);
   assert.ok(lines1 > lines0, 'Look printed what it sees');
   await page.keyboard.press('Space');
   await h.waitPrompt(page);
@@ -2011,7 +2011,9 @@ test('the context menu (spec 17, unit M3) in Wide: a right press opens the engin
 // cancel or a press outside never does. Any other entry is one of the map commands (Attack..Use,
 // 0x81..0x88: a map menu's), each of which prints when it runs: from the command prompt (up
 // before the click, round 3, gpt d SHOULD 3) the prompt goes for its run and the message scroll
-// grows (round 3, opus S2: leaving the prompt alone is no receipt, a run held up leaves it too).
+// grows (round 3, opus S2: leaving the prompt alone is no receipt, a run held up leaves it too),
+// by its finished lines (round 6: `Game.lines_finished` only grows; the lines the scroll keeps
+// stop at 64, so a wait on them hung once the scroll was full).
 async function menuVisibleAndChosen(page, view, where) {
   const rects = await visibleMenu(page, view);
   console.log(`  receipt: ${where}: menu ${rects.menu} in the visible canvas ${rects.visible} (viewport ${rects.viewport}); hidden frame rects given ${JSON.stringify(rects.hidden)}`);
@@ -2023,7 +2025,7 @@ async function menuVisibleAndChosen(page, view, where) {
   assert.ok(px >= vx && py >= vy && px < vx + vw && py < vy + vh, `${where}: its last entry that can run inside it`);
   const ran = () => page.evaluate(() => {
     const g = globalThis.__shownGame;
-    return { asked: g.go_here_asked(), lines: g.message_lines(), prompt: document.getElementById('screen').dataset.prompt };
+    return { asked: g.go_here_asked(), lines: g.lines_finished(), prompt: document.getElementById('screen').dataset.prompt };
   });
   const before = await ran();
   await page.mouse.click(px, py);
@@ -2039,9 +2041,10 @@ async function menuVisibleAndChosen(page, view, where) {
     assert.equal(before.prompt, '1', `${where}: the command prompt up before the click`);
     await page.waitForFunction(() => document.getElementById('screen').dataset.prompt !== '1', null, { timeout: 10_000, polling: 'raf' });
     const left = await ran();
-    await page.waitForFunction((l) => globalThis.__shownGame.message_lines() > l, before.lines, { timeout: 10_000, polling: 'raf' });
+    console.log(`  receipt: ${where}: command ${code} chosen: waiting for the message lines finished to pass ${before.lines}`);
+    await page.waitForFunction((l) => globalThis.__shownGame.lines_finished() > l, before.lines, { timeout: 10_000, polling: 'raf' });
     const after = await ran();
-    console.log(`  receipt: ${where}: command ${code} chosen: the prompt ${before.prompt} -> ${left.prompt}, message lines ${before.lines} -> ${after.lines}`);
+    console.log(`  receipt: ${where}: command ${code} chosen: the prompt ${before.prompt} -> ${left.prompt}, message lines finished ${before.lines} -> ${after.lines}`);
     assert.equal(after.asked, before.asked, `${where}: no travel asked`);
   }
   return rects;

@@ -1612,6 +1612,125 @@ fn a_key_the_menu_takes_ends_a_travel_under_way_by_its_flag() {
     assert_eq!(e.game_keys(), keys, "the fixture: the key the menu's");
 }
 
+/// What [`over_ticks`] left: the travel walking, how it ended, the keys it pressed with their
+/// ticks, the leader's cell, the presses and the key events the menu let through to the game.
+type Outcome = (bool, Option<End>, Vec<(u64, Key)>, (u16, u16), u64, u64);
+
+/// [`menu_over_the_room`] given `ticks` (a tick's input each), then ticks with no input to 60 in
+/// all; what it left, and the leader's cell and the presses the prompt took after the first tick.
+fn over_ticks(ticks: &[&[InputEvent]]) -> (Outcome, ((u16, u16), u64)) {
+    let (mut e, _) = menu_over_the_room();
+    let takes = e.prompt_takes();
+    let mut first = None;
+    for t in 0..60 {
+        e.tick(ticks.get(t).copied().unwrap_or(&[]), 20);
+        first.get_or_insert((leader_at(&e.state()), e.prompt_takes() - takes));
+    }
+    let outcome = (
+        e.travel_active(),
+        e.travel_end(),
+        e.travel_log().to_vec(),
+        leader_at(&e.state()),
+        e.game_presses(),
+        e.game_keys(),
+    );
+    (outcome, first.expect("ticked"))
+}
+
+/// Spec 21's merge contract (round 6, opus MUST A): the outcome of a choice of Go here does not
+/// hang on how the platform groups the events into ticks. Each input given in one tick and split
+/// at the choice into two ends the same: the travel walking or not, its end, the keys it pressed
+/// and when, the leader's cell, the presses and keys that reached the game. A key or a left press
+/// on the map after the choice ends the travel before its first step (`Input`), in the choice's
+/// tick as in the next; the choosing gesture's own tail (the press's release, Enter's release and
+/// its repeat, the menu's) is no stop: the travel walks as with the choice alone. The menu is
+/// shown over the room by the test and the stand-in opens none (B, a menu opened and closed after
+/// the choice in its tick: `popup_real`).
+#[test]
+fn a_stop_after_the_choice_in_its_tick_ends_the_travel_as_in_the_next() {
+    let (_, go) = menu_over_the_room();
+    let start = (R, R + 3);
+    let enter = InputEvent::Key(Key::Enter);
+    let right = InputEvent::Key(Key::Right);
+    let (press, release) = (ptr(go, POINTER_LEFT), ptr(go, 0));
+    let map = ptr((9, 9), POINTER_LEFT);
+    let (enter_up, enter_again) = (
+        InputEvent::Release(Key::Enter),
+        InputEvent::Repeat(Key::Enter),
+    );
+    // What, the choice, the rest of the input, whether it stops the travel.
+    let cases: [(&str, InputEvent, &[InputEvent], bool); 7] = [
+        ("Enter, then a direction key", enter, &[right], true),
+        (
+            "a press on Go here, its release, a left press on the map",
+            press,
+            &[release, map],
+            true,
+        ),
+        ("Enter alone (control)", enter, &[], false),
+        ("Enter and its release (control)", enter, &[enter_up], false),
+        (
+            "Enter and its repeat (control)",
+            enter,
+            &[enter_again],
+            false,
+        ),
+        ("a press on Go here alone (control)", press, &[], false),
+        (
+            "a press on Go here and its release (control)",
+            press,
+            &[release],
+            false,
+        ),
+    ];
+    let from = |c: (u16, u16)| {
+        (
+            i32::from(c.0) - i32::from(start.0),
+            i32::from(c.1) - i32::from(start.1),
+        )
+    };
+    // Every case printed (one tick, and whether the split gave the same), then the cases that
+    // broke the property or their expected end.
+    let mut wrong = Vec::new();
+    for (what, choice, rest, stops) in cases {
+        let all: Vec<InputEvent> = std::iter::once(choice)
+            .chain(rest.iter().copied())
+            .collect();
+        let (one, first) = over_ticks(&[&all]);
+        let (split, split_first) = over_ticks(&[&[choice], rest]);
+        let (walking, end, log, at, presses, keys) = &one;
+        let same = one == split;
+        println!(
+            "tick split: {what}: one tick: walking {walking}, end {:?}, {} steps, the leader {:?} \
+             from its start, game presses {presses}, game keys {keys}; after the choice's tick the \
+             leader {:?} from its start, the prompt took {}; split at the choice: the same {same} \
+             (walking {}, end {:?}, {} steps, the leader {:?}; after the choice's tick {:?}, the \
+             prompt took {})",
+            end.map(End::code),
+            log.len(),
+            from(*at),
+            from(first.0),
+            first.1,
+            split.0,
+            split.1.map(End::code),
+            split.2.len(),
+            from(split.3),
+            from(split_first.0),
+            split_first.1
+        );
+        let ended = (*walking, *end, log.len()) == (false, Some(End::Input), 0);
+        let walked = !log.is_empty() && *end != Some(End::Input);
+        if !same || (stops && !ended) || (!stops && !walked) {
+            wrong.push(what);
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "one tick and split at the choice differ, or the key or press after the choice did not \
+         end the travel before its first step, or a control's travel did not walk: {wrong:?}"
+    );
+}
+
 /// Real data: the user's zip, read only (counts printed only). Skips without it.
 #[allow(clippy::disallowed_methods)] // tests may read files
 mod real {
