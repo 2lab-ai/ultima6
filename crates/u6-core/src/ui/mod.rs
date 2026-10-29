@@ -122,6 +122,10 @@ pub struct UiState {
     /// scroll window), oldest first, at most [`textstate::TRANSCRIPT`] lines. The screen is
     /// the original's only copy; this is for tests and tools.
     pub messages: Vec<String>,
+    /// Port-side: the lines finished in the message scroll so far, each one [`UiState::messages`]
+    /// took (that keeps the last [`textstate::TRANSCRIPT`]): a count that only grows, for a test
+    /// that waits on a command's print (the page's).
+    pub lines_finished: u64,
     /// Original: the font `u6.ch` main loads (0x1351d8 body), `None` until [`UiState::load`]
     pub font: Option<BitFont>,
     /// Port-only (spec 08): the Hangul table the cells of Hangul syllables are drawn from,
@@ -174,6 +178,7 @@ impl UiState {
     pub fn from_parts(font: Option<BitFont>, tables: UiTables) -> UiState {
         UiState {
             messages: Vec::new(),
+            lines_finished: 0,
             font,
             hangul: None,
             paper: None,

@@ -70,6 +70,11 @@ fn ptr(x: i16, y: i16, buttons: u8) -> InputEvent {
     InputEvent::Pointer { x, y, buttons }
 }
 
+/// The cells of the choices of Go here `p` holds, taken ([`Popup::take_go_here`]).
+fn chosen(p: &mut Popup) -> Vec<(i16, i16)> {
+    p.take_go_here().iter().map(|c| c.cell).collect()
+}
+
 /// A popup on, `open` shown.
 fn popup_with(open: &Open) -> Popup {
     let mut p = Popup::default();
@@ -423,11 +428,11 @@ fn escape_a_right_press_a_press_outside_a_letter_and_go_here() {
         [ptr(gx, gy, 0)]
     );
     assert_eq!(
-        p.take_go_here(),
-        Some(CELL_PRESSED),
+        chosen(&mut p),
+        [CELL_PRESSED],
         "Go here: travel to the cell"
     );
-    assert_eq!(p.take_go_here(), None, "handed out once");
+    assert!(chosen(&mut p).is_empty(), "handed out once");
     assert!(p.run().is_none() && p.open().is_none());
 }
 
@@ -760,7 +765,7 @@ fn every_key_the_menu_took_keeps_its_repeats_to_its_own_release() {
         );
         assert!(p.open().is_none(), "{close:?}: closed");
         if close == Key::Enter {
-            assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+            assert_eq!(chosen(&mut p), [CELL_PRESSED], "Enter chose Go here");
         }
         for _ in 0..3 {
             assert!(
@@ -836,8 +841,8 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
     let out = p.input(&s, &io, &clicks, true);
     assert_eq!(presses(&out), 0, "one batch: {out:?}");
     assert_eq!(
-        (p.take_go_here(), p.take_go_here()),
-        (Some(CELL_PRESSED), None),
+        (chosen(&mut p), chosen(&mut p)),
+        (vec![CELL_PRESSED], vec![]),
         "one batch: chosen once"
     );
     let mut p = popup_with(&o);
@@ -847,8 +852,8 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
     }
     assert_eq!(presses(&all), 0, "across ticks: {all:?}");
     assert_eq!(
-        (p.take_go_here(), p.take_go_here()),
-        (Some(CELL_PRESSED), None),
+        (chosen(&mut p), chosen(&mut p)),
+        (vec![CELL_PRESSED], vec![]),
         "across ticks: chosen once"
     );
     // Unit M4's merge contract (spec 21): a travel ends on an event that sets a button the
@@ -875,7 +880,7 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
         [ptr(gx + 40, gy - 20, 0)],
         "its release: a move with no button"
     );
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "held: chosen once");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "held: chosen once");
     // Independent clicks pass (round 2b, gpt c SHOULD 3): the next press later than
     // DOUBLE_CLICK_MS on the player's clock, or farther than DOUBLE_CLICK_PX, is the game's.
     for (what, at, (x, y)) in [
@@ -886,14 +891,14 @@ fn a_double_click_on_an_entry_chooses_it_once_and_leaks_no_press() {
         let mut p = popup_with(&o);
         p.input_with(&s, &io, &[ptr(gx, gy, 1)], true, 1_000, &[]);
         p.input_with(&s, &io, &[ptr(gx, gy, 0)], true, 1_000, &[]);
-        assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "{what}: chosen");
+        assert_eq!(chosen(&mut p), [CELL_PRESSED], "{what}: chosen");
         let second = [ptr(x, y, 1), ptr(x, y, 0)];
         assert_eq!(
             p.input_with(&s, &io, &second, true, at, &[]),
             second,
             "{what}: the next click is the game's"
         );
-        assert_eq!(p.take_go_here(), None, "{what}: chosen once");
+        assert!(chosen(&mut p).is_empty(), "{what}: chosen once");
     }
 }
 
@@ -924,7 +929,7 @@ fn a_double_click_is_the_choosing_buttons_press_again_uninterrupted() {
     let choose = |p: &mut Popup| {
         p.input(&s, &io, &[ptr(gx, gy, POINTER_LEFT)], true);
         p.input(&s, &io, &[ptr(gx, gy, 0)], true);
-        assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
+        assert_eq!(chosen(p), [CELL_PRESSED], "Go here chosen");
     };
     let mut p = popup_with(&o);
     choose(&mut p);
@@ -1169,7 +1174,7 @@ fn a_paced_press_is_the_held_keys_not_the_players() {
     assert_eq!(p.version(), drawn, "nothing drawn again");
     let (out, new) = feed(&mut p, InputEvent::Key(Key::Enter));
     assert!(out.is_empty() && new, "Enter: the menu's");
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Enter chose Go here");
     for ev in [
         InputEvent::Paced(Key::Down),
         InputEvent::Paced(Key::Down),
@@ -1416,7 +1421,7 @@ fn the_tail_of_a_choice_is_not_new_input() {
     let mut p = popup_with(&o);
     assert!(fed(&mut p, &s, ptr(gx, gy, 0)), "a move while open");
     assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press");
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Go here chosen");
     for (what, ev) in [
         ("a held move", ptr(gx + 3, gy, 1)),
         ("the release", ptr(gx + 3, gy, 0)),
@@ -1446,7 +1451,7 @@ fn the_tail_of_a_choice_is_not_new_input() {
     // A press 5 pixels off is no double click: it reaches the game (the menu took nothing new).
     let mut p = popup_with(&o);
     assert!(fed(&mut p, &s, ptr(gx, gy, 1)), "the choosing press again");
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Go here chosen again");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Go here chosen again");
     p.input(&s, &io, &[ptr(gx, gy, 0)], true);
     let off = ptr(gx + 5, gy, 1);
     assert_eq!(
@@ -1464,7 +1469,7 @@ fn the_tail_of_a_choice_is_not_new_input() {
         fed(&mut p, &s, InputEvent::Key(Key::Enter)),
         "Enter choosing"
     );
-    assert_eq!(p.take_go_here(), Some(CELL_PRESSED), "Enter chose Go here");
+    assert_eq!(chosen(&mut p), [CELL_PRESSED], "Enter chose Go here");
     for ev in [
         InputEvent::Repeat(Key::Enter),
         InputEvent::Repeat(Key::Down),

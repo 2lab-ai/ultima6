@@ -454,20 +454,29 @@ fn a_right_press_on_a_door_draws_the_menu_and_use_opens_the_door() {
 /// A view cell of bare ground two or more cells from the leader (its menu the tile's Look alone,
 /// with Go here) and its pixel.
 fn bare_ground(p: &Play) -> ((i16, i16), (i16, i16)) {
+    go_here_cells(p, true)
+        .into_iter()
+        .next()
+        .expect("bare ground near the leader")
+}
+
+/// Every view cell two to four cells from the leader whose menu offers Go here able to run (of
+/// [`bare_ground`] only, with `bare`), row by row, and its pixel.
+fn go_here_cells(p: &Play, bare: bool) -> Vec<((i16, i16), (i16, i16))> {
     let leader = p.e.state().leader_position().expect("a leader");
     let (lx, ly) = (leader.x as i16, leader.y as i16);
     (-4..=4i16)
         .flat_map(|dy| (-4..=4i16).map(move |dx| (dx, dy)))
         .filter(|&(dx, dy)| dx.abs().max(dy.abs()) >= 2)
         .map(|(dx, dy)| (lx + dx, ly + dy))
-        .find_map(|(x, y)| {
+        .filter_map(|(x, y)| {
             let at = p.pixel(x as u16, y as u16);
             let m = menu::query(&p.e.state(), p.e.io(), at.0, at.1)?;
-            let bare = m.sections.len() == 1 && m.sections[0].object == -1;
+            let ground = m.sections.len() == 1 && m.sections[0].object == -1;
             let go = m.go_here.is_some_and(|e| e.enabled());
-            (bare && go && m.cell == Some((x, y))).then_some(((x, y), at))
+            ((ground || !bare) && go && m.cell == Some((x, y))).then_some(((x, y), at))
         })
-        .expect("bare ground near the leader")
+        .collect()
 }
 
 /// Escape closes the open menu, then the prompt again.
@@ -570,10 +579,11 @@ fn a_right_press_after_a_choice_or_a_repeat_taken_back_opens_the_menu() {
 
 /// Spec 21's merge contract (round 5, opus SHOULD 1): Go here chosen by a left press, its
 /// release and a right press on the map, all in one tick's input: the right press opens a menu
-/// after the choice, and no travel starts under it (the engine starts Go here's travel only when
-/// no menu is open after the input); the cell is recorded as asked all the same. Over quiet ticks
-/// the menu stays open and the party where it stood; Escape closes it and no travel walks. Frames:
-/// `r5-menu-no-walk` (the menu open after those ticks).
+/// after the choice, and no travel walks under it (round 6: the travel the choice started ends at
+/// once on the menu's new input after the choice, `Input`, as the right press in the next tick
+/// ends it); the cell is recorded as asked all the same. Over quiet ticks the menu stays open and
+/// the party where it stood; Escape closes it and no travel walks. Frames: `r5-menu-no-walk` (the
+/// menu open after those ticks).
 #[test]
 fn a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel() {
     const NAME: &str = "a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel";
@@ -598,6 +608,11 @@ fn a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel() {
         "the right press opened a menu"
     );
     assert!(!p.e.travel_active(), "no travel under it");
+    assert_eq!(
+        p.e.travel_end(),
+        Some(crate::actors::travel::End::Input),
+        "the menu's new input after the choice ended the travel the choice started"
+    );
     assert_eq!(p.e.go_here_asked().asked, [cell], "Go here asked");
     p.release(at);
     let quiet = 30;
@@ -630,6 +645,139 @@ fn a_menu_opened_in_the_input_that_chose_go_here_starts_no_travel() {
     assert!(
         !p.e.travel_active() && p.e.travel_log().is_empty() && after == stood,
         "closed: no travel walks, the party where it stood"
+    );
+    println!("{NAME}: ran");
+}
+
+/// Spec 21's merge contract (round 6, opus MUST B): Go here chosen by a left press, its release,
+/// a right press on the map that opens a menu, that press's release and Escape closing the menu,
+/// all in one tick's input: no menu is open after the input, and the travel the choice started
+/// ends at once (`Input`, before its first step) on the menu's new input after the choice, as the
+/// same events in the next tick end it (round 5 started it, and the party walked off); the cell
+/// is asked. Over quiet ticks no travel walks and the party stands where it stood. Frames:
+/// `r6-menu-closed-no-walk` (the menu closed after those ticks, the party standing).
+#[test]
+fn a_menu_opened_and_closed_in_the_input_that_chose_go_here_ends_its_travel() {
+    const NAME: &str = "a_menu_opened_and_closed_in_the_input_that_chose_go_here_ends_its_travel";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (cell, at) = bare_ground(&p);
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    let stood = p.e.state().leader_position().expect("a leader");
+    let ptr = |(x, y): (i16, i16), buttons: u8| InputEvent::Pointer { x, y, buttons };
+    p.e.tick(
+        &[
+            ptr(go_at, POINTER_LEFT),
+            ptr(go_at, 0),
+            ptr(at, POINTER_RIGHT),
+            ptr(at, 0),
+            InputEvent::Key(Key::Escape),
+        ],
+        STEP_MS,
+    );
+    assert!(
+        p.e.context_menu().is_none(),
+        "the fixture: Escape closed the menu the right press opened"
+    );
+    assert_eq!(
+        (
+            p.e.travel_active(),
+            p.e.travel_end(),
+            p.e.travel_log().len()
+        ),
+        (false, Some(crate::actors::travel::End::Input), 0),
+        "the menu after the choice ended its travel before its first step"
+    );
+    assert_eq!(p.e.go_here_asked().asked, [cell], "Go here asked");
+    p.e.tick(&[InputEvent::Release(Key::Escape)], STEP_MS);
+    let quiet = 30;
+    for _ in 0..quiet {
+        p.e.tick(&[], STEP_MS);
+    }
+    let now = p.e.state().leader_position().expect("a leader");
+    println!(
+        "the menu opened and closed in the choice's input, then {quiet} quiet ticks: travel steps \
+         {}, Go here asked {}, the leader moved {}",
+        p.e.travel_log().len(),
+        p.e.go_here_asked().asked.len(),
+        u8::from(now != stood)
+    );
+    assert!(
+        p.e.context_menu().is_none()
+            && !p.e.travel_active()
+            && p.e.travel_log().is_empty()
+            && now == stood,
+        "no menu, no travel walks, the party where it stood"
+    );
+    p.frames("r6-menu-closed-no-walk");
+    println!("{NAME}: ran");
+}
+
+/// Spec 17 Layer flow with spec 21 (round 6, opus NIT 1): Go here chosen twice in one tick's input
+/// (a left press on its row and the release, a right press on another cell whose menu offers Go
+/// here opening that menu and the release, a left press on its Go here and the release): the record
+/// keeps both cells, in order, and the second travel walks the party to the second cell (the first
+/// ended at once on the menu opened after it; round 5 kept only the second cell).
+#[test]
+fn every_go_here_chosen_in_one_input_is_asked_and_the_last_walks() {
+    const NAME: &str = "every_go_here_chosen_in_one_input_is_asked_and_the_last_walks";
+    let Some(files) = archive(NAME) else { return };
+    let mut p = Play::boot(&files);
+    p.beside_a_door();
+    let (first, at) = bare_ground(&p);
+    let (second, at2) = go_here_cells(&p, false)
+        .into_iter()
+        .find(|&(c, _)| c != first)
+        .expect("a second cell whose menu offers Go here");
+    let v = p.open_at(at);
+    let (_, go_at) = row_of(&v, menu::GO_HERE).expect("Go here");
+    // The second menu as the right press at its pixel lays it out in the tick (the state the same).
+    let v2 = {
+        let s = p.e.state();
+        let m = menu::query(&s, p.e.io(), at2.0, at2.1).expect("the second cell's menu");
+        crate::ui::popup::Open::new(&m, at2, &s, p.e.context_menu_hidden()).view()
+    };
+    let (_, go2_at) = row_of(&v2, menu::GO_HERE).expect("the second menu's Go here");
+    let ptr = |(x, y): (i16, i16), buttons: u8| InputEvent::Pointer { x, y, buttons };
+    p.e.tick(
+        &[
+            ptr(go_at, POINTER_LEFT),
+            ptr(go_at, 0),
+            ptr(at2, POINTER_RIGHT),
+            ptr(at2, 0),
+            ptr(go2_at, POINTER_LEFT),
+            ptr(go2_at, 0),
+        ],
+        STEP_MS,
+    );
+    assert_eq!(
+        p.e.go_here_asked().asked,
+        [first, second],
+        "both choices asked, in order"
+    );
+    assert!(
+        p.e.context_menu().is_none() && p.e.travel_active(),
+        "the second menu closed by its choice, the second travel walks"
+    );
+    let mut ticks = 0;
+    while p.e.travel_active() && ticks < 4000 {
+        p.e.tick(&[], STEP_MS);
+        ticks += 1;
+    }
+    let l = p.e.state().leader_position().expect("a leader");
+    println!(
+        "two choices of Go here in one input: {} asked, the travel's end {:?} after {ticks} ticks, \
+         {} steps",
+        p.e.go_here_asked().asked.len(),
+        p.e.travel_end().map(crate::actors::travel::End::code),
+        p.e.travel_log().len()
+    );
+    assert_eq!(
+        (p.e.travel_end(), (l.x as i16, l.y as i16)),
+        (Some(crate::actors::travel::End::Arrived), second),
+        "the party on the second cell"
     );
     println!("{NAME}: ran");
 }
@@ -702,27 +850,45 @@ fn a_right_press_on_bare_ground_offers_go_here_and_it_calls_travel_to() {
     );
     let text = drawn_in_the_frame(&p, &v);
     // The cells of the text area drawn from the Hangul table: their glyph sources name a syllable.
-    let syllables = {
+    // The cells of the text area drawn from the Hangul table, and of Go here's label (its row,
+    // columns 1 to 6: the port's words, three syllables, a space, two): whether each is.
+    let (syllables, go_label) = {
         let f = p.e.screen_frame();
         let (tx0, ty0, tx1, ty1) = v.text;
         let hangul = |x: i32, y: i32| {
-            f.src_at(x as usize, y as usize).is_some_and(|s| {
-                s.kind == u6_render::Kind::Glyph && (0xac00..=0xd7a3).contains(&s.id)
+            (0..64).any(|k| {
+                f.src_at((x + k % 8) as usize, (y + k / 8) as usize)
+                    .is_some_and(|s| {
+                        s.kind == u6_render::Kind::Glyph && (0xac00..=0xd7a3).contains(&s.id)
+                    })
             })
         };
-        (ty0..=ty1)
+        let all = (ty0..=ty1)
             .step_by(8)
             .flat_map(|y| (tx0..=tx1).step_by(8).map(move |x| (x, y)))
-            .filter(|&(x, y)| (0..64).any(|k| hangul(x + k % 8, y + k / 8)))
-            .count()
+            .filter(|&(x, y)| hangul(x, y))
+            .count();
+        let label: Vec<bool> = (1..=6)
+            .map(|col| hangul(tx0 + col * 8, v.rows[go].y))
+            .collect();
+        (all, label)
     };
     println!(
-        "ground menu: {} rows, text area {text} pixels, {syllables} cells of Hangul syllables",
-        v.rows.len()
+        "ground menu: {} rows, text area {text} pixels, {syllables} cells of Hangul syllables, {} \
+         of Go here's 6 label cells",
+        v.rows.len(),
+        go_label.iter().filter(|&&h| h).count()
     );
     assert!(
         v.korean && syllables > 0,
         "the menu in the Korean words, drawn from the Hangul table"
+    );
+    // Round 6 (gpt a SHOULD, opus NIT 3): the count above holds with the pack's heading alone;
+    // Go here's own row is in the port's Korean words.
+    assert_eq!(
+        go_label,
+        [true, true, true, false, true, true],
+        "Go here's label drawn from the Hangul table, syllable by syllable"
     );
     p.frames("r4-menu-ground");
     let steps = (lx - cell.0).abs().max((ly - cell.1).abs());
