@@ -1736,7 +1736,7 @@ impl Game {
     /// picture of the map) and to every game started after.
     pub fn set_motion(&mut self, on: bool) {
         self.motion.on = on;
-        self.motion.presenter.clear();
+        self.motion.clear();
         if let Some(engine) = &mut self.engine {
             engine.set_motion(on);
         }
@@ -1762,6 +1762,14 @@ impl Game {
         self.motion.drawn
             || !self.layers.placed.is_empty()
             || self.motion.presenter.active(self.presentation_ms())
+    }
+
+    /// Spec 20 Design 3 (round 13, the receipts): a foreign picture came after the leader's
+    /// early picture with no scene of the engine's since, so the engine's frame, where the page
+    /// shows it, holds the map as the engine published it before the step: the party on its old
+    /// cell.
+    pub fn old_cell(&self) -> bool {
+        self.motion.old_cell
     }
 
     /// Spec 20 Design 5: moves whenever what the page draws of a slide over the HD frame's map
@@ -2173,7 +2181,7 @@ impl Game {
         engine.set_context_menu_hidden(self.menu_hidden.clone());
         engine.io().set_sight_memory(self.sight_memory);
         engine.set_motion(self.motion.on);
-        self.motion.presenter.clear();
+        self.motion.clear();
         self.slide_reset();
         self.motion.drawn = false;
         self.motion.shown = None;
@@ -2224,17 +2232,20 @@ impl Game {
     /// as drawn at the presentation clock while one runs. A scene that snaps drops the layers the
     /// page holds as the base of the next changes: the next layers come whole.
     ///
+    /// Spec 20 Design 3 (round 13): with the engine's command prompt up
+    /// ([`u6_core::engine::command_prompt`]) a held early picture ends ([`Presenter::prompt`]).
+    ///
     /// Spec 20 with spec 17: while a context menu is open ([`Engine::context_menu_open`]) no slide
     /// runs. One running when the menu opens, or started under it, ends at once
-    /// ([`Presenter::foreign`]: a snap, not a publication; the presenter keeps the scene it
-    /// shows), so the page shows the engine's frame with the menu: the menu is never drawn over a
-    /// moving map, nor a moving map under it, and nothing slides on once it closes.
+    /// ([`Presenter::snap`]: not a publication; the presenter keeps the scene it shows), so the
+    /// page shows the engine's frame with the menu: the menu is never drawn over a moving map,
+    /// nor a moving map under it, and nothing slides on once it closes.
     fn slide_view(&mut self) -> Option<View> {
         let engine = self.engine.as_mut()?;
         let t = engine.io().now_ms() as f64 + self.pacer.carried_ms();
         let mut view = self.motion.take(engine, self.pacer.pace_rate(), t);
         if engine.context_menu_open() && view.take().is_some() {
-            self.motion.presenter.foreign();
+            self.motion.presenter.snap();
         }
         // After a scene that snaps no change is made against layers made before it: after a load
         // the remembered sight's copies are forgotten and their sources named again by others. A
@@ -2247,11 +2258,13 @@ impl Game {
     }
 
     /// Spec 20, HD off: with a slide (`view`), puts the engine's shown frame ([`Engine::frame`]:
-    /// the published frame, the message history the player scrolled back to over it, spec 23,
-    /// and the pointer sprite) with the map as the slides have it
-    /// ([`u6_core::gfx::motion::paint`]) and the pointer sprite over it again into the RGBA frame
-    /// (nothing when it holds that picture already: a preview held at rest). Returns whether it
-    /// did; the first present after the last slide converts the engine's frame again.
+    /// the screen frame, the published frame with the message history the player scrolled back
+    /// to over it, spec 23, and an open context menu over both, spec 17; then the pointer sprite)
+    /// with the map as the slides have it ([`u6_core::gfx::motion::paint`]) and the pointer sprite
+    /// over it again into the RGBA frame (nothing when it holds that picture already: a preview
+    /// held at rest). The map painted here would cover a menu over it: that holds only because no
+    /// slide runs with the menu open ([`Game::slide_view`]'s snap). Returns whether it did; the
+    /// first present after the last slide converts the engine's frame again.
     fn present_slide(&mut self, view: Option<&View>) -> bool {
         let Some(engine) = &self.engine else {
             return false;
@@ -2497,6 +2510,12 @@ struct Motion<T> {
     /// changes, whatever made it snap (a load, and a dissolve or an XOR plot too: their next
     /// layers come whole).
     snapped: bool,
+    /// An early picture was handed and no scene of the engine's since ([`Motion::old_cell`]).
+    early: bool,
+    /// Spec 20 Design 3 (round 13, the receipts): a foreign publication came after the early
+    /// picture with no scene since, so the engine's frame shows the map as the engine published it
+    /// before the leader's step: the party on its old cell. Ends at the next scene.
+    old_cell: bool,
     /// Every publication handed to the presenter: its engine time, whether it was a preview and
     /// whether it had a scene (the tests read it).
     #[cfg(test)]
@@ -2513,6 +2532,8 @@ impl<T: AsRef<Scene>> Motion<T> {
             shown: None,
             frame: Framebuffer::new(),
             snapped: false,
+            early: false,
+            old_cell: false,
             #[cfg(test)]
             taken: Vec::new(),
         }
@@ -2526,14 +2547,23 @@ impl<T: AsRef<Scene>> Motion<T> {
         }
     }
 
+    /// Forgets every scene and slide (a new game, the switch).
+    fn clear(&mut self) {
+        self.presenter.clear();
+        self.early = false;
+        self.old_cell = false;
+    }
+
     /// Hands the presenter `publications` (a scene, or none for a foreign picture, at an engine
     /// time; a preview of the leader's step flagged), slides shown at the pace `rate` the frame
-    /// ran at ([`slides_shown`]), then the slides as drawn at presentation time `t` while one runs;
-    /// the slides ended at `t` are dropped.
+    /// ran at ([`slides_shown`]); with the engine's command prompt up (`prompt`) a held preview
+    /// ends ([`Presenter::prompt`]); then the slides as drawn at presentation time `t` while one
+    /// runs; the slides ended at `t` are dropped.
     fn publish(
         &mut self,
         publications: impl IntoIterator<Item = (Option<Rc<T>>, f64, bool)>,
         rate: Option<f64>,
+        prompt: bool,
         t: f64,
     ) -> Option<View> {
         let slides = slides_shown(rate, self.interval);
@@ -2541,11 +2571,17 @@ impl<T: AsRef<Scene>> Motion<T> {
             #[cfg(test)]
             self.taken.push((time, preview, shot.is_some()));
             self.snapped |= shot.as_ref().is_some_and(|s| (**s).as_ref().snap);
+            let foreign = shot.is_none();
+            self.old_cell = foreign && self.early;
+            self.early = if foreign { self.early } else { preview };
             match shot {
                 Some(shot) if preview => self.presenter.preview(shot, time, slides),
                 Some(shot) => self.presenter.publish(shot, time, slides),
                 None => self.presenter.foreign(),
             }
+        }
+        if prompt {
+            self.presenter.prompt();
         }
         let view = self.presenter.view(t).filter(|_| self.presenter.active(t));
         self.presenter.end(t);
@@ -2554,12 +2590,15 @@ impl<T: AsRef<Scene>> Motion<T> {
 }
 
 impl Motion<Shot> {
-    /// [`Motion::publish`] of `engine`'s publications ([`Engine::take_motion`]).
+    /// [`Motion::publish`] of `engine`'s publications ([`Engine::take_motion`]), with its command
+    /// prompt as it stands ([`u6_core::engine::command_prompt`]).
     fn take(&mut self, engine: &mut Engine, rate: Option<f64>, t: f64) -> Option<View> {
         let taken = engine.take_motion().into_iter();
+        let prompt = u6_core::engine::command_prompt(&engine.state());
         self.publish(
             taken.map(|p| (p.shot, p.time_ms as f64, p.preview)),
             rate,
+            prompt,
             t,
         )
     }
@@ -5930,7 +5969,7 @@ mod tests {
                     motion.frame(dt);
                     let t = now as f64 + pacer.carried_ms();
                     let rate = pacer.pace_rate();
-                    drawn += u32::from(motion.publish(publications, rate, t).is_some());
+                    drawn += u32::from(motion.publish(publications, rate, false, t).is_some());
                 }
                 assert!(published, "{speed:?}: the step was published");
                 let shown = f64::from(drawn) * dt;
@@ -8559,14 +8598,21 @@ mod tests {
     /// in the page the static layer): the frames to the next step, those with the map off rest,
     /// at rest while the presenter draws (an early picture held, or other objects sliding),
     /// moving (closer to rest along the step than on the step's frame before that reached the
-    /// screen, which was between its two cells too), backward (farther from rest than that frame,
-    /// once the step's slide began: a frame at rest before its first frame off rest is before its
-    /// onset, not a place it went back from) and stray (off rest but not between the step's two
+    /// screen, which was between its two cells too), backward (a frame that reached the screen
+    /// farther from rest than the last that did, once the step's slide began: a frame at rest
+    /// before its first frame off rest is before its onset, not a place it went back from; round
+    /// 13: judged against that last place, the engine's frame at rest included, so a slide that
+    /// starts again after rest counts) and stray (off rest but not between the step's two
     /// cells). And the jump (round 12, opus S1): the largest drop of the map's offset behind rest
     /// between two frames that reached the screen, from 16 (the old cell, where the step starts)
     /// to its first; a frame of the engine's after the slide began counts as at rest (0), one
-    /// before it is not counted. So a slide cut short (16, 15, 14, then the engine's frame) jumps
-    /// 14, and one drawn in larger steps by their size.
+    /// before it is not counted, and (round 13) one of the engine's that shows the map as the
+    /// engine published it before the step, a foreign picture after the step's early picture with
+    /// no scene since ([`Game::old_cell`]), counts as the old cell (16). So a slide cut short (16,
+    /// 15, 14, then the engine's frame) jumps 14, and one drawn in larger steps by their size.
+    /// At the step's close ([`Progress::close`]: the next step, or the end of the sampling) the
+    /// map must stand at rest once the slide began: a slide that stops short of rest (16, 15, 14
+    /// and 14 on to the next step) is unfinished.
     #[derive(Debug)]
     struct Progress {
         dir: (i32, i32),
@@ -8576,6 +8622,8 @@ mod tests {
         moving: usize,
         backward: usize,
         stray: usize,
+        /// Frames of the engine's that showed the old cell ([`Game::old_cell`]).
+        old_cell: usize,
         /// How far behind rest the step's frame before that reached the screen was ([`behind`];
         /// `Some(0)` at rest).
         before: Option<i32>,
@@ -8585,6 +8633,8 @@ mod tests {
         /// until the slide began), and the largest drop of it so far.
         last: i32,
         jump: i32,
+        /// Closed with the slide begun and the map not at rest.
+        unfinished: bool,
     }
 
     impl Progress {
@@ -8597,20 +8647,27 @@ mod tests {
                 moving: 0,
                 backward: 0,
                 stray: 0,
+                old_cell: 0,
                 before: None,
                 began: false,
                 last: 16,
                 jump: 0,
+                unfinished: false,
             }
         }
 
         /// A display frame of the step showing `placed`: the placement's offset from rest while
-        /// the presenter's picture is shown (`None`: the engine's frame); `moved`: whether the
-        /// frame's picture reached the screen (only such a frame counts as moving, and only it is
-        /// the frame before of the next).
-        fn frame(&mut self, placed: Option<(i32, i32)>, moved: bool) {
+        /// the presenter's picture is shown (`None`: the engine's frame); `old`: the engine's frame
+        /// shows the old cell ([`Game::old_cell`]); `moved`: whether the frame's picture reached
+        /// the screen (only such a frame counts as moving or backward, and only it is the frame
+        /// before of the next).
+        fn frame(&mut self, placed: Option<(i32, i32)>, old: bool, moved: bool) {
             self.frames += 1;
             let k = match placed {
+                None if old => {
+                    self.old_cell += 1;
+                    Some(16)
+                }
                 None => None,
                 Some((0, 0)) => {
                     self.held += 1;
@@ -8619,13 +8676,8 @@ mod tests {
                 Some(offset) => {
                     self.off_rest += 1;
                     let k = behind(offset, self.dir);
-                    match (k, self.before) {
-                        (None, _) => self.stray += 1,
-                        (Some(k), Some(b)) if b > k && b <= 16 && moved => self.moving += 1,
-                        (Some(k), Some(b)) if b < k && self.began => self.backward += 1,
-                        _ => {}
-                    }
                     if k.is_none() {
+                        self.stray += 1;
                         if moved {
                             self.before = None;
                         }
@@ -8637,6 +8689,16 @@ mod tests {
             if !moved {
                 return;
             }
+            if let (Some(k), Some(b)) = (k, self.before)
+                && k > 0
+                && b > k
+                && b <= 16
+            {
+                self.moving += 1;
+            }
+            if k.is_some_and(|k| self.began && k > self.last) {
+                self.backward += 1;
+            }
             self.before = k;
             self.began |= k.is_some_and(|k| k > 0);
             // Once the slide began, the engine's frame is the map at rest.
@@ -8645,37 +8707,56 @@ mod tests {
                 self.last = at;
             }
         }
+
+        /// The step ends (the next step, or the end of the sampling): once its slide began the
+        /// map stands at rest, else the step is unfinished.
+        fn close(&mut self) {
+            self.unfinished = self.began && self.last != 0;
+        }
     }
 
     /// The largest jump (drop of the map's offset between two display frames, [`Progress`]) a
-    /// slide at `rate` engine ms per wall ms on 60 Hz frames may make: ceil(16 · Δ / D) + 1, Δ the
-    /// engine ms a display frame runs and D the slide's 360 ms (the presentation clock moves Δ a
-    /// frame; the slide's first frame lies within Δ of its start; the offsets are rounded): 2 at
-    /// 1×, 4 at 4×, 7 at 8×.
+    /// slide at `rate` engine ms per wall ms on 60 Hz frames may make: ceil(16 · Δ / D), Δ the
+    /// engine ms a display frame runs and D the slide's 360 ms: 1 at 1×, 3 at 4×, 6 at 8× (round
+    /// 13, opus N4: round 12's + 1 was slack). The presentation clock moves Δ a frame (the
+    /// pacer's carried fraction takes up the ticks' 20 ms), and the slide's first frame lies
+    /// within Δ of its start (it starts at the engine time of a tick of that frame or the one
+    /// before, which the frame before showed), so the map moves at most 16 · Δ / D a frame; the
+    /// offsets are rounded, and round(a) − round(a − x) is an integer under x + 1, so at most
+    /// ceil(x).
     fn jump_bound(rate: f64) -> i32 {
-        (16.0 * rate * FRAME / u6_render::motion::SLIDE_MS).ceil() as i32 + 1
+        (16.0 * rate * FRAME / u6_render::motion::SLIDE_MS).ceil() as i32
     }
 
-    /// The receipts' predicate on hand-made frames (round 12): a slide at 1× ([`jump_bound`] 2)
-    /// moving 16 to 0 a pixel or so a frame passes; one drawn in 4 px steps jumps 4; one cut short
-    /// (16, 15, 14, then the engine's frame) jumps 14; one frozen has no moving frame; one run
-    /// backward or restarted after reaching rest counts backward; a frame at rest before the
-    /// slide's first frame off rest is its onset, not backward; a frame that did not reach the
-    /// screen is neither moving nor the frame before of the next.
+    /// The receipts' predicate on hand-made frames (rounds 12–13): a slide at 1× ([`jump_bound`]
+    /// 1) moving 16 to 0 a pixel or so a frame passes; one drawn in 4 px steps jumps 4; one cut
+    /// short (16, 15, 14, then the engine's frame) jumps 14; one frozen has no moving frame; one
+    /// stopped short of rest to the step's close (16, 15, 14, 14, 14) is unfinished; one run
+    /// backward or restarted after reaching rest counts backward, after an engine frame at rest
+    /// too (15, 0, the engine's, 10); a frame at rest before the slide's first frame off rest is
+    /// its onset, not backward; a frame that did not reach the screen is neither moving, nor
+    /// backward (15 shown, 16 not, 14 shown), nor the frame before of the next; an engine frame
+    /// that shows the old cell counts as 16: backward, and its drop to rest a jump. The same
+    /// cases run through the page's twin (test-web.mjs `progress`) at the start of its test.
     #[test]
     fn the_step_receipt_counts_the_jump_onset_and_frames_not_shown() {
-        let run = |frames: &[(Option<i32>, bool)]| {
+        // A frame: how far behind rest (None: the engine's frame), the old cell, shown.
+        let run_old = |frames: &[(Option<i32>, bool, bool)]| {
             let mut p = Progress::new((1, 0));
-            for &(k, moved) in frames {
-                p.frame(k.map(|k| (-k, 0)), moved);
+            for &(k, old, moved) in frames {
+                p.frame(k.map(|k| (-k, 0)), old, moved);
             }
+            p.close();
             p
+        };
+        let run = |frames: &[(Option<i32>, bool)]| {
+            run_old(&frames.iter().map(|&(k, m)| (k, false, m)).collect::<Vec<_>>())
         };
         let shown = |ks: &[Option<i32>]| ks.iter().map(|&k| (k, true)).collect::<Vec<_>>();
         let bound = jump_bound(1.0);
         assert_eq!(
             (bound, jump_bound(4.0), jump_bound(8.0)),
-            (2, 4, 7),
+            (1, 3, 6),
             "the bounds"
         );
         let smooth: Vec<Option<i32>> = (0..=22)
@@ -8687,7 +8768,12 @@ mod tests {
             .collect();
         let p = run(&shown(&smooth));
         assert!(
-            p.jump <= bound && p.moving >= 2 && p.backward == 0 && p.stray == 0,
+            p.jump <= bound
+                && p.moving >= 2
+                && p.backward == 0
+                && p.stray == 0
+                && !p.unfinished
+                && p.old_cell == 0,
             "smooth: {p:?}"
         );
         let p = run(&shown(&[
@@ -8703,10 +8789,33 @@ mod tests {
         assert_eq!(p.jump, 14, "cut short: 14");
         let p = run(&shown(&[Some(12), Some(12), Some(12)]));
         assert_eq!(p.moving, 0, "frozen: none moving");
+        let p = run(&shown(&[Some(16), Some(15), Some(14), Some(14), Some(14)]));
+        assert!(
+            p.unfinished && p.moving == 2 && p.backward == 0 && p.jump == 1,
+            "stopped short of rest: {p:?}"
+        );
         let p = run(&shown(&[Some(10), Some(12)]));
         assert_eq!(p.backward, 1, "backward");
         let p = run(&shown(&[Some(15), Some(0), Some(10)]));
         assert_eq!(p.backward, 1, "back off rest after reaching it");
+        let p = run(&shown(&[Some(15), Some(0), None, Some(10)]));
+        assert_eq!(p.backward, 1, "back off rest after the engine's frame: {p:?}");
+        let p = run(&[(Some(15), true), (Some(16), false), (Some(14), true)]);
+        assert!(
+            p.backward == 0 && p.moving == 1,
+            "a frame not shown is not backward: {p:?}"
+        );
+        let p = run_old(&[
+            (Some(15), false, true),
+            (Some(14), false, true),
+            (None, true, true),
+            (None, true, true),
+            (None, false, true),
+        ]);
+        assert!(
+            p.old_cell == 2 && p.backward == 1 && p.jump == 16 && !p.unfinished,
+            "the old cell through a foreign picture: {p:?}"
+        );
         let p = run(&shown(&[None, Some(0), Some(15), Some(14)]));
         assert!(
             p.backward == 0 && p.moving == 1 && p.jump == 1,
@@ -8738,13 +8847,19 @@ mod tests {
     /// frame, the camera of the view the RGBA frame shows ([`Game::present_slide`]'s), or none
     /// (the engine's frame), counted by [`Progress`]: off rest, at rest, moving (closer to rest
     /// along the step than on the step's frame before), backward, stray, and the jump (the
-    /// largest drop of the camera's offset between two frames, from 16 to the first). Every paced
-    /// step (the first and the last left out) slides: at least [`moving_needed`] moving frames,
-    /// none backward and none stray, and no jump over [`jump_bound`] (2 px at 1×, 4 at 4×, 7 at
-    /// 8×). A slide frozen at any offset, run backward, past rest, snapped, cut short or drawn
-    /// in steps larger than the bound has none moving, some backward or stray, or a larger jump.
-    /// Printed per speed: the mean wall ms between steps, per step the off-rest, moving and held
-    /// shares of the frames to the next step, and the largest jump of any paced step.
+    /// largest drop of the camera's offset between two frames, from 16 to the first; the engine's
+    /// frame showing the old cell, [`Game::old_cell`], counted as 16). Every paced step (the
+    /// first and the last left out) slides: at least [`moving_needed`] moving frames, none
+    /// backward and none stray, and no jump over [`jump_bound`] (1 px at 1×, 3 at 4×, 6 at 8×).
+    /// And every step's slide, the first and the last included, ends at rest by the step's close
+    /// (round 13: the next step, or for the last the frames after the release until nothing
+    /// slides or steps for a second, at most 10 s): none unfinished. A slide frozen at its start,
+    /// run backward, past rest, snapped, cut short or drawn in steps larger than the bound has
+    /// none moving, some backward or stray, or a larger jump; one frozen short of rest anywhere
+    /// after it moved (16, 15, 14 and 14 on) is unfinished. Printed per speed: the mean wall ms
+    /// between steps, per step the off-rest, moving and held shares of the frames to the next
+    /// step, the largest jump of any paced step against the bound, the unfinished steps and the
+    /// frames of the old cell.
     #[test]
     fn a_held_walk_slides_on_every_paced_step_and_its_moving_share_by_speed() {
         for speed in [1.0, 4.0, 8.0] {
@@ -8759,17 +8874,29 @@ mod tests {
             let mut steps: Vec<Progress> = Vec::new();
             let mut gaps = Vec::new();
             let mut last = None;
-            while game.clock - t0 < 6000.0 {
+            // The hold, then the frames after its release until nothing slides or steps for 60.
+            let (mut held, mut still, mut drained) = (true, 0, 0);
+            while held || (still < 60 && drained < 600) {
+                if held && game.clock - t0 >= 6000.0 {
+                    assert!(game.key_up("ArrowDown"));
+                    held = false;
+                }
+                drained += usize::from(!held);
                 game.set_clock(game.clock + FRAME);
                 let k = game.pace(FRAME);
+                let mut stepped = false;
                 for _ in 0..k {
                     game.step(20);
                     let now = game.leader_position();
                     if now != at {
                         let d = |i: usize| i32::from(now[i]) - i32::from(at[i]);
+                        if let Some(step) = steps.last_mut() {
+                            step.close();
+                        }
                         steps.push(Progress::new((d(0), d(1))));
                         at = now;
-                        if let Some(t) = last.replace(game.clock) {
+                        stepped = true;
+                        if let Some(t) = last.replace(game.clock).filter(|_| held) {
                             gaps.push(game.clock - t);
                         }
                     }
@@ -8778,13 +8905,23 @@ mod tests {
                 if k > 0 || game.sliding() {
                     game.present();
                 }
+                still = if stepped || game.sliding() { 0 } else { still + 1 };
                 let Some(step) = steps.last_mut() else {
                     continue;
                 };
                 let shown = (game.motion.shown.as_ref()).filter(|_| game.motion.drawn);
-                step.frame(shown.map(|s| s.0.camera), true);
+                step.frame(shown.map(|s| s.0.camera), game.old_cell(), true);
             }
-            assert!(game.key_up("ArrowDown"));
+            if let Some(step) = steps.last_mut() {
+                step.close();
+            }
+            let unfinished = steps.iter().filter(|s| s.unfinished).count();
+            assert_eq!(
+                unfinished,
+                0,
+                "at {speed}x every step's slide at rest by its close: {unfinished} of {} not",
+                steps.len()
+            );
             let inner = steps.get(1..steps.len().saturating_sub(1)).unwrap_or(&[]);
             assert!(
                 inner.len() >= 3,
@@ -8816,11 +8953,14 @@ mod tests {
             let gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
             let fewest = inner.iter().map(|s| s.moving).min().unwrap_or(0);
             let jump = inner.iter().map(|s| s.jump).max().unwrap_or(0);
+            let jumps: Vec<i32> = inner.iter().map(|s| s.jump).collect();
+            let old: usize = steps.iter().map(|s| s.old_cell).sum();
             println!(
                 "held 6 s at {speed}x: {} steps, a step every {gap:.0} wall ms on average; per \
                  step over the frames to the next: off rest {}, moving (closer to rest than the \
                  frame before) {}, held at rest {}; the fewest moving frames in a step {fewest} \
-                 (needed {need}); the largest jump {jump} px (bound {bound})",
+                 (needed {need}); the largest jump {jump} px (bound {bound}; per paced step \
+                 {jumps:?}); unfinished {unfinished}; frames of the old cell {old}",
                 steps.len(),
                 share(|s| s.off_rest),
                 share(|s| s.moving),

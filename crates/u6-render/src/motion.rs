@@ -34,8 +34,9 @@
 //! - **Previews** ([`Presenter::preview`], spec 20 Design 4): a scene the engine built on a copy
 //!   of its state right after the leader's step, before its own picture of the turn. The party's
 //!   slide starts there, and the preview is held, drawn at rest, until the engine publishes a
-//!   picture (or [`PREVIEW_MS`] passed): a scene of the same places lets the party stand and
-//!   slides the objects the turn moved since.
+//!   picture or its command prompt is back ([`Presenter::prompt`]), whichever comes first: a
+//!   scene of the same places lets the party stand and slides the objects the turn moved since.
+//!   No timer ends it: the hold keeps nothing past the scenes kept ([`HISTORY`]).
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -55,11 +56,6 @@ pub const MIN_FRAMES: f64 = 2.0;
 pub const SNAP_PX: f64 = 1.5 * CELL as f64;
 /// Scenes kept for the cells a slide shows and the newest scene lacks (the strip leaving the view).
 pub const HISTORY: usize = 3;
-/// How long a preview ([`Presenter::preview`]) is held, on the presentation clock, when no
-/// picture of the engine's follows it: past the 520 engine ms from a step's early picture to the
-/// turn's first picture that u6-web's start-room receipt measures, and past the bound spec 20
-/// Design 3 writes for a turn's first pick.
-pub const PREVIEW_MS: f64 = 2000.0;
 
 /// Whether slides are shown at `rate` engine ms per wall ms (`None`: Max) on a display of
 /// `interval_ms` wall ms per frame: a [`SLIDE_MS`] slide lasts `SLIDE_MS / rate` wall ms, at least
@@ -250,8 +246,9 @@ pub struct Presenter<T> {
     history: Vec<Rc<T>>,
     camera: Option<Track>,
     movers: Vec<(u16, Track)>,
-    /// The newest scene is a preview the engine has not shown yet, held until this time.
-    held: Option<f64>,
+    /// The newest scene is a preview the engine has not shown yet, held until it publishes a
+    /// picture or its prompt is back ([`Presenter::preview`]).
+    held: bool,
     /// [`Presenter::generation`].
     generation: u64,
 }
@@ -269,7 +266,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
             history: Vec::new(),
             camera: None,
             movers: Vec::new(),
-            held: None,
+            held: false,
             generation: 0,
         }
     }
@@ -277,7 +274,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
     /// Forgets every scene and slide (a new game).
     pub fn clear(&mut self) {
         self.history.clear();
-        self.end_all();
+        self.snap();
     }
 
     /// The scenes kept, newest first ([`Draw::Base`] names them by index).
@@ -285,10 +282,14 @@ impl<T: AsRef<Scene>> Presenter<T> {
         &self.history
     }
 
-    fn end_all(&mut self) {
+    /// Every slide ends at once, a held preview with them, and the scenes are kept: the platform
+    /// shows the engine's frame, and the next publication that moves something slides from the
+    /// newest scene. A new generation ([`Presenter::generation`]). Not a publication: a foreign
+    /// picture ([`Presenter::foreign`]), an open context menu (spec 17, u6-web `Game::slide_view`).
+    pub fn snap(&mut self) {
         self.camera = None;
         self.movers.clear();
-        self.held = None;
+        self.held = false;
         self.generation += 1;
     }
 
@@ -298,37 +299,42 @@ impl<T: AsRef<Scene>> Presenter<T> {
             self.camera = None;
         }
         self.movers.retain(|(_, m)| !m.done(t));
-        if self.held.is_some_and(|until| t >= until) {
-            self.held = None;
-        }
+    }
+
+    /// The engine's command prompt is back (spec 20 Design 3): the turn a held preview was made
+    /// for is over, and it ends; the slides run on. A turn whose picture of the map was the
+    /// preview's own (nothing in the shown map changed: no publication) ends its hold here.
+    pub fn prompt(&mut self) {
+        self.held = false;
     }
 
     /// A scene the engine built ahead of its picture (the early picture of the leader's step):
     /// slid to as [`Presenter::publish`] does, then held at rest until the engine publishes a
-    /// picture, at most [`PREVIEW_MS`]. Where slides are not shown it is left out, unless it snaps
+    /// picture (a scene or a foreign one) or its command prompt is back ([`Presenter::prompt`]),
+    /// whichever comes first; no timer. Where slides are not shown it is left out, unless it snaps
     /// ([`Scene::snap`]: the first scene after a load): then the presenter starts again from it,
     /// as from a publication that snaps. The engine counts a scene that snaps handed over once it
     /// queued it (u6-core `Io::break_motion` ends there), so no scene before it may stay here.
     pub fn preview(&mut self, shot: Rc<T>, time: f64, slides: bool) {
         if slides {
             self.publish(shot, time, true);
-            self.held = Some(time + PREVIEW_MS);
+            self.held = true;
         } else if (*shot).as_ref().snap {
             self.restart(shot);
         }
     }
 
     /// A publication with no scene of its own (a missile, a flash, a quake): every slide ends, so
-    /// the platform shows the engine's frame.
+    /// the platform shows the engine's frame ([`Presenter::snap`]).
     pub fn foreign(&mut self) {
-        self.end_all();
+        self.snap();
     }
 
     /// The engine published `shot`'s scene at engine time `time`; `slides`: whether slides are
     /// shown now ([`slides_shown`]).
     pub fn publish(&mut self, shot: Rc<T>, time: f64, slides: bool) {
         self.end(time);
-        self.held = None;
+        self.held = false;
         let before = (self.camera, self.movers.clone());
         let new = (*shot).as_ref();
         let follows = |prev: &Scene| {
@@ -389,7 +395,7 @@ impl<T: AsRef<Scene>> Presenter<T> {
     fn restart(&mut self, shot: Rc<T>) {
         self.history.clear();
         self.history.push(shot);
-        self.end_all();
+        self.snap();
     }
 
     /// Whether a slide runs at `t`, or a preview is held (the platform draws the plan then, else
@@ -397,14 +403,14 @@ impl<T: AsRef<Scene>> Presenter<T> {
     pub fn active(&self, t: f64) -> bool {
         self.camera.is_some_and(|c| !c.done(t))
             || self.movers.iter().any(|(_, m)| !m.done(t))
-            || self.held.is_some_and(|until| t < until)
+            || self.held
     }
 
     /// The slides as drawn at `t` (at their end once `t` passed it, until [`Presenter::end`]),
     /// and a preview held at rest; `None` when neither is.
     pub fn view(&self, t: f64) -> Option<View> {
         let idle = self.camera.is_none() && self.movers.is_empty();
-        if idle && self.held.is_none_or(|until| t >= until) || self.history.is_empty() {
+        if idle && !self.held || self.history.is_empty() {
             return None;
         }
         Some(View {
@@ -440,8 +446,8 @@ impl<T: AsRef<Scene>> Presenter<T> {
     }
 
     /// Bumped whenever what slides changes: a camera slide starts or restarts, a mover joins,
-    /// restarts or leaves the slides, the presenter starts again ([`Presenter::foreign`],
-    /// [`Presenter::clear`], a snap). A publication that only lets the slides run on (the same
+    /// restarts or leaves the slides, the slides end at once ([`Presenter::snap`]: a foreign
+    /// picture, an open context menu; [`Presenter::clear`]; a scene that snaps). A publication that only lets the slides run on (the same
     /// places: an animation, the turn's picture after its early one) keeps it, and the layers
     /// ([`Presenter::layers`]) of a generation stay those it was made with: what changed in place
     /// shows at the slide's end, in the engine's frame.
