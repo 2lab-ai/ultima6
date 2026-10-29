@@ -512,6 +512,34 @@ fn fights(s: &State, actor: usize, npc: bool) -> bool {
     npc && runs && npc::runs_combat_routine(turn_worktype(s, actor))
 }
 
+/// Port-only (spec 20 Design 4): whether the next world turn's first pick, as the scheduler makes
+/// it from `s`, is an NPC turn that runs a combat routine ([`fights`]): [`pick_actor`] again and
+/// again with a [`refill`] whenever no one near has points left, as [`world_turn`]'s loop, at most
+/// 256 refills (a debt is at most 128 points and the scheduler refills only actors of dexterity
+/// above 0 to any points). `s` is a copy (smooth motion's early picture,
+/// [`crate::gfx::motion::preview`]): the pass and the refills write it. Left out of [`world_turn`]
+/// before that pick: its bookkeeping ([`leader_bookkeeping`], [`formation`], [`go_to_schedules`],
+/// which can hand the lead over, end solo mode on the engine's `Io` or send NPCs home), the
+/// clock's minute at each refill and a swallowed pick ([`swallowed`]).
+pub(crate) fn first_pick_fights(s: &mut State) -> bool {
+    let mask = if s.map.centre.z == 0 { 0x3ff } else { 0xff };
+    let mut pick = Pick {
+        actor: -1,
+        mp: 0,
+        dex: 1,
+    };
+    for _ in 0..=256 {
+        pick_actor(s, mask, &mut pick);
+        if pick.mp > 0 {
+            let a = pick.actor as usize;
+            let wt = s.actors.worktype[a];
+            return fights(s, a, wt != 2 && wt != 1);
+        }
+        refill(s);
+    }
+    false
+}
+
 /// The worktype 0x1200b0 runs for `actor`. Its first test (0x1200ba..0x1200d4), before it saves
 /// the points and before the time-stop and level tests: a party member (status bit 0x80) who is
 /// not charmed (object status 0x04) is uncharmed (0x121bce through the thunk 0x121988,
@@ -766,6 +794,28 @@ mod tests {
         };
         pick_actor(s, 0x3ff, &mut p);
         p.actor
+    }
+
+    /// Spec 20 Design 4 (round 13): the next world turn's first pick fights only when the
+    /// scheduler would pick an NPC in a combat routine first ([`first_pick_fights`], the leader's
+    /// points spent by its step): an assaulting NPC (8) with full points behind none does; the
+    /// same one behind a loitering NPC with full points does not; with nobody's points left the
+    /// one the refill puts first does, while the leader in debt waits; in a time stop no turn
+    /// runs a routine.
+    #[test]
+    fn the_first_pick_fights_only_when_the_scheduler_picks_a_fighter_first() {
+        let first = |npcs: &[(i8, u8)], fighter: usize, leader: i8, stop: bool| {
+            let mut s = world(npcs);
+            s.actors.worktype[10 + fighter] = 8;
+            s.actors.movement_points[1] = leader as u8;
+            s.actors.timers[timer::TIME_STOP] = u8::from(stop) * 5;
+            first_pick_fights(&mut s)
+        };
+        assert!(first(&[(0, 10), (10, 10)], 1, 0, false), "the fighter first");
+        assert!(!first(&[(10, 10), (10, 10)], 1, 0, false), "a loiterer first");
+        assert!(first(&[(0, 10), (0, 9)], 0, -3, false), "after a refill");
+        assert!(!first(&[(0, 10), (0, 9)], 1, 0, false), "after a refill, the leader");
+        assert!(!first(&[(0, 10), (10, 10)], 1, 0, true), "a time stop");
     }
 
     #[test]

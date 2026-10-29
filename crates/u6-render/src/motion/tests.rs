@@ -463,8 +463,10 @@ fn a_preview_slides_at_once_is_held_until_the_engine_shows_its_places_and_then_o
         ((0, 0), None, Some((-16, 0)))
     );
     assert!(!p.active(1900.0), "no longer held");
-    // A foreign publication ends a held preview; one not followed for PREVIEW_MS lapses; none is
-    // shown where slides are not.
+    // A foreign publication ends a held preview; no time does (round 13: past the 2000 ms the
+    // timer held it before, and a minute on), the command prompt does, with the slides running
+    // on and the generation kept, and a snap does, a new generation; none is shown where slides
+    // are not.
     let mut p = Presenter::new();
     p.publish(Rc::new(start.clone()), 0.0, true);
     p.preview(Rc::new(early.clone()), 1000.0, true);
@@ -476,7 +478,32 @@ fn a_preview_slides_at_once_is_held_until_the_engine_shows_its_places_and_then_o
     let mut p = Presenter::new();
     p.publish(Rc::new(start.clone()), 0.0, true);
     p.preview(Rc::new(early.clone()), 1000.0, true);
-    assert!(p.active(1000.0 + PREVIEW_MS - 1.0) && !p.active(1000.0 + PREVIEW_MS));
+    for t in [3000.0, 61_000.0] {
+        p.end(t);
+        assert!(
+            p.active(t) && p.view(t).map(|v| v.camera) == Some((0, 0)),
+            "held at rest {t} ms on"
+        );
+    }
+    let generation = p.generation();
+    p.prompt();
+    assert!(
+        !p.active(61_000.0) && p.view(61_000.0).is_none() && p.generation() == generation,
+        "the prompt ends it"
+    );
+    let mut p = Presenter::new();
+    p.publish(Rc::new(start.clone()), 0.0, true);
+    p.preview(Rc::new(early.clone()), 1000.0, true);
+    p.prompt();
+    let v = p.view(1100.0).expect("the slide runs on past the prompt");
+    assert!(v.camera != (0, 0) && p.active(1100.0) && !p.active(1360.0));
+    let generation = p.generation();
+    p.preview(Rc::new(early.clone()), 2000.0, true);
+    p.snap();
+    assert!(
+        !p.active(2000.0) && p.view(2000.0).is_none() && p.generation() > generation,
+        "a snap ends it"
+    );
     let mut p = Presenter::new();
     p.publish(Rc::new(start), 0.0, true);
     p.preview(Rc::new(early), 1000.0, false);

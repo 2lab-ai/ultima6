@@ -204,7 +204,11 @@ pub fn keep_scene(io: &Io, scene: Scene) {
 /// snapping while a load's break is pending: the engine queued no publication with a scene since
 /// (an early picture is one, [`Io::break_motion`]). The copy is dropped; nothing with the switch
 /// off, nor in combat mode, where a fight's frames (a missile's flight, a flash) can show the
-/// party where it was before the turn's picture does.
+/// party where it was before the turn's picture does, nor (round 13) when the next world turn's
+/// first pick, found by the scheduler's own pass on the copy after its scene was read
+/// ([`crate::actors::turn::first_pick_fights`]), is an NPC turn that runs a combat routine: its
+/// frames play before the turn's refresh over the window as last published (a flight's steps,
+/// 0x151fe6, and a cast's spell), the party on its old cell.
 pub(crate) fn preview(state: &State, io: &Io) {
     if !io.motion() || state.actors.combat_mode() {
         return;
@@ -228,6 +232,9 @@ pub(crate) fn preview(state: &State, io: &Io) {
         frame: state.gfx.frame,
         hash: 0,
     };
+    if crate::actors::turn::first_pick_fights(&mut copy) {
+        return;
+    }
     io.keep_preview(Rc::new(shot));
 }
 
