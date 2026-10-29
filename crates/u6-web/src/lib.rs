@@ -5929,7 +5929,10 @@ mod tests {
     /// its last take, the fight's `b`, stands at the page clock's 0; the clock then starts at 16
     /// ms), each step after the one before to its arrival, and the first step of a travel started
     /// right after an ordinary command the prompt took (Space, a pass). The least gap of each
-    /// speed, printed.
+    /// speed, printed. The entry into clocked mode never happens in production (round 6, opus NIT
+    /// 4): the page gives `set_clock` before the first `step` of every frame (`site/app.js`), so no
+    /// take is stamped without its clock; its 160 ms holds only because `Game`'s clock starts at
+    /// 0.0, which is this test's `t = 0`.
     #[test]
     fn at_every_speed_a_travel_steps_at_most_once_a_min_step_of_the_pages_clock() {
         use u6_core::actors::travel::{End, reachable};

@@ -752,10 +752,11 @@ fn every_go_here_chosen_in_one_input_is_asked_and_the_last_walks() {
         ],
         STEP_MS,
     );
-    assert_eq!(
-        p.e.go_here_asked().asked,
-        [first, second],
-        "both choices asked, in order"
+    let asked = &p.e.go_here_asked().asked;
+    assert!(
+        *asked == [first, second],
+        "both choices asked, in order: {} asked",
+        asked.len()
     );
     assert!(
         p.e.context_menu().is_none() && p.e.travel_active(),
