@@ -7,6 +7,7 @@
 use super::*;
 use crate::{FLAG_OUTLINE, FLAG_OVERLAY};
 
+mod chunks;
 mod font;
 mod paper;
 

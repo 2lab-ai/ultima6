@@ -41,7 +41,8 @@
 //! held, also during a composition whose images alone exceed the bound); outside it, the 2×
 //! intermediate of a 4× magnification while it is made, the frame (`WIDTH·S × HEIGHT·S`
 //! words), the last composition's inputs (a [`Src`], an index and a token per screen pixel),
-//! lazily requested diagnostic glyphs, and a few words per image named so far: per tile
+//! one image dependency per 16-pixel row chunk, lazily requested diagnostic glyphs, and a few
+//! words per image named so far: per tile
 //! record up to the largest record id named (the game's records are 2048), per portrait (letter,
 //! item) and per panel bitmap (two) named. The pack's own images are the platform's ([`Pack`]);
 //! the compositor holds a reference to it.
@@ -808,7 +809,7 @@ fn symbol_cell(plane: &[Src], pixels: &[u8], (x0, y0): (usize, usize)) -> Option
 const NONE: u32 = 0;
 
 /// What one image is in the running composition.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Resolved {
     /// The HD image's token, or [`NONE`].
     token: u32,
@@ -841,6 +842,37 @@ struct Slot {
     memo: Option<(usize, u32, u64)>,
 }
 
+const CHUNK_PIXELS: usize = 16;
+const _: () = assert!(WIDTH.is_multiple_of(CHUNK_PIXELS));
+
+/// Images consulted by a row chunk, even when missing, stale or hidden by classic colour.
+/// A single dependency can be checked without visiting the chunk's unchanged pixels.
+#[derive(Clone, Copy)]
+enum ChunkImages {
+    Flat,
+    One(Kind, u16, Resolved),
+    Mixed,
+}
+
+impl ChunkImages {
+    fn record(&mut self, kind: Kind, id: u16, resolved: &Resolved) {
+        match self {
+            Self::Flat => *self = Self::One(kind, id, *resolved),
+            Self::One(k, i, previous) if (*k, *i) == (kind, id) && previous == resolved => {}
+            _ => *self = Self::Mixed,
+        }
+    }
+
+    fn unchanged(self, resolver: &mut Resolver<'_>) -> bool {
+        match self {
+            Self::Flat => true,
+            // Resolve in this composition too: refresh the image and pin its cache entry.
+            Self::One(kind, id, previous) => resolver.resolve(kind, id) == previous,
+            Self::Mixed => false,
+        }
+    }
+}
+
 /// The inputs of the last composition, per screen pixel. They also supply lazy diagnostics.
 struct Last {
     palette: [Rgb; 256],
@@ -848,6 +880,7 @@ struct Last {
     src: Vec<Src>,
     pixels: Vec<u8>,
     tokens: Vec<u32>,
+    chunks: Vec<ChunkImages>,
     /// The next composition must resolve images again, but diagnostics still describe this
     /// last published frame until that composition replaces it.
     invalidated: bool,
@@ -1041,6 +1074,7 @@ impl Compositor {
             src: vec![Src::CLASSIC; n],
             pixels: vec![0; n],
             tokens: vec![NONE; n],
+            chunks: vec![ChunkImages::Flat; n / CHUNK_PIXELS],
             invalidated: false,
         });
         last.palette = frame.palette;
@@ -1070,79 +1104,119 @@ impl Compositor {
         // The paper, resolved at the first glyph pixel that may show it.
         let mut paper: Option<Resolved> = None;
         for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let i = y * WIDTH + x;
-                let src = plane.map_or(Src::CLASSIC, |p| p[i]);
-                let index = pixels[i];
-                let classic = pal[usize::from(index)];
-                // Text is never cleared for a platform font overlay.
-                let flat = classic;
-                let mut shown = None;
-                // The place in the image shown whose HD block the pixel takes.
-                let mut at = (usize::from(src.u), usize::from(src.v));
-                if !matches!(src.kind, Kind::Classic | Kind::Glyph) && src.flags & !FLAG_MEMORY == 0
-                {
-                    if key != Some((src.kind, src.id)) {
-                        key = Some((src.kind, src.id));
-                        cur = res.resolve(src.kind, src.id);
-                    }
-                    let (u, v) = at;
-                    if cur.token != NONE && src.ver == cur.ver && u < cur.width && v < cur.height {
-                        shown = Some(cur);
-                    }
-                } else if src.kind == Kind::Glyph
-                    && src.flags & FLAG_PAPER != 0
-                    && src.flags & FLAG_INK == 0
-                {
-                    // A clear glyph pixel drawn over the paper uses the HD background only
-                    // where its colour matches the paper's there (drawn at (0, 0)). Ink stays
-                    // flat in its original colour.
-                    let p = *paper.get_or_insert_with(|| res.resolve(Kind::Bitmap, BITMAP_PAPER));
-                    let under = (p.token != NONE && x < p.width && y < p.height)
-                        .then(|| res.hd.entry(p.slot).input[y * p.width + x]);
-                    if under == Some(flat) {
-                        shown = Some(p);
-                        at = (x, y);
-                    }
-                }
-                let token = shown.map_or(NONE, |r| r.token);
-                if !full && last.src[i] == src && last.pixels[i] == index && last.tokens[i] == token
+            for x0 in (0..WIDTH).step_by(CHUNK_PIXELS) {
+                let start = y * WIDTH + x0;
+                let end = start + CHUNK_PIXELS;
+                let chunk = start / CHUNK_PIXELS;
+                if !full
+                    && last.pixels[start..end] == pixels[start..end]
+                    && plane.map_or_else(
+                        || last.src[start..end].iter().all(|&src| src == Src::CLASSIC),
+                        |src| last.src[start..end] == src[start..end],
+                    )
+                    && last.chunks[chunk].unchanged(&mut res)
                 {
                     continue;
                 }
-                last.src[i] = src;
-                last.pixels[i] = index;
-                last.tokens[i] = token;
-                dirty = [
-                    dirty[0].min(x),
-                    dirty[1].min(y),
-                    dirty[2].max(x + 1),
-                    dirty[3].max(y + 1),
-                ];
-                let o = y * s * ow + x * s;
-                match shown {
-                    None => {
-                        for r in 0..s {
-                            out[o + r * ow..o + r * ow + s].fill(flat);
+                let mut dependencies = ChunkImages::Flat;
+                for x in x0..x0 + CHUNK_PIXELS {
+                    let i = y * WIDTH + x;
+                    let src = plane.map_or(Src::CLASSIC, |p| p[i]);
+                    let index = pixels[i];
+                    // Only pixels that cannot sample an image may skip image resolution.
+                    if !full
+                        && (src.kind == Kind::Classic
+                            || src.kind == Kind::Glyph
+                                && (src.flags & FLAG_PAPER == 0 || src.flags & FLAG_INK != 0))
+                        && last.src[i] == src
+                        && last.pixels[i] == index
+                        && last.tokens[i] == NONE
+                    {
+                        continue;
+                    }
+                    let classic = pal[usize::from(index)];
+                    // Text is never cleared for a platform font overlay.
+                    let flat = classic;
+                    let mut shown: Option<&Resolved> = None;
+                    // The place in the image shown whose HD block the pixel takes.
+                    let mut at = (usize::from(src.u), usize::from(src.v));
+                    if !matches!(src.kind, Kind::Classic | Kind::Glyph)
+                        && src.flags & !FLAG_MEMORY == 0
+                    {
+                        if key != Some((src.kind, src.id)) {
+                            key = Some((src.kind, src.id));
+                            cur = res.resolve(src.kind, src.id);
+                        }
+                        // Record the branch, not just a resolve call: cur spans chunk boundaries.
+                        dependencies.record(src.kind, src.id, &cur);
+                        let (u, v) = at;
+                        if cur.token != NONE
+                            && src.ver == cur.ver
+                            && u < cur.width
+                            && v < cur.height
+                        {
+                            shown = Some(&cur);
+                        }
+                    } else if src.kind == Kind::Glyph
+                        && src.flags & FLAG_PAPER != 0
+                        && src.flags & FLAG_INK == 0
+                    {
+                        // A clear glyph pixel drawn over the paper uses the HD background only
+                        // where its colour matches the paper's there (drawn at (0, 0)). Ink stays
+                        // flat in its original colour.
+                        let p =
+                            paper.get_or_insert_with(|| res.resolve(Kind::Bitmap, BITMAP_PAPER));
+                        dependencies.record(Kind::Bitmap, BITMAP_PAPER, p);
+                        let under = (p.token != NONE && x < p.width && y < p.height)
+                            .then(|| res.hd.entry(p.slot).input[y * p.width + x]);
+                        if under == Some(flat) {
+                            shown = Some(p);
+                            at = (x, y);
                         }
                     }
-                    Some(r) => {
-                        let hd = if src.flags & FLAG_MEMORY != 0 {
-                            res.hd.grey(r.slot)
-                        } else {
-                            res.hd.entry(r.slot).hd.as_slice()
-                        };
-                        let hw = r.width * s;
-                        let b = at.1 * s * hw + at.0 * s;
-                        for k in 0..s {
-                            let from = &hd[b + k * hw..b + k * hw + s];
-                            let to = &mut out[o + k * ow..o + k * ow + s];
-                            for (d, &c) in to.iter_mut().zip(from) {
-                                *d = over(c, flat);
+                    let token = shown.map_or(NONE, |r| r.token);
+                    if !full
+                        && last.src[i] == src
+                        && last.pixels[i] == index
+                        && last.tokens[i] == token
+                    {
+                        continue;
+                    }
+                    last.src[i] = src;
+                    last.pixels[i] = index;
+                    last.tokens[i] = token;
+                    dirty = [
+                        dirty[0].min(x),
+                        dirty[1].min(y),
+                        dirty[2].max(x + 1),
+                        dirty[3].max(y + 1),
+                    ];
+                    let o = y * s * ow + x * s;
+                    match shown {
+                        None => {
+                            for r in 0..s {
+                                out[o + r * ow..o + r * ow + s].fill(flat);
+                            }
+                        }
+                        Some(r) => {
+                            let hd = if src.flags & FLAG_MEMORY != 0 {
+                                res.hd.grey(r.slot)
+                            } else {
+                                res.hd.entry(r.slot).hd.as_slice()
+                            };
+                            let hw = r.width * s;
+                            let b = at.1 * s * hw + at.0 * s;
+                            for k in 0..s {
+                                let from = &hd[b + k * hw..b + k * hw + s];
+                                let to = &mut out[o + k * ow..o + k * ow + s];
+                                for (d, &c) in to.iter_mut().zip(from) {
+                                    *d = over(c, flat);
+                                }
                             }
                         }
                     }
                 }
+                last.chunks[chunk] = dependencies;
             }
         }
         self.hd.shrink();
