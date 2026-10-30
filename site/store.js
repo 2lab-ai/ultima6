@@ -14,8 +14,10 @@
 // tools/i18n) is one record under `locale:ko`, its file's bytes, and where it came from (spec 08
 // K6: the file name the site's listing gave it) one under `locale:ko:source`, written, read and
 // removed in the same transaction as the pack: none for a dropped pack, so a kept pack never
-// carries the source of another. The page calls these one at a time (its operation queue), so
-// a read never races a write or a delete.
+// carries the source of another. The page serializes its own operations; save transfers also
+// compare their preview snapshot inside the write transaction to detect changes from other tabs.
+// Current pages also guard each Save with the epoch of their attached snapshot. Code already
+// loaded from an older release has no such guard and must be reloaded before transferring.
 
 const DB = 'ultima6-port';
 const STORE = 'files';
@@ -85,16 +87,27 @@ export async function forgetFiles() {
 
 const SAVE = 'save:';
 const SAVES = IDBKeyRange.bound(SAVE, `${SAVE}\uffff`);
+const SAVE_EPOCH = 'save-epoch';
 
 /// Writes the files ({ path, bytes }) of one Save over the stored ones, all in one transaction;
-/// `replace` drops every stored save file first (an imported savegame folder). Resolves once
-/// committed, throws when it is not.
-export async function storeSaves(files, replace = false) {
-  await run('readwrite', (s) => {
-    if (replace) s.delete(SAVES);
-    let last = null;
-    for (const { path, bytes } of files) last = s.put({ path, bytes }, SAVE + path.toLowerCase());
-    return last ?? s.count();
+/// `replace` drops every stored save file first (an imported savegame folder). Callers that
+/// attach a snapshot must pass its epoch: a replaced/deleted save invalidates older games,
+/// even if their next Save writes only one block. The comparison and writes share one tx.
+/// Resolves with { epoch } once committed; replacement starts a new epoch to adopt.
+export async function storeSaves(files, replace = false, expectedEpoch = undefined) {
+  const copy = snapshotFiles(files);
+  checkExpectedEpoch(expectedEpoch);
+  return saveTransaction('readwrite', (store, done, guard) => {
+    readSaveEpoch(store, guard, (epoch) => {
+      compareSaveEpoch(epoch, expectedEpoch);
+      const after = replace ? nextSaveEpoch(epoch) : epoch;
+      if (replace) {
+        store.delete(SAVES);
+        store.put(after, SAVE_EPOCH);
+      }
+      for (const file of copy) store.put(file, SAVE + file.path.toLowerCase());
+      done({ epoch: after });
+    });
   });
 }
 
@@ -109,9 +122,249 @@ export async function loadSaves() {
   }
 }
 
-/// Removes the saved game; resolves once the delete is committed, throws when it is not.
-export async function forgetSaves() {
-  await run('readwrite', (s) => s.delete(SAVES));
+// Save-transfer backups are deliberately outside SAVES: normal engine saves and
+// Forget saved game cannot overwrite them. Metadata is separate from payloads so
+// listing history never materializes all earlier saves at once.
+const BACKUPS = 'save-backup:';
+const BACKUP_FILES = 'save-backup-files:';
+const BACKUP_ORDER = 'save-backup-order';
+const BACKUP_RANGE = IDBKeyRange.bound(BACKUPS, `${BACKUPS}\uffff`);
+const BACKUP_ID = /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TRANSFER_PATH = /^savegame\/(?:objlist|u6sight|objblk[a-h][a-h]|objblk[a-e]i)$/;
+
+// Legacy snapshots may contain unknown names. Keep their original path and bytes
+// in backups; only a newly imported candidate must use the native allowlist.
+function snapshotFiles(files, candidate = false) {
+  if (!Array.isArray(files) || (candidate && files.length === 0)) throw new TypeError('invalid saved-game file list');
+  const seen = new Set();
+  return files.map((file) => {
+    if (!file || typeof file.path !== 'string' || !file.path || !(file.bytes instanceof Uint8Array)) {
+      throw new TypeError('invalid saved-game record');
+    }
+    const name = file.path.toLowerCase();
+    if (candidate && (!/^[\x20-\x7e]+$/.test(file.path) || !TRANSFER_PATH.test(name))) {
+      throw new TypeError('invalid imported saved-game path');
+    }
+    if (seen.has(name)) throw new TypeError('duplicate saved-game path');
+    seen.add(name);
+    return { path: candidate ? name : file.path, bytes: new Uint8Array(file.bytes) };
+  }).sort((a, b) => {
+    const x = a.path.toLowerCase(), y = b.path.toLowerCase();
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+}
+
+function sameSave(a, b) {
+  return a.length === b.length && a.every((file, i) => file.path.toLowerCase() === b[i].path.toLowerCase()
+    && file.bytes.length === b[i].bytes.length && file.bytes.every((byte, j) => byte === b[i].bytes[j]));
+}
+
+function checkExpectedEpoch(epoch) {
+  if (epoch !== undefined && (!Number.isSafeInteger(epoch) || epoch < 0)) {
+    throw new TypeError('invalid saved-game epoch');
+  }
+}
+
+function readSaveEpoch(store, guard, done) {
+  const request = store.get(SAVE_EPOCH);
+  request.onsuccess = guard(() => {
+    const epoch = request.result === undefined ? 0 : request.result;
+    checkExpectedEpoch(epoch);
+    done(epoch);
+  });
+}
+
+function compareSaveEpoch(epoch, expectedEpoch) {
+  if (expectedEpoch !== undefined && epoch !== expectedEpoch) {
+    const error = new Error('the saved game was replaced; reload before saving');
+    error.name = 'SaveConflictError';
+    throw error;
+  }
+}
+
+function nextSaveEpoch(epoch) {
+  if (epoch === Number.MAX_SAFE_INTEGER) throw new RangeError('saved-game epoch exhausted');
+  return epoch + 1;
+}
+
+// All request callbacks are synchronous. In particular no hashing/await can let
+// the transaction commit between its comparison, backup and replacement.
+async function saveTransaction(mode, work) {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, mode);
+      let result, failure;
+      const fail = (error) => {
+        failure ??= error;
+        try { tx.abort(); } catch { /* A failed request may already have aborted it. */ }
+      };
+      const guard = (fn) => (event) => {
+        try { fn(event); } catch (error) { fail(error); }
+      };
+      tx.oncomplete = () => resolve(result);
+      tx.onabort = () => reject(failure ?? tx.error ?? new Error('the storage transaction was aborted'));
+      tx.onerror = (event) => { failure ??= event.target.error ?? tx.error; };
+      try { work(tx.objectStore(STORE), (value) => { result = value; }, guard); }
+      catch (error) { fail(error); }
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function readCurrentSave(store, guard, done) {
+  const files = [];
+  const request = store.openCursor(SAVES);
+  request.onsuccess = guard(() => {
+    const cursor = request.result;
+    if (!cursor) { done(snapshotFiles(files)); return; }
+    const file = cursor.value;
+    if (typeof file?.path !== 'string' || cursor.key !== SAVE + file.path.toLowerCase()) {
+      throw new TypeError('inconsistent saved-game record');
+    }
+    files.push(file);
+    cursor.continue();
+  });
+}
+
+/// The exact saved-game snapshot, with private byte copies. Unlike loadSaves,
+/// unavailable or malformed storage rejects; it must never appear to be empty. The epoch and
+/// files are read in one transaction, so a game can retain ownership of that exact snapshot.
+export async function readSaveSnapshot() {
+  return saveTransaction('readonly', (store, done, guard) => {
+    readSaveEpoch(store, guard, (epoch) => {
+      readCurrentSave(store, guard, (files) => done({ files, epoch }));
+    });
+  });
+}
+
+/// Atomically compare the preview snapshot, preserve the previous save, and
+/// install a validated candidate. A change from another tab rejects rather than
+/// replacing unpreviewed progress. Identical imports write nothing at all.
+export async function replaceSavesWithBackup(files, expectedFiles, expectedEpoch = undefined) {
+  const candidate = snapshotFiles(files, true);
+  const expected = snapshotFiles(expectedFiles);
+  checkExpectedEpoch(expectedEpoch);
+  return saveTransaction('readwrite', (store, done, guard) => {
+    readSaveEpoch(store, guard, (epoch) => {
+      compareSaveEpoch(epoch, expectedEpoch);
+      readCurrentSave(store, guard, (current) => {
+        if (!sameSave(current, expected)) {
+          const error = new Error('the saved game changed after the preview');
+          error.name = 'SaveConflictError';
+          throw error;
+        }
+        if (sameSave(candidate, current)) { done({ changed: false, backupId: null, epoch }); return; }
+        const after = nextSaveEpoch(epoch);
+        const replace = (backupId) => {
+          store.delete(SAVES);
+          for (const file of candidate) store.put(file, SAVE + file.path);
+          store.put(after, SAVE_EPOCH);
+          done({ changed: true, backupId, epoch: after });
+        };
+        if (current.length === 0) { replace(null); return; }
+        const order = store.get(BACKUP_ORDER);
+        order.onsuccess = guard(() => {
+          const before = order.result ?? 0;
+          if (!Number.isSafeInteger(before) || before < 0 || before === Number.MAX_SAFE_INTEGER) {
+            throw new TypeError('invalid backup order');
+          }
+          const sequence = before + 1;
+          const createdAt = Date.now();
+          const id = `${createdAt}-${crypto.randomUUID()}`;
+          const totalBytes = current.reduce((n, file) => n + file.bytes.length, 0);
+          const metadata = { id, createdAt, sequence, fileCount: current.length, totalBytes };
+          checkBackupMetadata(metadata, id);
+          // add, never put: an identity collision aborts instead of replacing history.
+          store.add(metadata, BACKUPS + id);
+          for (const [i, file] of current.entries()) store.add(file, backupFileKey(id, i));
+          store.put(sequence, BACKUP_ORDER);
+          replace(id);
+        });
+      });
+    });
+  });
+}
+
+const backupFileKey = (id, index) => `${BACKUP_FILES}${id}:${String(index).padStart(12, '0')}`;
+
+function checkBackupMetadata(value, id) {
+  if (!value || !BACKUP_ID.test(id) || value.id !== id || !Number.isSafeInteger(value.createdAt)
+      || value.createdAt < 0 || !id.startsWith(`${value.createdAt}-`)
+      || !Number.isSafeInteger(value.sequence) || value.sequence < 1
+      || !Number.isSafeInteger(value.fileCount) || value.fileCount < 1
+      || !Number.isSafeInteger(value.totalBytes) || value.totalBytes < 0) {
+    throw new TypeError('invalid saved-game backup metadata');
+  }
+  return value;
+}
+
+/// Backup descriptions only, newest first even if two were made in the same
+/// millisecond or the browser's wall clock moved backwards. No pruning occurs.
+export async function listSaveBackups() {
+  return saveTransaction('readonly', (store, done, guard) => {
+    const rows = [];
+    const request = store.openCursor(BACKUP_RANGE);
+    request.onsuccess = guard(() => {
+      const cursor = request.result;
+      if (!cursor) {
+        rows.sort((a, b) => b.sequence - a.sequence);
+        done(rows.map(({ id, createdAt, fileCount, totalBytes }) => ({ id, createdAt, fileCount, totalBytes })));
+        return;
+      }
+      rows.push(checkBackupMetadata(cursor.value, cursor.key.slice(BACKUPS.length)));
+      cursor.continue();
+    });
+  });
+}
+
+/// Load one immutable backup with its original paths. Missing, incomplete or
+/// unreadable backups reject instead of returning an apparently empty save.
+export async function loadSaveBackup(id) {
+  if (typeof id !== 'string' || !BACKUP_ID.test(id)) throw new TypeError('invalid saved-game backup id');
+  return saveTransaction('readonly', (store, done, guard) => {
+    const metadataRequest = store.get(BACKUPS + id);
+    metadataRequest.onsuccess = guard(() => {
+      if (metadataRequest.result === undefined) {
+        const error = new Error('the saved-game backup does not exist');
+        error.name = 'SaveBackupNotFoundError';
+        throw error;
+      }
+      const metadata = checkBackupMetadata(metadataRequest.result, id);
+      const prefix = `${BACKUP_FILES}${id}:`, files = [];
+      const request = store.openCursor(IDBKeyRange.bound(prefix, `${prefix}\uffff`));
+      request.onsuccess = guard(() => {
+        const cursor = request.result;
+        if (!cursor) {
+          const copy = snapshotFiles(files);
+          if (copy.length !== metadata.fileCount || copy.reduce((n, f) => n + f.bytes.length, 0) !== metadata.totalBytes) {
+            throw new TypeError('incomplete saved-game backup');
+          }
+          done(copy);
+          return;
+        }
+        if (cursor.key !== backupFileKey(id, files.length)) throw new TypeError('inconsistent saved-game backup');
+        files.push(cursor.value);
+        cursor.continue();
+      });
+    });
+  });
+}
+
+/// Removes the active save and invalidates games attached before the deletion. Backups
+/// remain immutable. The caller may adopt the returned epoch for its explicit new start.
+export async function forgetSaves(expectedEpoch = undefined) {
+  checkExpectedEpoch(expectedEpoch);
+  return saveTransaction('readwrite', (store, done, guard) => {
+    readSaveEpoch(store, guard, (epoch) => {
+      compareSaveEpoch(epoch, expectedEpoch);
+      const after = nextSaveEpoch(epoch);
+      store.delete(SAVES);
+      store.put(after, SAVE_EPOCH);
+      done({ epoch: after });
+    });
+  });
 }
 
 const PACK = 'hd:pack';

@@ -52,6 +52,17 @@ engine build or language restart are marked for the next start so unsaved progre
 Game text always uses pixel glyphs, including the Korean bitmap font. HD art is a separate
 setting and remains available. See [the settings contract](.prd/24-ingame-settings.md).
 
+To move a saved journey between browsers, use **Settings → Files → Export saved game**.
+The ZIP contains only the last normal game save, including its remembered sight; it does not
+save current unsaved play or include original game files, artwork packs or voice models.
+**Import saved game** checks the ZIP before asking to back up the browser's current save and
+start a new session. Cancel keeps the current game unchanged. You can select and export an
+immutable pre-import backup in the same Files menu. A save can be imported before the original
+files are opened; those original files are still required to play. See [save transfer](.prd/25-save-transfer.md).
+New pages guard normal saves with the storage epoch read at startup. Import, deletion and
+legacy full replacement advance it, so a stale page must reload before saving. Close other
+game tabs before import: an already open older version does not implement this guard.
+
 ## How it was built
 
 1. **Disk intake** — flux dump → HFE → Amiga MFM → ADF → AmigaDOS OFS → PowerPacker (`crates/u6-intake`).

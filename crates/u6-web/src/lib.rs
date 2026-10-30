@@ -84,7 +84,10 @@
 //! [`MAX_SAVE_BYTES`] for the stored save (a file over them is left out, and the start's report
 //! says so).
 
+mod save_transfer;
 mod zipscan;
+
+pub use save_transfer::{SaveTransfer, max_save_archive_bytes};
 
 use std::collections::BTreeMap;
 use u6_render::motion::footsteps::{Footsteps, Pattern, Pose};
@@ -4615,7 +4618,7 @@ mod tests {
     /// sound machine starts and renders.
     #[test]
     #[allow(clippy::disallowed_methods)] // tests may read files
-    fn a_save_listed_and_laid_over_restarts_there() {
+    fn save_transfer_a_save_listed_and_laid_over_restarts_there() {
         if !u6_testkit::archive().exists() {
             eprintln!("skipped: the archive (U6_ARCHIVE) not present");
             return;
@@ -4656,6 +4659,20 @@ mod tests {
             })
             .collect();
         assert!(files.iter().any(|(p, _)| p == "savegame/objlist"));
+        let saved_state = game.engine.as_ref().unwrap().state().clone();
+        let mut transfer = SaveTransfer::new();
+        for (path, bytes) in &files {
+            transfer
+                .insert(path, bytes)
+                .expect("saved file passes transfer bounds");
+        }
+        transfer
+            .check()
+            .expect("normal save passes transfer validation");
+        assert!(
+            *game.engine.as_ref().unwrap().state() == saved_state,
+            "detached transfer validation leaves all live state, including RNG and coordinates, unchanged"
+        );
         game.save_committed(1);
         assert!(game.save_collect() == 0, "nothing new after the commit");
         let kept: Vec<(String, Vec<u8>)> = (0..game.kept_count())
@@ -4665,16 +4682,165 @@ mod tests {
         for (path, bytes) in &kept {
             again.collect(path, bytes.clone()).quiet();
         }
-        for (path, bytes) in files {
-            again.load_save(&path, bytes);
+        for i in 0..transfer.count() {
+            assert!(again.load_save(
+                &transfer.file_path(i).quiet(),
+                transfer.file_bytes(i).quiet()
+            ));
         }
         again.boot(1, true).quiet();
+        // Boot constructs game_main's future. Its first poll loads the object region and
+        // links inventories; compare at the first normal input boundary, before any command.
+        for _ in 0..1000 {
+            if again.command_prompt() {
+                break;
+            }
+            again.step(16);
+            again.present();
+        }
+        assert!(
+            again.command_prompt(),
+            "restored game reaches its first command prompt"
+        );
         assert!(again.save_files() == n);
         assert!(
             again.game_files() == game.game_files(),
             "the save is not a game file"
         );
         assert!(again.leader_position() == moved);
+        {
+            let restored = again.engine.as_ref().unwrap().state();
+            assert!(
+                restored.actors.party == saved_state.actors.party,
+                "party roster restored"
+            );
+            assert!(
+                restored.actors.attrs.hp == saved_state.actors.attrs.hp,
+                "hit points restored"
+            );
+            assert!(
+                restored.actors.attrs.level == saved_state.actors.attrs.level,
+                "levels restored"
+            );
+            assert!(
+                restored.actors.quest_flag == saved_state.actors.quest_flag,
+                "quest state restored"
+            );
+            let inventory = |s: &u6_core::State| {
+                let o = &s.objects;
+                // blocks::pack_record replaces container parents with file-record indices;
+                // blocks::unpack assigns free runtime slots and remaps those parent links.
+                // Compare the complete owner/container forest, not those transient indices.
+                #[derive(PartialEq, Eq, PartialOrd, Ord)]
+                struct Item(u8, u16, u16, Vec<Item>);
+                #[derive(PartialEq, Eq, PartialOrd, Ord)]
+                enum Owner {
+                    Actor(usize, Vec<Item>),
+                    World([u8; 3], Item),
+                }
+                fn item(
+                    o: &u6_core::objects::Objects,
+                    at: usize,
+                    children: &BTreeMap<usize, Vec<usize>>,
+                    seen: &mut std::collections::BTreeSet<usize>,
+                ) -> Item {
+                    if o.obj_status[at] & 0x18 != 0 {
+                        assert!(
+                            seen.insert(at),
+                            "inventory graph has no repeated or cyclic node"
+                        );
+                    }
+                    let mut nested: Vec<_> = children
+                        .get(&at)
+                        .into_iter()
+                        .flatten()
+                        .map(|&child| item(o, child, children, seen))
+                        .collect();
+                    nested.sort_unstable();
+                    Item(o.obj_status[at], o.type_frame[at], o.qq[at], nested)
+                }
+                let items: std::collections::BTreeSet<_> = (0..o.type_frame.len())
+                    .filter(|&i| o.type_frame[i] != 0 && o.obj_status[i] & 0x18 != 0)
+                    .collect();
+                let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for &i in &items {
+                    let parent =
+                        usize::try_from(o.parent(i as i16)).expect("inventory parent exists");
+                    assert!(parent < o.type_frame.len(), "inventory parent is in bounds");
+                    children.entry(parent).or_default().push(i);
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                let mut forest = Vec::new();
+                for (&parent, owned) in &children {
+                    if items.contains(&parent) {
+                        continue;
+                    }
+                    if parent < u6_core::objects::ACTOR_SLOTS {
+                        let mut trees: Vec<_> = owned
+                            .iter()
+                            .map(|&i| item(o, i, &children, &mut seen))
+                            .collect();
+                        trees.sort_unstable();
+                        forest.push(Owner::Actor(parent, trees));
+                    } else {
+                        assert!(o.type_frame[parent] != 0, "world container exists");
+                        forest.push(Owner::World(
+                            o.location[parent].to_packed(),
+                            item(o, parent, &children, &mut seen),
+                        ));
+                    }
+                }
+                assert!(
+                    seen == items,
+                    "every inventory and contained item participates in the graph"
+                );
+                forest.sort_unstable();
+                let (actors, world): (Vec<_>, Vec<_>) = forest
+                    .into_iter()
+                    .partition(|owner| matches!(owner, Owner::Actor(..)));
+                // The requirement is the party's equipment and nested inventory. Other
+                // NPC/world-container roots can differ with the region loaded at restart.
+                let mut party = Vec::new();
+                for &actor in s
+                    .actors
+                    .party
+                    .members
+                    .iter()
+                    .take(usize::from(s.actors.party.size))
+                {
+                    let at = usize::from(actor);
+                    let mut visited = std::collections::BTreeSet::new();
+                    let mut trees: Vec<_> = children
+                        .get(&at)
+                        .into_iter()
+                        .flatten()
+                        .map(|&i| item(o, i, &children, &mut visited))
+                        .collect();
+                    trees.sort_unstable();
+                    party.push(Owner::Actor(at, trees));
+                }
+                party.sort_unstable();
+                (party, actors, world)
+            };
+            let saved_inventory = inventory(&saved_state);
+            let restored_inventory = inventory(&restored);
+            eprintln!(
+                "save transfer inventory graph: party_equal={} all_actor_roots_equal={} world_roots_equal={}",
+                restored_inventory.0 == saved_inventory.0,
+                restored_inventory.1 == saved_inventory.1,
+                restored_inventory.2 == saved_inventory.2,
+            );
+            assert!(
+                restored_inventory.0 == saved_inventory.0,
+                "party equipment and nested inventory graph restored"
+            );
+            assert!(
+                restored_inventory == saved_inventory,
+                "all actor inventories and world container graphs restored"
+            );
+            // RNG is not in the original save format; no equality across restart is claimed.
+        }
+        eprintln!("save transfer real-data roundtrip: ran; state checks passed");
         let mut fresh = Game::new();
         for (path, bytes) in kept {
             fresh.collect(&path, bytes).quiet();

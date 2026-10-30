@@ -28,6 +28,8 @@ button, a, .file-choice { transition: background-color 150ms ease, border-color 
 .wordmark span { margin: 0 8px; color: var(--muted); }
 .source-link { display: inline-flex; align-items: center; min-height: 44px; text-decoration: none; color: var(--muted); font-size: 14px; white-space: nowrap; }
 .source-link:hover { color: var(--ink); }
+.save-import-start { margin-top: 12px; padding: 8px 0; min-height: 44px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 14px; text-decoration: underline; text-underline-offset: .25em; }
+.save-import-start:hover { color: var(--ink); background: transparent; }
 #launcher { display: grid; grid-template-columns: 1.2fr 1fr; align-items: center; gap: 64px; min-height: 520px; padding: 80px 0; }
 .edition { margin: 0 0 16px; font: 12px/1.5 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--muted); }
 h1 { margin: 0; font-size: clamp(72px, 8vw, 112px); font-weight: 500; line-height: 1; letter-spacing: -.065em; }
