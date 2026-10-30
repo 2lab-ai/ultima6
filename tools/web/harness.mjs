@@ -197,6 +197,10 @@ export function pageHooks() {
 const STORE_WRAPPER = `
 import * as real from './store.js?real';
 export const collect = real.collect;
+export const readSaveSnapshot = real.readSaveSnapshot;
+export const replaceSavesWithBackup = real.replaceSavesWithBackup;
+export const listSaveBackups = real.listSaveBackups;
+export const loadSaveBackup = real.loadSaveBackup;
 const log = (e) => window.__log.push(e);
 export async function saveFiles(files) {
   log('save:start'); await window.__gate('save');
@@ -211,16 +215,16 @@ export async function forgetFiles() {
   if (window.__fail.has('forget')) { log('forget:fail'); throw new Error('test: storage refused the delete'); }
   await real.forgetFiles(); log('forget:end');
 }
-export async function storeSaves(files, replace) {
+export async function storeSaves(files, replace, expectedEpoch) {
   log('saves:store:start:' + files.length); await window.__gate('saves');
-  await real.storeSaves(files, replace); log('saves:store:end');
+  const saved = await real.storeSaves(files, replace, expectedEpoch); log('saves:store:end'); return saved;
 }
 export async function loadSaves() {
   const files = await real.loadSaves(); log('saves:load:' + files.length); return files;
 }
-export async function forgetSaves() {
+export async function forgetSaves(expectedEpoch) {
   log('saves:forget:start'); await window.__gate('saves-forget');
-  await real.forgetSaves(); log('saves:forget:end');
+  const removed = await real.forgetSaves(expectedEpoch); log('saves:forget:end'); return removed;
 }
 export async function storePack(bytes) {
   log('pack:store:start'); await window.__gate('pack-store');

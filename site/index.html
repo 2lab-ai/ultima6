@@ -34,10 +34,13 @@
           </label>
           <p id="file-formats" class="file-formats" data-i18n="fileFormats">ZIP, HFE or ADF · You can also drop files here.</p>
           <p id="file-privacy" class="file-privacy" data-i18n="filePrivacy">Files stay in this browser. Your saved journey returns on your next visit.</p>
+          <button id="save-import-start" type="button" class="save-import-start" disabled data-i18n="importSavedGame">Import saved game</button>
+          <p id="save-import-note" class="file-privacy" role="status" hidden></p>
         </section>
         <p class="loading-label" data-i18n="loadingLibrary">Preparing your game…</p>
       </div>
     </section>
+    <input id="save-picker" type="file" accept=".zip,application/zip" hidden aria-label="Choose an Ultima VI saved game ZIP" data-i18n-label="savePickerLabel">
     <section id="game-stage" aria-label="Ultima VI">
     <div id="screen-box">
       <div id="game-chrome">

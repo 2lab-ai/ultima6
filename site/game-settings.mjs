@@ -32,7 +32,8 @@ const inside = (x,y,r) => x>=r[0] && y>=r[1] && x<r[0]+r[2] && y<r[1]+r[3];
 
 export function createGameSettings({ canvas, language, sections, onOpen, onClose, onChange, onAction }) {
   let open=false, section='display', page=0, focused='close', pressed=null, items=[], hangul=null, fontState='loading';
-  let modal=null, modalPage=0, notice='', savedStyle=null, backdrop=null, patch=null, patchRect=null, stageDisplay=null;
+  let modal=null, confirmationOwner=null, modalPage=0, notice='', busy=false, savedStyle=null, backdrop=null, patch=null, patchRect=null, stageDisplay=null;
+  const busyOwners=new Set();
   const stage=document.getElementById('game-stage');
   const entryControl=document.getElementById('game-settings-open')??document.createElement('button');
   if(!entryControl.isConnected){entryControl.id='game-settings-open';entryControl.type='button';canvas.before(entryControl);}
@@ -95,6 +96,7 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
     const {w}=geometry();return [Math.max(0,w-44),0,44,44];
   }
   function button(ctx,id,title,rect,extra={}) {
+    extra={...extra,disabled:busy||extra.disabled};
     items.push({id,label:title,value:extra.value??'',valueLabel:extra.valueLabel??'',options:extra.options??[],disabled:!!extra.disabled,rect});
     ctx.fillStyle=focused===id?COLORS.selected:COLORS.background;ctx.fillRect(...rect);
     ctx.strokeStyle=focused===id?COLORS.ink:COLORS.line;ctx.lineWidth=1;ctx.strokeRect(rect[0]+.5,rect[1]+.5,rect[2]-1,rect[3]-1);
@@ -106,6 +108,11 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
     mirror.replaceChildren();mirror.hidden=!open;
     if(!open)return;
     mirror.setAttribute('role','dialog');mirror.setAttribute('aria-modal','true');mirror.setAttribute('aria-label',label('Settings — game paused','설정 — 게임 일시정지'));
+    if(modal){
+      const heading=document.createElement('h2');heading.id='game-settings-modal-title';heading.textContent=modal.title;
+      const description=document.createElement('p');description.id='game-settings-modal-description';description.textContent=modal.body;
+      mirror.append(heading,description);mirror.setAttribute('aria-labelledby',heading.id);mirror.setAttribute('aria-describedby',description.id);
+    }else{mirror.removeAttribute('aria-labelledby');mirror.removeAttribute('aria-describedby');}
     for(const item of items) {
       const b=document.createElement('button');b.type='button';b.id=`game-setting-${item.id}`;b.dataset.settingId=item.id;b.disabled=item.disabled;b.tabIndex=item.id===focused?0:-1;
       if(item.id.startsWith('nav-'))b.setAttribute('aria-current',item.value==='active'?'page':'false');
@@ -136,8 +143,11 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
     button(ctx,'close',label('Close','닫기'),[right-92,8,92,44]);
     const categories=[['display',label('View','화면')],['play',label('Play','진행')],['audio',label('Audio','소리')],['files',label('Files','파일')]];
     if(modal) {
+      const accept=modal.acceptLabel??label('Delete','삭제');
+      const acceptWidth=Math.max(112,measure(accept)+24);
+      const stacked=modal.kind!=='terms'&&acceptWidth+120>contentWidth;
       text(ctx,modal.title,margin,70,COLORS.ink,2,contentWidth);
-      const lines=wrap(modal.body,contentWidth,2), capacity=Math.max(1,Math.floor((h-(modal.kind==='terms'?264:214))/22));
+      const lines=wrap(modal.body,contentWidth,2), capacity=Math.max(1,Math.floor((h-(modal.kind==='terms'?264:stacked?266:214))/22));
       const pages=Math.max(1,Math.ceil(lines.length/capacity));modalPage=Math.min(modalPage,pages-1);
       for(const [i,line]of lines.slice(modalPage*capacity,(modalPage+1)*capacity).entries())text(ctx,line,margin,100+i*22,COLORS.muted,2,contentWidth);
       if(modal.kind==='terms') {
@@ -146,19 +156,20 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
         button(ctx,'terms-decline',label('Back','뒤로'),[margin,h-54,100,44]);
         button(ctx,'terms-accept',label('Agree & load','동의 후 받기'),[right-176,h-54,176,44]);
       } else {
-        button(ctx,'confirm-cancel',label('Cancel','취소'),[margin,h-54,112,44]);
-        button(ctx,'confirm-accept',label('Delete','삭제'),[right-112,h-54,112,44]);
+        button(ctx,'confirm-cancel',label('Cancel','취소'),[margin,h-54,stacked?contentWidth:112,44]);
+        button(ctx,'confirm-accept',accept,stacked?[margin,h-106,contentWidth,44]:[right-acceptWidth,h-54,acceptWidth,44],{disabled:modal.pending});
       }
       if(pages>1) {
-        button(ctx,'terms-previous','<',[right-112,h-106,48,44],{disabled:modalPage===0});
-        button(ctx,'terms-next','>',[right-48,h-106,48,44],{disabled:modalPage===pages-1});
-        text(ctx,`${modalPage+1}/${pages}`,margin,h-91,COLORS.muted,2);
+        const y=h-(stacked?158:106);
+        button(ctx,'terms-previous','<',[right-112,y,48,44],{disabled:modalPage===0});
+        button(ctx,'terms-next','>',[right-48,y,48,44],{disabled:modalPage===pages-1});
+        text(ctx,`${modalPage+1}/${pages}`,margin,y+15,COLORS.muted,2);
       }
     } else {
       const tabWidth=(contentWidth-18)/4;
       for(const [i,[id,title]]of categories.entries())button(ctx,`nav-${id}`,title,[margin+i*(tabWidth+6),64,tabWidth,44],{value:id===section?'active':'',tab:true});
       const rows=sections(section).map(item=>{
-        const stack=!!item.valueLabel&&measure(item.label)+measure(item.valueLabel)+48>contentWidth;
+        const stack=!!item.valueLabel&&(item.valueLabel.includes('\n')||measure(item.label)+measure(item.valueLabel)+48>contentWidth);
         const valueLines=stack?wrap(item.valueLabel,contentWidth-24,2):[];
         return {...item,stack,valueLines,height:stack?(valueLines.length>1?84:64):48};
       });
@@ -188,7 +199,8 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
   function saveEntry() {}
   function refresh(){restore();if(open)paint();else{saveEntry();paint();}}
   function show(which='display') {
-    if(open){section=which;page=0;modal=null;refresh();return;}
+    if(busy)return;
+    if(open){cancelModal();section=which;page=0;refresh();return;}
     restore();backdrop=copyCanvas();if(stage){stageDisplay=stage.style.display;stage.style.display='block';}open=true;section=which;page=0;modal=null;notice='';focused='close';
     savedStyle={height:canvas.style.height,aspectRatio:canvas.style.aspectRatio,imageRendering:canvas.style.imageRendering};
     const box=canvas.getBoundingClientRect();const height=Math.max(320,Math.min(560,window.innerHeight-Math.max(0,box.top)-12));
@@ -197,24 +209,33 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
     onOpen();canvas.focus({preventScroll:true});canvas.scrollIntoView({block:'nearest'});paint();
   }
   function hide() {
-    if(!open)return;
-    restore();open=false;const declined=modal?.kind==='terms';modal=null;if(declined)onAction('terms-decline');Object.assign(canvas.style,savedStyle);savedStyle=null;backdrop=null;if(stage)stage.style.display=stageDisplay;
+    if(!open||busy)return;
+    restore();open=false;cancelModal();Object.assign(canvas.style,savedStyle);savedStyle=null;backdrop=null;if(stage)stage.style.display=stageDisplay;
     document.body.dataset.settings='closed';mirror.hidden=true;canvas.setAttribute('aria-label',label('Ultima VI. F10 opens settings.','울티마 VI. F10으로 설정 열기.'));
     onClose();canvas.focus({preventScroll:true});if(!patch){saveEntry();paint();}
   }
   async function activate(id,direction=1) {
+    if(busy)return;
     const item=items.find(i=>i.id===id);if(item?.disabled)return;
     focused=id;
     if(id==='close'){hide();return;}
-    if(id.startsWith('nav-')){section=id.slice(4);page=0;notice='';modal=null;}
+    if(id.startsWith('nav-')){cancelModal();section=id.slice(4);page=0;notice='';}
     else if(id==='previous')page=Math.max(0,page-1);
     else if(id==='next')page++;
     else if(id==='terms-previous')modalPage=Math.max(0,modalPage-1);
     else if(id==='terms-next')modalPage++;
-    else if(id==='terms-decline'||id==='confirm-cancel'){const kind=modal?.kind;modal=null;if(kind==='terms')onAction('terms-decline');}
+    else if(id==='terms-decline'||id==='confirm-cancel'){cancelModal();}
     else if(id==='terms-license'||id==='terms-notice')onAction(id);
     else if(id==='terms-accept'){modal=null;const result=await onAction(id);if(typeof result==='string')notice=result;}
-    else if(id==='confirm-accept'){const action=modal?.action;modal=null;notice=label('Applying...','적용 중...');refresh();const result=await onAction(action);if(typeof result==='string')notice=result;}
+    else if(id==='confirm-accept'){
+      const current=modal;if(!current||current.pending)return;
+      current.pending=true;confirmationOwner=current;
+      if(!current.keepPending)modal=null;
+      notice=label('Applying...','적용 중...');
+      const release=current.lockOnAccept?lock():()=>{};refresh();
+      try {const result=await onAction(current.action);if(confirmationOwner===current){modal=null;confirmationOwner=null;if(typeof result==='string')notice=result;}}
+      finally {release();}
+    }
     else if(item?.options.length) {
       const index=item.options.findIndex(o=>o.value===item.value);
       const next=item.options[(index+direction+item.options.length)%item.options.length];
@@ -225,10 +246,11 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
     if(open)refresh();
   }
   function key(e) {
+    if(open&&busy){e.preventDefault();return true;}
     if(e.key==='F10'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){e.preventDefault();if(!e.repeat)open?hide():show();return true;}
     if(!open)return false;
     if(e.metaKey||e.ctrlKey||e.altKey)return true;
-    if(e.key==='Escape'){e.preventDefault();if(modal){const kind=modal.kind;modal=null;if(kind==='terms')onAction('terms-decline');refresh();}else hide();return true;}
+    if(e.key==='Escape'){e.preventDefault();if(modal){cancelModal();refresh();}else hide();return true;}
     const available=items.filter(i=>!i.disabled);let at=available.findIndex(i=>i.id===focused);
     if(['Tab','ArrowDown','ArrowUp'].includes(e.key)) {
       e.preventDefault();const d=e.key==='ArrowUp'||(e.key==='Tab'&&e.shiftKey)?-1:1;
@@ -249,11 +271,19 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
     if(hit&&focused!==hit.id){focused=hit.id;refresh();}
     return true;
   }
-  function wheel(e){if(!open)return false;e.preventDefault();if(e.deltaY!==0){if(modal)modalPage=Math.max(0,modalPage+Math.sign(e.deltaY));else page=Math.max(0,page+Math.sign(e.deltaY));refresh();}return true;}
-  function confirm(title,body,action){modal={kind:'confirm',title,body,action};modalPage=0;focused='confirm-cancel';refresh();}
-  function terms(title,body){if(!open)show('audio');modal={kind:'terms',title,body};modalPage=0;focused='terms-decline';refresh();}
+  function wheel(e){if(!open)return false;e.preventDefault();if(!busy&&e.deltaY!==0){if(modal)modalPage=Math.max(0,modalPage+Math.sign(e.deltaY));else page=Math.max(0,page+Math.sign(e.deltaY));refresh();}return true;}
+  // Each asynchronous operation releases only its own lease. Completion of a cancelled
+  // confirmation must not unlock a newer confirmation or an atomic storage operation.
+  function lock(message){
+    const owner=Symbol();busyOwners.add(owner);busy=true;
+    if(message){notice=message;if(modal)modal.body=message;}if(open)refresh();
+    return ()=>{if(!busyOwners.delete(owner))return;busy=busyOwners.size>0;if(open)refresh();};
+  }
+  function cancelModal(){const old=modal;modal=null;confirmationOwner=null;if(old?.kind==='terms')onAction('terms-decline');else if(old?.cancelAction){const result=onAction(old.cancelAction);if(typeof result==='string')notice=result;}}
+  function confirm(title,body,action,{acceptLabel,cancelAction,lockOnAccept=false,keepPending=false}={}){if(busy)return;cancelModal();modal={kind:'confirm',title,body,action,acceptLabel,cancelAction,lockOnAccept,keepPending,pending:false};modalPage=0;focused='confirm-cancel';notice='';refresh();}
+  function terms(title,body){if(busy)return;if(!open)show('audio');cancelModal();modal={kind:'terms',title,body};modalPage=0;focused='terms-decline';refresh();}
   const api={
-    get open(){return open;},get section(){return section;},get page(){return page;},get focused(){return focused;},get notice(){return notice;},get fontState(){return fontState;},
+    get open(){return open;},get section(){return section;},get page(){return page;},get focused(){return focused;},get notice(){return notice;},get busy(){return busy;},get fontState(){return fontState;},
     get items(){const r=canvas.getBoundingClientRect();return items.map(i=>({...i,rect:[r.left+i.rect[0],r.top+i.rect[1],...i.rect.slice(2)],options:i.options.map(o=>({...o}))}));},
     get entry(){const r=entryControl.getBoundingClientRect();return[r.left,r.top,r.width,r.height];},
     get entryPaint(){return[0,0,0,0];},
@@ -261,10 +291,11 @@ export function createGameSettings({ canvas, language, sections, onOpen, onClose
   Object.defineProperty(window,'u6Settings',{value:Object.freeze(api),configurable:false,writable:false});
   fetch(new URL('./fonts/galmuri7-hangul.bin',import.meta.url)).then(r=>{if(!r.ok)throw new Error('font');return r.arrayBuffer();}).then(b=>{if(b.byteLength!==11172*8)throw new Error('font size');hangul=new Uint8Array(b);fontState='ready';refresh();}).catch(()=>{fontState='fallback';if(open){notice=label('Using the system Korean font.','기본 한글 글꼴로 표시합니다.');refresh();}});
   window.addEventListener('resize',()=>{if(open)canvas.style.height=`${Math.max(320,Math.min(560,window.innerHeight-Math.max(0,canvas.getBoundingClientRect().top)-12))}px`;refresh();});
-  return {get open(){return open;},get section(){return section;},show,hide,key,pointer,wheel,confirm,terms,refresh,
+  return {get open(){return open;},get section(){return section;},get busy(){return busy;},show,hide,key,pointer,wheel,confirm,terms,refresh,
     beforeGameDraw:restore,
     afterGameDraw(){if(open){backdrop=copyCanvas();paint();}else{saveEntry();paint();}},
     covers(){return open;},
     notify(message){notice=message;if(open)refresh();},
+    lock,
   };
 }

@@ -219,11 +219,13 @@
 // own.
 import {
   collect, forgetBundles, forgetFiles, forgetLocalePack, forgetPack, forgetSaves, forgetVoicePack,
-  loadFiles, loadLocalePack, loadPack, loadSaves, loadVoicePack, saveFiles,
+  loadFiles, loadLocalePack, loadPack, loadVoicePack, saveFiles,
+  readSaveSnapshot, replaceSavesWithBackup, listSaveBackups, loadSaveBackup,
   storeLocalePack, storePack, storeSaves, storeVoicePack,
 } from './store.js';
 import { TEXT } from './i18n.js';
 import { createGameSettings } from './game-settings.mjs';
+import { createSaveTransferCodec } from './save-transfer.mjs';
 import { probeWideScale } from './wide-scale.mjs';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
 import { createVoices } from './voice/player.js';
@@ -233,6 +235,9 @@ import { RESTRICTIONS } from './voice/terms.js';
 const canvas = document.getElementById('screen');
 const drop = document.getElementById('drop');
 const picker = document.getElementById('picker');
+const savePicker = document.getElementById('save-picker');
+const saveImportStart = document.getElementById('save-import-start');
+const saveImportNote = document.getElementById('save-import-note');
 const forget = document.getElementById('forget');
 const forgetSave = document.getElementById('forget-save');
 const forgetHd = document.getElementById('forget-hd');
@@ -280,6 +285,7 @@ const fullscreenExit = document.getElementById('fullscreen-exit');
 // the visitor started, so the page it loads goes on with downloads allowed.
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 const VOICE_DOWNLOAD_AFTER_RELOAD = 'u6-voice-download-after-reload';
+const SAVE_IMPORT_AFTER_RELOAD = 'u6-save-import-after-reload';
 // Where sessionStorage throws, a mark is kept in the page's own history entry (history.state,
 // which a reload keeps, only this site's document writes, and no other tab sees; it is not Web
 // Storage): under `MARKS_STATE`, each mark's time, taken only this long after it was set (one
@@ -294,6 +300,9 @@ let Game = null;
 let HdPack = null;
 let LocalePack = null;
 let PackProbe = null;
+let SaveTransfer = null;
+let max_save_archive_bytes = null;
+let saveTransferCodec = null;
 let budget_ms = null;
 let input_too_large = null;
 let max_input_bytes = null;
@@ -310,6 +319,12 @@ let wasm = null; // the wasm exports, once loaded
 let game = null; // the running game, or null
 let crashed = false; // the engine trapped: nothing calls into it again until a reload
 let leaving = false; // the page is loading again into the other build: the game steps no more
+let saveTransferToken = 0;
+let stagedSaveTransfer = null;
+let saveTransferCommitting = false;
+let saveBackups = [];
+let saveBackupsFailed = false;
+let selectedSaveBackup = '';
 
 // Public state for scripts and tests: data-ops = queued operations, data-state = what the page
 // does, data-saved = the last save generation stored, data-audio / data-audio-chunks = the
@@ -355,6 +370,7 @@ function reflect(state) {
   canvas.dataset.files = String(live ? game.game_files() : 0);
   canvas.dataset.saves = String(live ? game.save_files() : 0);
   drop.hidden = !(filesKept === false && game === null);
+  saveImportStart.disabled = !saveTransferCodec || leaving || saveTransferCommitting;
 }
 
 // --- the page's language ---------------------------------------------------------------------
@@ -1199,9 +1215,29 @@ async function forgetKoPack() {
 // only when the import left this game on screen: it is taken at the first frame after, as a list
 // covers every Save since the last one stored.
 let owner = null;
+let ownerEpoch = null; // last known storage generation; a null owner still forbids normal saves
 let pause = 0;
 let saveSeen = 0; // the owner's highest save generation already queued (or, at a forget, made)
 let forgets = 0; // removals of the stored save so far: a save job taken before one writes nothing
+
+function saveConflictNotice() {
+  return menuText('Save changed in a tab.\nReload to save safely.', '다른 탭에서 저장이 바뀜.\n새로고침 후 저장하세요.');
+}
+
+function saveUnavailableNotice() {
+  return menuText('Cannot read saves.\nThis visit cannot save.', '저장 읽기 불가.\n이번 세션은 저장 불가.');
+}
+
+function lostSaveOwnership(err, target = game) {
+  if (err?.name !== 'SaveConflictError') return false;
+  if (target === owner) { owner = null; ownerEpoch = null; }
+  document.body.dataset.saveConflict = 'true';
+  const line = saveConflictNotice();
+  setStatus(line, true);
+  settingsMenu?.notify(line);
+  restart.hidden = false;
+  return true;
+}
 
 // After a frame's steps: a Save that committed in them is stored as one operation; the game
 // hears of the commit (its next list starts after it) only once the transaction completed. The
@@ -1209,12 +1245,13 @@ let forgets = 0; // removals of the stored save so far: a save job taken before 
 // replaced) or the stored save was removed after it was taken (it lists only the blocks its
 // Saves replaced).
 function checkSave() {
-  if (pause > 0 || game !== owner) return;
+  if (pause > 0 || !owner || game !== owner || ownerEpoch === null) return;
   const gen = game.save_generation();
   if (gen <= saveSeen) return;
   saveSeen = gen;
   const g = game;
   const era = forgets;
+  const epoch = ownerEpoch;
   const files = [];
   const n = g.save_collect();
   for (let i = 0; i < n; i += 1) {
@@ -1225,7 +1262,8 @@ function checkSave() {
   }
   enqueue('opSave', async () => {
     if (g !== owner || era !== forgets) return;
-    await storeSaves(files);
+    try { await storeSaves(files, false, epoch); }
+    catch (err) { if (lostSaveOwnership(err, g)) return; throw err; }
     if (g === game && !crashed) g.save_committed(gen);
     document.body.dataset.saved = String(gen);
     say('saved', files.length);
@@ -1235,22 +1273,222 @@ function checkSave() {
 // The save `next` starts from, laid over its game files before the start: `imported` (a
 // dropped savegame folder) or else the stored one.
 async function attachSaves(next, imported = null) {
-  const saves = imported ?? await loadSaves();
+  // Unavailable storage still permits this visit's game, but never an empty writable save.
+  // The strict transfer/backup APIs keep rejecting the same failure.
+  let snapshot;
+  try { snapshot = await readSaveSnapshot(); }
+  catch { snapshot = null; }
+  const saves = imported ?? snapshot?.files ?? [];
   for (const { path, bytes } of saves) next.load_save(path, bytes);
+  return snapshot?.epoch ?? null;
 }
 
 // After the game started from `imported`: the folder becomes the stored save. When the browser
 // does not keep it, the game's own Saves are not stored either (they hold only the blocks they
 // replaced and would land over the old save). Returns the status note.
 async function adoptSaves(imported) {
+  if (ownerEpoch === null) { owner = null; return t('importedSaveNotKept'); }
   try {
-    await storeSaves(imported, true);
+    const saved = await storeSaves(imported, true, ownerEpoch);
+    ownerEpoch = saved.epoch;
     return '';
   } catch (err) {
+    if (lostSaveOwnership(err)) return `${t('importedSaveNotKept')} ${saveConflictNotice()}`;
     console.warn(`could not keep the imported save: ${message(err)}`);
     owner = null;
+    ownerEpoch = null;
     return t('importedSaveNotKept');
   }
+}
+
+// --- portable saved games (spec 25) ----------------------------------------------------------
+// Only the last normally committed save is read. Neither export nor preview asks the engine
+// to Save. The codec validates the complete archive before the atomic store replacement.
+function saveTransferError(err) {
+  const reason = String(err?.code ?? err?.message ?? '');
+  if (reason.includes('save-transfer-sight-mismatch')) return menuText(
+    'Memory mismatch.\nSave again and export.',
+    '시야 기억 불일치.\n원래 게임에서 저장하세요.');
+  if (err?.name === 'SaveConflictError') return menuText(
+    'Save changed in a tab.\nChoose the ZIP again.',
+    '다른 탭에서 저장이 바뀜.\nZIP을 다시 선택하세요.');
+  if (reason.includes('empty')) return menuText(
+    'No stored saved game.\nSave in the game first.',
+    '내보낼 저장이 없습니다.\n게임에서 먼저 저장하세요.');
+  if (/large|limit|size|bounds/.test(reason)) return menuText(
+    'Save ZIP is too large.\nStored save unchanged.',
+    '저장 ZIP이 너무 큽니다.\n현재 저장은 그대로입니다.');
+  if (/checksum|sha256|crc|hash|integrity/.test(reason)) return menuText(
+    'ZIP integrity failed.\nRe-export at source.',
+    'ZIP 무결성 검사 실패.\n원래 환경에서 내보내세요.');
+  if (/save-transfer/.test(reason)) return menuText(
+    'Invalid save ZIP.\nUse Export saved game.',
+    '잘못된 저장 ZIP입니다.\n저장 내보내기로 만드세요.');
+  return menuText(
+    'Save storage failed.\nCheck browser storage.',
+    '저장 읽기나 보관 실패.\n브라우저 저장 공간 확인.');
+}
+
+function transferNotice(text, state = 'idle') {
+  document.body.dataset.saveTransfer = state;
+  settingsMenu?.notify(text);
+}
+
+function discardSaveTransfer(token = saveTransferToken) {
+  if (saveTransferCommitting || token !== saveTransferToken) return false;
+  saveTransferToken += 1;
+  stagedSaveTransfer = null;
+  document.body.dataset.saveTransfer = 'idle';
+  return true;
+}
+
+function saveDate(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC` : '-';
+}
+
+function backupLabel(backup) {
+  if (!backup) return '';
+  const at = saveBackups.indexOf(backup) + 1;
+  const date = new Date(backup.createdAt);
+  if (!Number.isFinite(date.getTime())) return menuText('Invalid backup date', '백업 날짜 오류');
+  const iso = date.toISOString();
+  return `${at}/${saveBackups.length} / ${iso.slice(0, 10)}\n${iso.slice(11, 19)} / ${backup.fileCount} ${menuText('files', '파일')}`;
+}
+
+async function refreshSaveBackups() {
+  try {
+    saveBackups = await listSaveBackups();
+    saveBackupsFailed = false;
+    if (!saveBackups.some(b => b.id === selectedSaveBackup)) selectedSaveBackup = saveBackups[0]?.id ?? '';
+  } catch {
+    saveBackups = [];
+    saveBackupsFailed = true;
+    selectedSaveBackup = '';
+  }
+  if (settingsMenu?.open) settingsMenu.refresh();
+}
+
+function downloadSave(bytes, kind) {
+  const blob = new Blob([bytes], { type: 'application/zip' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `ultima6-${kind}-${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}.zip`;
+  link.hidden = true;
+  document.body.append(link);
+  try { link.click(); } finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+}
+
+async function exportSavedGame(backup = false) {
+  if (!saveTransferCodec || saveTransferCommitting) return '';
+  // Drain an already completed normal Save before this read; never issue a Save command.
+  if (!backup && game && !crashed) checkSave();
+  const backupId = selectedSaveBackup;
+  let result = '';
+  await enqueue('opSaveExport', async () => {
+    try {
+      transferNotice(menuText('Preparing saved game ZIP...', '저장 ZIP을 준비합니다.'), 'exporting');
+      const files = backup ? await loadSaveBackup(backupId) : (await readSaveSnapshot()).files;
+      if (!files.length) {
+        result = saveTransferError({ code: 'empty' });
+        transferNotice(result, 'error');
+        return;
+      }
+      const bytes = await saveTransferCodec.encode(files);
+      downloadSave(bytes, backup ? 'save-backup' : 'save');
+      result = menuText('Download started.\nLast normal save only.', '저장 ZIP 다운로드 시작.\n마지막 정상 저장만 포함.');
+      transferNotice(result, 'idle');
+    } catch (err) { result = saveTransferError(err); transferNotice(result, 'error'); }
+  });
+  return result;
+}
+
+function chooseSaveTransfer() {
+  if (!saveTransferCodec || saveTransferCommitting || leaving) return;
+  discardSaveTransfer();
+  settingsMenu.show('files');
+  savePicker.value = '';
+  savePicker.click();
+}
+
+async function stageSaveTransfer(file) {
+  if (!file || !saveTransferCodec || saveTransferCommitting || leaving) return;
+  discardSaveTransfer();
+  const token = saveTransferToken;
+  if (!settingsMenu.open) settingsMenu.show('files');
+  transferNotice(menuText('Checking saved game ZIP...', '저장 ZIP을 검사합니다.'), 'checking');
+  await enqueue('opSaveImport', async () => {
+    try {
+      // The codec checks File.size before reading, then archive, checksums and native content.
+      const decoded = await saveTransferCodec.decode(file);
+      if (token !== saveTransferToken || !settingsMenu.open) return;
+      const expected = await readSaveSnapshot();
+      if (token !== saveTransferToken || !settingsMenu.open) return;
+      stagedSaveTransfer = { token, files: decoded.files, expectedFiles: expected.files, expectedEpoch: expected.epoch };
+      const size = decoded.files.reduce((n, entry) => n + entry.bytes.length, 0);
+      const body = menuText(
+        `Import starts a new session. Unsaved play will be lost.\nThe current stored save (${expected.files.length} files) is kept as a backup.\nClose other game tabs first, including older versions.\nExported: ${saveDate(decoded.manifest.createdAt)}\n${decoded.files.length} files / ${size} bytes. Last normal save only.\nOriginal game files are required to continue and are not in this ZIP.`,
+        `가져오면 새 세션을 시작합니다. 저장하지 않은 진행은 사라집니다.\n현재 보관된 저장 ${expected.files.length}개 파일은 백업으로 남깁니다.\n구버전을 포함해 다른 게임 탭을 먼저 닫으세요.\n내보낸 시각: ${saveDate(decoded.manifest.createdAt)}\n${decoded.files.length}개 파일 / ${size}바이트. 마지막 정상 저장만 포함합니다.\n이어가려면 원본 게임 파일이 필요하며 이 ZIP에는 포함되지 않습니다.`);
+      document.body.dataset.saveTransfer = 'preview';
+      settingsMenu.confirm(menuText('Import saved game', '저장 가져오기'), body, `save-transfer-confirm:${token}`, {
+        acceptLabel: menuText('Back up & import', '백업 후 가져오기'),
+        cancelAction: `save-transfer-cancel:${token}`, lockOnAccept: false, keepPending: true,
+      });
+    } catch (err) {
+      if (token !== saveTransferToken || !settingsMenu.open) return;
+      stagedSaveTransfer = null;
+      transferNotice(saveTransferError(err), 'error');
+    }
+  });
+}
+
+async function confirmSaveTransfer(token) {
+  const stage = stagedSaveTransfer;
+  if (!stage || stage.token !== token || token !== saveTransferToken || saveTransferCommitting) return '';
+  let result = '';
+  await enqueue('opSaveImport', async () => {
+    // Cancellation while this operation waited in the queue must make it a no-op.
+    if (stagedSaveTransfer !== stage || saveTransferToken !== token || !settingsMenu.open) return;
+    saveTransferCommitting = true;
+    const releaseLock = settingsMenu.lock(menuText('Keeping the backup and imported save...', '백업과 가져온 저장을 보관합니다.'));
+    document.body.dataset.saveTransfer = 'committing';
+    try {
+      const replacement = await replaceSavesWithBackup(stage.files, stage.expectedFiles, stage.expectedEpoch);
+      stagedSaveTransfer = null;
+      saveTransferToken += 1;
+      if (!replacement.changed) {
+        result = menuText('Save already stored.\nPlay is unchanged.', '이미 같은 저장입니다.\n현재 진행은 그대로입니다.');
+        transferNotice(result, 'same');
+        return;
+      }
+      // The explicit confirmation includes this new-session transition. Until the reload,
+      // the prior game's later Saves must never overwrite the successfully imported save.
+      owner = null;
+      ownerEpoch = null;
+      leaving = true;
+      setMark(FOCUS_AFTER_RELOAD);
+      setMark(SAVE_IMPORT_AFTER_RELOAD);
+      result = menuText('Save imported.\nStarting new session.', '저장을 가져왔습니다.\n새 세션을 시작합니다.');
+      transferNotice(result, 'imported');
+    } catch (err) { result = saveTransferError(err); transferNotice(result, 'error'); }
+    finally {
+      saveTransferCommitting = false;
+      releaseLock();
+      reflect();
+    }
+  });
+  if (leaving) {
+    // Storage already committed. A navigation refusal must not be reported as a rollback.
+    try { location.reload(); }
+    catch {
+      result = menuText('Imported + backed up.\nReload to continue.', '가져오기와 백업 완료.\n새로고침해 이어가세요.');
+      transferNotice(result, 'imported');
+      restart.hidden = false;
+    }
+  }
+  if (!leaving) await refreshSaveBackups();
+  return result;
 }
 
 // --- speed ---------------------------------------------------------------------------------
@@ -3024,7 +3262,7 @@ function stopOnTrap(err) {
 // Boots `next` (its files loaded; `origin` the key of the line that says where from); on success
 // it replaces the running game. Returns the intake report, or null when it did not start (the
 // status says why; the caller frees `next`).
-async function boot(next, origin) {
+async function boot(next, origin, epoch) {
   say(origin, next.files_loaded());
   // Let the status paint before the (synchronous) intake runs.
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3042,7 +3280,10 @@ async function boot(next, origin) {
   wideScaleProbe = null;
   wideComposeMedian = null;
   hiddenGiven = null; // the new game has none until the next frame gives them
-  owner = next;
+  owner = epoch === null ? null : next;
+  ownerEpoch = epoch;
+  document.body.dataset.saveStorage = epoch === null ? 'unavailable' : 'ready';
+  delete document.body.dataset.saveConflict;
   next.set_voices(voice.ready);
   next.set_sight_memory(memoryOn);
   next.set_motion(motionOn);
@@ -3070,7 +3311,7 @@ async function boot(next, origin) {
   restart.hidden = true;
   reflect('running');
   startLoop();
-  return report;
+  return epoch === null ? `${saveUnavailableNotice()}\n${report}` : report;
 }
 
 // Copies the files `started` booted from out of wasm and stores them; true once committed.
@@ -3203,8 +3444,8 @@ async function importFiles(dropped) {
         next.load_file(path, new Uint8Array(await file.arrayBuffer()));
       }
     }
-    await attachSaves(next, imported);
-    const report = await boot(next, 'bootRead');
+    const epoch = await attachSaves(next, imported);
+    const report = await boot(next, 'bootRead', epoch);
     if (report === null) return;
     started = true;
     canvas.focus();
@@ -3214,7 +3455,7 @@ async function importFiles(dropped) {
     reflect();
     const kept = keptNow ? t('filesKept', next.game_files()) : t('filesNotKept');
     const resumed = next.save_files() > 0 ? t('resumed') : '';
-    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}${localeLine()}\n${t('howToPlay')}`, localeShown === 'mismatch');
+    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}${localeLine()}\n${t('howToPlay')}`, localeShown === 'mismatch' || epoch === null);
   } finally {
     if (started) {
       if (!crashed) next.release_kept();
@@ -3238,9 +3479,15 @@ async function restoreKept(focus, note = '', imported = null) {
     let after = '';
     if (imported) {
       // No game starts from it: it is the stored save now, and no longer the running game's.
-      await storeSaves(imported, true);
+      const snapshot = await readSaveSnapshot();
+      let replaced;
+      try { replaced = await storeSaves(imported, true, snapshot.epoch); }
+      catch (err) { if (lostSaveOwnership(err)) return; throw err; }
       if (game) {
         owner = null;
+        // Keep this page's successful replacement epoch for a later explicit Delete CAS.
+        // Revoked ownership continues to block every normal Save from the running game.
+        ownerEpoch = replaced.epoch;
         after = t('notSavedAnyMore');
       }
     }
@@ -3256,15 +3503,15 @@ async function restoreKept(focus, note = '', imported = null) {
       kept[i] = null;
     }
     kept = null;
-    await attachSaves(next, imported);
-    const report = await boot(next, 'bootKept');
+    const epoch = await attachSaves(next, imported);
+    const report = await boot(next, 'bootKept', epoch);
     if (report === null) return;
     started = true;
     next.release_kept();
     if (focus) canvas.focus();
     const saved = imported ? await adoptSaves(imported) : '';
     const what = t(next.save_files() > 0 ? 'keptResumed' : 'keptNew');
-    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}${localeLine()}\n${t('howToPlay')}`, localeShown === 'mismatch');
+    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}${localeLine()}\n${t('howToPlay')}`, localeShown === 'mismatch' || epoch === null);
   } finally {
     if (!started) next.free();
   }
@@ -3301,13 +3548,25 @@ async function forgetKept() {
 // before the forget and not yet stored (made while it did not own the store, or during an
 // import just before) is not stored: only its Saves after the forget are.
 async function forgetSaved() {
-  await forgetSaves();
+  if (game && ownerEpoch === null) {
+    if (document.body.dataset.saveStorage === 'unavailable') {
+      const line = saveUnavailableNotice();
+      setStatus(line, true); settingsMenu?.notify(line); restart.hidden = false;
+    } else lostSaveOwnership({ name: 'SaveConflictError' });
+    return false;
+  }
+  const epoch = game ? ownerEpoch : (await readSaveSnapshot()).epoch;
+  let removed;
+  try { removed = await forgetSaves(epoch); }
+  catch (err) { if (lostSaveOwnership(err)) return false; throw err; }
   forgets += 1;
   if (game && !crashed) {
     game.save_forgotten();
     owner = game;
+    ownerEpoch = removed.epoch;
     saveSeen = game.save_generation();
   }
+  delete document.body.dataset.saveConflict;
   say('forgotSave');
   return true;
 }
@@ -3359,6 +3618,13 @@ async function takeDrop(dropped) {
 }
 
 function queueImport(gather) {
+  if (saveTransferCommitting || leaving) return;
+  const reviewingSave = stagedSaveTransfer !== null;
+  const checkingSave = document.body.dataset.saveTransfer === 'checking';
+  // A different file flow supersedes even a ZIP decode still waiting in the queue.
+  discardSaveTransfer();
+  if (reviewingSave && settingsMenu?.open) settingsMenu.show('files');
+  if (reviewingSave || checkingSave) transferNotice(menuText('Save import cancelled.\nOther files selected.', '저장 가져오기 취소.\n다른 파일을 선택했습니다.'));
   if (queued > 0) say('waiting');
   enqueue('opLoad', () => pausingSaves(async () => takeDrop(await gather())));
 }
@@ -4072,6 +4338,7 @@ window.addEventListener('dragleave', (e) => {
 window.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
+  if (saveTransferCommitting || leaving) return;
   // Entries must be taken synchronously; the DataTransfer is cleared after this handler.
   const entries = [...e.dataTransfer.items]
     .map((item) => item.webkitGetAsEntry?.())
@@ -4089,6 +4356,15 @@ picker.addEventListener('change', () => {
   picker.value = '';
   queueImport(async () => items);
 });
+savePicker.addEventListener('change', () => {
+  const file = savePicker.files?.[0];
+  savePicker.value = '';
+  if (file) stageSaveTransfer(file);
+});
+savePicker.addEventListener('cancel', () => {
+  if (discardSaveTransfer()) transferNotice(menuText('Import cancelled.\nStored save unchanged.', '가져오기를 취소했습니다.\n현재 저장은 그대로입니다.'));
+});
+saveImportStart.addEventListener('click', chooseSaveTransfer);
 forget.addEventListener('click', () => {
   if (queued > 0) say('forgetFilesLater');
   enqueue('opForgetFiles', forgetKept);
@@ -4265,6 +4541,12 @@ function settingsRows(section) {
     setting('voice-terms', 'Voice licence', '음성 이용약관', ''),
   ];
   return [
+    setting('save-export', 'Export saved game', '저장 내보내기', '', [], !saveTransferCodec || leaving),
+    setting('save-import', 'Import saved game', '저장 가져오기', '', [], !saveTransferCodec || leaving),
+    { ...setting('backup-choice', 'Backup time (UTC)', '백업 생성 (UTC)', selectedSaveBackup,
+      saveBackups.map(b => ({ value: b.id, label: backupLabel(b) })), saveBackups.length === 0),
+      valueLabel: saveBackupsFailed ? menuText('Storage unavailable / reopen to retry', '저장 공간 오류 / 다시 열어 재시도') : saveBackups.length ? backupLabel(saveBackups.find(b => b.id === selectedSaveBackup)) : menuText('No backups yet', '백업 없음') },
+    setting('backup-export', 'Export backup', '백업 내보내기', '', [], !saveTransferCodec || !selectedSaveBackup || leaving),
     setting('import', 'Import files', '파일 가져오기', '', [], queued > 0),
     setting('forget-files', 'Remove original files', '원본 파일 지우기', '', [], queued > 0),
     setting('forget-save', 'Remove saved game', '저장 게임 지우기', '', [], queued > 0),
@@ -4275,6 +4557,10 @@ function settingsRows(section) {
 }
 function nextStartNotice() { return menuText('Applies next start. Current game kept.', '다음 시작에 적용. 현재 진행 유지.'); }
 async function changeSetting(id, value) {
+  if (id === 'backup-choice') {
+    if (saveBackups.some(b => b.id === value)) selectedSaveBackup = value;
+    return '';
+  }
   if (id === 'language') {
     setLang(value);
     const kept = remember(SETUP_KEY, JSON.stringify({ lang, version: SETUP_VERSION }));
@@ -4321,6 +4607,14 @@ async function changeSetting(id, value) {
   return '';
 }
 async function settingAction(id) {
+  if (id === 'save-export') return exportSavedGame();
+  if (id === 'backup-export') return exportSavedGame(true);
+  if (id === 'save-import') { chooseSaveTransfer(); return ''; }
+  if (id?.startsWith('save-transfer-confirm:')) return confirmSaveTransfer(Number(id.slice(22)));
+  if (id?.startsWith('save-transfer-cancel:')) {
+    if (discardSaveTransfer(Number(id.slice(21)))) transferNotice(menuText('Import cancelled.\nStored save unchanged.', '가져오기를 취소했습니다.\n현재 저장은 그대로입니다.'));
+    return '';
+  }
   if (id === 'windows-reset') {
     remember(WINDOWS_KEY, null); placeWide(shown_map()); repaintWide();
     return menuText('Window positions reset.', '창 위치를 초기화했습니다.');
@@ -4346,6 +4640,8 @@ async function settingAction(id) {
     const action = deletes[id.slice(10)];
     if (!action) return '';
     const removed = id === 'confirmed:forget-voices' ? await action[1]() : await enqueue(action[0], action[1]);
+    if (id === 'confirmed:forget-save' && !removed && document.body.dataset.saveStorage === 'unavailable') return saveUnavailableNotice();
+    if (id === 'confirmed:forget-save' && !removed && document.body.dataset.saveConflict === 'true') return saveConflictNotice();
     return removed ? menuText('Selected data removed.', '선택한 자료 삭제 완료.') : menuText('Could not remove data.', '자료를 지우지 못했습니다.');
   }
   if (deletes[id]) settingsMenu.confirm(menuText('Remove browser data?', '브라우저 자료 삭제?'),
@@ -4367,8 +4663,10 @@ settingsMenu = createGameSettings({
     settingsMutedAudio = audio.ctx?.state === 'running';
     if (settingsMutedAudio) audio.ctx.suspend().catch(() => {});
     listPacks().then(packs => { availableSettingsPacks = packs; if (settingsMenu.open) settingsMenu.refresh(); });
+    refreshSaveBackups();
   },
   onClose() {
+    discardSaveTransfer();
     const now = performance.now();
     settingsPausedMs += Math.max(0, now - settingsPausedAt);
     last = now;
@@ -4412,6 +4710,7 @@ if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: !voiceDownload 
 // Restart's mark, taken as the page loads (its age is the reload's; an engine that fails to load
 // leaves none behind), is applied once the kept game is back (`opRestore`).
 const focusAfterReload = takeFocusFlag();
+const importedAfterReload = takeMark(SAVE_IMPORT_AFTER_RELOAD);
 // The chooser first while no choice of this version is kept.
 setup.hidden = true;
 setupFirst = false;
@@ -4419,11 +4718,12 @@ remember(SETUP_KEY, JSON.stringify({ lang, version: SETUP_VERSION }));
 enqueue('opEngine', async () => {
   try {
     ({
-      default: init, Game, HdPack, LocalePack, PackProbe, budget_ms, input_too_large, max_input_bytes,
+      default: init, Game, HdPack, LocalePack, PackProbe, SaveTransfer, max_save_archive_bytes, budget_ms, input_too_large, max_input_bytes,
       max_locale_pack_bytes, max_pack_bytes, max_save_bytes, max_save_file_bytes_of,
       is_sight_file, step_ms, zip_sliced, shown_map,
     } = await import(ENGINE_URL));
     wasm = await init();
+    saveTransferCodec = createSaveTransferCodec({ SaveTransfer, max_save_archive_bytes });
     if (WIDE) placeWide(shown_map());
   } catch (err) {
     reflect('failed');
@@ -4450,6 +4750,10 @@ enqueue('opRestore', async () => {
     // In 한글 the site's Korean pack first (spec 08 K6), so the first game starts with it.
     const hosted = wasm ? await hostedLocalePack() : null;
     if (wasm) await restoreKept(focusAfterReload, hosted?.line ?? '');
+    if (importedAfterReload && !game) {
+      saveImportNote.hidden = false;
+      saveImportNote.textContent = t('saveImportReady');
+    }
   } finally {
     if (wasm) picker.disabled = false;
     // Storage that could not say what it keeps: the drop line shows.
