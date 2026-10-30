@@ -46,8 +46,11 @@ try {
   page.on('console', (m) => { if (m.type() === 'error') errors.push('console'); });
   page.on('pageerror', () => errors.push('pageerror'));
   await page.goto(BASE, { waitUntil: 'load' });
-  await until(page, () => !document.getElementById('setup').hidden && !document.getElementById('setup-ok').disabled, 120000);
-  await page.click('#setup-ok');
+  await h.waitSettled(page, 120000);
+  const artwork = await h.settingsItem(page, 'pack');
+  const hosted = artwork.options.find(option => option.value && option.value !== ':dropped');
+  if (!hosted) throw new Error('A hosted artwork pack must be listed');
+  await h.chooseSetting(page, 'pack', hosted.value, {close:true});
   check('the hosted HD pack loads', await until(page, () => document.body.dataset.hdPack && document.body.dataset.hdPack !== 'none', 300000) >= 0);
   check('the hosted Korean pack loads', await until(page, () => (document.body.dataset.localePack ?? 'none') !== 'none', 180000) >= 0);
   if (!ok) throw new Error('Required hosted packs did not load');

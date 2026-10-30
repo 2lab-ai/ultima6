@@ -1317,40 +1317,11 @@ impl Game {
         self.hd.scale().factor() as u32
     }
 
-    /// Spec 11: the HD frame shows text in the HD font (`on`: each listed cell,
-    /// [`Game::hd_glyphs`], is its paper colour, for the page to draw the character over) or in
-    /// the pixel font, as before. Off until called. A change with HD on composes the HD frame at
-    /// once and moves [`Game::frame_version`], with no step, as [`Game::set_hd`] does; with HD
-    /// off nothing is shown differently, so nothing moves until HD is switched on.
-    pub fn set_hd_font(&mut self, on: bool) {
-        if self.hd.set_font(on) && self.hd.on() {
-            self.conversions += 1;
-            self.compose_hd();
-        }
-    }
-
-    /// Whether the HD frame shows text in the HD font ([`Game::set_hd_font`]).
-    pub fn hd_font(&self) -> bool {
-        self.hd.font()
-    }
-
-    /// Spec 11: every cell the HD frame shows in the HD font, every whole space, and every symbol
-    /// drawn over the paper, of its last composition (the whole list, not what changed: the page
-    /// that copies a rect of the HD frame draws every listed glyph over it again), 5 words per
-    /// cell in raster order: the cell's x and y in frame pixels (multiples of 8, of the
-    /// [`Game::width`] × [`Game::height`] frame), its code, its ink and its paper as 0xRRGGBB.
-    /// The code: printable ASCII but the space, or a Hangul syllable's code point, drawn in the
-    /// HD font; 0x20, a space the text writer drew whole, for which nothing is drawn but which a
-    /// run of text may cross, its ink equal to its paper; rev 3, [`TYPED`] | 0x20, such a space
-    /// the player typed (a run goes on across it whatever the spaces beside it); [`SYMBOL`] | its
-    /// glyph (a code of the game's font), a symbol the game drew over the paper (the key wait's
-    /// cursor, the more prompt's mark), its cell the paper in the HD frame and its pixels in
-    /// [`Game::hd_symbol_rows`]; spec 17, [`HALFTONE`] | a letter's or a space's code, the cell
-    /// drawn half-toned (a disabled entry of the context menu: the page draws its HD glyph as a
-    /// checker at the HD pixel grid, half its pixels the paper). Empty while HD or the HD font is
-    /// off. The list changes only
-    /// with every block of the cells it adds, drops or changes written, so with
-    /// [`Game::frame_version`] moved and those cells in the rect of [`Game::hd_take_dirty`].
+    /// Diagnostic whole-glyph cells of the last HD composition, five words per cell:
+    /// x, y, code, ink RGB, paper RGB. Glyphs always retain their original pixel shapes.
+    /// Codes are ASCII or Hangul, 0x20 for a whole space, [`TYPED`] | 0x20 for a typed
+    /// space, [`SYMBOL`] | the original glyph for a paper symbol, and [`HALFTONE`] for
+    /// half-toned cells. Empty while HD is off. This data never enables a font overlay.
     pub fn hd_glyphs(&self) -> Vec<u32> {
         let rgb = |c: u6_core::Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
         self.hd
@@ -5665,85 +5636,55 @@ mod tests {
         engine
     }
 
-    /// Spec 11 in the platform: the HD font is off until switched on, and lists nothing while HD
-    /// or it is off; switched on with HD on it composes at once (the whole frame, the version
-    /// moved, no step) and lists every letter cell, not the space (the synthetic font's space
-    /// has ink, so it is not a whole space), as x, y, code, ink, paper; a recoloured letter and
-    /// a letter under a classic write change the list with their cells in the rect; off again, the
-    /// HD frame is the definition's (the pixel font); with HD off a switch moves nothing until
-    /// HD is on again.
+    /// Text diagnostics follow the visible pixel font without a rendering switch. HD scale
+    /// changes and recolouring publish both pixels and metadata without advancing the engine.
     #[test]
-    fn the_hd_font_lists_the_letters_shown_and_follows_its_switch() {
+    fn pixel_text_diagnostics_follow_the_frame_and_only_changed_ink_is_dirty_without_an_overlay() {
         let mut game = Game::new();
         game.put_on_screen(text_engine());
         press(&mut game, "t");
+        for scale in [2, 4] {
+            game.set_hd(true, scale);
+            let e = game.engine.as_ref().unwrap();
+            let rgb = |i: usize| {
+                let c = e.frame().palette[i];
+                u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+            };
+            let (ink, paper) = (rgb(3), rgb(4));
+            assert_eq!(
+                game.hd_glyphs(),
+                vec![16, 16, 0x41, ink, paper, 24, 16, 0x7a, ink, paper]
+            );
+            assert_eq!(
+                game.hd_frame_rgba(),
+                expected_hd(&game, Scale::from_factor(scale))
+            );
+        }
         game.set_hd(true, 2);
-        assert!(
-            !game.hd_font() && game.hd_glyphs().is_empty(),
-            "off by default"
-        );
-        let e = game.engine.as_ref().unwrap();
-        let rgb = |i: usize| {
-            let c = e.frame().palette[i];
-            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
-        };
-        let (ink3, ink5, paper) = (rgb(3), rgb(5), rgb(4));
         game.hd_take_dirty();
-        let v = game.frame_version();
-        game.set_hd_font(true);
-        assert!(
-            game.hd_font() && game.frame_version() > v,
-            "composed at once"
-        );
-        assert_eq!(game.hd_take_dirty(), frame_rect(2), "the whole frame");
-        let letters = |a: u32| vec![16, 16, 0x41, a, paper, 24, 16, 0x7a, ink3, paper];
-        assert_eq!(
-            game.hd_glyphs(),
-            letters(ink3),
-            "the letters, not the space"
-        );
-        let v = game.frame_version();
-        game.set_hd_font(true);
-        assert_eq!(game.frame_version(), v, "no change, nothing composed");
+        let before = game.frame_version();
         press(&mut game, "r");
-        assert_eq!(game.hd_glyphs(), letters(ink5), "the letter recoloured");
-        assert_eq!(game.hd_take_dirty(), vec![32, 32, 16, 16], "its cell");
-        assert!(game.frame_version() > v);
+        assert!(game.frame_version() > before);
+        // Synthetic A has row 0x41: only columns 17 and 23 change ink. No font overlay
+        // needs the unchanged leftmost column included in the dirty bounding rectangle.
+        assert_eq!(game.hd_take_dirty(), vec![34, 32, 14, 16]);
+        assert_eq!(game.hd_frame_rgba(), expected_hd(&game, Scale::X2));
         press(&mut game, "p");
+        assert_eq!(game.hd_take_dirty(), vec![38, 40, 2, 2], "one source pixel");
         assert_eq!(
-            game.hd_glyphs(),
-            vec![24, 16, 0x7a, ink3, paper],
-            "under a classic write"
+            game.hd_glyphs().len(),
+            5,
+            "the partly covered letter is no longer whole"
         );
-        assert_eq!(
-            game.hd_take_dirty(),
-            vec![32, 32, 16, 16],
-            "its cell, whole"
-        );
-        let v = game.frame_version();
-        game.set_hd_font(false);
-        assert!(!game.hd_font() && game.frame_version() > v);
-        assert!(game.hd_glyphs().is_empty(), "off: nothing listed");
-        assert!(
-            game.hd_frame_rgba() == expected_hd(&game, Scale::X2),
-            "off: the pixel font, as before"
-        );
-        // HD off: the switch moves nothing and nothing is listed, until HD is on again.
+        assert_eq!(game.hd_frame_rgba(), expected_hd(&game, Scale::X2));
+        let kept = game.hd_glyphs();
         game.set_hd(false, 2);
-        let v = game.frame_version();
-        game.set_hd_font(true);
         assert!(
-            game.hd_font() && game.frame_version() == v,
-            "HD off: nothing moves"
+            game.hd_glyphs().is_empty(),
+            "HD off exposes no stale diagnostics"
         );
-        assert!(game.hd_glyphs().is_empty(), "HD off: nothing listed");
         game.set_hd(true, 2);
-        assert!(game.frame_version() > v);
-        assert_eq!(
-            game.hd_glyphs(),
-            vec![24, 16, 0x7a, ink3, paper],
-            "HD on again"
-        );
+        assert_eq!(game.hd_glyphs(), kept);
     }
 
     /// An engine on screen with the plane that draws, over a paper of colour 4 named in place
@@ -5793,7 +5734,7 @@ mod tests {
 
     /// Spec 11 rev 3 in the platform: the list's code of a space the player typed is 0x20000 |
     /// 0x20 and of a symbol 0x10000 | its glyph, a letter's as before; the symbol's rows follow in
-    /// [`Game::hd_symbol_rows`]; both empty with the HD font off.
+    /// [`Game::hd_symbol_rows`]; both empty with HD off.
     #[test]
     fn the_hd_glyphs_give_a_typed_space_and_a_symbol_in_their_ranges() {
         let mut game = Game::new();
@@ -5801,7 +5742,7 @@ mod tests {
         game.step(20);
         game.present();
         game.set_hd(true, 2);
-        game.set_hd_font(true);
+
         let e = game.engine.as_ref().unwrap();
         let rgb = |i: usize| {
             let c = e.frame().palette[i];
@@ -5817,7 +5758,8 @@ mod tests {
             "the letter, the typed space, the symbol"
         );
         assert_eq!(game.hd_symbol_rows(), vec![5; 8], "the symbol's rows");
-        game.set_hd_font(false);
+        assert_eq!(game.hd_frame_rgba(), expected_hd(&game, Scale::X2));
+        game.set_hd(false, 2);
         assert!(game.hd_glyphs().is_empty() && game.hd_symbol_rows().is_empty());
     }
 
@@ -5961,7 +5903,7 @@ mod tests {
         );
         game.put_on_screen(pointer_engine());
         game.set_hd(true, 2);
-        game.set_hd_font(true);
+
         point(&mut game, 100, 60);
         let p = game.hd_pointer();
         assert_eq!(p[..4], [98, 59, 16, 3], "the sprite's box");
@@ -9070,7 +9012,7 @@ mod tests {
         game.step(20);
         game.present();
         game.set_hd(true, 2);
-        game.set_hd_font(true);
+
         let codes: Vec<u32> = game.hd_glyphs().chunks(5).map(|g| g[2]).collect();
         assert_eq!(
             codes,

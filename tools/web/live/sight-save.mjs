@@ -77,18 +77,14 @@ try {
   const shot = async (name) => page.locator('#screen').screenshot({ path: join(out, `${name}.png`) });
 
   async function acceptSetup() {
-    await page.waitForFunction(() => {
-      const setup = document.getElementById('setup');
-      return (setup && !setup.hidden && !document.getElementById('setup-ok').disabled)
-        || (document.body.dataset.state === 'running' && globalThis.__shownGame);
-    }, null, { timeout: 120_000 });
-    if (await page.locator('#setup').isVisible()) {
-      await page.check('input[name="setup-lang"][value="en"]');
-      await page.check('input[name="setup-hd"][value=""]');
-      await page.uncheck('#setup-voices');
-      await page.click('#setup-ok');
-    }
     await h.waitSettled(page, 120_000);
+    const language = await h.settingsItem(page, 'language');
+    await h.chooseSetting(page, 'pack', '', {close:true});
+    if (language.value !== 'en') {
+      await h.chooseSetting(page, 'language', 'en', {close:true});
+      await page.reload();
+      await h.waitSettled(page, 120_000);
+    } else await h.closeSettings(page);
   }
 
   async function menu() {

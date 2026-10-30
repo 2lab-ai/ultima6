@@ -39,9 +39,9 @@ try {
   assert.ok(poses.every(p=>p[1]===0&&(mode==='ranged'?p[2]<0:p[2]>0)),'lunge toward target, recoil away');
   await page.locator('#screen-box').screenshot({path:join(out,`${layout}-${mode}-active.png`)});
   // Settings opens during a live envelope; later frames must not recreate the cue.
-  await page.locator('#settings').click();await h.runFrames(page,240);
+  await h.openSettings(page);await h.runFrames(page,240);
   assert.deepEqual(await page.evaluate(()=>Array.from(__shownGame.attack_offsets())),[],'Settings clears and suppresses');
-  await page.locator('#setup-ok').click();await h.runFrames(page,120);
+  await h.closeSettings(page);await h.runFrames(page,120);
   assert.deepEqual(await page.evaluate(()=>Array.from(__shownGame.attack_offsets())),[],'no replay after closing');
   await page.locator('#screen-box').screenshot({path:join(out,`${layout}-${mode}-rest.png`)});
   assert.deepEqual(errors,[]);

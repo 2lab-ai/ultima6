@@ -300,7 +300,7 @@ fn the_line_editors_echo_names_its_cells_typed() {
         "the cursor's cell erased at the line's end"
     );
     let mut c = Compositor::new();
-    c.set_font_mode(true);
+
     c.compose(fb, &mut NoImages, Scale::X2);
     let codes: Vec<(u16, u16)> = c
         .glyphs()

@@ -42,7 +42,9 @@ owner-supplied game art and must stay private. Engine mode never writes frames.
 ## Scenarios
 
 Both modes run the same synthetic English and Korean conversations with Original
-and Wide wasm. Browser mode uses the HD and Wide layouts with the HD font enabled.
+and Wide wasm. Browser mode uses the HD and Wide layouts with bitmap pixel text.
+It seeds the obsolete HD font preference to verify that it is ignored and checks
+actual source-plane glyph diagnostics without a font renderer or choice.
 The Korean pack is generated from the synthetic script's own offsets, hashes and
 aliases; this is not a test of a separately supplied translation pack.
 

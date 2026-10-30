@@ -8,8 +8,8 @@
 //
 // As a module: `const s = await serve({ root }); s.url; await s.close();`
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { extname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TYPES = {
@@ -75,16 +75,21 @@ async function loadRules(file) {
 
 /// Serves `root` on 127.0.0.1:`port` (0 = any free port). `packs`, when given, answers every
 /// request under /packs/ in place of the files there: a function from the request (a fetch
-/// Request) to its Response.
-export async function serve({ root = 'site', port = 0, headersFile, packs } = {}) {
+/// Request) to its Response. Optional absolute `modelsRoot` mounts existing private model files
+/// only under /models/, with normalized and realpath boundaries, on this loopback server.
+export async function serve({ root = 'site', port = 0, headersFile, packs, modelsRoot } = {}) {
   const base = resolve(root);
+  if (modelsRoot && !isAbsolute(modelsRoot)) throw new Error('modelsRoot must be an absolute local path');
+  const modelsBase = modelsRoot ? await realpath(modelsRoot) : null;
   const rules = await loadRules(headersFile ?? join(base, '_headers'));
   let url = '';
   const server = createServer(async (req, res) => {
     try {
       const path = decodeURIComponent(new URL(req.url, 'http://local').pathname);
-      let file = normalize(join(base, path));
-      if (file !== base && !file.startsWith(base + sep)) throw Object.assign(new Error(), { code: 'ENOENT' });
+      const modelRequest = modelsBase && path.startsWith('/models/');
+      const allowedBase = modelRequest ? modelsBase : base;
+      let file = normalize(join(allowedBase, modelRequest ? path.slice('/models/'.length) : path));
+      if (file !== allowedBase && !file.startsWith(allowedBase + sep)) throw Object.assign(new Error(), { code: 'ENOENT' });
       if (path === '/_headers') throw Object.assign(new Error(), { code: 'ENOENT' });
       if (packs && path.startsWith('/packs/')) {
         const headers = Object.entries(req.headers).filter(([, value]) => typeof value === 'string');
@@ -97,13 +102,17 @@ export async function serve({ root = 'site', port = 0, headersFile, packs } = {}
         return;
       }
       if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
+      if (modelRequest) {
+        file = await realpath(file);
+        if (file !== modelsBase && !file.startsWith(modelsBase + sep)) throw Object.assign(new Error(), { code: 'ENOENT' });
+      }
       const body = await readFile(file);
       for (const [name, value] of headersFor(rules, path)) res.setHeader(name, value);
       res.setHeader('Content-Type', TYPES[extname(file)] ?? 'application/octet-stream');
       res.end(body);
     } catch (err) {
       res.statusCode = err.code === 'ENOENT' || err.code === 'ENOTDIR' ? 404 : 500;
-      res.end(res.statusCode === 404 ? 'not found' : String(err));
+      res.end(res.statusCode === 404 ? 'not found' : 'internal server error');
     }
   });
   await new Promise((done) => server.listen(port, '127.0.0.1', done));

@@ -1505,10 +1505,10 @@ fn pointer_tables_from_a_synthetic_game() {
     assert!(PointerTables::load(&[0; 8]).is_err());
 }
 
-/// Spec 11 Design 7 (rev 2), Acceptance 5's synthetic item: a line of eight letters the HD font
+/// Spec 11 Design 7 (rev 2), Acceptance 5's synthetic item: a line of eight letters the glyph metadata
 /// lists (the synthetic font, drawn in the UI's cells, so both builds draw it at the same place)
 /// and the pointer sprite over one of them, its shape inside that cell. First the pointer away:
-/// the HD frame as the platform composes it ([`crate::hd::HdView`], HD and the HD font on) lists
+/// the HD frame as the platform composes it ([`crate::hd::HdView`], HD on) lists
 /// the whole line (the baseline, checked). Then the pointer moved over the line: the views kept
 /// compose nothing for it, and a new view of the frame lists every cell of the line, as with the
 /// pointer away, and holds the same blocks: the cell under the sprite is its paper, no pixel of
@@ -1569,7 +1569,7 @@ fn the_pointer_over_a_line_of_text_leaves_every_cell_listed_and_out_of_the_hd_fr
     let view = |e: &Engine, scale| {
         let mut v = HdView::new();
         v.set(true, scale);
-        v.set_font(true);
+
         v.present(Some(e), &blank);
         v
     };
@@ -1641,13 +1641,15 @@ fn the_pointer_over_a_line_of_text_leaves_every_cell_listed_and_out_of_the_hd_fr
         }
         let n = scale.factor();
         let width = u6_render::WIDTH * n;
+        let original = e.published_frame();
         for &(x, y, _) in &sprite {
+            let expected = word(original.palette[usize::from(original.get(x, y).unwrap())]);
             for k in 0..n * n {
                 let at = (y * n + k / n) * width + x * n + k % n;
                 assert_eq!(
                     fresh.rgba()[at],
-                    word(paper),
-                    "{scale:?}: ({x}, {y}) is the cell's paper"
+                    expected,
+                    "{scale:?}: ({x}, {y}) keeps the original glyph without the pointer"
                 );
             }
         }

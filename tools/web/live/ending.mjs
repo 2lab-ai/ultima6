@@ -59,15 +59,14 @@ try {
   let errors = 0;
   page.on('pageerror', () => errors++);
   await page.goto(server.url);
+  phase = 'settings';
+  await h.waitSettled(page, 120_000);
+  await h.chooseSetting(page, 'language', 'en', {close:true});
+  await h.chooseSetting(page, 'pack', '', {close:true});
+  await page.reload();
+  await h.waitSettled(page, 120_000);
   await h.dropFiles(page, [zip], extra);
-
-  phase = 'setup';
-  await page.waitForFunction(() => !document.getElementById('setup').hidden
-    && !document.getElementById('setup-ok').disabled, null, { timeout: 120_000 });
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.check('input[name="setup-hd"][value=""]');
-  await page.uncheck('#setup-voices');
-  await page.click('#setup-ok');
+  // The explicit new page start applies the language before importing the test fixture.
   async function journey() {
     // Setup/restore may replace the running launcher; do not send keys to that old instance.
     await h.waitSettled(page, 120_000);

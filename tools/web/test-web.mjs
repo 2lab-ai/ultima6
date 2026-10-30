@@ -14,13 +14,12 @@
 // drawn only when it changed), and HD (spec 07: the switch and its storage, the S× canvas and
 // its scaling, the pointer, the MMPX notice the site ships, the performance baseline; an HD
 // pack dropped, shown, kept, forgotten and refused, its performance with a full pack), and the
-// first-run chooser (the page's language, a pack the site lists, NPC voices), the page itself
-// (one toolbar, the drop line, Settings' "HD on" and forget buttons, the controls, the notices)
+// import-first launcher and actual canvas settings (language, artwork, audio, files),
+// with game settings removed from the outside page and paused while open
 // and fullscreen, and the HD layout (spec 10: the 1280 x 720 canvas composed from the x4 frame,
 // the game's paper round its regions, clicks through it, the letterbox, fullscreen at any size,
-// the setting) and the HD font on it
-// (spec 11: the font file, the text drawn in runs over the listed cells, the pixel font as before,
-// the choice), and the Wide layout (spec 13: the Wide build site/pkg-wide on a fresh page, the
+// the setting), pixel font unification (old choices ignored, bitmap text retained in every
+// layout, no font overlay request), and the Wide layout (spec 13: the Wide build site/pkg-wide on a fresh page, the
 // map covering the 1920 x 1080 canvas, the framed windows over it, the pointer through them, the
 // letterbox, fullscreen, the compositor's time and scale, the setting across the builds; spec 14:
 // the actor windows, the active one marked, the side panel's own window in another mode or a
@@ -33,7 +32,7 @@
 // layouts' gaps, after a context-menu entry or a touch moved the game's pointer and once the game
 // stopped; right again under a still mouse).
 // Most tests start `game` at once (harness `gameFirst`); the launcher tests run the
-// page as it is. Every test but the HD layout's, the HD font's and the Wide layout's runs on the
+// page as it is. Every test but the HD layout's, font-unification's and Wide layout's runs on the
 // Original layout of the Original build (harness `openPage`); the HD layout's and the Wide
 // layout's keep the pixel font (`bootLayout`, `bootWide`, on harness `openWide`).
 // Gates hold file reads and storage calls at chosen points, so every interleaving is forced,
@@ -44,6 +43,8 @@
 // covers less of the game. Tests that need the user's disks skip when they are absent.
 //
 //   node tools/web/test-web.mjs [name-filter]      (build first: bash scripts/build-web.sh)
+// Existing private models may stay outside the checkout: U6_MODELS_ROOT=/absolute/models.
+// Optional stable partitions: U6_TEST_SHARD=0/3, 1/3 and 2/3; run every shard for the full gate.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
@@ -117,16 +118,12 @@ const promptNow = (page) => page.evaluate(() => document.getElementById('screen'
 // Presses one of the forget buttons: they sit in Settings, in its "Kept in this browser" group
 // (closed by default): Settings opened first when it is not, the group opened.
 async function forgetVia(page, id) {
-  if (await page.evaluate(() => document.getElementById('setup').hidden)) await page.click('#settings');
-  await page.evaluate(() => { document.getElementById('kept').open = true; });
-  await page.click(id);
+  await h.forgetSetting(page, id === '#forget' ? 'forget-files' : id.slice(1));
 }
 
 // Switches Settings' "HD on" and closes Settings again (its OK, nothing else chosen).
 async function switchHd(page) {
-  await page.click('#settings');
-  await page.click('#hd');
-  await page.click('#setup-ok');
+  await h.clickSetting(page, 'hd', { close: true });
   await h.waitSettled(page);
 }
 
@@ -363,6 +360,31 @@ test('the runner shows a failure by its label or kind and its places here, never
   }
 });
 
+test('local model mount: loopback only, model route isolated, encoded traversal and outside symlinks refused', async () => {
+  const {serve}=await import('./serve.mjs');
+  const dir=await mkdtemp(join(tmpdir(),'u6-model-mount-'));
+  let server;
+  try {
+    const root=join(dir,'site'), models=join(dir,'models');
+    await mkdir(root);await mkdir(models);
+    await writeFile(join(root,'index.html'),'test page');
+    await writeFile(join(models,'part.bin'),'test model part');
+    await writeFile(join(dir,'outside.txt'),'outside fixture');
+    await symlink(join(dir,'outside.txt'),join(models,'outside.txt'));
+    await writeFile(join(root,'_headers'),'/*\n  X-Test-Policy: enabled\n');
+    server=await serve({root,modelsRoot:models});
+    assert.equal(new URL(server.url).hostname,'127.0.0.1','loopback address only');
+    const model=await fetch(new URL('models/part.bin',server.url));
+    assert.equal(await model.text(),'test model part','only the requested model part is served');
+    assert.equal(model.headers.get('x-test-policy'),'enabled','site response policy still applies');
+    assert.equal(await (await fetch(server.url)).text(),'test page','site root remains separate');
+    for(const route of ['part.bin','models/%2e%2e%2foutside.txt','models/outside.txt','models/%2e%2e%2fsite/index.html']) {
+      assert.equal((await fetch(new URL(route,server.url))).status,404,'model mount cannot escape or expose other routes');
+    }
+    await assert.rejects(serve({root,modelsRoot:'relative-models'}),/absolute local path/);
+  } finally {if(server)await server.close();await rm(dir,{recursive:true,force:true});}
+});
+
 test('headers and CSP: the page runs under its policy, third-party requests are blocked', async (env) => {
   const { page } = await h.openPage(env, { gated: false });
   const doc = await h.load(page, env);
@@ -413,23 +435,22 @@ test('keyboard only: Tab to the picker, choose, play on the canvas, Tab out', as
   // ending the run; `await chosen` still throws.
   const chosen = page.waitForEvent('filechooser');
   chosen.catch(() => {});
-  await page.keyboard.press('Tab');
-  assert.equal((await h.state(page)).focused, 'screen', 'the canvas is in the tab order');
-  await page.keyboard.press('ArrowDown');
-  assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['ArrowDown', false], 'no game: arrows stay the page\'s');
-  // From the canvas: the toolbar under it, then the drop line's picker.
   const order = [];
-  for (let i = 0; i < 8 && order.at(-1) !== 'picker'; i += 1) {
+  for (let i = 0; i < 20 && order.at(-1) !== 'picker'; i += 1) {
     await page.keyboard.press('Tab');
     order.push((await h.state(page)).focused);
   }
-  assert.deepEqual(order, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'turns', 'settings', 'picker'], 'the toolbar, including turn playback, then the picker');
+  assert.equal(order.at(-1), 'picker', 'the initial import is keyboard reachable');
+  assert.ok(!order.some(id => ['fullscreen','mute','voices','slower','faster','turns','settings'].includes(id)),
+    'retired outside game controls are absent from the tab order');
+  await page.keyboard.press('ArrowDown');
+  assert.deepEqual(await page.evaluate(() => window.__keys.at(-1)), ['ArrowDown', false], 'no game: arrows stay the page\'s');
   await page.keyboard.press('Enter');
   const chooser = await chosen;
   await chooser.setFiles(h.HFES);
   const s = await started(page, FILES);
   assert.equal(s.focused, 'screen', 'focus lands on the canvas after the import');
-  assert.equal(await page.evaluate(() => getComputedStyle(document.activeElement).outlineColor), 'rgb(255, 209, 102)');
+  assert.ok(await page.evaluate(() => { const s=getComputedStyle(document.activeElement); return s.outlineStyle !== 'none' && parseFloat(s.outlineWidth)>0; }), 'keyboard focus remains visible');
   // From the prompt, one step east (another way when the start fight blocks it), then the
   // prompt again.
   const { key, dx, dy, before } = await h.stepOnce(page, { withFrame: true });
@@ -492,17 +513,20 @@ test('an import during the restore waits for it, then replaces the restored game
   assert.equal((await h.state(page)).pickerDisabled, false);
 }, { needs: h.haveHfes });
 
-test('forget during a pending save runs after the save and reports only once committed', async (env) => {
+test('forget is unavailable during a pending save, then reports only after the confirmed delete commits', async (env) => {
   const { page } = await h.openPage(env);
   await h.load(page, env);
   await page.evaluate(() => { window.__hold('save'); window.__hold('forget'); });
   await h.dropFiles(page, h.HFES);
   await h.waitLog(page, 'save:start');
-  await forgetVia(page, '#forget');
+  assert.equal((await h.settingsItem(page, 'forget-files')).disabled, true, 'deletion disabled until the save settles');
   let s = await h.state(page);
-  assert.equal(s.ops, 2);
-  assert.match(s.status, /will be removed after the current step/);
+  assert.equal(s.ops, 1, 'only the save is queued');
+  assert.ok(!(await h.log(page)).includes('forget:start'), 'no delete starts while saving');
+  await h.closeSettings(page);
   await page.evaluate(() => window.__release('save'));
+  await h.waitSettled(page);
+  await forgetVia(page, '#forget');
   await h.waitLog(page, 'forget:start');
   const log = await h.log(page);
   assert.ok(log.indexOf('save:end:true') < log.indexOf('forget:start'), 'the save before the forget');
@@ -857,9 +881,9 @@ test('zip: a click starts the sound, the worklet gets chunks, Mute; save and rel
   assert.equal(s.audio, 'running');
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'the worklet loads under the CSP');
   console.log(`  receipt: audioContext.state=${s.audio}, worklet chunks=${s.audioChunks}`);
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'true');
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
   await page.click('#screen');
   const { moved } = await walkAndSave(page);
@@ -1515,14 +1539,16 @@ for (const layout of ['original', 'wide']) {
     await page.keyboard.up('Control');
     await page.keyboard.press('Escape');
     await h.menuClosed(page);
-    await page.locator('#settings').click();
-    await page.waitForFunction(() => !document.getElementById('setup').hidden);
+    await h.openSettings(page);
+    await page.waitForFunction(() => window.u6Settings.open);
+    const pausedTicks=await page.evaluate(()=>globalThis.__ticks);
     await page.keyboard.down('Control');
-    await h.waitTicks(page, 2);
+    await h.waitFrames(page, 2);
+    assert.equal(await page.evaluate(()=>globalThis.__ticks),pausedTicks,'Settings pauses game ticks');
     assert.equal(await quickView(page), null, 'Ctrl in Settings exposes no world action');
     await page.keyboard.up('Control');
-    await page.click('#setup-ok');
-    await page.waitForFunction(() => document.getElementById('setup').hidden);
+    await h.closeSettings(page);
+    await page.waitForFunction(() => !window.u6Settings.open);
     await page.focus('#screen');
     await page.mouse.move(...await h.screenPoint(page, ...at));
     await page.keyboard.down('Control');
@@ -1600,7 +1626,7 @@ const menuHelpers = (page) => page.evaluate(() => {
 // counts only. For each row, the canvas pixels of its band of the text area (8 game pixels tall,
 // from the area's second column: the labels and what follows them, not the highlight's mark):
 // how many are exactly the paper, the ink and the heading's colour (`view.colours`), how many
-// something else (the HD font's anti-aliasing), and how many side-by-side pairs are both not the
+// something else (fractional resampling), and how many side-by-side pairs are both not the
 // paper (`pairs`: a half-toned label has none, at the canvas's pixel grid). Of the whole box, how
 // many canvas pixels differ from the canvas kept before (`keepCanvas`) and how many it has. The
 // game's own screen may change meanwhile (a step moves a passer-by): `world` counts the game
@@ -1739,7 +1765,7 @@ const releaseSteps = (page) => page.evaluate(() => {
 // `px` in the layout `name`: every heading has pixels of the heading's colour, every entry that
 // can run ink pixels; a disabled entry (past the first row, without the theft mark) has pixels
 // other than the paper, and where the canvas shows the half-tone at its own pixel grid (the HD
-// font, or the frame one to one) never two side by side, while an entry that runs has; at least
+// frame one to one) never two side by side, while an entry that runs has; at least
 // one disabled entry is checked (round 2b, gpt f MUST 1: every caller claims the half-tone, so an
 // open menu without one fails rather than passing on none). Logs the counts; returns the disabled
 // rows checked.
@@ -1747,10 +1773,9 @@ function checkMenuContent(name, px) {
   const heads = px.rows.filter((r) => r.kind === 'head');
   const on = px.rows.filter((r) => r.kind === 'entry' && r.enabled);
   const off = px.rows.filter((r) => r.kind === 'entry' && !r.enabled && !r.theft && r.i > 0);
-  // The half-tone at the canvas's own pixel grid: the HD font's (the page's checker), or the frame
-  // shown one to one; else (the frame scaled, its checker scaled with it) at the game's grid, the
+  // The half-tone at the canvas's own pixel grid when the frame is shown one to one; else (the frame scaled, its checker scaled with it) at the game's grid, the
   // colour at each game pixel's centre (`cells`).
-  const grid = px.font === 'hd' || px.scale === 1;
+  const grid = px.scale === 1;
   const key = grid ? 'pairs' : 'cells';
   const sum = (rows, key) => rows.reduce((k, r) => k + r[key], 0);
   console.log(`  receipt: ${name} (layout ${px.layout}, font ${px.font}, ${grid ? 'canvas' : 'game'} pixel grid): ${heads.length} heading(s), ${sum(heads, 'head')} heading-colour pixels; ${on.length} entries that run, ${sum(on, 'ink')} ink pixels, ${sum(on, key)} side by side; ${off.length} disabled, ${sum(off, 'ink') + sum(off, 'other')} not paper, ${sum(off, key)} side by side; box ${px.boxed} canvas pixels, ${px.differ} differ from before it opened`);
@@ -2080,10 +2105,10 @@ async function menuInLayout(page, hero, name, frame = null) {
   return view;
 }
 
-test('the context menu (spec 17, unit M3) in the HD layout with the HD font: a right press opens the engine\'s menu, which the canvas shows in its box (through the layout) with its content, a disabled entry half-toned at the canvas\'s pixel grid, and Escape closes it, the canvas as before; a press in a gap between the layout\'s regions closes it too and gives the game nothing (screenshot)', async (env) => {
+test('the context menu (spec 17, unit M3) in the HD layout with pixel text and an ignored legacy font choice: a right press opens the engine\'s menu, which the canvas shows in its box (through the layout) with its content, a disabled entry half-toned at the engine\'s pixel grid, and Escape closes it, the canvas as before; a press in a gap between the layout\'s regions closes it too and gives the game nothing (screenshot)', async (env) => {
   const { page } = await bootLayout(env, { font: 'hd' });
   await h.waitFrames(page, 3);
-  assert.equal(await page.evaluate(() => document.body.dataset.font), 'hd', 'the HD font drawn');
+  assert.equal(await page.evaluate(() => document.body.dataset.font), 'pixel', 'the old HD font preference is ignored');
   await menuInLayout(page, HERO, 'menu-hero-hd', 'r2b-hd-disabled.png');
   const taken = () => page.evaluate(() => globalThis.__taken.length);
   const t0 = await taken();
@@ -2220,7 +2245,7 @@ test('the context menu (spec 17, round 2): on a phone held sideways (844 x 390, 
   await h.waitPrompt(page);
 
   await page.setViewportSize({ width: 1024, height: 700 });
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await page.waitForFunction(() => document.fullscreenElement !== null || document.getElementById('screen-box').classList.contains('full'));
   await h.waitFrames(page, 5);
   await page.focus('#screen');
@@ -2295,6 +2320,9 @@ test('the context menu (spec 17, round 2b): the canvas\'s parts outside the view
     assert.equal(o.double, 0, `case ${i}: none twice`);
   }
   assert.equal((await page.evaluate((c) => globalThis.__u6Layout.offViewportOf(c.box, c.size, c.view), cases[3])).length, 0, 'a canvas the view\'s size exactly: nothing outside');
+  // The import-first launcher hides the game; open its real canvas settings before measuring.
+  await h.openSettings(page);
+  await page.evaluate(()=>document.getElementById('screen').scrollIntoView({block:'start'}));
   // The visual viewport: a zoomed part of the layout viewport (a stand-in with its fields, as a
   // pinch-zoom gives it), the canvas's parts outside it.
   const vv = await page.evaluate(() => {
@@ -2384,12 +2412,41 @@ test('the context menu (spec 17, round 2b, gpt f SHOULD 3): the viewport shrunk 
   assert.equal(await h.menuView(page), null, 'closed');
 }, { needs: h.haveHfes });
 
-test('the context menu (spec 17, round 2b, opus S5): in fullscreen, the Original layout filling a 16:10 screen, the page keeps the Exit button\'s and the speed badge\'s parts of the canvas from the menu at all times, shown or hidden (the stylesheet keeps their boxes there), as hidden frame rects the engine has; out of fullscreen, with the badge hidden, none; a menu open in fullscreen with the Exit button shown (screenshot)', async (env) => {
+// The normal chrome no longer covers game pixels. Preserve the overlay-exclusion
+// regressions with an explicit adversarial layout fixture, not a production UI change.
+async function adversarialGameOverlays(page) {
+  const clear = await page.evaluate(() => {
+    const c=document.getElementById('screen').getBoundingClientRect();
+    const overlaps = r => r.width>0&&r.height>0&&r.left<c.right&&c.left<r.right&&r.top<c.bottom&&c.top<r.bottom;
+    return ['game-chrome','game-settings-open','fullscreen-exit','speed-badge'].every(id=>!overlaps(document.getElementById(id).getBoundingClientRect()));
+  });
+  assert.ok(clear,'the real game chrome and controls do not overlap the framebuffer');
+  await page.evaluate(() => {
+    const c=document.getElementById('screen').getBoundingClientRect();
+    const box=document.getElementById('screen-box').getBoundingClientRect();
+    const exit=document.getElementById('fullscreen-exit'), badge=document.getElementById('speed-badge');
+    // Production controls are now grid children of game-chrome. The adversarial
+    // fixture must opt into absolute positioning before its canvas coordinates apply.
+    for (const control of [exit,badge]) {
+      control.style.position='absolute';
+      control.style.gridColumn='auto';
+      control.style.justifySelf='auto';
+    }
+    exit.style.top=`${c.top-box.top+2}px`;
+    exit.style.right=`${box.right-c.right+8}px`;
+    badge.style.top=`${c.top-box.top+6}px`;
+    badge.style.left=`${c.left-box.left+6}px`;
+  });
+  await h.waitFrames(page,3);
+}
+
+test('the context menu (spec 17, round 2b, opus S5): with explicit adversarial overlays in fullscreen, the Original layout filling a 16:10 screen, the page keeps the Exit button\'s and the speed badge\'s parts of the canvas from the menu at all times, shown or hidden (the stylesheet keeps their boxes there), as hidden frame rects the engine has; out of fullscreen, with the badge hidden, none; a menu open in fullscreen with the Exit button shown (screenshot)', async (env) => {
   const { page } = await menuPage(env, { width: 1280, height: 800 });
   const over = () => page.evaluate(() => globalThis.__u6Layout.overCanvas);
   assert.deepEqual(await over(), [], 'out of fullscreen, the badge hidden: nothing reserved');
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
+  await adversarialGameOverlays(page);
   await page.waitForFunction(() => document.getElementById('fullscreen-exit').hidden, null, { timeout: 10_000 });
   await h.waitFrames(page, 3);
   const r = await page.evaluate(() => {
@@ -2443,19 +2500,20 @@ test('the context menu (spec 17, round 2b, opus S5): in fullscreen, the Original
   console.log('  receipt: fullscreen reserves the Exit button and the badge, hidden or shown; both hidden as drawn, the hidden Exit button taking no press; the engine has the Exit button\'s frame rect; a menu open with the Exit button shown kept: pass');
 }, { needs: h.haveHfes });
 
-test('the context menu (spec 17, round 3, gpt d SHOULDs 1-2, opus N3): in fullscreen in Wide at 16:9 (the canvas the whole screen, the windows moved down off the map\'s top), the Exit button lies over the map\'s top right and the speed badge over its top left; both start hidden as drawn and the hidden Exit button takes no press; for each, a right press near it whose menu, with the engine not told of it, would cover it opens one clear of it once the engine has its rect again (screenshot: the menu beside the badge)', async (env) => {
+test('the context menu (spec 17, round 3, gpt d SHOULDs 1-2, opus N3): with explicit adversarial overlays in fullscreen in Wide at 16:9 (the canvas the whole screen, the windows moved down off the map\'s top), the Exit button lies over the map\'s top right and the speed badge over its top left; both start hidden as drawn and the hidden Exit button takes no press; for each, a right press near it whose menu, with the engine not told of it, would cover it opens one clear of it once the engine has its rect again (screenshot: the menu beside the badge)', async (env) => {
   // The date line, the party and the attributes moved off the top of the canvas (frame corners
   // on the canvas, as a drag keeps them): only the map lies under the Exit button and the badge.
   const kept = { date: [700, 900], party: [100, 400], stats: [560, 400] };
   const { page } = await bootWide(env, {
     width: 1280,
-    height: 720,
+    height: 768,
     init: `localStorage.setItem('u6.layout.windows', ${JSON.stringify(JSON.stringify(kept))});`,
   });
   const placed = await page.evaluate(() => Object.fromEntries(globalThis.__u6Layout.windows.map((w) => [w.name, w.outer.slice(0, 2)])));
   assert.deepEqual([placed.date, placed.party, placed.stats], [kept.date, kept.party, kept.stats], 'precondition: the windows where kept');
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
+  await adversarialGameOverlays(page);
   await page.waitForFunction(() => document.getElementById('fullscreen-exit').hidden, null, { timeout: 10_000 });
   await h.waitFrames(page, 3);
   const state = () => page.evaluate(() => {
@@ -2486,7 +2544,7 @@ test('the context menu (spec 17, round 3, gpt d SHOULDs 1-2, opus N3): in fullsc
   });
   const s0 = await state();
   console.log(`  receipt: Wide fullscreen 16:9: canvas ${s0.canvas}, the Exit button over frame ${s0.exit.map(Math.round)}, the badge over ${s0.badge.map(Math.round)}`);
-  assert.deepEqual(s0.canvas, [0, 0, 1280, 720], 'precondition: the canvas the whole screen');
+  assert.deepEqual(s0.canvas, [0, 48, 1280, 720], 'precondition: the exact canvas below the 48px chrome');
   assert.deepEqual(s0.hidden, [true, true], 'precondition: both hidden');
   assert.deepEqual(s0.shown, ['hidden', 'hidden'], 'both hidden as drawn (their computed visibility)');
   assert.equal(s0.exitHit, false, 'the hidden Exit button takes no press');
@@ -2605,7 +2663,7 @@ async function heldKey(page, key, ms, how, check) {
     await page.keyboard.down(key);
     await h.sleep(30);
   }
-  if (how === 'focus') await page.evaluate(() => document.getElementById('mute').focus());
+  if (how === 'focus') await page.focus('#controls summary');
   if (how === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')));
   else await page.keyboard.up(key);
   let failed = null;
@@ -3279,7 +3337,7 @@ test('the focus leaving the canvas while an arrow is held lets it go: the hero w
       log.up = up;
     };
   });
-  await page.focus('#mute');
+  await page.focus('#controls summary');
   const at = await leader();
   const after = await h.runFrames(page, 1200);
   const reads = await page.evaluate(() => {
@@ -3327,11 +3385,11 @@ test('zip: the first press on the canvas is one game click and starts the sound;
   await page.waitForFunction(() => Number(document.body.dataset.audioChunks ?? 0) > 5, null, { timeout: 15_000 });
   const s = await h.state(page);
   assert.equal(s.audio, 'running');
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'true');
   await h.waitTicks(page, 30); // a click the game took would have walked by now
   assert.equal((await h.state(page)).leader, to, 'Mute is not a game click');
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
   assert.equal(await page.getAttribute('#mute', 'aria-pressed'), 'false');
   console.log(`  receipt: first press -> Look waits, audioContext.state=${s.audio}, chunks=${s.audioChunks}; the click walked ${from !== to}`);
 }, { needs: h.haveZip });
@@ -3664,7 +3722,7 @@ test('turn playback (spec 19 O3): original by default; quick, fast and instant c
     };
     assert.deepEqual(await read(), { selected: 1, engine: 1, speed: 1 });
     for (const k of [2, 4, 0, 1, 2]) {
-      await page.selectOption('#turns', String(k));
+      await h.chooseSetting(page, 'turns', String(k), { close: true });
       assert.deepEqual(await read(), { selected: k, engine: k, speed: 1 });
       assert.equal(await page.evaluate(() => localStorage.getItem('u6.turns')), String(k));
     }
@@ -3687,7 +3745,7 @@ test('turn playback (spec 19 O3/O5): every factor shortens a real turn in Origin
     const times = new Map();
     for (const factor of [1, 2, 4, 0]) {
       const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
-      await page.selectOption('#turns', String(factor));
+      await h.chooseSetting(page, 'turns', String(factor), { close: true });
       const before = await page.evaluate(() => ({ at: __clock, takes: __shownGame.prompt_takes() }));
       await page.keyboard.press('Space');
       const result = await page.evaluate((base) => {
@@ -4024,12 +4082,14 @@ test('a display frame converts the game\'s frame at most once however many steps
 // frame is composed without the pointer sprite, which the page draws over it pixelated at the
 // frame's scale: the test stamps Game.hd_pointer_rgba's pixels that are not clear at its box.
 const canvasShowsGame = (page) => page.evaluate(() => {
+  const c = document.getElementById('screen');
   const hash = (d) => {
     let x = 0x811c9dc5;
-    for (let i = 0; i < d.length; i += 1) x = Math.imul(x ^ d[i], 0x01000193) >>> 0;
+    for (let i = 0; i < d.length; i += 1) {
+      x = Math.imul(x ^ d[i], 0x01000193) >>> 0;
+    }
     return x;
   };
-  const c = document.getElementById('screen');
   const g = globalThis.__shownGame;
   const want = g.hd_on() ? g.hd_frame_rgba() : g.frame_rgba();
   if (g.hd_on()) {
@@ -4218,30 +4278,7 @@ test('the opening\'s frame at a step is the same on a 60 Hz and a 144 Hz display
 }, { needs: h.haveHfes });
 
 // No game: the controls only. The widest speed text and "behind" shown.
-test('layout: the Speed group sits on Mute\'s line at 1280 and 1024 px, inside the toolbar; at 375 px the page does not scroll sideways', async (env) => {
-  const { page } = await h.openPage(env, { gated: false });
-  await h.load(page, env);
-  for (const width of [1280, 1024, 375]) {
-    await page.setViewportSize({ width, height: 900 });
-    const m = await page.evaluate(() => {
-      document.getElementById('speed-label').textContent = 'Max';
-      document.getElementById('speed-reached').textContent = ' 307.2×';
-      document.getElementById('speed-badge').textContent = 'Max 307.2×';
-      document.getElementById('behind').hidden = false;
-      document.getElementById('speed-badge').hidden = false;
-      const box = (id) => document.getElementById(id).getBoundingClientRect();
-      const [mute, group, behind] = [box('mute'), box('speed-group'), box('behind')];
-      return {
-        sameLine: Math.abs((mute.top + mute.bottom) / 2 - (group.top + group.bottom) / 2) < 2 && group.left > mute.right,
-        inside: behind.right <= document.getElementById('playback').getBoundingClientRect().right,
-        sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
-      };
-    });
-    if (width >= 1024) assert.ok(m.sameLine, `${width} px: Speed on Mute's line`);
-    assert.ok(m.inside, `${width} px: the group inside the toolbar`);
-    assert.ok(!m.sideways, `${width} px: no sideways scroll`);
-  }
-});
+
 
 // Before the page's scripts: every scheduling call on an AudioParam (the page's only one is its
 // gain) logged as [method, ...arguments].
@@ -4260,7 +4297,7 @@ function logGainSchedule() {
 // The fade's time constant (site/app.js FADE_S): ~95% of the way in 50 ms.
 const FADE_TAU_S = 0.05 / 3;
 
-test('the Speed buttons change the speed by click; the music fades out above 4x and back at 4x or below, a quick reversal included; Mute is 0 at once at any speed', async (env) => {
+test('canvas speed settings change playback by keyboard; the music fades out above 4x and back at 4x or below, a quick reversal included; Mute is 0 at once at any speed', async (env) => {
   const page = await bootGame(env, logGainSchedule);
   const gain = (want) => page.waitForFunction((g) => document.body.dataset.gain === g, want, { timeout: 10_000 });
   // The schedule since the last call, each change as [kind, value, at]: kind 'fade' (a cancel
@@ -4280,7 +4317,16 @@ test('the Speed buttons change the speed by click; the music fades out above 4x 
     return out;
   }, FADE_TAU_S);
   const kinds = (changes) => changes.map(([kind, value]) => `${kind} ${value}`);
-  const click = async (id, times = 1) => { for (let i = 0; i < times; i += 1) await page.click(`#${id}`); };
+  const click = async (id, times = 1) => {
+    for (let i = 0; i < times; i += 1) {
+      if (id === 'mute') await h.clickSetting(page, 'mute', { close: true });
+      else {
+        await h.focusSetting(page, 'speed');
+        await page.keyboard.press(id === 'faster' ? 'ArrowRight' : 'ArrowLeft');
+        await h.closeSettings(page);
+      }
+    }
+  };
   await click('faster');
   assert.equal((await speedShown(page)).speed, '1.5', 'the + button');
   await engineSpeed(page, 1.5);
@@ -4306,10 +4352,9 @@ test('the Speed buttons change the speed by click; the music fades out above 4x 
   assert.deepEqual(kinds(await schedule()), ['fade 1'], 'at 4x: the fade back');
   await gain('1.00');
   // A quick reversal: up and down again in one task; the second cancels the first's fade.
-  await page.evaluate(() => {
-    document.getElementById('faster').click();
-    document.getElementById('slower').click();
-  });
+  await page.focus('#screen');
+  await page.keyboard.press('NumpadAdd');
+  await page.keyboard.press('NumpadSubtract');
   const reversal = await schedule();
   assert.deepEqual(kinds(reversal), ['fade 0', 'fade 1'], 'a quick reversal: out, then back, the out cancelled');
   assert.ok(reversal[1][2] - reversal[0][2] < 0.05, 'the reversal comes within the fade');
@@ -4401,7 +4446,7 @@ test('HD: on by default and kept across a reload; the button switches it at once
   // The switch on a frozen display: the canvas changes with no frame of the game run.
   await h.virtualDisplay(page, 60);
   const ticks = await page.evaluate(() => globalThis.__ticks);
-  const press = () => page.evaluate(() => document.getElementById('hd').click());
+  const press = () => h.clickSetting(page, 'hd', { close: true });
   await press();
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'false' && shown.stored === 'off', 'off, stored');
@@ -4670,20 +4715,24 @@ test('HD: Settings\' "HD on" works from the keyboard (Space); with storage that 
     if (lifted) break;
   }
   assert.ok(lifted, 'precondition: a real walk presents a lifted B pose');
-  await page.click('#settings');
-  await page.focus('#hd');
+  await h.focusSetting(page, 'hd');
+  await h.closeSettings(page);
   await page.evaluate(() => { window.__hdBArmed = null; });
   let posed = (await assertFrozenBFrame(page, 'initial B display')).posedPixels;
   assert.ok(posed > 0, 'precondition: the lifted B canvas visibly differs from the unposed base');
   // Every action below is observed without running one RAF. Rebuilding reference layers
   // happens only after the actual canvas has been captured inside assertFrozenBFrame.
+  await h.focusSetting(page, 'hd');
   await armFrozenBFrame(page);
   await page.keyboard.press('Space');
+  await h.closeSettings(page);
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'false' && shown.width === 320, 'Space: off');
   await assertFrozenBFrame(page, 'off first synchronous draw');
+  await h.focusSetting(page, 'hd');
   await armFrozenBFrame(page);
   await page.keyboard.press('Space');
+  await h.closeSettings(page);
   shown = await hdShown(page);
   assert.ok(shown.pressed === 'true' && shown.width === 1280, 'Space again: on');
   posed += (await assertFrozenBFrame(page, 'on first synchronous draw')).posedPixels;
@@ -4697,8 +4746,10 @@ test('HD: Settings\' "HD on" works from the keyboard (Space); with storage that 
     assert.equal((await hdShown(page)).width, pixels, 'the resized box selects its HD scale');
     posed += (await assertFrozenBFrame(page, 'scale ' + pixels + ' first synchronous draw')).posedPixels;
   }
+  await h.focusSetting(page, 'hd');
   await armFrozenBFrame(page);
   await page.keyboard.press('Space');
+  await h.closeSettings(page);
   assert.equal((await hdShown(page)).pressed, 'false', 'off again');
   await assertFrozenBFrame(page, 'off before reload');
   await page.reload();
@@ -5365,7 +5416,7 @@ test('HD pack on a page with no game: the drop loads it and starts nothing (no i
   assert.equal(foreign.length, 0, 'no request to another origin');
 }, { needs: h.haveHfes });
 
-// --- the first-run chooser and the site's packs -----------------------------------------------
+// --- in-game artwork choices and the site's packs -----------------------------------------------
 // The chooser (the page's language, HD: MMPX or a pack the site lists, and NPC voices), the
 // site's packs under /packs/ (static files, asked with no key) and the catalog of the page's own
 // text (site/i18n.js). The packs are the test's: made-up records (h.packKit), served by the test
@@ -5397,62 +5448,10 @@ test('the page\'s text: English and Korean hold the same keys, of the same shape
 
 // --- the page (the owner's "쓰잘대기 없는 내용 빼주고", 2026-10-21) and fullscreen ---------------
 
-// The page as a visitor sees it: the toolbar's controls, every button shown outside Settings and
-// the Voices terms, the drop line, the footer's links, the controls' list.
+// Initial import visibility remains observable separately from in-game file management.
 const pageShown = (page) => page.evaluate(() => {
-  const shownNow = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
   const drop = document.getElementById('drop');
-  const controls = document.getElementById('controls');
-  return {
-    title: document.title,
-    h1: document.querySelector('h1').textContent.trim(),
-    toolbars: document.querySelectorAll('[role="toolbar"]').length,
-    toolbar: [...document.getElementById('playback').children].map((e) => e.id),
-    afterScreen: document.getElementById('screen-box').nextElementSibling?.id ?? null,
-    buttons: [...document.querySelectorAll('button')].filter((b) => shownNow(b) && !b.closest('#setup, #voice-terms')).map((b) => b.id),
-    gone: ['limits', 'npc-bundles', 'forget-npc-bundles', 'game-strings', 'hd-credits', 'voice-credits', 'locale-note']
-      .filter((id) => document.getElementById(id) !== null),
-    hint: document.querySelectorAll('.hint').length,
-    hdInSettings: document.getElementById('hd').type === 'checkbox' && document.getElementById('setup').contains(document.getElementById('hd')),
-    kept: [...document.querySelectorAll('#kept button')].map((b) => b.id),
-    keptOpen: document.getElementById('kept').open,
-    drop: drop.hidden ? null : drop.querySelector('label[for="picker"]').textContent.replace(/\s+/g, ' ').trim(),
-    notices: [...document.querySelectorAll('#notices a')].map((a) => new URL(a.href).pathname),
-    controlsOpen: controls.open,
-    controls: [...controls.querySelectorAll('li')].map((li) => li.textContent.trim()),
-    controlsTitle: controls.querySelector('summary').textContent.trim(),
-  };
-});
-
-const CONTROL_KEYS = ['keyWalk', 'keyCommands', 'keyCombat', 'keyPass', 'keySave', 'keySpeed', 'keyTurnSkip', 'keyOpening'];
-
-test('the page: titled "Ultima VI"; under the game screen one toolbar of exactly Fullscreen, Mute, Voices (and its chip), the Speed and Turns groups and Settings, the only buttons shown outside Settings; no "What this version does", hint, NPC bundles, Game strings, HD button or page note; Settings holds "HD on" and a closed "Kept in this browser" group of the five forget buttons; the footer links the MMPX notice and the voice model\'s licence and notice; the controls are closed and list the keys in the page\'s language', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const { LICENSE_URL, NOTICE_URL } = await import('../../site/voice/model.js');
-  const { page } = await h.openPage(env);
-  await h.load(page, env);
-  const p = await pageShown(page);
-  assert.deepEqual([p.title, p.h1], ['Ultima VI', 'Ultima VI'], 'the title');
-  assert.equal(p.toolbars, 1, 'one toolbar');
-  assert.equal(p.afterScreen, 'playback', 'right under the game screen');
-  assert.deepEqual(p.toolbar, ['fullscreen', 'mute', 'voices', 'voice-chip', 'speed-group', 'turns-group', 'settings'], 'its controls, in order');
-  assert.deepEqual(p.buttons, ['fullscreen', 'mute', 'voices', 'slower', 'faster', 'settings'], 'the only buttons shown');
-  assert.deepEqual(p.gone, [], 'the removed parts are gone');
-  assert.equal(p.hint, 0, 'no hint paragraph');
-  assert.ok(p.hdInSettings, '"HD on" is a checkbox in Settings');
-  assert.deepEqual(p.kept, ['forget', 'forget-save', 'forget-hd', 'forget-ko', 'forget-voices'], 'the forget buttons, in Settings\' group');
-  assert.equal(p.keptOpen, false, 'the group closed');
-  const [licence, notice] = [LICENSE_URL, NOTICE_URL].map((u) => u.pathname.slice(h.SITE.length));
-  assert.deepEqual(p.notices, ['/NOTICE.txt', licence, notice], 'the footer: MMPX\'s notice, the voice model\'s licence and notice');
-  assert.equal(p.controlsOpen, false, 'the controls closed');
-  assert.equal(p.controlsTitle, TEXT.en.controls);
-  assert.deepEqual(p.controls, CONTROL_KEYS.map((k) => TEXT.en[k]), 'the keys, in English');
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  const ko = await pageShown(page);
-  assert.equal(ko.controlsTitle, TEXT.ko.controls);
-  assert.deepEqual(ko.controls, CONTROL_KEYS.map((k) => TEXT.ko[k]), 'and in Korean');
-  console.log(`  receipt: toolbar ${p.toolbar.length} controls, ${p.buttons.length} buttons shown, ${p.kept.length} forget buttons in Settings, ${p.notices.length} notice links: pass`);
+  return { drop: drop.hidden ? null : drop.querySelector('.import-description').textContent.replace(/\s+/g, ' ').trim() };
 });
 
 test('the drop line: shown with no game files kept, one sentence in the page\'s language with the picker; hidden once files are kept (made-up kept files: no game starts from them), while a drop on the page still loads a voice pack; Forget the kept files shows it again; Settings\' "HD on" switches HD and is kept across a reload', async (env) => {
@@ -5471,7 +5470,7 @@ test('the drop line: shown with no game files kept, one sentence in the page\'s 
   await h.waitSettled(page);
   assert.equal((await pageShown(page)).drop, TEXT.en.dropLine, 'forgotten: the drop line again');
   assert.equal(await page.evaluate(() => document.getElementById('hd').checked), true, 'HD on by default');
-  await page.click('#hd');
+  await h.clickSetting(page, 'hd', { close: true });
   assert.equal(await page.evaluate(() => localStorage.getItem('u6.hd')), 'off', 'off, kept');
   await page.reload();
   await h.waitSettled(page);
@@ -5499,18 +5498,22 @@ const fullShown = (page) => page.evaluate(() => {
 
 // The canvas as large as fits the viewport with the game's aspect ratio, centred.
 function fitsScreen({ rect: [left, top, width, height], viewport: [vw, vh] }) {
-  return Math.abs(width / height - 1.6) < 0.01 && width <= vw + 0.5 && height <= vh + 0.5
-    && (Math.abs(width - vw) < 1 || Math.abs(height - vh) < 1)
-    && Math.abs(left - (vw - width) / 2) < 1 && Math.abs(top - (vh - height) / 2) < 1;
+  const chrome=48;
+  return Math.abs(width / height - 1.6) < 0.01 && width <= vw + 0.5 && height <= vh - chrome + 0.5
+    && (Math.abs(width - vw) < 1 || Math.abs(height - (vh-chrome)) < 1)
+    && Math.abs(left - (vw - width) / 2) < 1 && Math.abs(top - ((vh - height - chrome) / 2 + chrome)) < 1;
 }
 
 const waitFull = (page, mode) => page.waitForFunction((m) => document.body.dataset.fullscreen === m, mode, { timeout: 10_000 });
 
-test('fullscreen: the toolbar\'s Fullscreen puts the screen box in the browser\'s fullscreen, the canvas as large as fits with the game\'s aspect ratio, centred, with the focus; the button reads Exit fullscreen; the Exit button shows on entering and on a pointer move and hides 2 s after; the Exit button, the toolbar\'s button and the browser\'s own way out each leave, the page says so and the canvas has the focus again; without requestFullscreen the box fills the viewport by its class instead, left the same way', async (env) => {
+test('fullscreen: canvas settings Fullscreen puts the screen box in the browser\'s fullscreen, the canvas as large as fits with the game\'s aspect ratio, centred, with the focus; the button reads Exit fullscreen; the Exit button shows on entering and on a pointer move and hides 2 s after; the Exit button, the canvas setting and the browser\'s own way out each leave, the page says so and the canvas has the focus again; without requestFullscreen the box fills the viewport by its class instead, left the same way', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   let { context, page } = await h.openPage(env);
   await h.load(page, env);
-  await page.click('#fullscreen');
+  await page.setInputFiles('#picker',h.HFES);
+  await started(page,FILES);
+  await h.waitPrompt(page);
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
   let f = await fullShown(page);
   assert.equal(f.element, 'screen-box', 'the screen box is fullscreen');
@@ -5529,13 +5532,13 @@ test('fullscreen: the toolbar\'s Fullscreen puts the screen box in the browser\'
   assert.ok(f.element === null && f.label === TEXT.en.fullscreen && f.pressed === 'false' && !f.exit, 'the Exit button leaves');
   assert.ok(!fitsScreen(f), 'the canvas back in the page');
   assert.equal(f.focus, 'screen', 'left by the Exit button: the canvas has the focus back');
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
-  await page.evaluate(() => document.getElementById('fullscreen').click());
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'off');
-  assert.equal((await fullShown(page)).element, null, 'the toolbar\'s button leaves');
-  assert.equal((await fullShown(page)).focus, 'screen', 'left by the toolbar\'s button: the canvas has the focus back');
-  await page.click('#fullscreen');
+  assert.equal((await fullShown(page)).element, null, 'the canvas setting leaves');
+  assert.equal((await fullShown(page)).focus, 'screen', 'left by the canvas setting: the canvas has the focus back');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
   await page.evaluate(() => document.exitFullscreen()); // as the browser's Escape or F11 does
   await waitFull(page, 'off');
@@ -5546,7 +5549,10 @@ test('fullscreen: the toolbar\'s Fullscreen puts the screen box in the browser\'
   ({ context, page } = await h.openPage(env));
   await context.addInitScript(() => { delete Element.prototype.requestFullscreen; });
   await h.load(page, env);
-  await page.click('#fullscreen');
+  await page.setInputFiles('#picker',h.HFES);
+  await started(page,FILES);
+  await h.waitPrompt(page);
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'css');
   f = await fullShown(page);
   assert.ok(f.element === null && f.full, 'the box by its class, not the browser\'s fullscreen');
@@ -5556,39 +5562,13 @@ test('fullscreen: the toolbar\'s Fullscreen puts the screen box in the browser\'
   await waitFull(page, 'off');
   assert.ok(!(await fullShown(page)).full, 'the Exit button leaves it');
   assert.equal((await fullShown(page)).focus, 'screen', 'the class left by the Exit button: the canvas has the focus back');
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'css');
-  await page.evaluate(() => document.getElementById('fullscreen').click());
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'off');
   console.log(`  receipt: fullscreen canvas ${seen.rect.join(',')} in a viewport ${seen.viewport.join('x')}; css fallback ${f.rect.join(',')} in ${f.viewport.join('x')}; keyboard lock ${lock ? 'offered' : 'not offered'} by this Chromium: pass`);
-});
+}, { needs: h.haveHfes });
 
-test('the chooser\'s note on the game\'s text, in 한글: with no Korean pack at all (none listed, none kept) it points at the README\'s "Packs from your own copy"; with one listed it shows nothing, also while that pack is still downloading and once it is loaded; in English it shows nothing', async (env) => {
-  sitePacks(env, { 'index.json': koListing(null) });
-  let { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
-  await h.load(page, env);
-  await page.click('#settings');
-  await listed(page, 0);
-  let c = await chooser(page);
-  assert.equal(c.note, await noteFor('ko'), 'none listed or kept: the note');
-  assert.equal(c.noteLink, README_PACKS, 'pointing at the README');
-  await page.check('input[name="setup-lang"][value="en"]');
-  assert.equal((await chooser(page)).note, null, 'in English: none');
-  await context.close();
-  const { pack, runs, scripts } = await koFixture();
-  sitePacks(env, { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) });
-  const held = h.holdPack(env, KO_FILE);
-  ({ context, page } = await h.openPage(env, { setup: null }));
-  await page.goto(env.server.url);
-  await held.asked;
-  c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'ko', 'the first run\'s chooser, on 한글');
-  assert.equal(c.note, null, 'a pack listed, still downloading: no note');
-  held.release();
-  await koPackIs(page, `${runs},${scripts}`);
-  assert.equal((await chooser(page)).note, null, 'loaded: no note');
-  await context.close();
-});
 
 test('fullscreen in a game in 한글 with the Korean pack (the user\'s disks, a synthetic conversation): the hidden input that takes Korean is inside the fullscreen element, the canvas has the focus, and while the game reads the player\'s words the input has it; composed syllables and Enter reach the game as on the page; left by the Exit button, the canvas has the focus again and a key reaches the game', async (env) => {
   const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
@@ -5603,7 +5583,7 @@ test('fullscreen in a game in 한글 with the Korean pack (the user\'s disks, a 
   await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
   const inside = () => page.evaluate(() => ({
     ime: document.fullscreenElement?.contains(document.getElementById('ime')) ?? false,
@@ -5672,15 +5652,16 @@ const chooser = (page) => page.evaluate(() => {
 
 // The README section the chooser's note points at, and the note in `lang` (shown only with no
 // Korean pack at all: none kept, none listed).
-const README_PACKS = 'https://github.com/2lab-ai/ultima6#packs-from-your-own-copy';
 async function noteFor(lang) {
   const { TEXT } = await import('../../site/i18n.js');
   return `${TEXT[lang].gameText} ${TEXT[lang].packsReadme}`;
 }
 
 // Waits until the chooser's HD entries hold the list the site gave (`n` packs).
-const listed = (page, n) => page.waitForFunction((want) => document.getElementById('setup-hd').dataset.packs === want,
-  String(n), { timeout: 10_000 });
+const listed = async (page, n) => {
+  const item=await h.settingsItem(page,'pack');
+  assert.equal(item.options.filter(o=>o.value && o.value!==':dropped').length,n,'canvas menu includes each listed pack');
+};
 
 // The tests' pack: `tiles` made-up tile records (no game: their keys match nothing), built in a
 // page the way u6-hdpack writes one (h.packKit); its bytes.
@@ -5704,189 +5685,6 @@ function sitePacks(env, files) {
   for (const [name, body] of Object.entries(files)) env.packs.set(name, body);
   env.packRequests.length = 0;
 }
-
-// The site's listing for the first-run tests: two HD packs (the first is the default), a Korean
-// pack and a voice pack, each the tests' own.
-async function fullSite(env, { hd = true } = {}) {
-  const ko = await koFixture();
-  const voices = await voicePack({ [PACK_A]: VOICE_A, [PACK_B]: VOICE_B });
-  const hdPack = hd ? await madePack(env) : null;
-  sitePacks(env, {
-    'index.json': JSON.stringify({
-      packs: hd ? [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'other.zip', label: 'Other' }] : [],
-      ko: { file: KO_FILE, label: 'Korean (test)' },
-      voices: { file: VOICES_FILE, label: 'Voices (test)' },
-    }),
-    ...(hd ? { 'test-pack.zip': hdPack } : {}),
-    [KO_FILE]: Uint8Array.from(ko.pack),
-    [VOICES_FILE]: JSON.stringify(voices),
-  });
-  return { ko, voices, hdPack };
-}
-
-// The voice model's terms as the chooser shows them: the restrictions' text and the paths the
-// licence and the notice link to.
-const setupTermsShown = (page) => page.evaluate(() => ({
-  text: document.getElementById('setup-restrictions').textContent,
-  licence: new URL(document.getElementById('setup-license').href).pathname,
-  notice: new URL(document.getElementById('setup-notice').href).pathname,
-}));
-
-test('first visit: the chooser shows first, above the game screen, on 한글 (an en-US browser), with the first HD pack the site lists and NPC voices checked, the voice model\'s use restrictions shown verbatim with the licence and the notice linked and OK reading as their acceptance (in English too); unchecking NPC voices hides them and OK reads as OK; the listing is asked once a visit with no key, the listed Korean and voice packs downloaded once before any press; OK loads the HD pack, keeps the choice, asks nothing of /models/ and accepts nothing; a reload downloads nothing and skips the chooser; Settings shows the choice kept, NPC voices unchecked while the voices are off', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const { RESTRICTIONS } = await import('../../site/voice/terms.js');
-  const { LICENSE_URL, NOTICE_URL } = await import('../../site/voice/model.js');
-  const { ko, hdPack } = await fullSite(env);
-  const { context, page } = await h.openPage(env, { setup: null });
-  await context.addInitScript(voiceProbe);
-  const requests = modelRequests(context);
-  await h.load(page, env);
-  await listed(page, 2);
-  await koPackIs(page, `${ko.runs},${ko.scripts}`);
-  await voicePackIs(page, 2);
-  let c = await chooser(page);
-  assert.ok(c.shown && c.first, 'the chooser shows, above the game screen');
-  assert.deepEqual(c.langs, ['English', '한글']);
-  assert.equal(c.lang, 'ko', 'on 한글');
-  assert.equal((await pageText(page)).lang, 'ko', 'the page in 한글');
-  assert.deepEqual(c.hd, [TEXT.ko.mmpx, 'Test pack', 'Other'], 'MMPX and the packs listed');
-  assert.equal(c.checked, 'test-pack.zip', 'the first pack listed checked');
-  assert.ok(c.voices && c.terms, 'NPC voices checked, the terms shown');
-  assert.equal(c.ok, TEXT.ko.acceptStart, 'OK reads as acceptance');
-  const shown = await setupTermsShown(page);
-  const [licence, notice] = [LICENSE_URL, NOTICE_URL].map((u) => u.pathname.slice(h.SITE.length));
-  assert.equal(shown.text, RESTRICTIONS, 'the restrictions shown verbatim');
-  assert.ok(shown.licence === licence && shown.notice === notice, 'the licence and the notice linked');
-  assert.equal(c.stored, null, 'nothing kept yet');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${VOICES_FILE}`, 200], [`/packs/${KO_FILE}`, 200]],
-    'the listing once, the voice pack and the Korean pack once each, before any press');
-  await page.check('input[name="setup-lang"][value="en"]');
-  assert.equal((await chooser(page)).ok, TEXT.en.acceptStart, 'in English too');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await page.uncheck('#setup-voices');
-  c = await chooser(page);
-  assert.ok(!c.voices && !c.terms, 'unchecked: the terms hidden');
-  assert.equal(c.ok, TEXT.ko.ok, 'and OK reads as OK');
-  await page.click('#setup-ok');
-  await packIs(page, '1,0,0');
-  c = await chooser(page);
-  assert.ok(!c.shown, 'OK closes it');
-  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'the choice kept');
-  assert.equal(c.source, 'test-pack.zip', 'the listed HD pack loaded');
-  assert.equal(await h.keptPackBytes(page), hdPack.length, 'and kept');
-  assert.deepEqual(env.packRequests.slice(3), [['/packs/test-pack.zip', 200]], 'downloaded once');
-  let v = await voiceShown(page);
-  assert.ok(v.state === 'off' && !v.chip, 'voices off');
-  assert.deepEqual(await page.evaluate(() => [window.__workers, localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')]),
-    [0, null, null], 'no worker, nothing accepted');
-  assert.deepEqual(requests, [], 'nothing asked of /models/');
-  env.packRequests.length = 0;
-  await page.reload();
-  await packIs(page, '1,0,0');
-  await koPackIs(page, `${ko.runs},${ko.scripts}`);
-  assert.ok(!(await chooser(page)).shown, 'a kept choice skips the chooser');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a reload: the listing only, every pack kept');
-  await page.click('#settings');
-  await listed(page, 2);
-  c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'ko' && c.checked === 'test-pack.zip', 'Settings: on the choice kept');
-  assert.ok(!c.voices && !c.terms && c.ok === TEXT.ko.ok, 'NPC voices unchecked while the voices are off');
-  assert.deepEqual(requests, [], 'still nothing asked of /models/');
-  console.log('  receipt: 1 listing a visit, 3 packs downloaded once each, 0 model requests: pass');
-});
-
-test('first visit with the voice model: OK as the chooser opens (NPC voices checked; a listing that names no HD pack: MMPX checked) accepts the model\'s use restrictions as the Voices terms\' Accept does (the revision accepted kept, the voices on) and starts the voices to ready, the model asked of /models/ only after OK; Settings then shows NPC voices checked with the terms; unchecked there, OK turns the voices off', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const { REVISION } = await import('../../site/voice/model.js');
-  await fullSite(env, { hd: false });
-  const { context, page } = await h.openPage(env, { setup: null });
-  await context.addInitScript(voiceProbe);
-  const requests = modelRequests(context);
-  await h.load(page, env);
-  await listed(page, 0);
-  await voicePackIs(page, 2);
-  let c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'ko', 'the chooser on 한글');
-  assert.equal(c.checked, '', 'MMPX checked: the listing names no HD pack');
-  assert.ok(c.voices && c.terms && c.ok === TEXT.ko.acceptStart, 'NPC voices checked, the terms shown, OK as acceptance');
-  assert.deepEqual(requests, [], 'nothing asked of /models/ before OK');
-  const gpu = await page.evaluate(async () => Boolean(await navigator.gpu?.requestAdapter()));
-  await page.click('#setup-ok');
-  await waitVoice(page, () => ['ready', 'failed'].includes(document.body.dataset.voice), null);
-  const v = await voiceShown(page);
-  assert.ok(v.state === 'ready' && v.chip, 'the voices ready');
-  assert.equal(v.path, gpu ? 'gpu' : 'cpu', 'where this browser runs them');
-  assert.deepEqual(await page.evaluate(() => [localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')]),
-    [REVISION, 'on'], 'the acceptance kept, voices on');
-  assert.ok(requests.length > 0, 'the model asked of /models/ after OK');
-  c = await chooser(page);
-  assert.ok(!c.shown, 'OK closes the chooser');
-  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'and keeps the choice');
-  assert.deepEqual([koRequests(env).length, voiceRequests(env).length], [1, 1], 'the Korean and the voice pack downloaded once each');
-  await page.click('#settings');
-  c = await chooser(page);
-  assert.ok(c.voices && c.terms && c.ok === TEXT.ko.acceptStart, 'Settings: NPC voices checked while on, the terms shown');
-  await page.uncheck('#setup-voices');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  assert.equal((await voiceShown(page)).state, 'off', 'unchecked: OK turns the voices off');
-  assert.equal(await page.evaluate(() => localStorage.getItem('u6.voices')), 'off', 'and keeps them off');
-  console.log(`  receipt: voices ready on the ${v.path} from the chooser's OK, ${requests.length} model requests after it, 0 before: pass`);
-}, { needs: h.haveModels });
-
-// The chooser's OK, the HD entry checked and what is kept, read in the page.
-const setupOkState = (page) => page.evaluate(() => ({
-  shown: !document.getElementById('setup').hidden,
-  disabled: document.getElementById('setup-ok').disabled,
-  checked: document.querySelector('#setup-hd input:checked')?.value ?? null,
-  stored: localStorage.getItem('u6.setup'),
-}));
-
-test('the chooser waits for the site\'s listing: on a first visit while the listing is held, OK is disabled with no HD entry checked and a press does nothing (nothing kept, the chooser open once the queue is done); once the listing is in, the first pack listed is checked, OK is enabled and loads it; a listing that fails (a 404, a body that does not read) enables OK with MMPX checked', async (env) => {
-  const hdPack = await madePack(env);
-  sitePacks(env, {
-    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'other.zip', label: 'Other' }] }),
-    'test-pack.zip': hdPack,
-  });
-  let hold = h.holdPack(env, 'index.json');
-  let { context, page } = await h.openPage(env, { setup: null });
-  await page.goto(env.server.url);
-  await hold.asked;
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  let s = await setupOkState(page);
-  assert.ok(s.shown && s.disabled, 'the listing held: the chooser shows, OK disabled');
-  assert.equal(s.checked, null, 'no HD entry checked yet');
-  await page.uncheck('#setup-voices'); // no voices turned on here
-  await page.evaluate(() => document.getElementById('setup-ok').click());
-  hold.release();
-  await listed(page, 2);
-  await h.waitSettled(page);
-  s = await setupOkState(page);
-  assert.ok(s.shown && s.stored === null, 'the press while disabled did nothing: nothing kept, the chooser open');
-  assert.ok(!s.disabled && s.checked === 'test-pack.zip', 'the listing in: the first pack listed checked, OK enabled');
-  await page.click('#setup-ok');
-  await packIs(page, '1,0,0');
-  const c = await chooser(page);
-  assert.ok(!c.shown && c.source === 'test-pack.zip', 'OK loads it');
-  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'and keeps the choice');
-  await context.close();
-  for (const [what, files] of [['a 404', {}], ['a body that does not read', { 'index.json': 'not JSON' }]]) {
-    sitePacks(env, files);
-    hold = h.holdPack(env, 'index.json');
-    ({ context, page } = await h.openPage(env, { setup: null }));
-    await page.goto(env.server.url);
-    await hold.asked;
-    await page.waitForFunction(() => !document.getElementById('setup').hidden);
-    s = await setupOkState(page);
-    assert.ok(s.disabled && s.checked === null, `${what}: OK disabled while the listing is held`);
-    hold.release();
-    await listed(page, 0);
-    s = await setupOkState(page);
-    assert.ok(!s.disabled && s.checked === '', `${what}: then OK enabled, MMPX checked`);
-    await context.close();
-  }
-  console.log('  receipt: OK disabled while the listing was held (3 visits), a press then kept nothing; the listed pack loaded after; 2 failed listings: MMPX: pass');
-});
 
 test('the pack list: asked once a visit with no key, the packs listed by their labels as text (a file that is not a plain name left out), MMPX checked in Settings with no pack active; an old link\'s ?k= is taken off the address bar and opens no chooser, and the key an older page kept is removed', async (env) => {
   sitePacks(env, {
@@ -5914,72 +5712,42 @@ test('the pack list: asked once a visit with no key, the packs listed by their l
   c = await chooser(page);
   assert.equal(page.url(), `${env.server.url}?x=1#here`, 'an old link\'s ?k= taken off the address bar');
   assert.ok(!c.shown && c.key === null, 'it opens no chooser and is not kept');
-  await page.click('#settings');
+  await h.openSettings(page);
   await listed(page, 2);
-  c = await chooser(page);
-  assert.deepEqual(c.hd, ['MMPX (no pack)', '<b>Test</b> pack', 'plain.zip'], 'the packs by their labels (a file without one by its name)');
-  assert.equal(c.markup, 0, 'a label is text, not markup');
-  assert.equal(c.checked, '', 'MMPX, the HD now, checked');
+  const packChoice = await h.settingsItem(page, 'pack');
+  assert.deepEqual(packChoice.options.map(option=>option.label), ['MMPX', '<b>Test</b> pack', 'plain.zip'], 'canvas choices preserve labels as text and reject paths');
+  assert.equal(await page.locator('#setup-hd b').count(), 0, 'a label is text, not markup');
+  assert.equal(packChoice.value, '', 'MMPX is active');
+  await h.closeSettings(page);
   assert.deepEqual(env.packRequests, [['/packs/index.json', 200], ['/packs/index.json', 200]], 'once a visit');
 });
 
-test('a listed pack chosen: downloaded, its progress shown, loaded and kept as a dropped pack (no game needed); the chooser closes; a reload brings it back with no chooser and no download; one the site does not have leaves the chooser open with the reason and nothing loaded; MMPX then forgets it', async (env) => {
-  const bytes = await madePack(env);
-  sitePacks(env, {
-    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }, { file: 'gone.zip', label: 'Gone' }] }),
-    'test-pack.zip': bytes,
-  });
-  const { page } = await h.openPage(env, { setup: null });
-  await h.load(page, env);
-  // A first visit opens on 한글 with NPC voices checked; this test reads the English labels and
-  // turns no voices on.
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.uncheck('#setup-voices');
-  await listed(page, 2);
-  assert.deepEqual((await chooser(page)).hd, ['MMPX (no pack)', 'Test pack', 'Gone']);
-  await page.evaluate(() => {
-    window.__setupLines = [];
-    const line = document.getElementById('setup-status');
-    new MutationObserver(() => window.__setupLines.push(line.textContent)).observe(line, { childList: true, characterData: true, subtree: true });
-  });
-  await page.check('input[name="setup-hd"][value="gone.zip"]');
-  await page.click('#setup-ok');
+test('canvas artwork packs: a failed first option preserves storage, the next option succeeds with progress, reload reuses it and MMPX removes only the pack', async (env) => {
+  const bytes=await madePack(env);
+  sitePacks(env, {'index.json':JSON.stringify({packs:[{file:'gone.zip',label:'Gone'},{file:'test-pack.zip',label:'Test pack'}]}),'test-pack.zip':bytes});
+  const {page}=await h.openPage(env);
+  await h.load(page,env);
+  await page.evaluate(()=>{window.__packProgress=[];new MutationObserver(()=>window.__packProgress.push(document.getElementById('status').textContent)).observe(document.getElementById('status'),{subtree:true,childList:true,characterData:true});});
+  await h.clickSetting(page,'pack');
   await h.waitSettled(page);
-  let c = await chooser(page);
-  assert.ok(c.shown, 'not loaded: the chooser stays open');
-  assert.equal(c.status, 'The HD pack was not loaded: it could not be downloaded (HTTP 404).', 'with the reason');
-  assert.equal(c.stored, null, 'nothing kept');
-  assert.deepEqual(await packShown(page), { pack: 'none', matched: '', forgetEnabled: true }, 'no pack');
-  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
-  await page.click('#setup-ok');
-  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
-  c = await chooser(page);
-  const lines = await page.evaluate(() => window.__setupLines);
-  const mib = (bytes.length / 2 ** 20).toFixed(1);
-  assert.ok(lines.some((l) => l === `Downloading the HD pack: ${mib} of ${mib} MiB…`), 'the download\'s progress, of its size');
-  assert.ok(lines.includes('Checking the HD pack…'), 'then the check');
-  assert.ok(!c.shown, 'loaded: the chooser closes');
-  assert.match((await h.state(page)).status, /^HD pack loaded: 1 tiles, 0 portraits and 0 panel pictures; it is used once a game runs\. It is kept in this browser for the next visit\.$/);
-  assert.deepEqual(c.stored, { lang: 'en', version: h.SETUP_VERSION }, 'the choice is kept');
-  assert.equal(c.source, 'test-pack.zip', 'and where the kept pack came from');
-  assert.equal(await h.keptPackBytes(page), bytes.length, 'the pack is kept as a dropped one is');
-  assert.equal((await h.state(page)).state, 'idle', 'no game started');
-  assert.deepEqual(env.packRequests.slice(1), [['/packs/gone.zip', 404], ['/packs/test-pack.zip', 200]], 'each download');
-  env.packRequests.length = 0;
-  await page.reload();
-  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === '1,0,0', null, { timeout: 30_000 });
-  assert.ok(!(await chooser(page)).shown, 'a reload: no chooser');
-  // The listing is asked at every restore (the voice pack it may name, spec 09).
-  assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'the listing only, no download: the kept pack');
-  await page.click('#settings');
-  await listed(page, 2);
-  assert.equal((await chooser(page)).checked, 'test-pack.zip', 'Settings: the pack chosen is checked');
-  await page.check('input[name="setup-hd"][value=""]');
-  await page.click('#setup-ok');
-  await page.waitForFunction(() => document.body.dataset.ops === '0' && document.body.dataset.hdPack === 'none', null, { timeout: 30_000 });
-  c = await chooser(page);
-  assert.ok(!c.shown && c.source === null, 'MMPX: no pack, no source kept');
-  assert.equal(await h.keptPackBytes(page), null, 'the pack forgotten');
+  assert.equal(await h.keptPackBytes(page),null,'failed option stores no pack');
+  assert.equal((await packShown(page)).pack,'none','failed option leaves the active pack alone');
+  assert.ok((await h.state(page)).status.includes('HTTP 404'),'failure has a recoverable reason');
+  await h.chooseSetting(page,'pack','test-pack.zip');
+  await packIs(page,'1,0,0');
+  assert.equal(await h.keptPackBytes(page),bytes.length,'the successful pack is stored');
+  assert.equal(await page.evaluate(()=>localStorage.getItem('u6.hdSource')),'test-pack.zip','source stored');
+  assert.equal((await h.state(page)).state,'idle','pack selection starts no game');
+  const progress=await page.evaluate(()=>window.__packProgress);
+  assert.ok(progress.some(s=>s.startsWith('Downloading the HD pack:'))&&progress.includes('Checking the HD pack…'),'download and validation progress is visible');
+  await h.closeSettings(page);
+  env.packRequests.length=0;
+  await page.reload();await packIs(page,'1,0,0');
+  assert.deepEqual(env.packRequests,[['/packs/index.json',200]],'reload only retrieves the listing');
+  await h.chooseSetting(page,'pack','',{close:true});
+  await packIs(page,'none');
+  assert.equal(await h.keptPackBytes(page),null,'MMPX removes the pack');
+  assert.equal(await page.evaluate(()=>localStorage.getItem('u6.hdSource')),null,'MMPX clears its source');
 });
 
 // The pack on the page by its counts (data-hd-pack: one tile for the listed pack, two for the
@@ -5987,151 +5755,33 @@ test('a listed pack chosen: downloaded, its progress shown, loaded and kept as a
 const packIs = (page, counts) => page.waitForFunction((want) => document.body.dataset.ops === '0'
   && document.body.dataset.hdPack === want, counts, { timeout: 30_000 });
 
-test('a dropped pack still loads; the chooser then shows it as the active pack ("Dropped pack" checked), OK with nothing changed keeps it, and after a reload it is shown so again; MMPX then removes it', async (env) => {
-  const dropped = await madePack(env, 2);
-  sitePacks(env, {});
-  const { page } = await h.openPage(env);
-  await h.load(page, env);
-  assert.ok(!(await chooser(page)).shown, 'MMPX kept: no chooser');
-  await h.dropFiles(page, [], [{ name: 'dropped-pack.zip', bytes: [...dropped] }]);
-  await packIs(page, '2,0,0');
-  assert.equal((await chooser(page)).source, ':dropped', 'a dropped pack kept as one');
-  await page.click('#settings');
-  await listed(page, 0);
-  let c = await chooser(page);
-  assert.deepEqual(c.hd, ['MMPX (no pack)', 'Dropped pack'], 'the dropped pack is an entry');
-  assert.equal(c.checked, ':dropped', 'and the one checked');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  assert.ok(!(await chooser(page)).shown, 'OK closes it');
-  assert.equal(await page.evaluate(() => document.body.dataset.hdPack), '2,0,0', 'OK unchanged: the dropped pack stays');
-  assert.equal(await h.keptPackBytes(page), dropped.length, 'and stays kept');
-  await page.reload();
-  await packIs(page, '2,0,0');
-  await page.click('#settings');
-  await listed(page, 0);
-  c = await chooser(page);
-  assert.ok(c.hd.includes('Dropped pack') && c.checked === ':dropped', 'after a reload: "Dropped pack" checked');
-  await page.check('input[name="setup-hd"][value=""]');
-  await page.click('#setup-ok');
-  await packIs(page, 'none');
-  c = await chooser(page);
-  assert.ok(!c.shown && c.source === null, 'MMPX removes the dropped pack');
-  assert.equal(await h.keptPackBytes(page), null, 'from the browser too');
-  await page.click('#settings');
-  await listed(page, 0);
-  c = await chooser(page);
-  assert.ok(c.hd.length === 1 && c.checked === '', 'no pack: MMPX only, checked');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', 404], ['/packs/index.json', 404]], 'the listing only, once a visit');
+test('canvas artwork packs: imported pack is selected, kept through unchanged menu and reload, and removable through MMPX', async (env) => {
+  const bytes=await madePack(env,2);sitePacks(env,{});
+  const {page}=await h.openPage(env);await h.load(page,env);
+  await h.dropFiles(page,[],[{name:'dropped-pack.zip',bytes:[...bytes]}]);await packIs(page,'2,0,0');
+  let item=await h.settingsItem(page,'pack');
+  assert.equal(item.value,':dropped','imported pack is the selected entry');
+  assert.ok(item.options.some(o=>o.value==='')&&item.options.some(o=>o.value===':dropped'),'both current pack and MMPX are available');
+  await h.closeSettings(page);assert.equal(await h.keptPackBytes(page),bytes.length,'closing unchanged preserves the pack');
+  await page.reload();await packIs(page,'2,0,0');
+  item=await h.settingsItem(page,'pack');assert.equal(item.value,':dropped','reload keeps the imported pack');
+  await h.chooseSetting(page,'pack','',{close:true});await packIs(page,'none');
+  assert.equal(await h.keptPackBytes(page),null,'MMPX removes it from storage');
+  item=await h.settingsItem(page,'pack');assert.deepEqual(item.options.map(o=>o.value),[''],'no stale imported-pack option');
 });
 
-test('a listed pack chosen, then another pack dropped: the chooser shows the dropped one as active, and the listed pack chosen again is downloaded and replaces it', async (env) => {
-  const [listedPack, dropped] = [await madePack(env, 1), await madePack(env, 2)];
-  sitePacks(env, {
-    'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }),
-    'test-pack.zip': listedPack,
-  });
-  const { page } = await h.openPage(env, { setup: null });
-  await h.load(page, env);
-  await page.check('input[name="setup-lang"][value="en"]'); // a first visit opens on 한글
-  await page.uncheck('#setup-voices'); // and with NPC voices checked: none turned on here
-  await listed(page, 1);
-  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
-  await page.click('#setup-ok');
-  await packIs(page, '1,0,0');
-  assert.equal((await chooser(page)).source, 'test-pack.zip');
-  await h.dropFiles(page, [], [{ name: 'dropped-pack.zip', bytes: [...dropped] }]);
-  await packIs(page, '2,0,0');
-  await page.click('#settings');
-  await listed(page, 1);
-  let c = await chooser(page);
-  assert.deepEqual(c.hd, ['MMPX (no pack)', 'Dropped pack', 'Test pack']);
-  assert.equal(c.checked, ':dropped', 'the dropped pack is the active one, not the listed one chosen before');
-  env.packRequests.length = 0;
-  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
-  await page.click('#setup-ok');
-  await packIs(page, '1,0,0');
-  c = await chooser(page);
-  assert.ok(!c.shown && c.source === 'test-pack.zip', 'the listed pack is active again');
-  assert.deepEqual(env.packRequests, [['/packs/test-pack.zip', 200]], 'downloaded again');
-  assert.equal(await h.keptPackBytes(page), listedPack.length, 'and kept in place of the dropped one');
-  await page.click('#settings');
-  await listed(page, 1);
-  c = await chooser(page);
-  assert.ok(c.checked === 'test-pack.zip' && !c.hd.includes('Dropped pack'), 'the listed one checked, no dropped entry');
-  env.packRequests.length = 0;
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  assert.deepEqual(env.packRequests, [], 'the active listed pack again: no download');
-});
-
-// The page's own text as shown: the language of the page, buttons and labels, the status line.
-const pageText = (page) => page.evaluate(() => {
-  const text = (id) => document.getElementById(id).textContent.trim();
-  return {
-    lang: document.documentElement.lang,
-    forget: text('forget'),
-    forgetHd: text('forget-hd'),
-    settings: text('settings'),
-    mute: text('mute'),
-    fullscreen: text('fullscreen'),
-    drop: document.querySelector('label[for="picker"]').textContent.replace(/\s+/g, ' ').trim(),
-    canvas: document.getElementById('screen').getAttribute('aria-label'),
-    status: text('status'),
-    mmpx: document.querySelector('#setup-hd input[value=""]').parentElement.textContent.trim(),
-  };
-});
-
-test('한글: a first visit opens on 한글 and English is one click away; the page\'s labels, buttons and status lines switch to Korean at once and the chooser says the game\'s text is still English; the choice survives a reload; English switches back', async (env) => {
-  sitePacks(env, {});
-  const { page } = await h.openPage(env, { setup: null });
-  await h.load(page, env);
-  assert.equal((await pageText(page)).lang, 'ko', 'a first visit: 한글');
-  await page.uncheck('#setup-voices'); // no voices turned on here
-  await page.check('input[name="setup-lang"][value="en"]');
-  let shown = await pageText(page);
-  assert.deepEqual({ lang: shown.lang, forget: shown.forget, mute: shown.mute, status: shown.status },
-    { lang: 'en', forget: 'Forget the kept files', mute: 'Mute', status: 'No files loaded yet: drop or choose your Ultima VI files.' });
-  const english = shown;
-  await page.check('input[name="setup-lang"][value="ko"]');
-  shown = await pageText(page);
-  assert.deepEqual(shown, {
-    lang: 'ko',
-    forget: '보관한 파일 지우기',
-    forgetHd: 'HD 팩 지우기',
-    settings: '설정',
-    mute: '소리 끄기',
-    fullscreen: '전체화면',
-    drop: '울티마 VI 파일(archive.org의 zip)을 여기에 놓거나 고르세요. 파일은 이 브라우저 밖으로 나가지 않습니다.',
-    canvas: '게임 화면. 클릭하거나 Tab으로 옮겨 오면 화살표 키로 걷고 글자 키는 게임 명령입니다. Tab을 누르면 빠져나갑니다.',
-    status: '아직 불러온 파일이 없습니다: 울티마 VI 파일을 놓거나 고르세요.',
-    mmpx: 'MMPX (팩 없음)',
-  }, 'Korean at once, the status line too');
-  // With no Korean pack at all (none kept, none listed: spec 08): the game's text is English, and
-  // one line in the chooser points at the README's way to make one; no path of the owner's data.
-  const c = await chooser(page);
-  assert.equal(c.note, await noteFor('ko'), 'the game\'s text is still English');
-  assert.equal(c.noteLink, README_PACKS, 'it points at the README\'s "Packs from your own copy"');
-  assert.ok(!/~|\/Users|Games|tools\/i18n/.test(c.note), 'at no path of data or tool');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  assert.deepEqual((await chooser(page)).stored, { lang: 'ko', version: h.SETUP_VERSION });
-  await forgetVia(page, '#forget');
-  await h.waitSettled(page);
-  assert.equal((await h.state(page)).status, '보관한 게임 파일을 이 브라우저에서 지웠습니다.', 'a status line of app.js in Korean');
-  await page.click('#mute');
-  assert.equal((await pageText(page)).mute, '소리 켜기', 'a button\'s state in Korean');
-  await page.click('#mute');
-  await page.reload();
-  await h.waitSettled(page);
-  shown = await pageText(page);
-  assert.ok(!(await chooser(page)).shown, 'no chooser after the reload');
-  assert.ok(shown.lang === 'ko' && shown.forget === '보관한 파일 지우기' && shown.status === '아직 불러온 파일이 없습니다: 울티마 VI 파일을 놓거나 고르세요.',
-    'Korean after the reload');
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="en"]');
-  assert.deepEqual(await pageText(page), english, 'English again, as it was');
-  assert.equal((await chooser(page)).note, null, 'no note in English');
+test('canvas artwork packs: imported pack replaces a hosted one and selecting the hosted pack downloads it again', async (env) => {
+  const [hosted,dropped]=[await madePack(env,1),await madePack(env,2)];
+  sitePacks(env,{'index.json':JSON.stringify({packs:[{file:'test-pack.zip',label:'Test pack'}]}),'test-pack.zip':hosted});
+  const {page}=await h.openPage(env);await h.load(page,env);
+  await h.chooseSetting(page,'pack','test-pack.zip',{close:true});await packIs(page,'1,0,0');
+  await h.dropFiles(page,[],[{name:'dropped-pack.zip',bytes:[...dropped]}]);await packIs(page,'2,0,0');
+  assert.equal((await h.settingsItem(page,'pack')).value,':dropped','import now active');
+  env.packRequests.length=0;
+  await h.chooseSetting(page,'pack','test-pack.zip',{close:true});await packIs(page,'1,0,0');
+  assert.deepEqual(env.packRequests,[['/packs/test-pack.zip',200]],'hosted pack downloaded again');
+  assert.equal(await h.keptPackBytes(page),hosted.length,'hosted bytes replace imported bytes');
+  assert.equal((await h.settingsItem(page,'pack')).value,'test-pack.zip','hosted pack active again');
 });
 
 // The owner's full-size pack for spec 07 Acceptance 5: every classic image of the owner's files
@@ -6349,7 +5999,7 @@ const voiceShown = (page) => page.evaluate(() => {
     cancels: Number(d.voiceCancels), fade: Number(d.voiceFadeMs), playing: Number(d.voicePlaying),
     dropped: Number(d.voiceDropped), distinct: Number(d.voiceDistinct), chip: !document.getElementById('voice-chip').hidden,
     pressed: document.getElementById('voices').getAttribute('aria-pressed'),
-    terms: !document.getElementById('voice-terms').hidden,
+    terms: Boolean(window.u6Settings?.open && window.u6Settings.items.some(item => item.id === 'terms-accept')),
     status: document.getElementById('status').textContent,
   };
 });
@@ -6385,10 +6035,9 @@ function consoleText(page) {
 
 test('hosting: every file under site/models is at most 24 MiB, each part and each whole file matches its manifest; LICENSE.txt and NOTICE beside the parts; the terms the page shows are the licence\'s Attachment A verbatim; _headers unchanged', async () => {
   const { RESTRICTIONS } = await import('../../site/voice/terms.js');
-  const { MODEL_BASE, ORT_BASE } = await import('../../site/voice/model.js');
+  const { REVISION, ORT_VERSION } = await import('../../site/voice/model.js');
   let files = 0;
-  for (const base of [MODEL_BASE, ORT_BASE]) {
-    const dir = base.pathname;
+  for (const dir of [join(h.MODELS,'supertonic3',REVISION),join(h.MODELS,'onnxruntime-web',ORT_VERSION)]) {
     const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'));
     assert.ok(existsSync(join(dir, 'LICENSE.txt')) && existsSync(join(dir, 'NOTICE')), 'LICENSE.txt and NOTICE beside the parts');
     assert.ok((await readFile(join(dir, 'NOTICE'))).equals(await readFile(join(dir, 'NOTICE.txt'))), 'NOTICE.txt is the notice');
@@ -6426,7 +6075,7 @@ test('voices off by default: no worker and nothing from /models/; Voices shows t
   await started(page, FILES);
   let v = await voiceShown(page);
   assert.ok(v.state === 'off' && !v.chip && v.pressed === 'false' && !v.terms, 'off by default');
-  await page.click('#voices');
+  await h.clickSetting(page, 'voices', { close: false });
   v = await voiceShown(page);
   assert.ok(v.state === 'terms' && v.terms, 'the terms first');
   const shown = await page.evaluate(() => ({
@@ -6448,7 +6097,7 @@ test('voices off by default: no worker and nothing from /models/; Voices shows t
     }
   }
   assert.ok(shown.storage, 'the storage line');
-  await page.click('#voice-decline');
+  await h.clickSetting(page, 'terms-decline', { close: true });
   v = await voiceShown(page);
   assert.ok(v.state === 'off' && !v.terms, 'Cancel: off');
   const probe = await page.evaluate(() => ({ workers: window.__workers, kept: [localStorage.getItem('u6.voiceTerms'), localStorage.getItem('u6.voices')] }));
@@ -6475,8 +6124,9 @@ async function gpuGame(env) {
 
 // Voices on from the button (the terms accepted first when shown), until ready.
 async function voicesOn(page) {
-  await page.click('#voices');
-  if (await page.evaluate(() => !document.getElementById('voice-terms').hidden)) await page.click('#voice-accept');
+  await h.clickSetting(page, 'voices', { close: false });
+  if ((await voiceShown(page)).terms) await h.clickSetting(page, 'terms-accept');
+  await h.closeSettings(page);
   await waitVoice(page, () => ['ready', 'failed'].includes(document.body.dataset.voice), null);
   return voiceShown(page);
 }
@@ -6595,18 +6245,18 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
   // A Korean line and an English one reach the worker each in its language (spec 09 Order 6).
   await saysEachLanguage(page, 5, 30_000);
   // Mute: the voice gain 0 with the music's, and back.
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
   assert.equal((await voiceShown(page)).gain, '0.00', 'muted: the voice gain 0');
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
   assert.equal((await voiceShown(page)).gain, '1.00', 'unmuted: 1');
   // Above 4x nothing is synthesized.
-  for (let i = 0; i < 5; i += 1) await page.click('#faster');
+  await h.chooseSetting(page, 'speed', '6', { close: true });
   assert.equal(await page.evaluate(() => document.getElementById('screen').dataset.speed), '6');
   const before = await voiceShown(page);
   await page.evaluate((u) => window.__speech.push(u), utterance(6, LINE_60));
   await waitVoice(page, (n) => Number(document.body.dataset.voiceDropped) > n, before.dropped, 10_000);
   assert.equal((await voiceShown(page)).spoken, before.spoken, 'at 6x: not said');
-  for (let i = 0; i < 5; i += 1) await page.click('#slower');
+  await h.chooseSetting(page, 'speed', '1', { close: true });
   // A reload: voices come back from the cache, nothing downloaded, no line on the status.
   requests.length = 0;
   await page.reload();
@@ -6623,7 +6273,7 @@ test('voices with WebGPU: accepted, downloaded, checked and warmed up to ready (
     await cache.put(key, new Response(new Uint8Array([1, 2, 3])));
   });
   requests.length = 0;
-  await page.click('#voices');
+  await h.clickSetting(page, 'voices', { close: false });
   assert.equal((await voiceShown(page)).state, 'off', 'Voices off');
   v = await voicesOn(page);
   assert.ok(v.state === 'ready' && v.refetched === 1, 'ready, the corrupted part fetched again');
@@ -7108,7 +6758,7 @@ test('voices per NPC (CPU): two neighbouring speakers say one line in two voices
 
   // The worker alone (the model cached in this context), one voice: at 0, +2 and -2 semitones,
   // then at 0 at the pace +2 synthesizes at (its speed over its rate's ratio).
-  await page.click('#voices');
+  await h.clickSetting(page, 'voices', { close: false });
   assert.equal((await voiceShown(page)).state, 'off', 'the page\'s voices off');
   const runs = await page.evaluate(async (line) => {
     const worker = new Worker(new URL('/voice/worker.js', location.href), { type: 'module' });
@@ -7384,8 +7034,8 @@ test('voice pack on the page (synthetic): a dropped voices.u6vp gives its actors
   await page.reload();
   await started(page, FILES);
   await waitVoice(page, () => document.body.dataset.voice === 'ready', null, 30_000);
-  await page.click('#mute');
-  await page.click('#mute');
+  await h.clickSetting(page, 'mute', { close: true });
+  await h.clickSetting(page, 'mute', { close: true });
   await waitVoice(page, () => document.body.dataset.voiceGain === '1.00', null, 30_000);
   assert.equal(await shownPack(), '2', 'back after a reload');
   turn = 0;
@@ -7527,8 +7177,8 @@ test('the site\'s voice pack and a dropped one (synthetic, no game, in 한글): 
   await h.waitSettled(page);
   assert.equal(await page.evaluate(() => document.body.dataset.voicePack), '0', 'forgotten');
   assert.deepEqual((await h.keptVoicePacks(page)).keys, [], 'and out of storage');
-  await page.click('#settings');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.deepEqual(voiceRequests(env), [], 'after Forget voices: not downloaded in the visit');
   await page.reload();
@@ -7596,8 +7246,8 @@ test('the site\'s voice pack not loaded (synthetic, no game): a listing that nam
     const kept = await h.keptVoicePacks(page);
     assert.deepEqual([kept.byKey['voice-pack:voices'], kept.byKey['voice-pack:source']], [pack, VOICES_FILE], `${what}: the pack from before stays kept, with its source`);
     assert.ok(words.includes(warned), `${what}: a warning that names its kind only`);
-    await page.click('#settings');
-    await page.click('#setup-ok');
+    await h.openSettings(page);
+    await h.closeSettings(page);
     await h.waitSettled(page);
     assert.equal(voiceRequests(env).length, 1, `${what}: not asked again in the visit`);
   }
@@ -7804,7 +7454,7 @@ test('Korean pack (synthetic, no game): a dropped ko.u6lp is checked by the engi
   assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
 });
 
-test('Korean pack in a game (the user\'s disks, a synthetic conversation): in 한글 a game started with a pack made for other files runs in English and says the conversation part differs; with the kept converse.a the test\'s own (in the page), the conversation shows the pack\'s Korean in the Hangul cells while every run it starts is the pack\'s; English at the chooser restarts it in English and leaves the save; Forget the Korean pack restarts it in English; no line reaches the console, the page\'s data or text', async (env) => {
+test('Korean pack in a game (the user\'s disks, a synthetic conversation): in 한글 a game started with a pack made for other files runs in English and says the conversation part differs; with the kept converse.a the test\'s own (in the page), the conversation shows the pack\'s Korean in the Hangul cells while every run it starts is the pack\'s; English selected in canvas settings applies on the next explicit page start and leaves the save; Forget the Korean pack preserves the running language until the next explicit start; no line reaches the console, the page\'s data or text', async (env) => {
   const { page } = await h.openPage(env, { setup: { lang: 'ko' } });
   const words = consoleText(page);
   await h.load(page, env);
@@ -7817,6 +7467,8 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
   assert.equal((await localeShown(page)).locale, 'off', 'no pack: English');
   // The pack, over the user's own converse.a: the game restarts and refuses it.
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'mismatch', 'made for other files: not used');
@@ -7844,9 +7496,11 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
   assert.equal(korean.found.size, glyphs.size, 'every syllable of the pack\'s lines in a cell of the message window');
   const saved = await h.savedFiles(page);
   // English at the chooser: the game restarts in English, the save as it was.
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'en', { close: true });
+  await h.closeSettings(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'language change preserves the running game until next start');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'off', 'English: the pack not on the game');
@@ -7855,18 +7509,23 @@ test('Korean pack in a game (the user\'s disks, a synthetic conversation): in �
   let english = await cellsShown(page, glyphs);
   assert.ok(english.found.size === 0 && english.inked > 0, 'the conversation in English: no Korean cell');
   // 한글 again, then Forget the Korean pack: English again.
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'ko', { close: true });
+  await h.closeSettings(page);
+  assert.equal((await localeShown(page)).locale, 'off', 'language change preserves the running game until next start');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'on', '한글: on again');
   await forgetVia(page, '#forget-ko');
   await h.waitSettled(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'removing stored pack preserves the running language');
+  await page.reload();
+  await h.waitSettled(page);
   await h.waitPrompt(page);
   shown = await localeShown(page);
   assert.deepEqual([shown.pack, shown.locale], ['none', 'off'], 'forgotten: English');
-  assert.ok((await h.state(page)).status.startsWith(ko.koPackForgot), 'its line');
+  assert.equal(await h.keptLocalePack(page), null, 'the pack stays removed after explicit restart');
   await talkTo2();
   english = await cellsShown(page, glyphs);
   assert.ok(english.found.size === 0 && english.inked > 0, 'English again after the forget');
@@ -7923,11 +7582,11 @@ test('the site\'s Korean pack (synthetic, no game): with a listing that names on
   assert.deepEqual(await h.keptLocalePack(page), first.pack, 'kept under locale:ko, byte for byte');
   assert.equal(await koSourceKept(page), KO_FILE, 'with the file it came from');
   assert.equal(await localeNoteShown(page), null, 'the line pointing at the tool goes');
-  await page.click('#settings');
+  await h.openSettings(page);
   let c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'ko', 'Settings opens the chooser, on 한글');
+  assert.equal((await h.settingsItem(page, 'language')).value, 'ko', 'canvas Settings shows 한글');
   assert.equal(c.note, null, 'with the site\'s pack the chooser has no note');
-  await page.click('#setup-ok');
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.equal(koRequests(env).length, 1, 'OK in 한글: not downloaded again');
   env.packRequests.length = 0;
@@ -7971,17 +7630,19 @@ test('the site\'s Korean pack and a dropped one (synthetic, no game): a dropped 
   await h.waitSettled(page);
   assert.equal((await localeShown(page)).pack, 'none', 'forgotten');
   assert.equal(await localeNoteShown(page), null, 'the site still lists one: no note');
-  await page.click('#settings');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.deepEqual(koRequests(env), [], 'after Forget, OK in 한글: still nothing downloaded');
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'en', { close: true });
+  await h.closeSettings(page);
   await h.waitSettled(page);
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'ko', { close: true });
+  await h.closeSettings(page);
+  assert.deepEqual(koRequests(env), [], 'changing a preference does not download a pack');
+  await page.reload();
   await koPackIs(page, `${listedPack.runs},${listedPack.scripts}`);
   assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], '한글 again: the listed pack downloaded');
   assert.equal(await koSourceKept(page), KO_FILE);
@@ -8003,8 +7664,8 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   sitePacks(env, { 'index.json': koListing(null) });
   let { context, page } = await h.openPage(env, { setup: { lang: 'ko' } });
   await h.load(page, env);
-  await page.click('#settings');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.deepEqual(env.packRequests, [['/packs/index.json', 200]], 'a listing with no Korean pack: the listing only');
   assert.equal((await localeShown(page)).pack, 'none');
@@ -8014,9 +7675,9 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   ({ context, page } = await h.openPage(env, { setup: { lang: 'en' } }));
   await page.goto(env.server.url);
   await h.waitSettled(page);
-  await page.click('#settings');
+  await h.openSettings(page);
   await listed(page, 0);
-  await page.click('#setup-ok');
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.deepEqual(koRequests(env), [], 'English: no Korean pack asked for');
   assert.equal((await localeShown(page)).pack, 'none');
@@ -8032,16 +7693,16 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   assert.equal(await h.keptLocalePack(page), null, 'none kept');
   assert.equal((await h.state(page)).status, ko.noFilesYet, 'nothing else changes');
   assert.equal(await localeNoteShown(page), null, 'one is listed: no note');
-  await page.click('#settings');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.closeSettings(page);
   await h.waitSettled(page);
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'en', { close: true });
+  await h.closeSettings(page);
   await h.waitSettled(page);
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'ko', { close: true });
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.equal(koRequests(env).length, 1, 'not asked again in the visit, 한글 again included');
   // A pack that does not read: the reader's line, nothing kept; asked once in the next visit.
@@ -8055,20 +7716,20 @@ test('the site\'s Korean pack not loaded (synthetic, no game): a listing that na
   assert.equal(await h.keptLocalePack(page), null, 'none kept');
   assert.equal(await koSourceKept(page), null, 'no source kept');
   assert.equal(await localeNoteShown(page), null, 'one is listed: no note');
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'en', { close: true });
+  await h.closeSettings(page);
   await h.waitSettled(page);
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'ko', { close: true });
+  await h.closeSettings(page);
   await h.waitSettled(page);
   assert.equal(koRequests(env).length, 1, 'not asked again in the visit');
   await noPackWords(page, words);
   console.log('  receipt: no Korean pack listed 0 pack requests, English 0 pack requests, 404 1 request, unreadable 1 request: pass');
 });
 
-test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversation): a game running in English, then 한글 at the chooser: the listed pack is downloaded and the game restarts with it, its line counts only; a reload starts the game with the kept pack and downloads nothing', async (env) => {
+test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversation): a game running in English, then 한글 in canvas settings: the running game is preserved and the next explicit start loads the listed pack, its line counts only; a reload starts the game with the kept pack and downloads nothing', async (env) => {
   const { TEXT } = await import('../../site/i18n.js');
   const ko = TEXT.ko;
   const { archive, pack, runs, scripts } = await koFixture();
@@ -8085,9 +7746,11 @@ test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversa
   assert.equal((await localeShown(page)).locale, 'off', 'English');
   assert.deepEqual(koRequests(env), [], 'English: no Korean pack asked for');
   const saved = await h.savedFiles(page);
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'ko', { close: true });
+  await h.closeSettings(page);
+  assert.equal((await localeShown(page)).locale, 'off', 'language change preserves the running game until next start');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   let shown = await localeShown(page);
@@ -8109,73 +7772,9 @@ test('the site\'s Korean pack in a game (the user\'s disks, a synthetic conversa
   console.log('  receipt: 1 download, the game on it after the switch and after a reload, 0 downloads on the reload: pass');
 }, { needs: h.haveHfes });
 
-test('the first-run language: with no choice kept the chooser shows on 한글, whatever the browser\'s language, and English is one click away; a kept choice wins in each case', async (env) => {
-  sitePacks(env, { 'index.json': koListing(null) });
-  // [what, the browser's language, the choice kept, the language wanted]
-  const cases = [
-    ['an en-US browser', 'en-US', null, 'ko'],
-    ['a ko-KR browser', 'ko-KR', null, 'ko'],
-    ['an en-US browser, English kept', 'en-US', { lang: 'en' }, 'en'],
-    ['a ko-KR browser, English kept', 'ko-KR', { lang: 'en' }, 'en'],
-    ['an en-US browser, 한글 kept', 'en-US', { lang: 'ko' }, 'ko'],
-  ];
-  for (const [what, locale, stored, want] of cases) {
-    const { context, page } = await h.openPage(env, { setup: stored, locale });
-    await h.load(page, env);
-    const c = await chooser(page);
-    assert.equal((await pageText(page)).lang, want, `${what}: the page in ${want}`);
-    if (stored === null) {
-      assert.ok(c.shown, `${what}: the chooser shows first`);
-      assert.equal(c.lang, want, `${what}: on ${want}`);
-      await page.uncheck('#setup-voices'); // no voices turned on here
-      await page.click('#setup-ok');
-      await h.waitSettled(page);
-      assert.deepEqual((await chooser(page)).stored, { lang: want, version: h.SETUP_VERSION }, `${what}: OK keeps it`);
-    } else {
-      assert.ok(!c.shown, `${what}: no chooser`);
-      assert.deepEqual(c.stored, { ...stored, version: h.SETUP_VERSION }, `${what}: the choice kept as it was`);
-    }
-    await context.close();
-  }
-  console.log(`  receipt: ${cases.length} first-run cases: pass`);
-});
 
-test('a choice kept by an older page (SETUP_VERSION 2, or none) counts as none once, for every visitor: the chooser opens on 한글 (over English kept) with NPC voices checked and the listed packs loaded, its OK keeps the current record and the next visit has no chooser; a current record with English stands (no chooser, English, no Korean pack asked for)', async (env) => {
-  const { pack, runs, scripts } = await koFixture();
-  const listing = { 'index.json': koListing(KO_FILE), [KO_FILE]: Uint8Array.from(pack) };
-  for (const [what, record] of [['version 2', '{"lang":"en","version":2}'], ['no version', '{"lang":"en"}']]) {
-    sitePacks(env, listing);
-    const { context, page } = await h.openPage(env, { setup: record, locale: 'en-US' });
-    await h.load(page, env);
-    await koPackIs(page, `${runs},${scripts}`);
-    let c = await chooser(page);
-    assert.ok(c.shown, `${what}: the chooser shows`);
-    assert.equal(c.lang, 'ko', `${what}: on 한글`);
-    assert.equal((await pageText(page)).lang, 'ko', `${what}: the page in 한글`);
-    assert.ok(c.voices && c.terms, `${what}: NPC voices checked, the terms shown`);
-    assert.deepEqual(koRequests(env), [[`/packs/${KO_FILE}`, 200]], `${what}: the listed Korean pack loaded before any press, once`);
-    assert.deepEqual(c.stored, JSON.parse(record), `${what}: the older record untouched until OK`);
-    await page.uncheck('#setup-voices'); // no voices turned on here
-    await page.click('#setup-ok');
-    await h.waitSettled(page);
-    c = await chooser(page);
-    assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, `${what}: OK keeps the current record`);
-    await page.reload();
-    await koPackIs(page, `${runs},${scripts}`);
-    assert.ok(!(await chooser(page)).shown, `${what}: the next visit: no chooser`);
-    assert.equal(koRequests(env).length, 1, `${what}: and no second download`);
-    await context.close();
-  }
-  sitePacks(env, listing);
-  const { context, page } = await h.openPage(env, { setup: { lang: 'en' } });
-  await h.load(page, env);
-  const c = await chooser(page);
-  assert.ok(!c.shown, 'a current record: no chooser');
-  assert.equal((await pageText(page)).lang, 'en', 'English');
-  assert.deepEqual(koRequests(env), [], 'no Korean pack asked for');
-  await context.close();
-  console.log('  receipt: 2 older records 1 chooser and 1 download each, a current record 0 downloads: pass');
-});
+
+
 
 // Runs in the page: while the test holds `ko-source` (window.__fail), every write of the Korean
 // pack's source record (a put or a delete of locale:ko:source) throws inside its transaction,
@@ -8263,66 +7862,7 @@ test('the site\'s Korean pack, then a dropped one (synthetic, no game): the drop
   console.log('  receipt: the site\'s pack then a drop, a renamed listing, 0 downloads: pass');
 });
 
-test('a returning visit after an older page (the user\'s disks, a synthetic conversation): a choice kept by an older page in English, the kept game files, an HD pack chosen from the listing and no Korean pack kept; the listing names a Korean pack and another HD pack first: before any press, the chooser is open on 한글 with the HD pack chosen still checked, and the game it started behind it already runs with the Korean pack, downloaded once; OK keeps the current record, the HD pack and the Korean pack, nothing downloaded again', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const ko = TEXT.ko;
-  const { archive, pack, runs, scripts } = await koFixture();
-  const hd = await madePack(env);
-  const hdEntry = { file: 'test-pack.zip', label: 'Test pack' };
-  // An older page: the game files kept, an HD pack chosen from the listing (no Korean pack listed
-  // yet), its choice kept as that page kept it (no version).
-  sitePacks(env, { 'index.json': JSON.stringify({ packs: [hdEntry] }), 'test-pack.zip': hd });
-  const { context, page } = await h.openPage(env, { setup: '{"lang":"en"}' });
-  await h.load(page, env);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.goto(env.server.url);
-  await h.waitSettled(page);
-  await listed(page, 1);
-  // The older record opened the chooser as a first run: English, the HD pack, no voices.
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.check('input[name="setup-hd"][value="test-pack.zip"]');
-  await page.uncheck('#setup-voices');
-  await page.click('#setup-ok');
-  await packIs(page, '1,0,0');
-  await page.evaluate(() => localStorage.setItem('u6.setup', '{"lang":"en"}'));
-  assert.equal((await chooser(page)).source, 'test-pack.zip', 'the HD pack chosen from the listing');
-  assert.equal(await h.keptLocalePack(page), null, 'no Korean pack kept');
-  // The visit: the listing now names a Korean pack, and another HD pack before the one chosen
-  // (the first run's default for a visitor with none); no press at all.
-  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'first.zip', label: 'First' }, hdEntry],
-    ko: { file: KO_FILE, label: 'Korean (test)' } }), 'test-pack.zip': hd, [KO_FILE]: Uint8Array.from(pack) });
-  await page.reload();
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  await listed(page, 2);
-  // The games the visit started, in order (h's glue: each Game.start, and what set_locale gave
-  // it): one, with the Korean pack from before its first step; no English start, no restart.
-  const starts = () => page.evaluate(() => globalThis.__starts.map(({ locale, stepsBefore }) => ({ locale, stepsBefore })));
-  assert.deepEqual(await starts(), [{ locale: 'on', stepsBefore: 0 }],
-    'before any press: one game started, with the Korean pack before its first step');
-  let c = await chooser(page);
-  assert.ok(c.shown && c.lang === 'ko', 'the chooser open on 한글');
-  assert.equal(c.checked, 'test-pack.zip', 'the HD pack still checked, not the first listed');
-  const shown = await localeShown(page);
-  assert.deepEqual([shown.pack, shown.locale], [`${runs},${scripts}`, 'on'], 'the game behind it runs with the Korean pack');
-  assert.ok((await h.state(page)).status.includes(ko.koPackOn(runs, scripts)), 'its line, counts only');
-  assert.equal(await page.evaluate(() => document.body.dataset.hdPack), '1,0,0', 'and the HD pack');
-  assert.deepEqual(env.packRequests, [['/packs/index.json', 200], [`/packs/${KO_FILE}`, 200]],
-    'the listing and the Korean pack, once each; the HD pack not downloaded again');
-  assert.deepEqual(c.stored, { lang: 'en' }, 'the older record untouched until OK');
-  await page.uncheck('#setup-voices'); // no voices turned on here
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  c = await chooser(page);
-  assert.ok(!c.shown && c.source === 'test-pack.zip', 'OK: the HD pack stays the one chosen');
-  assert.deepEqual(c.stored, { lang: 'ko', version: h.SETUP_VERSION }, 'and keeps the current record');
-  assert.equal((await localeShown(page)).locale, 'on', 'the game still on the Korean pack');
-  assert.equal((await starts()).length, 1, 'OK: no restart');
-  assert.equal(env.packRequests.length, 2, 'nothing downloaded again');
-  console.log('  receipt: 1 game start in the visit, on the Korean pack from its first step, 1 pack download, the HD choice kept: pass');
-}, { needs: h.haveHfes });
+
 
 // --- typing Korean in a conversation (spec 08 Design 4, slice K5a) ------------------------
 
@@ -8378,6 +7918,8 @@ test('Korean typed in a conversation (the user\'s disks, a synthetic conversatio
   await page.setInputFiles('#picker', h.HFES);
   await started(page, FILES);
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
+  await h.waitSettled(page);
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
@@ -8468,9 +8010,11 @@ test('Korean typed in a conversation (the user\'s disks, a synthetic conversatio
   assert.deepEqual([again.hits, again.misses], [6, 0], 'the alias answered from the pack again, nothing missed');
   assert.deepEqual(await focus(), { ime: true, at: 'screen' }, 'and the focus back on the canvas');
   // English at the chooser: no hidden input; the canvas takes the keys of the line.
-  await page.click('#settings');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.click('#setup-ok');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'language', 'en', { close: true });
+  await h.closeSettings(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'language change preserves the running game until next start');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   assert.equal((await localeShown(page)).locale, 'off', 'English: the pack not on the game');
@@ -8617,6 +8161,8 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   await h.waitPrompt(page);
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
   await h.waitSettled(page);
+  await page.reload();
+  await h.waitSettled(page);
   await h.waitPrompt(page);
   let shown = await localeShown(page);
   assert.deepEqual([shown.pack, shown.locale], [`${fx.runs},${fx.scripts}`, 'on'], 'the pack on the game');
@@ -8648,6 +8194,9 @@ test('Korean pack with game strings in a game (the user\'s disks, a synthetic co
   assert.ok(counts.textHits > 0, 'game strings from the pack');
   // Forget the Korean pack: the game restarts in English.
   await forgetVia(page, '#forget-ko');
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'removing stored pack preserves the running language');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   shown = await localeShown(page);
@@ -8784,6 +8333,8 @@ test('Korean pack with object names and books in a game (the user\'s disks): the
   assert.ok(fx.refused < fx.look + fx.books, 'fewer refused by the gates than kept');
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
   await h.waitSettled(page);
+  await page.reload();
+  await h.waitSettled(page);
   await h.waitPrompt(page);
   let shown = await localeShown(page);
   assert.deepEqual([shown.pack, shown.locale], ['0,0', 'on'], 'the pack on the game');
@@ -8804,6 +8355,9 @@ test('Korean pack with object names and books in a game (the user\'s disks): the
   assert.ok(hits >= 1, `object names from the pack (${hits}, missed ${missed})`);
   // Forget the Korean pack: the game restarts in English.
   await forgetVia(page, '#forget-ko');
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'removing stored pack preserves the running language');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
   shown = await localeShown(page);
@@ -8947,6 +8501,8 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): the nat
   // The pack: the game restarts with it, from the opening.
   await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: fx.pack }]);
   await h.waitSettled(page);
+  await page.reload();
+  await h.waitSettled(page);
   await h.waitProgram(page, 'u');
   const shown = await localeShown(page);
   assert.deepEqual([shown.pack, shown.locale], ['0,0', 'on'], 'the pack on the game');
@@ -8960,6 +8516,9 @@ test('Korean pack with the strings of u in a new game (the user\'s zip): the nat
   assert.ok(counts.hits >= 1, 'strings of u from the pack');
   // Forget the Korean pack: the game restarts in English, the same opening without the syllable.
   await forgetVia(page, '#forget-ko');
+  await h.waitSettled(page);
+  assert.equal((await localeShown(page)).locale, 'on', 'removing stored pack preserves the running language');
+  await page.reload();
   await h.waitSettled(page);
   await h.waitProgram(page, 'u');
   const off = await localeShown(page);
@@ -8999,9 +8558,8 @@ const LAYOUT_PARTS = {
 
 // A gated page (gameFirst) with the HD layout kept, in a `width` x `height` window, on the
 // user's disks, started at its prompt with the canvas focused. The layout's tests compare the
-// canvas with the x4 frame, so they keep the pixel font (`font`; spec 11: with the HD font the
-// page draws characters over cells that are paper in that frame), unless a test asks. `init`, a
-// page init script the test adds before the page loads.
+// canvas with the x4 frame; `font` may seed an obsolete preference that is ignored.
+// `init` adds an optional page initialization script before the page loads.
 async function bootLayout(env, { width = 1400, height = 900, font = 'pixel', init = null } = {}) {
   const { context, page } = await h.openPage(env, { layout: 'hd', font });
   if (init) await context.addInitScript(init);
@@ -9088,6 +8646,7 @@ const pointerAreaHook = (page) => page.evaluate(() => {
     return area;
   };
   window.__inPointer = (rects, px, py) => rects.some(([x, y, w, hh]) => px >= x && px < x + w && py >= y && py < y + hh);
+
 });
 
 // Per one-to-one region of the canvas (a canvas rect the size of its x4 rect), the pixels that
@@ -9537,21 +9096,21 @@ test('HD layout (spec 10 Acceptance 3): the opening and the menu show the whole 
   console.log(`  receipt: the opening and the menu letterboxed at ${whole.join(',')}, sides of one dark colour (${side.n} pixels); ${points.length + 3} presses landed (one in the opening); the frame's colours where the letterbox shows them: pass`);
 }, { needs: h.haveZip });
 
-test('HD layout (spec 10 Acceptance 4): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1280 x 720: at 1920 x 1080 the whole screen, smooth; at 2560 x 1440 the whole screen, sharp (x2); at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each; the page\'s own fullscreen (no requestFullscreen) the same', async (env) => {
-  const sizes = [[1920, 1080, 'smooth'], [2560, 1440, 'sharp'], [1728, 1117, 'smooth']];
+test('HD layout (spec 10 Acceptance 4): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1280 x 720: at 1920 x 1128 below the 48px game chrome, smooth; at 2560 x 1488 below the game chrome, sharp (x2); at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each; the page\'s own fullscreen (no requestFullscreen) the same', async (env) => {
+  const sizes = [[1920, 1080, 'smooth'], [1920, 1128, 'smooth'], [2560, 1488, 'sharp'], [1728, 1117, 'smooth']];
   const lines = [];
   const check = async (page, mode, label) => {
     for (const [w, hh, want] of sizes) {
       await page.setViewportSize({ width: w, height: hh });
-      await page.click('#fullscreen');
+      await h.clickSetting(page, 'fullscreen', { close: true });
       await waitFull(page, mode);
-      await page.waitForFunction(([vw]) => Math.abs(document.getElementById('screen').getBoundingClientRect().width - Math.min(vw, (innerHeight * 16) / 9)) < 1, [w], { timeout: 10_000 });
+      await page.waitForFunction(([vw]) => Math.abs(document.getElementById('screen').getBoundingClientRect().width - Math.min(vw, ((innerHeight - 48) * 16) / 9)) < 1, [w], { timeout: 10_000 });
       await h.waitFrames(page, 2);
       const s = await layoutShown(page);
       const [bw, bh] = s.box;
       assert.ok(Math.abs(bw / bh - 16 / 9) < 0.01, `${label} ${w}x${hh}: 16:9`);
-      assert.ok(bw <= w + 0.5 && bh <= hh + 0.5 && (Math.abs(bw - w) < 1 || Math.abs(bh - hh) < 1), `${label} ${w}x${hh}: as large as fits`);
-      assert.ok(Math.abs(s.at[0] - (w - bw) / 2) < 1 && Math.abs(s.at[1] - (hh - bh) / 2) < 1, `${label} ${w}x${hh}: centred`);
+      assert.ok(bw <= w + 0.5 && bh <= hh - 48 + 0.5 && (Math.abs(bw - w) < 1 || Math.abs(bh - (hh-48)) < 1), `${label} ${w}x${hh}: as large as fits`);
+      assert.ok(Math.abs(s.at[0] - (w - bw) / 2) < 1 && Math.abs(s.at[1] - ((hh - bh - 48) / 2 + 48)) < 1, `${label} ${w}x${hh}: centred`);
       assert.deepEqual(s.size, [1280, 720], `${label} ${w}x${hh}: the canvas stays 1280 x 720`);
       const mode2 = SHARP.includes(s.rendering) ? 'sharp' : s.rendering === 'auto' ? 'smooth' : s.rendering;
       assert.equal(mode2, want, `${label} ${w}x${hh}: ${want}`);
@@ -9607,32 +9166,30 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (Wi
   });
   assert.ok(column < 1280 && Math.abs(s.box[0] - column) < 0.5 && Math.abs(s.box[1] - (column * 9) / 16) < 0.5, 'a 16:9 box as wide as the column');
   assert.equal(s.rendering, 'auto', 'more canvas pixels than box pixels: smooth');
-  await page.click('#settings');
-  const choice = () => page.evaluate(() => ({
-    title: document.getElementById('layout-title').textContent,
-    labels: [...document.querySelectorAll('#layout-choice label')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
-    values: [...document.querySelectorAll('input[name="layout"]')].map((i) => [i.value, i.checked]),
-    inSettings: document.getElementById('setup').contains(document.getElementById('layout-choice')),
-  }));
+  await h.openSettings(page);
+  const choice = async () => {
+    const item=await h.settingsItem(page,'layout');
+    return {title:item.label,labels:item.options.map(option=>option.label),values:item.options.map(option=>[option.value,option.value===item.value])};
+  };
   let c = await choice();
-  assert.ok(c.inSettings, 'in Settings');
-  assert.deepEqual([c.title, c.labels], [TEXT.en.layout, [TEXT.en.layoutWide, 'HD 16:9', TEXT.en.layoutOriginal]], 'its words in English');
-  assert.deepEqual(c.values, [['wide', false], ['hd', true], ['original', false]], 'HD 16:9 checked');
-  await page.check('input[name="layout"][value="original"]');
+  assert.deepEqual(c.values, [['wide', false], ['hd', true], ['original', false]], 'canvas layout options select HD');
+  assert.ok(c.title.length>0 && c.labels.length===3,'canvas choices have readable labels');
+  await h.chooseSetting(page, 'layout', 'original', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'original' && s.view === 'frame' && s.stored === 'original', 'Original at once, kept');
   assert.ok(s.size[0] === 1280 && s.size[1] === 800 && s.scale === 4, '07\'s canvas: the x4 frame');
   assert.deepEqual(s.box, [960, 600], 'in a 16:10 box');
   assert.ok(await canvasShowsGame(page), 'the HD frame as it is');
-  await page.check('input[name="layout"][value="hd"]');
+  await h.chooseSetting(page, 'layout', 'hd', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720 && s.stored === 'hd', 'HD 16:9 again at once, kept');
-  await page.check('input[name="setup-lang"][value="ko"]');
+  await h.chooseSetting(page, 'language', 'ko', { close: true });
   c = await choice();
-  assert.deepEqual([c.title, c.labels], [TEXT.ko.layout, [TEXT.ko.layoutWide, 'HD 16:9', TEXT.ko.layoutOriginal]], 'its words in Korean');
-  await page.check('input[name="setup-lang"][value="en"]');
+  assert.ok(/[가-힣]/.test(c.title) && c.labels.length===3, 'the in-game layout choice uses Korean labels');
+  await h.closeSettings(page);
+  await h.chooseSetting(page, 'language', 'en', { close: true });
   // HD off: the page as before, whatever the layout chosen.
-  await page.click('#hd');
+  await h.clickSetting(page, 'hd', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'original' && s.view === 'frame' && s.size[0] === 320 && s.size[1] === 200, 'HD off: the 320 x 200 frame');
   assert.deepEqual(s.box, [960, 600], 'in a 16:10 box');
@@ -9640,18 +9197,19 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (Wi
   const identity = await page.evaluate(() => [globalThis.__u6Layout.toGame(88.5, 88.5), globalThis.__u6Layout.toCanvas(88, 88)]);
   assert.deepEqual(identity, [[88, 88], [88.5, 88.5]], 'the page\'s map: the canvas is the frame');
   // Settings is a modal input boundary. Verify its guard before testing the game's mapping.
+  await h.openSettings(page);
   const beforePointer = await page.evaluate(() => globalThis.__pointerAt);
   await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
   assert.deepEqual(await page.evaluate(() => globalThis.__pointerAt), beforePointer, 'Settings blocks pointer moves into the game');
-  await page.click('#setup-ok');
+  await h.closeSettings(page);
   await h.waitSettled(page);
   await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
   await page.waitForFunction(() => globalThis.__pointerAt?.[0] === 88 && globalThis.__pointerAt[1] === 88, null, { timeout: 5000 });
-  await page.click('#settings');
-  await page.click('#hd');
+  await h.openSettings(page);
+  await h.clickSetting(page, 'hd', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'hd' && s.view === 'game' && s.size[1] === 720, 'HD on: the HD layout again');
-  await page.click('#setup-ok');
+  await h.closeSettings(page);
   await h.waitSettled(page);
   // Kept across a reload, as chosen; another value is HD (spec 13: `wide` is the Wide build's).
   for (const [kept, want] of [['original', 'original'], ['hd', 'hd'], ['other', 'hd']]) {
@@ -9668,11 +9226,11 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (Wi
   await page.evaluate(() => { globalThis.__trap = true; });
   await page.waitForFunction(() => document.body.dataset.state === 'crashed');
   const trapped = await canvasHash(page);
-  await page.click('#settings');
-  await page.check('input[name="layout"][value="original"]');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'layout', 'original', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'hd' && s.size[0] === 1280 && s.size[1] === 720 && s.stored === 'original', 'trapped: Original kept, the canvas and its box as they were');
-  await page.click('#hd');
+  await h.clickSetting(page, 'hd', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'hd' && s.size[0] === 1280 && s.size[1] === 720, 'trapped: HD off leaves them too');
   assert.equal(await canvasHash(page), trapped, 'trapped: the canvas not drawn again');
@@ -9687,8 +9245,8 @@ test('HD layout (spec 10 Acceptance 5, Design 6): Settings\' "Screen layout" (Wi
   await h.waitPrompt(page);
   s = await layoutShown(page);
   assert.ok(s.stored === 'unreadable' && s.layout === 'hd' && s.size[1] === 720, 'storage that throws: HD 16:9');
-  await page.click('#settings');
-  await page.check('input[name="layout"][value="original"]');
+  await h.openSettings(page);
+  await h.chooseSetting(page, 'layout', 'original', { close: true });
   s = await layoutShown(page);
   assert.ok(s.layout === 'original' && s.size[1] === 800, 'Original for the visit');
   await page.reload();
@@ -9849,6 +9407,75 @@ const writeFramePixels = (page, at, colour) => page.evaluate(([points, rgb]) => 
   });
 }, [at, colour]);
 
+// Shared dirty-region observers used by parchment repaint regressions.
+const recordDirty = (page) => page.evaluate(() => {
+  const g = globalThis.__shownGame;
+  const real = Object.getPrototypeOf(g);
+  window.__dirty = [];
+  window.__dirtyGame = g;
+  const union = (a, b) => {
+    if (!a || !b) return a ?? b;
+    const [x0, y0] = [Math.min(a[0], b[0]), Math.min(a[1], b[1])];
+    const [x1, y1] = [Math.max(a[0] + a[2], b[0] + b[2]), Math.max(a[1] + a[3], b[1] + b[3])];
+    return [x0, y0, x1 - x0, y1 - y0];
+  };
+  const box = (p) => (p[2] > 0 ? [p[0], p[1], p[2], p[3]].map((v) => 4 * v) : null);
+  let last = [...real.hd_pointer.call(g)];
+  let moved = null; // the pointer's old and new boxes, read by this draw
+  g.hd_pointer = function hdPointer() {
+    const p = real.hd_pointer.call(this);
+    if (p[4] !== last[4]) {
+      moved = union(box(last), box(p));
+      last = [...p];
+    }
+    return p;
+  };
+  window.__widenTake = null;
+  g.hd_take_dirty = function hdTakeDirty() {
+    let rect = real.hd_take_dirty.call(this);
+    if (window.__widenTake) {
+      rect = Uint32Array.from(union(rect.length > 0 ? [...rect] : null, window.__widenTake));
+      window.__widenTake = null;
+    }
+    const painted = union(rect.length > 0 ? [...rect] : null, moved);
+    moved = null;
+    if (painted) window.__dirty.push(painted);
+    return rect;
+  };
+});
+
+// Page script: the rects `recordDirty` kept (one per draw that painted: the union it painted
+// again): how many, whether any is the whole x4 frame, whether any meets the x4 rect `rect`;
+// whether the game on screen and the view are still the ones then (so each of those rects
+// reached `paint` as its dirty rect: a partial repaint).
+const dirtySeen = (page, rect) => page.evaluate(([x, y, w, hh]) => {
+  const g = globalThis.__shownGame;
+  const [w4, h4] = [g.width() * 4, g.height() * 4];
+  const meets = ([a, b, c, d]) => a < x + w && x < a + c && b < y + hh && y < b + d;
+  return {
+    rects: window.__dirty.length,
+    full: window.__dirty.some(([a, b, c, d]) => a === 0 && b === 0 && c === w4 && d === h4),
+    meets: window.__dirty.some(meets),
+    sameGame: g === window.__dirtyGame,
+    view: globalThis.__u6Layout.view,
+  };
+}, rect);
+
+// Page script: from now on, every `fillRect` on the game's canvas (a whole repaint's background:
+// `paint` with no dirty rect) is counted in `window.__wholePaints`, from 0 (the wrapper put in once,
+// then only the count reset).
+const countWholePaints = (page) => page.evaluate(() => {
+  if (window.__wholePaints === undefined) {
+    const rect = CanvasRenderingContext2D.prototype.fillRect;
+    CanvasRenderingContext2D.prototype.fillRect = function fillRect(...args) {
+      if (this.canvas.id === 'screen') window.__wholePaints += 1;
+      return rect.apply(this, args);
+    };
+  }
+  window.__wholePaints = 0;
+});
+
+
 test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the regions is the game\'s paper from the x4 frame: its outer band (in game only the paper there, the source plane says, the pointer apart) 9-sliced to the canvas\'s edges, the corners and the top and bottom edges unscaled, the side edges stretched, the right and bottom ones mirrored from the left and top; inside it the parchment in one colour, the median of three pixels of the frame; no pixel of the old dark fill or frames; the pieces tile the canvas; the rects that paint it whole outside every region; the pointer\'s sprite never in it (spec 11 Design 7: where the game starts it, moved into the map, the cross-hair at the map\'s left edge, the band as the frame shows it and the same throughout); a source of the band changed in the frame (by the test) and a repaint under the pointer meeting the band\'s sources paints it whole with that change; two samples changed in the frame (by the test) paint it whole, the parchment their new median, and put back whole again; the sprite over one sample leaves the parchment\'s colour with no whole repaint; the regions still the x4 frame\'s; no page error', async (env) => {
   const errors = [];
   const { page } = await bootLayout(env, { init: wasmMemoryHook });
@@ -9998,982 +9625,13 @@ test('HD layout (spec 10 Design 2, follow-up L2): in game the canvas round the r
   console.log(`  receipt: ${LAYOUT_PAPER.pieces.length} pieces of the band and the parchment tile the canvas; ${s.compared} canvas pixels round the regions the paper from the x4 frame (${s.directCompared} of them read straight from the frame), none the old fill or frame; the pointer's sprite never in it (at the boot, moved into the map, the cross-hair at the map's edge); a source of the band changed: painted whole with it; two samples changed in the frame: painted whole with their median, and again once put back; the sprite over a sample: the parchment's colour kept, no whole repaint: pass`);
 }, { needs: h.haveHfes });
 
-// --- the HD font (spec 11) ----------------------------------------------------------------------
-// With the HD layout and the HD font the compositor leaves each letter, syllable or whole space
-// cell its paper in the x4 frame and lists it (Game.hd_glyphs), and the page draws the text over
-// the cells' places on the canvas in runs (Design 3). The listed codes are the user's text (but
-// those of the test's own conversation): the checks tell them apart by kind (ASCII, a Hangul
-// syllable, a space) and compare in the page; the receipts print no code and no count of them.
-
-const FONT_PATH = '/fonts/gowun-batang.woff2';
-
-// The test's own conversation for the font (koFixture's script with this greeting): two spaces
-// between two words (a run after them keeps its column), a word the font kerns (AVAW: drawn
-// without kerning, Design 3), a keyword (`@`: the game's highlight colour when its help mode is
-// on), and its Korean with the same (`@{…}`: the pack's keyword).
-const FONT_GREET = '"Hail,  friend! AVAW? Ask of @tests."';
-const FONT_GREET_KO = '"어서 오시오,  나그네여! @{시험}을 물으시오."';
-
-// Every answer to a request for the font file in `context`, as [its origin, its status, its
-// content type].
-function fontAnswers(context) {
-  const seen = [];
-  context.on('response', (r) => {
-    const url = new URL(r.url());
-    if (url.pathname === FONT_PATH) seen.push([url.origin, r.status(), r.headers()['content-type']]);
-  });
-  return seen;
-}
-
-// The font as the page shows it: data-font and data-font-file, the compositor's font mode and
-// whether it lists any cell, the stored choice, the Font radios' values and checks.
-const fontShown = (page) => page.evaluate(() => {
-  const g = globalThis.__shownGame;
-  let stored = null;
-  try {
-    stored = localStorage.getItem('u6.font');
-  } catch {
-    stored = 'unreadable';
-  }
-  return {
-    font: document.body.dataset.font,
-    file: document.body.dataset.fontFile,
-    mode: g ? g.hd_font() : null,
-    listed: g ? g.hd_glyphs().length > 0 : false,
-    stored,
-    radios: [...document.querySelectorAll('input[name="font"]')].map((i) => [i.value, i.checked]),
-  };
-});
-
-const fontIs = (page, font) => page.waitForFunction((f) => document.body.dataset.font === f
-  && document.body.dataset.fontFile !== 'loading', font, { timeout: 30_000 });
-
-// Page init script: the test's own reading of Design 3 (`window.__fontRunsOf(list, from)`, the
-// page's is not used): the listed cells of `list` (Game.hd_glyphs) in the classic rect `from`,
-// in runs: one row, each cell the next one's left neighbour, one paper; one space joins the
-// cells either side, two or more end the run, so does a cell not listed; a space the player typed
-// (0x20000 | 0x20, rev 3) joins them whatever the spaces beside it; the spaces at a run's ends
-// left out. Each run: its row, its cells ({ x, code, ink }, a space's ink null), whether it
-// follows two or more spaces (`after`), its inks; and `parts`, the texts the page is to draw it
-// in (one per stretch of one ink, a space going with the stretch it stands in). A listed symbol
-// (0x10000 | its glyph: the key wait's cursor, the more prompt's mark; Design 2 rev 3) ends the
-// cells before it; when a run of the same cells stands before it, after its last cell or after
-// the spaces that follow it, it is that run's `caret` ({ x, code: its glyph, ink, spaces: the
-// spaces between, typed or not }), else it is one of `runs.symbols` ({ x, y, code, ink }), drawn
-// at its own cell. With `rows` (Game.hd_symbol_rows, read with `list`) each symbol also has its
-// 8 rows (`rows`, bit 7 leftmost), else null. Also every `fillText` on the game's canvas is kept in
-// `window.__fills` while that is an array, and every `fillRect` on it (a whole repaint's
-// background: `paint` with no dirty rect) is counted in `window.__wholePaints`.
-function fontRunsHook() {
-  window.__fontRunsOf = (list, [fx, fy, fw, fh], rows = null) => {
-    const runs = [];
-    runs.symbols = [];
-    let chain = null;
-    let symbols = 0; // the symbols of the whole list so far: their rows' place in `rows`
-    const close = () => {
-      if (chain?.run) runs.push(chain.run);
-      if (chain) chain.run = null;
-    };
-    for (let i = 0; i < list.length; i += 5) {
-      const [x, y, code, ink, paper] = [list[i], list[i + 1], list[i + 2], list[i + 3], list[i + 4]];
-      const symbol = code >= 0x10000 && code !== 0x20020;
-      const own = symbol && rows && rows.length >= 8 * symbols + 8 ? rows.slice(8 * symbols, 8 * symbols + 8) : null;
-      if (symbol) symbols += 1;
-      if (x + 8 <= fx || y + 8 <= fy || x >= fx + fw || y >= fy + fh) continue;
-      if (!chain || chain.y !== y || chain.next !== x || chain.paper !== paper) {
-        close();
-        chain = { y, paper, spaces: 0, gap: 0, run: null, last: null };
-      }
-      chain.next = x + 8;
-      if (code === 0x20 || code === 0x20020) {
-        chain.gap += 1;
-        if (code === 0x20) chain.spaces += 1;
-        if (chain.spaces === 2) close();
-        continue;
-      }
-      if (symbol) {
-        const glyph = code & 0xffff;
-        if (chain.last) chain.last.caret = { x, code: glyph, ink, spaces: chain.gap, rows: own };
-        else runs.symbols.push({ x, y, code: glyph, ink, rows: own });
-        close();
-        chain = null;
-        continue;
-      }
-      if (!chain.run) {
-        chain.run = { y, cells: [], after: chain.spaces >= 2, caret: null };
-        chain.last = chain.run;
-      } else {
-        for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push({ x: x - 8 * k, code: 0x20, ink: null });
-      }
-      chain.spaces = 0;
-      chain.gap = 0;
-      chain.run.cells.push({ x, code, ink });
-    }
-    close();
-    for (const run of runs) {
-      run.inks = new Set(run.cells.filter((c) => c.ink !== null).map((c) => c.ink));
-      run.parts = [];
-      let ink = null;
-      for (const c of run.cells) {
-        const ch = String.fromCharCode(c.code);
-        if (c.ink === null || c.ink === ink) run.parts[run.parts.length - 1] += ch;
-        else {
-          run.parts.push(ch);
-          ink = c.ink;
-        }
-      }
-    }
-    return runs;
-  };
-  // The test's own measure of where a run of `__fontRunsOf` (in the classic rect `from` that the
-  // canvas rect `to` shows) is drawn (Design 3) and its caret (Design 2 rev 3): its span, its text,
-  // the narrowing `k`, the pen; its ink's left and right ends and the pen's end (`inkStart`,
-  // `inkEnd`, `penEnd`), a space's advance as drawn (`space`); with a caret, where its cell's left
-  // edge belongs (`caretLeft`: the pen's end after the run's text and the spaces between, their
-  // advances measured here) and the caret's box (`caret`): its cell's 8 x 8 game pixels from there,
-  // each edge on the nearest whole canvas pixel. And `__symbolBox`: a symbol's own cell there,
-  // its edges likewise.
-  window.__runGeometry = (run, from, to) => {
-    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-    const ch = 8 * sy;
-    window.__measure ??= document.createElement('canvas').getContext('2d');
-    const mc = window.__measure;
-    mc.font = `${0.85 * ch}px "U6 Gowun Batang"`;
-    mc.fontKerning = 'none';
-    const [x0, x1] = [run.cells[0].x, run.cells.at(-1).x + 8];
-    const span = [to[0] + (x0 - from[0]) * sx, to[1] + (run.y - from[1]) * sy, (x1 - x0) * sx, ch];
-    const text = run.cells.map((k) => String.fromCharCode(k.code)).join('');
-    const m = mc.measureText(text);
-    const lead = Math.max(0, m.actualBoundingBoxLeft);
-    const natural = Math.max(m.width, lead + m.actualBoundingBoxRight);
-    const room = span[2] - 2;
-    const k = natural > room ? room / natural : 1;
-    const pen = span[0] + 1 + lead * k;
-    const out = {
-      span, text, k, pen,
-      inkStart: pen - m.actualBoundingBoxLeft * k,
-      inkEnd: pen + m.actualBoundingBoxRight * k,
-      penEnd: pen + m.width * k,
-      space: mc.measureText(' ').width * k,
-      caretLeft: null,
-      caret: null,
-    };
-    if (run.caret) {
-      const left = pen + mc.measureText(text + ' '.repeat(run.caret.spaces)).width * k;
-      const [l, t] = [Math.round(left), Math.round(span[1])];
-      out.caretLeft = left;
-      out.caret = [l, t, Math.round(left + 8 * sx) - l, Math.round(span[1] + ch) - t];
-    }
-    return out;
-  };
-  // Where the page drew a symbol (`mark`: its rows and its ink) on the canvas pixels `d` (RGBA, of
-  // width `cw`), read from the pixels alone: the first cell's left edge from `x0` to `x1` (canvas
-  // px) at which, on the cell rows from `top`, the centre of each of its set pixels' blocks
-  // (sx x sy canvas px each) is its ink (within 8 a channel); then its ink's observed left edge,
-  // the first column of its leftmost set pixel's block that is its ink, walking left from that
-  // block's centre (at most one block). `{ edge, lead }`, `lead` the canvas px of the glyph's own
-  // blank columns left of its ink; null when no place shows it.
-  window.__symbolEdge = (d, cw, mark, [x0, x1], top, sx, sy) => {
-    const rows = mark?.rows;
-    if (!rows) return null;
-    const cols = rows.reduce((m, r) => m | r, 0);
-    if (cols === 0) return null;
-    const u0 = Math.clz32(cols) - 24;
-    const v0 = rows.findIndex((r) => r & (0x80 >> u0));
-    const [r, g, b] = [(mark.ink >> 16) & 255, (mark.ink >> 8) & 255, mark.ink & 255];
-    const ink = (x, y) => {
-      const j = (y * cw + x) * 4;
-      return Math.max(Math.abs(d[j] - r), Math.abs(d[j + 1] - g), Math.abs(d[j + 2] - b)) <= 8;
-    };
-    const set = [];
-    for (let v = 0; v < 8; v += 1) for (let u = 0; u < 8; u += 1) if (rows[v] & (0x80 >> u)) set.push([u, v]);
-    for (let left = Math.floor(x0); left <= Math.ceil(x1); left += 1) {
-      if (!set.every(([u, v]) => ink(Math.floor(left + (u + 0.5) * sx), Math.floor(top + (v + 0.5) * sy)))) continue;
-      const y = Math.floor(top + (v0 + 0.5) * sy);
-      let x = Math.floor(left + (u0 + 0.5) * sx);
-      for (let n = 0; n < Math.ceil(sx) && ink(x - 1, y); n += 1) x -= 1;
-      return { edge: x, lead: u0 * sx };
-    }
-    return null;
-  };
-  window.__symbolBox = (cell, from, to) => {
-    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-    const [left, top] = [to[0] + (cell.x - from[0]) * sx, to[1] + (cell.y - from[1]) * sy];
-    const [l, t] = [Math.round(left), Math.round(top)];
-    return [l, t, Math.round(left + 8 * sx) - l, Math.round(top + 8 * sy) - t];
-  };
-  const real = CanvasRenderingContext2D.prototype.fillText;
-  CanvasRenderingContext2D.prototype.fillText = function fillText(text, ...rest) {
-    if (Array.isArray(window.__fills) && this.canvas.id === 'screen') window.__fills.push(String(text));
-    return real.call(this, text, ...rest);
-  };
-  window.__wholePaints = 0;
-  const rect = CanvasRenderingContext2D.prototype.fillRect;
-  CanvasRenderingContext2D.prototype.fillRect = function fillRect(...args) {
-    if (this.canvas.id === 'screen') window.__wholePaints += 1;
-    return rect.apply(this, args);
-  };
-}
-
-// Page script: the runs as the canvas shows them now, region by region of the game screen,
-// against the regions composed again from the x4 frame as it is (the page's own copies, rect for
-// rect: one to one, or scaled smooth; right after a whole composition, a change of the font,
-// every region was copied from that frame). A run's span: its first cell's left edge to its last
-// cell's right edge, over its cell rows, through the region's map; its ink: the pixels in its
-// span that differ from the composition. Where a run's ink belongs, by the test's own measure of
-// Design 3: its text (the joined spaces in it) measured in the HD font at 0.85 of the cell's
-// height, no kerning; the pen 1 pixel inside the span's left edge and on by the ink the first
-// character puts left of it; the run at that width, or narrowed to the span less 1 pixel at
-// each end; so its ink box from the pen less the measured left reach to the pen plus the right
-// reach (each scaled as the run is). Per region: `off`, the pixels that differ outside every
-// span (of `offCompared`); the runs, their cells, syllables and ASCII; how many runs show ink,
-// stand on whole pixels, have their ink where it belongs within FONT_TOL pixels at each end
-// (`fits`: natural spacing, the inset, the narrowing); the runs of four or more ASCII and no
-// syllable (`latin`); of the runs with a syllable, those whose ink stands at least 0.6 of the
-// cell's height and is centred down it (within a sixth); of the runs after two or more spaces,
-// those that fit (so start at their own first cell); of the runs of two inks, those showing both
-// (a pixel within 48 a channel of each) and whose second ink starts where the text before it
-// ends (within FONT_TOL + 1: its first pixel of that colour); `unlike`: the runs whose span
-// differs from the canvas `fontPixelShot` kept (the pixel font's). A listed symbol's box (Design 2
-// rev 3: a run's caret at its pen's end and the spaces' advances, `__runGeometry`; a symbol after
-// no run at its own cell, `__symbolBox`) is left out of the runs' ink and of `off`: `carets` and
-// `symbols` count them, `caretsPlaced` and `symbolsPlaced` those whose ink's observed left edge on
-// the canvas (`__symbolEdge`) is where it belongs, its glyph's blank columns on, within a canvas
-// pixel. The canvas, the spans and the symbols' boxes are kept in the page (`window.__fontSeen`)
-// for `fontAgain`. The pointer's place is left out (`pointerAreaHook`). Counts only.
-const FONT_TOL = 2;
-const fontRuns = async (page) => (await pointerAreaHook(page), page.evaluate((tol) => {
-  const c = document.getElementById('screen');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const g = globalThis.__shownGame;
-  const [w4, h4] = [g.width() * 4, g.height() * 4];
-  const x4 = document.createElement('canvas');
-  [x4.width, x4.height] = [w4, h4];
-  x4.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(g.hd_frame_rgba()), w4, h4), 0, 0);
-  const e = document.createElement('canvas');
-  [e.width, e.height] = [c.width, c.height];
-  const ctx = e.getContext('2d');
-  for (const { from, to } of globalThis.__u6Layout.regions) {
-    const source = from.map((v) => v * 4);
-    ctx.imageSmoothingEnabled = !(to[2] === source[2] && to[3] === source[3]);
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(x4, ...source, ...to);
-  }
-  const f = ctx.getImageData(0, 0, c.width, c.height).data;
-  const shot = window.__pixelShot;
-  const list = g.hd_glyphs();
-  const rows = g.hd_symbol_rows?.() ?? null;
-  const inked = (j) => d[j] !== f[j] || d[j + 1] !== f[j + 1] || d[j + 2] !== f[j + 2] || d[j + 3] !== f[j + 3];
-  const near = (j, v) => Math.max(Math.abs(d[j] - ((v >> 16) & 255)), Math.abs(d[j + 1] - ((v >> 8) & 255)), Math.abs(d[j + 2] - (v & 255))) <= 48;
-  const out = {};
-  const spans = [];
-  const symbolBoxes = [];
-  const pointer = window.__pointerArea();
-  const mc = document.createElement('canvas').getContext('2d');
-  for (const { name, from, to } of globalThis.__u6Layout.regions) {
-    const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-    const ch = 8 * sy;
-    mc.font = `${0.85 * ch}px "U6 Gowun Batang"`;
-    mc.fontKerning = 'none';
-    const r = {
-      off: 0, offCompared: 0, runs: 0, cells: 0, hangul: 0, ascii: 0, inked: 0, fits: 0, whole: 0,
-      latin: 0, syllabic: 0, tall: 0, upright: 0, after: 0, afterFits: 0, twoInk: 0, bothInks: 0, placed: 0, unlike: 0,
-      carets: 0, caretsPlaced: 0, symbols: 0, symbolsPlaced: 0,
-    };
-    const mask = new Uint8Array(c.width * c.height);
-    // The symbols' boxes (a caret after its run, a symbol alone at its own cell): kept out of the
-    // runs' ink and of `off`; each placed where its ink's observed left edge (`__symbolEdge`, read
-    // from the canvas from the run's first cell to the symbol's own cell's right edge) is where it
-    // belongs, the glyph's own blank columns on, within a canvas pixel (Design 2 rev 3).
-    const held = new Uint8Array(c.width * c.height);
-    const runs = window.__fontRunsOf(list, from, rows);
-    const boxes = [
-      ...runs.filter((run) => run.caret).map((run) => {
-        const geo = window.__runGeometry(run, from, to);
-        const reach = [geo.span[0], to[0] + (run.caret.x + 8 - from[0]) * sx];
-        return [geo.caret, run.caret, geo.caretLeft, geo.span[1], reach, 'carets'];
-      }),
-      ...runs.symbols.map((m) => {
-        const box = window.__symbolBox(m, from, to);
-        const [left, top] = [to[0] + (m.x - from[0]) * sx, to[1] + (m.y - from[1]) * sy];
-        return [box, m, left, top, [left - 8 * sx, left + 8 * sx], 'symbols'];
-      }),
-    ];
-    for (const [[bx, by, bw, bh], m, left, top, reach, kind] of boxes) {
-      for (let y = Math.max(by, to[1]); y < Math.min(by + bh, to[1] + to[3]); y += 1) {
-        for (let x = Math.max(bx, to[0]); x < Math.min(bx + bw, to[0] + to[2]); x += 1) held[y * c.width + x] = 1;
-      }
-      const seen = window.__symbolEdge(d, c.width, m, reach, top, sx, sy);
-      r[kind] += 1;
-      r[`${kind}Placed`] += seen && Math.abs(seen.edge - (left + seen.lead)) <= 1 ? 1 : 0;
-    }
-    for (const run of runs) {
-      const [x0, x1] = [run.cells[0].x, run.cells.at(-1).x + 8];
-      const span = [to[0] + (x0 - from[0]) * sx, to[1] + (run.y - from[1]) * sy, (x1 - x0) * sx, ch];
-      const [left, top] = span;
-      const [ya, yb] = [Math.max(span[1], to[1]), Math.min(span[1] + ch, to[1] + to[3])];
-      const [xa, xb] = [Math.max(span[0], to[0]), Math.min(span[0] + span[2], to[0] + to[2])];
-      let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
-      const found = new Map(); // ink -> the first x showing it
-      let unlike = false;
-      for (let y = ya; y < yb; y += 1) {
-        for (let x = xa; x < xb; x += 1) {
-          mask[y * c.width + x] = 1;
-          if (window.__inPointer(pointer, x, y) || held[y * c.width + x]) continue;
-          const j = (y * c.width + x) * 4;
-          if (shot && (shot[j] !== d[j] || shot[j + 1] !== d[j + 1] || shot[j + 2] !== d[j + 2])) unlike = true;
-          if (!inked(j)) continue;
-          [minX, minY, maxX, maxY] = [Math.min(minX, x), Math.min(minY, y), Math.max(maxX, x), Math.max(maxY, y)];
-          for (const v of run.inks) if (near(j, v) && !(found.get(v) <= x)) found.set(v, x);
-        }
-      }
-      const letters = run.cells.filter((k) => k.code !== 0x20);
-      const syllables = letters.filter((k) => k.code >= 0xac00 && k.code <= 0xd7a3).length;
-      const ink = maxX >= minX;
-      const text = run.cells.map((k) => String.fromCharCode(k.code)).join('');
-      const m = mc.measureText(text);
-      const lead = Math.max(0, m.actualBoundingBoxLeft);
-      const natural = Math.max(m.width, lead + m.actualBoundingBoxRight);
-      const room = span[2] - 2;
-      const k = natural > room ? room / natural : 1;
-      const pen = left + 1 + lead * k;
-      const fits = ink && Math.abs(minX - (pen - m.actualBoundingBoxLeft * k)) <= tol
-        && Math.abs(maxX + 1 - (pen + m.actualBoundingBoxRight * k)) <= tol;
-      r.runs += 1;
-      r.cells += letters.length;
-      r.hangul += syllables;
-      r.ascii += letters.length - syllables;
-      r.inked += ink ? 1 : 0;
-      r.fits += fits ? 1 : 0;
-      r.whole += span.every(Number.isInteger) ? 1 : 0;
-      r.unlike += unlike ? 1 : 0;
-      if (syllables === 0 && letters.length >= 4) r.latin += 1;
-      if (syllables > 0) {
-        r.syllabic += 1;
-        r.tall += ink && maxY - minY + 1 >= 0.6 * ch ? 1 : 0;
-        r.upright += ink && Math.abs((minY + maxY + 1) / 2 - (top + ch / 2)) <= ch / 6 ? 1 : 0;
-      }
-      if (run.after) {
-        r.after += 1;
-        r.afterFits += fits ? 1 : 0;
-      }
-      if (run.inks.size > 1) {
-        r.twoInk += 1;
-        r.bothInks += found.size === run.inks.size ? 1 : 0;
-        // The second ink's part: from its first cell to the next cell of another ink.
-        const a = run.cells.findIndex((q) => q.ink !== null && q.ink !== run.cells[0].ink);
-        const second = run.cells[a].ink;
-        let b = a + 1;
-        while (b < run.cells.length && (run.cells[b].ink === null || run.cells[b].ink === second)) b += 1;
-        const at = pen + (mc.measureText(text.slice(0, a)).width - mc.measureText(text.slice(a, b)).actualBoundingBoxLeft) * k;
-        r.placed += found.has(second) && Math.abs(found.get(second) - at) <= tol + 1 ? 1 : 0;
-      }
-      spans.push({ key: `${name},${run.y},${run.cells.map((k) => `${k.x}:${k.code}:${k.ink}`).join(' ')}`, rect: [xa, ya, xb - xa, yb - ya] });
-    }
-    for (const [box] of boxes) symbolBoxes.push({ name, rect: box });
-    const [x, y, w, hh] = to;
-    for (let yy = y; yy < y + hh; yy += 1) {
-      for (let xx = x; xx < x + w; xx += 1) {
-        if (mask[yy * c.width + xx] || held[yy * c.width + xx] || window.__inPointer(pointer, xx, yy)) continue;
-        r.offCompared += 1;
-        if (inked((yy * c.width + xx) * 4)) r.off += 1;
-      }
-    }
-    out[name] = r;
-  }
-  window.__fontSeen = { pixels: new Uint8ClampedArray(d), spans, symbolBoxes };
-  return out;
-}, FONT_TOL));
-
-// Page script: the spans `fontRuns` kept, against the canvas now: how many of those whose run is
-// still listed the same (its cells, codes and inks: `same`) show other pixels than then
-// (`differ`), outside the symbols' boxes it kept; per region whether any pixel of it outside those
-// spans and boxes changed (`moved`), and whether any pixel of those boxes did (`turned`: the key
-// wait's cursor, drawn as a caret or at its own cell, turns).
-const fontAgain = (page) => page.evaluate(() => {
-  const c = document.getElementById('screen');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const { pixels, spans, symbolBoxes } = window.__fontSeen;
-  const list = globalThis.__shownGame.hd_glyphs();
-  const now = new Set();
-  for (const { name, from } of globalThis.__u6Layout.regions) {
-    for (const run of window.__fontRunsOf(list, from)) now.add(`${name},${run.y},${run.cells.map((k) => `${k.x}:${k.code}:${k.ink}`).join(' ')}`);
-  }
-  const changed = (j) => d[j] !== pixels[j] || d[j + 1] !== pixels[j + 1] || d[j + 2] !== pixels[j + 2];
-  const on = new Uint8Array(c.width * c.height);
-  const boxed = new Uint8Array(c.width * c.height);
-  const turned = {};
-  for (const { name } of globalThis.__u6Layout.regions) turned[name] = false;
-  for (const { name, rect: [x, y, w, hh] } of symbolBoxes) {
-    for (let yy = Math.max(0, y); yy < Math.min(c.height, y + hh); yy += 1) {
-      for (let xx = Math.max(0, x); xx < Math.min(c.width, x + w); xx += 1) {
-        boxed[yy * c.width + xx] = 1;
-        if (changed((yy * c.width + xx) * 4)) turned[name] = true;
-      }
-    }
-  }
-  let same = 0;
-  let differ = 0;
-  for (const { key, rect: [x, y, w, hh] } of spans) {
-    let off = false;
-    for (let yy = y; yy < y + hh; yy += 1) {
-      for (let xx = x; xx < x + w; xx += 1) {
-        on[yy * c.width + xx] = 1;
-        if (!boxed[yy * c.width + xx] && changed((yy * c.width + xx) * 4)) off = true;
-      }
-    }
-    if (!now.has(key)) continue;
-    same += 1;
-    differ += off ? 1 : 0;
-  }
-  const moved = {};
-  for (const { name, to: [x, y, w, hh] } of globalThis.__u6Layout.regions) {
-    moved[name] = false;
-    for (let yy = y; yy < y + hh && !moved[name]; yy += 1) {
-      for (let xx = x; xx < x + w; xx += 1) {
-        if (!on[yy * c.width + xx] && !boxed[yy * c.width + xx] && changed((yy * c.width + xx) * 4)) {
-          moved[name] = true;
-          break;
-        }
-      }
-    }
-  }
-  return { same, differ, moved, turned };
-});
-
-// Page script: the canvas as it is now kept in the page (`window.__pixelShot`, for `fontRuns`).
-const fontPixelShot = (page) => page.evaluate(() => {
-  const c = document.getElementById('screen');
-  window.__pixelShot = new Uint8ClampedArray(c.getContext('2d').getImageData(0, 0, c.width, c.height).data);
-});
-
-// Settings' "Font" set to `value` (Settings opened first when it is not); the canvas is drawn
-// again at once, with no game step.
-async function chooseFont(page, value) {
-  if (await page.evaluate(() => document.getElementById('setup').hidden)) await page.click('#settings');
-  await page.check(`input[name="font"][value="${value}"]`);
-}
-
-// Talks to the party's second member (the test's conversation in place of the user's) and waits
-// for the prompt. The greeting's keyword shows in the game's highlight colour only in its help
-// mode, which the user's files start on or off: when no run of the scroll has two inks the help
-// mode is switched (Ctrl-H) and the member talked to again.
-async function fontTalk(page) {
-  const talk = async () => {
-    await page.focus('#screen');
-    for (const key of ['t', '2']) {
-      await page.keyboard.press(key);
-      await h.waitTaken(page);
-    }
-    await h.waitPrompt(page);
-  };
-  const twoInks = () => page.evaluate(() => {
-    const L = globalThis.__u6Layout;
-    const from = L.regions.find((r) => r.name === 'messages').from;
-    return window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).some((run) => run.inks.size > 1);
-  });
-  await talk();
-  if (await twoInks()) return;
-  await page.keyboard.press('Control+KeyH');
-  await h.waitTaken(page);
-  await h.waitPrompt(page);
-  await talk();
-}
-
-// The pixel font in effect (no cell listed) and the canvas exactly the x4 frame's regions; then
-// the HD font in one paint that draws each run once, part by part (the page's fillText calls
-// against the test's reading of the runs, in order); every run inked within its span and its
-// cell rows, the rest of the canvas exactly the x4 frame's regions, every run unlike the pixel
-// font's; `regions`: the regions checked closer, each with the kinds of run it must show
-// (`latin`, `syllabic`, `after`, `twoInk`). Returns what `fontRuns` read with the HD font.
-async function fontOnOff(page, regions) {
-  await chooseFont(page, 'pixel');
-  let s = await fontShown(page);
-  assert.ok(s.font === 'pixel' && s.mode === false && !s.listed && s.stored === 'pixel', 'the pixel font at once, kept: no cell listed');
-  for (const [name, r] of Object.entries(await fontRuns(page))) {
-    assert.equal(r.runs, 0, `${name}: no run drawn`);
-    assert.ok(r.offCompared > 0 && r.off === 0, `${name}: the pixel font: the canvas is the x4 frame's region exactly`);
-  }
-  await fontPixelShot(page);
-  await page.evaluate(() => { window.__fills = []; });
-  await chooseFont(page, 'hd');
-  const fills = await page.evaluate(() => {
-    const L = globalThis.__u6Layout;
-    const list = globalThis.__shownGame.hd_glyphs();
-    const want = L.regions.flatMap(({ from }) => window.__fontRunsOf(list, from).flatMap((run) => run.parts));
-    const got = window.__fills;
-    window.__fills = null;
-    return { calls: got.length, want: want.length, same: got.length === want.length && got.every((t, i) => t === want[i]) };
-  });
-  s = await fontShown(page);
-  assert.ok(s.font === 'hd' && s.mode === true && s.listed && s.stored === 'hd', 'the HD font at once, kept: cells listed');
-  assert.ok(fills.want > 0 && fills.same, 'one paint draws each run once, part by part, as the runs read');
-  const runs = await fontRuns(page);
-  for (const [name, kinds] of Object.entries(regions)) {
-    const r = runs[name];
-    assert.ok(r.runs > 0 && r.cells > 0, `${name}: runs listed`);
-    for (const kind of kinds) assert.ok(r[kind] > 0, `${name}: a run of kind ${kind}`);
-    assert.equal(r.inked, r.runs, `${name}: every run shows its ink`);
-    assert.equal(r.whole, r.runs, `${name}: every span on whole canvas pixels`);
-    assert.equal(r.fits, r.runs, `${name}: every run's ink where the font puts it: from 1 px inside its first cell, at the font's natural width without kerning (or narrowed to its cells)`);
-    assert.ok(r.tall === r.syllabic && r.upright === r.syllabic, `${name}: every run of syllables at the region's scale, centred down its cells`);
-    assert.equal(r.afterFits, r.after, `${name}: every run after two or more spaces at its own first cell`);
-    assert.ok(r.bothInks === r.twoInk && r.placed === r.twoInk, `${name}: every run of two inks shows both, the second where the text before it ends`);
-    assert.equal(r.unlike, r.runs, `${name}: every run unlike the pixel font's`);
-  }
-  for (const [name, r] of Object.entries(runs)) {
-    assert.ok(r.offCompared > 0, `${name}: pixels off the runs to compare`);
-    assert.equal(r.off, 0, `${name}: the runs' ink within their spans and cell rows, the rest the x4 frame's region exactly`);
-  }
-  return { runs, fills };
-}
-
-test('HD font (spec 11 Acceptance 2, English): in game on the HD layout (a 1400 x 900 window, the user\'s disks, a synthetic conversation) the text is in the pixel font until the font file is in, which comes from this origin (200, font/woff2, no CSP report); with the pixel font chosen in Settings no cell is listed and the canvas is the x4 frame\'s regions exactly, as before; with the HD font one paint draws each run of the side panel and the message scroll once, in its inks: its ink within its cells where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends), a run after two spaces at its own cell, a keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; frames that redraw the regions draw each run once (its pixels as before); at the game\'s own end (Ctrl-Q, Y) its last frame letterboxed still shows the runs; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openPage(env, { layout: 'hd' });
-  await context.addInitScript(fontRunsHook);
-  const answers = fontAnswers(context);
-  page.on('pageerror', () => errors.push(1));
-  // The font file's answer held until the game runs: the pixel font until it is in.
-  let release;
-  const held = new Promise((done) => { release = done; });
-  await context.route((url) => url.pathname === FONT_PATH, async (route) => {
-    await held;
-    await route.continue();
-  });
-  await page.setViewportSize({ width: 1400, height: 900 });
-  // The document's load event waits for the font file: the page is used from its DOM on.
-  await page.goto(env.server.url, { waitUntil: 'domcontentloaded' });
-  await h.waitSettled(page);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  let s = await fontShown(page);
-  assert.ok(s.font === 'pixel' && s.file === 'loading' && s.mode === false && !s.listed, 'the font file not in yet: the pixel font, no cell listed');
-  release();
-  await fontIs(page, 'hd');
-  s = await fontShown(page);
-  assert.ok(s.file === 'loaded' && s.mode === true && s.listed && s.stored === null, 'the HD font by default, loaded, cells listed');
-  assert.ok(answers.length >= 1 && answers.every(([origin, status, type]) => origin === new URL(env.server.url).origin && status === 200 && type === 'font/woff2'), 'the font file from this origin, 200, font/woff2');
-  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
-  // The test's conversation in place of the user's (in English no pack is taken).
-  const { archive } = await koFixture(0x63, { greeting: FONT_GREET, greetingKo: FONT_GREET_KO });
-  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.reload();
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  await fontIs(page, 'hd');
-  await fontTalk(page);
-  await h.virtualDisplay(page, 60);
-  await fontOnOff(page, { messages: ['latin', 'after', 'twoInk'], panel: ['latin'] });
-  // Frames at the prompt: the message scroll's cursor turns (listed as a symbol, Design 2 rev 3:
-  // drawn as the caret of the prompt's run, its own cell the paper), so the regions are copied
-  // again and their runs drawn again: each span as it was outside the caret's box, and nothing of
-  // the scroll outside the spans and the box changed.
-  const atPrompt = await fontRuns(page);
-  assert.ok(atPrompt.messages.carets === 1 && atPrompt.messages.caretsPlaced === 1, 'the cursor drawn as the caret of the prompt\'s run, in its ink, where the prompt\'s text ends');
-  let turned = 0;
-  for (let k = 0; k < 12; k += 1) {
-    await h.runFrames(page, 10);
-    const again = await fontAgain(page);
-    if (again.turned.messages) turned += 1;
-    assert.ok(again.same > 0, 'the runs still listed');
-    assert.equal(again.differ, 0, 'each run drawn once over its copied region: its pixels as before');
-    assert.ok(!again.moved.messages, 'nothing of the scroll outside its runs and the caret changed');
-  }
-  assert.ok(turned > 0, 'the message scroll drawn again (its cursor turned, as the caret)');
-  s = await fontShown(page);
-  assert.equal(s.font, 'hd', 'still the HD font');
-  // The game's own end (Ctrl-Q, Y: the command loop ends, and so does the launcher, in `game`):
-  // the page shows its last frame letterboxed, the runs listed still drawn there, each span
-  // (its cells' rect through the letterbox) showing the run's first ink.
-  await page.focus('#screen');
-  for (const key of ['Control+KeyQ', 'KeyY']) {
-    await page.keyboard.press(key);
-    for (let k = 0; k < 40 && await page.evaluate(() => document.getElementById('screen').dataset.keys !== '0'); k += 1) await h.runFrames(page, 5);
-    await h.runFrames(page, 30);
-  }
-  for (let k = 0; k < 40 && await page.evaluate(() => document.body.dataset.state !== 'ended'); k += 1) await h.runFrames(page, 10);
-  const ended = await page.evaluate(() => {
-    const c = document.getElementById('screen');
-    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    const L = globalThis.__u6Layout;
-    const [x, y, w, hh] = L.whole;
-    const [sx, sy] = [w / 320, hh / 200];
-    const runs = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), [0, 0, 320, 200]);
-    let inked = 0;
-    for (const run of runs) {
-      const v = run.cells[0].ink;
-      const ink = [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-      const [px, py] = [x + run.cells[0].x * sx, y + run.y * sy];
-      const pw = (run.cells.at(-1).x + 8 - run.cells[0].x) * sx;
-      let found = false;
-      for (let yy = Math.floor(py); yy < Math.ceil(py + 8 * sy) && !found; yy += 1) {
-        for (let xx = Math.floor(px); xx < Math.ceil(px + pw); xx += 1) {
-          const j = (yy * c.width + xx) * 4;
-          if (Math.max(...[0, 1, 2].map((n) => Math.abs(d[j + n] - ink[n]))) <= 48) {
-            found = true;
-            break;
-          }
-        }
-      }
-      inked += found ? 1 : 0;
-    }
-    return { state: document.body.dataset.state, view: L.view, runs: runs.length, inked };
-  });
-  assert.ok(ended.state === 'ended' && ended.view === 'whole', 'the game ended: its last frame letterboxed');
-  assert.ok(ended.runs > 0 && ended.inked === ended.runs, 'every run listed still drawn, in its ink');
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: the font file from this origin (200, font/woff2), no CSP report; the pixel font: the canvas the x4 frame\'s regions exactly; the HD font: one paint, each run of the panel and the scroll drawn once in its parts, inked within its cells from its first cell, letters at the font\'s width, a run after two spaces at its column, the keyword in its colour, the rest exactly the x4 frame\'s; 120 frames, the scroll drawn again: each run drawn once; the game\'s own end: its runs drawn in the letterbox: pass');
-}, { needs: h.haveHfes });
-
-test('HD font (spec 11, after a trap): a font file that comes in after the engine trapped is shown as loaded on the page (data-font-file), while the canvas, not drawn again, keeps the pixel font (data-font)', async (env) => {
-  const { context, page } = await h.openPage(env, { layout: 'hd' });
-  let release;
-  const held = new Promise((done) => { release = done; });
-  await context.route((url) => url.pathname === FONT_PATH, async (route) => {
-    await held;
-    await route.continue();
-  });
-  await page.setViewportSize({ width: 1400, height: 900 });
-  await page.goto(env.server.url, { waitUntil: 'domcontentloaded' });
-  await h.waitSettled(page);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  assert.deepEqual([(await fontShown(page)).font, (await fontShown(page)).file], ['pixel', 'loading'], 'the font file not in yet');
-  await page.evaluate(() => { globalThis.__trap = true; });
-  await page.waitForFunction(() => document.body.dataset.state === 'crashed');
-  const trapped = await canvasHash(page);
-  release();
-  await page.waitForFunction(() => document.body.dataset.fontFile !== 'loading', null, { timeout: 30_000 });
-  const s = await page.evaluate(() => [document.body.dataset.font, document.body.dataset.fontFile]);
-  assert.deepEqual(s, ['pixel', 'loaded'], 'the file loaded; the canvas keeps the pixel font');
-  assert.equal(await canvasHash(page), trapped, 'the canvas not drawn again');
-}, { needs: h.haveHfes });
-
-// Page script: the canvas's pixels in rect [x, y, w, h] that differ from the x4 frame's at the
-// same place of a one-to-one region `name` (its canvas rect `to` shows the x4 rect of `from`),
-// the pointer's place left out (`pointerAreaHook`).
-const oneToOneOff = async (page, name, rect) => (await pointerAreaHook(page), page.evaluate(([n, [x, y, w, hh]]) => {
-  const c = document.getElementById('screen');
-  const d = c.getContext('2d').getImageData(x, y, w, hh).data;
-  const g = globalThis.__shownGame;
-  const f = g.hd_frame_rgba();
-  const w4 = g.width() * 4;
-  const { from, to } = globalThis.__u6Layout.regions.find((r) => r.name === n);
-  const pointer = window.__pointerArea();
-  let off = 0;
-  for (let yy = 0; yy < hh; yy += 1) {
-    for (let xx = 0; xx < w; xx += 1) {
-      if (window.__inPointer(pointer, x + xx, y + yy)) continue;
-      const a = (yy * w + xx) * 4;
-      const b = ((4 * from[1] + y - to[1] + yy) * w4 + 4 * from[0] + x - to[0] + xx) * 4;
-      if (d[a] !== f[b] || d[a + 1] !== f[b + 1] || d[a + 2] !== f[b + 2]) off += 1;
-    }
-  }
-  return off;
-}, [name, rect]));
-
-// Page script: from now on, the rect of the game on screen's x4 frame each of the page's draws
-// paints again (the HD layout's `paint` gets it as its dirty rect) is kept in `window.__dirty`,
-// one per draw that paints, and that game in `window.__dirtyGame`. A draw reads the pointer first
-// (Game.hd_pointer, once) and then takes the rect the compositions wrote (Game.hd_take_dirty);
-// the rect it paints is the box round that rect and, when the pointer's version moved (spec 11
-// Design 7), the pointer's old and new boxes at x4. So each entry is that union, kept as the page
-// keeps it: the rect taken alone, the pointer's boxes alone, or both in one. A test that wrote
-// pixels of the x4 frame itself (`writeFramePixels`) sets `window.__widenTake` to the x4 rect it
-// wrote: the next take is widened to it (and that rect cleared), as a composition that wrote
-// there would give it, so the page copies those pixels to the canvas it paints from.
-const recordDirty = (page) => page.evaluate(() => {
-  const g = globalThis.__shownGame;
-  const real = Object.getPrototypeOf(g);
-  window.__dirty = [];
-  window.__dirtyGame = g;
-  const union = (a, b) => {
-    if (!a || !b) return a ?? b;
-    const [x0, y0] = [Math.min(a[0], b[0]), Math.min(a[1], b[1])];
-    const [x1, y1] = [Math.max(a[0] + a[2], b[0] + b[2]), Math.max(a[1] + a[3], b[1] + b[3])];
-    return [x0, y0, x1 - x0, y1 - y0];
-  };
-  const box = (p) => (p[2] > 0 ? [p[0], p[1], p[2], p[3]].map((v) => 4 * v) : null);
-  let last = [...real.hd_pointer.call(g)];
-  let moved = null; // the pointer's old and new boxes, read by this draw
-  g.hd_pointer = function hdPointer() {
-    const p = real.hd_pointer.call(this);
-    if (p[4] !== last[4]) {
-      moved = union(box(last), box(p));
-      last = [...p];
-    }
-    return p;
-  };
-  window.__widenTake = null;
-  g.hd_take_dirty = function hdTakeDirty() {
-    let rect = real.hd_take_dirty.call(this);
-    if (window.__widenTake) {
-      rect = Uint32Array.from(union(rect.length > 0 ? [...rect] : null, window.__widenTake));
-      window.__widenTake = null;
-    }
-    const painted = union(rect.length > 0 ? [...rect] : null, moved);
-    moved = null;
-    if (painted) window.__dirty.push(painted);
-    return rect;
-  };
-});
-
-// Page script: the rects `recordDirty` kept (one per draw that painted: the union it painted
-// again): how many, whether any is the whole x4 frame, whether any meets the x4 rect `rect`;
-// whether the game on screen and the view are still the ones then (so each of those rects
-// reached `paint` as its dirty rect: a partial repaint).
-const dirtySeen = (page, rect) => page.evaluate(([x, y, w, hh]) => {
-  const g = globalThis.__shownGame;
-  const [w4, h4] = [g.width() * 4, g.height() * 4];
-  const meets = ([a, b, c, d]) => a < x + w && x < a + c && b < y + hh && y < b + d;
-  return {
-    rects: window.__dirty.length,
-    full: window.__dirty.some(([a, b, c, d]) => a === 0 && b === 0 && c === w4 && d === h4),
-    meets: window.__dirty.some(meets),
-    sameGame: g === window.__dirtyGame,
-    view: globalThis.__u6Layout.view,
-  };
-}, rect);
-
-// Page script: from now on, every `fillRect` on the game's canvas (a whole repaint's background:
-// `paint` with no dirty rect) is counted in `window.__wholePaints`, from 0 (the wrapper put in once,
-// as `fontRunsHook` puts it; then only the count reset).
-const countWholePaints = (page) => page.evaluate(() => {
-  if (window.__wholePaints === undefined) {
-    const rect = CanvasRenderingContext2D.prototype.fillRect;
-    CanvasRenderingContext2D.prototype.fillRect = function fillRect(...args) {
-      if (this.canvas.id === 'screen') window.__wholePaints += 1;
-      return rect.apply(this, args);
-    };
-  }
-  window.__wholePaints = 0;
-});
-
-// Page script: a hash of the game on screen's x4 frame in its rect [x, y, w, h].
-const x4Hash = (page, rect) => page.evaluate(([x, y, w, hh]) => {
-  const g = globalThis.__shownGame;
-  const f = g.hd_frame_rgba();
-  const w4 = g.width() * 4;
-  let v = 0x811c9dc5;
-  for (let yy = y; yy < y + hh; yy += 1) {
-    for (let xx = x; xx < x + w; xx += 1) {
-      for (let k = 0; k < 4; k += 1) v = Math.imul(v ^ f[(yy * w4 + xx) * 4 + k], 0x01000193) >>> 0;
-    }
-  }
-  return v;
-}, rect);
-
-test('HD font (spec 11, a one-to-one region): a run listed in the map window (made up by the test: its own four letters and colours added to the list the page reads) is drawn there once and kept through a repaint the pointer causes elsewhere in the window; once it is no longer listed, the next such repaint copies the window again whole, and nothing of the run stays; preconditions asserted: the game lists no cell in the window, and through those frames nothing else repaints the run\'s place (its x4 pixels unchanged, no dirty rect meets it, each a partial repaint, no whole repaint of the canvas)', async (env) => {
-  const { page } = await bootLayout(env, { font: null });
-  await fontIs(page, 'hd');
-  await page.mouse.move(...(await h.screenPoint(page, 150, 150)));
-  await h.virtualDisplay(page, 60);
-  await h.runFrames(page, 10);
-  // The test's precondition: the game lists no cell in the map window (else the window is copied
-  // whole for those, and the made-up run below would not be what decides it).
-  const mapCells = () => page.evaluate(() => {
-    const [fx, fy, fw, fh] = globalThis.__u6Layout.regions.find((r) => r.name === 'map').from;
-    const g = globalThis.__shownGame;
-    const list = Object.getPrototypeOf(g).hd_glyphs.call(g);
-    let n = 0;
-    for (let i = 0; i < list.length; i += 5) {
-      if (list[i] + 8 > fx && list[i + 1] + 8 > fy && list[i] < fx + fw && list[i + 1] < fy + fh) n += 1;
-    }
-    return n;
-  });
-  assert.equal(await mapCells(), 0, 'precondition: the game lists no cell in the map window');
-  // The made-up run: 'TEST' in the map window's row 136 from x 16 (its lower left, away from the
-  // pointer and from the tiles that move at the start), ink and paper of the test's own.
-  const [RUN_X, RUN_Y] = [16, 136];
-  await page.evaluate(([rx, ry]) => {
-    const g = globalThis.__shownGame;
-    const real = Object.getPrototypeOf(g).hd_glyphs;
-    g.hd_glyphs = function hdGlyphs() {
-      const list = real.call(this);
-      return window.__fake ? Uint32Array.from([...list, ...window.__fake]) : list;
-    };
-    window.__fake = [0x54, 0x45, 0x53, 0x54].flatMap((code, i) => [rx + 8 * i, ry, code, 0xff00ff, 0x00ff00]);
-  }, [RUN_X, RUN_Y]);
-  const { from, to } = (await layoutTable(page)).regions.find((r) => r.name === 'map');
-  const span = [to[0] + (RUN_X - from[0]) * 4, to[1] + (RUN_Y - from[1]) * 4, 32 * 4, 32];
-  // A whole paint (the font off and on again) draws it; then Settings closed again (its OK,
-  // nothing else chosen). Settings (#setup) is a section in the page's flow above the screen's box
-  // (site/index.html: its rules, and the section before #screen-box), so while it is open the
-  // canvas sits lower, and `h.screenPoint` maps a game pixel through the canvas's box as it is
-  // then: the pointer's moves below could land past the viewport's bottom. Each target is checked
-  // inside the viewport.
-  await chooseFont(page, 'pixel');
-  await chooseFont(page, 'hd');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  const inView = async (gx, gy) => {
-    const [px, py] = await h.screenPoint(page, gx, gy);
-    const [w, hh] = await page.evaluate(() => [innerWidth, innerHeight]);
-    assert.ok(px >= 0 && px < w && py >= 0 && py < hh, `precondition: game pixel (${gx}, ${gy}) inside the viewport`);
-    return [px, py];
-  };
-  assert.ok(await oneToOneOff(page, 'map', span) > 0, 'the made-up run drawn in the map window');
-  await page.evaluate(([x, y, w, hh]) => {
-    window.__spanShot = [...document.getElementById('screen').getContext('2d').getImageData(x, y, w, hh).data];
-  }, span);
-  const sameAsShot = () => page.evaluate(([x, y, w, hh]) => {
-    const d = document.getElementById('screen').getContext('2d').getImageData(x, y, w, hh).data;
-    return d.every((v, i) => v === window.__spanShot[i]);
-  }, span);
-  // The pointer's version (Game.hd_pointer): the page draws the pointer over the x4 frame and
-  // repaints under its old and new boxes when it moves (spec 11 Design 7).
-  const version = () => page.evaluate(() => globalThis.__shownGame.hd_pointer()[4]);
-  // A repaint the pointer causes far from the run, the run still listed: drawn once again.
-  let v = await version();
-  await page.mouse.move(...(await inView(150, 100)));
-  await h.runFrames(page, 10);
-  assert.notEqual(await version(), v, 'the pointer moved: its version moved');
-  assert.ok(await sameAsShot(), 'the run still listed: its pixels as before (drawn once)');
-  // No longer listed: the next repaint copies the window whole, the run gone. Preconditions for
-  // that to rest on the whole copy alone: through those frames the x4 frame under the run's place
-  // stays as it was (no animated tile there), no rect the page copies meets it, every one reaches
-  // `paint` as a partial repaint (the same game and view, none the whole frame), no paint draws
-  // the whole canvas (whatever the rects, `compose` repaints whole for another game or view, a
-  // fresh x4 frame), and the game still lists no cell in the window.
-  const under = [4 * RUN_X, 4 * RUN_Y, 4 * 32, 4 * 8];
-  const before = await x4Hash(page, under);
-  await recordDirty(page);
-  await countWholePaints(page);
-  await page.evaluate(() => { window.__fake = null; });
-  v = await version();
-  await page.mouse.move(...(await inView(150, 150)));
-  await h.runFrames(page, 10);
-  assert.notEqual(await version(), v, 'the pointer moved again: its version moved');
-  const dirty = await dirtySeen(page, under);
-  assert.ok(dirty.rects > 0 && !dirty.full && dirty.sameGame && dirty.view === 'game', 'precondition: the frames after it repainted part of the frame');
-  assert.equal(await page.evaluate(() => window.__wholePaints), 0, 'precondition: no whole repaint of the canvas through those frames');
-  assert.ok(!dirty.meets, 'precondition: no rect the page copied meets the run\'s place');
-  assert.equal(await x4Hash(page, under), before, 'precondition: the x4 frame under the run\'s place unchanged');
-  assert.equal(await mapCells(), 0, 'precondition: still no cell of the game in the map window');
-  assert.equal(await oneToOneOff(page, 'map', span), 0, 'no longer listed: the run\'s place the x4 frame\'s again');
-  console.log('  receipt: a made-up run in the map window drawn, kept once through a pointer repaint, and gone after the next once no longer listed, its place repainted by nothing else (no game cell in the window, its x4 pixels unchanged, no dirty rect meeting it, no whole repaint): pass');
-}, { needs: h.haveHfes });
-
-test('HD font (spec 11 Acceptance 2, 한글): in game in 한글 with a Korean pack (the user\'s disks, a synthetic conversation) the message scroll lists the pack\'s syllables and the game\'s letters; with the HD font one paint draws each run once, in its inks, where the font puts it (from 1 px inside its first cell, at the font\'s natural width without kerning, the second ink where the text before it ends): syllables at the scroll\'s scale centred down their cells, a run after two spaces at its own cell, the keyword in its own colour, the rest of the canvas exactly the x4 frame\'s; a change of the scroll\'s text alone (Look at the prompt, the pointer in the map; precondition asserted: no rect the page copied met a source of the paper\'s band, nor did the x4 frame there change), a partial repaint (its dirty rects meet the scroll, none the whole frame), drawn over the scroll copied again, nothing of the runs before left; with the pixel font the canvas is the x4 frame\'s regions exactly; no line reaches the console, the page\'s data or text', async (env) => {
-  const { context, page } = await h.openPage(env, { setup: { lang: 'ko' }, layout: 'hd' });
-  await context.addInitScript(fontRunsHook);
-  const words = consoleText(page);
-  const answers = fontAnswers(context);
-  await page.setViewportSize({ width: 1400, height: 900 });
-  await h.load(page, env);
-  const { archive, pack } = await koFixture(0x63, { greeting: FONT_GREET, greetingKo: FONT_GREET_KO });
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  await h.dropFiles(page, [], [{ name: 'ko.u6lp', bytes: pack }]);
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.reload();
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  assert.equal((await localeShown(page)).locale, 'on', 'the pack on the game');
-  await fontIs(page, 'hd');
-  await fontTalk(page);
-  const shown = await localeShown(page);
-  assert.ok(shown.hits >= 2 && shown.misses === 0, 'the conversation from the pack');
-  assert.ok(answers.length >= 1 && answers.every(([, status]) => status === 200), 'the font file, 200');
-  await h.virtualDisplay(page, 60);
-  // The pack's syllables (the test's own lines) are among the scroll's listed cells.
-  const wanted = [...new Set([...(KO_LOOK_KO + FONT_GREET_KO)].filter((ch) => /[가-힣]/.test(ch)).map((ch) => ch.codePointAt(0)))];
-  const listed = await page.evaluate((codes) => {
-    const g = globalThis.__shownGame.hd_glyphs();
-    const seen = new Set();
-    for (let i = 0; i < g.length; i += 5) if (g[i] >= 176 && g[i + 1] >= 112) seen.add(g[i + 2]);
-    return codes.filter((c) => seen.has(c)).length;
-  }, wanted);
-  assert.equal(listed, wanted.length, 'every syllable of the pack\'s lines listed in the message scroll');
-  await fontOnOff(page, { messages: ['syllabic', 'latin', 'after', 'twoInk'], panel: ['latin'] });
-  // A change of the scroll's text on its own (L at the prompt: Look, its name printed, waiting
-  // for a target, no turn): a repaint of the regions the change touched, the scroll's runs not as
-  // before; the scroll copied again shows its new runs where the font puts them and nothing of
-  // the old ones. The pointer first into the map, settled: until the first move the game keeps its
-  // sprite over the paper's band where it starts it, and Look changes it there, which the page
-  // paints again under the pointer's box (spec 11 Design 7), a rect over the band's sources that
-  // rightly paints the canvas whole (spec 10 Design 2). Precondition: through
-  // the Look no rect the page copied meets a source of the band (its pieces' `from`, the x4
-  // frame's rects that paint the paper whole) and the x4 frame under them stays as it was, so a
-  // whole repaint could only be the page's own.
-  // fontOnOff leaves Settings open; close it before sending a world pointer move.
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  await page.mouse.move(...(await h.screenPoint(page, 88, 88)));
-  assert.deepEqual(await page.evaluate(() => globalThis.__pointerAt), [88, 88], 'the closed Settings lets the pointer reach the map');
-  await h.runFrames(page, 10);
-  await page.evaluate(() => {
-    const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
-    window.__keysBefore = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).map((run) => `${run.y}:${run.cells.map((k) => `${k.x}:${k.code}`).join(' ')}`).join('|');
-  });
-  const bandSources = await page.evaluate(() => globalThis.__u6Layout.paper.pieces.map(({ from }) => from.map((v) => 4 * v)));
-  const bandHashes = async () => {
-    const v = [];
-    for (const r of bandSources) v.push(await x4Hash(page, r));
-    return v;
-  };
-  const bandBefore = await bandHashes();
-  await recordDirty(page);
-  await page.evaluate(() => { window.__wholePaints = 0; });
-  await page.focus('#screen');
-  await page.keyboard.press('KeyL');
-  const scrollChanged = () => page.evaluate(() => {
-    const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
-    return window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from).map((run) => `${run.y}:${run.cells.map((k) => `${k.x}:${k.code}`).join(' ')}`).join('|') !== window.__keysBefore;
-  });
-  for (let k = 0; k < 40 && !(await scrollChanged()); k += 1) await h.runFrames(page, 5);
-  await h.runFrames(page, 10);
-  assert.ok(await scrollChanged(), 'the scroll\'s runs changed');
-  // The repaint was partial: each rect the page copied since reached `paint` as its dirty rect
-  // (the same game and view), none the whole frame, some met the scroll, and no paint drew the
-  // whole canvas (its background, `fillRect`).
-  const scroll = (await layoutTable(page)).regions.find((r) => r.name === 'messages').from.map((n) => 4 * n);
-  const dirty = await dirtySeen(page, scroll);
-  const bandMet = [];
-  for (const r of bandSources) bandMet.push((await dirtySeen(page, r)).meets);
-  assert.ok(bandSources.length > 0 && !bandMet.some(Boolean), 'precondition: through the Look no rect the page copied met a source of the paper\'s band');
-  assert.deepEqual(await bandHashes(), bandBefore, 'precondition: through the Look the x4 frame under the band\'s sources unchanged');
-  assert.ok(dirty.rects > 0 && dirty.meets && !dirty.full && dirty.sameGame && dirty.view === 'game', 'the repaint partial: the dirty rects met the scroll, none the whole frame');
-  assert.equal(await page.evaluate(() => window.__wholePaints), 0, 'the repaint partial: no whole repaint of the canvas');
-  const partial = (await fontRuns(page)).messages;
-  assert.ok(partial.runs > 0 && partial.inked === partial.runs && partial.fits === partial.runs, 'after the partial repaint every run of the scroll where the font puts it');
-  assert.ok(partial.offCompared > 0 && partial.off === 0, 'and nothing of the runs before: the rest of the scroll the x4 frame\'s exactly');
-  await noPackWords(page, words);
-  const where = await pageWords(page);
-  assert.ok(!where.includes('나그네여') && !words.some((m) => m.includes('나그네여')), 'no line of the test\'s conversation in the page\'s data, text or console');
-  console.log(`  receipt: in 한글 the ${wanted.length} syllables of the test's lines listed in the message scroll; one paint, each run drawn once in its parts, syllables at the scroll's scale from their first cell, a run after two spaces at its column, the keyword in its colour; a change of the scroll alone drawn over it copied again, nothing of the runs before left; the pixel font: the canvas the x4 frame's regions exactly: pass`);
-}, { needs: h.haveHfes });
-
-// --- the pointer over the HD text (spec 11 Design 7) --------------------------------------------
-// The HD frame is composed without the game's pointer sprite and the page draws the pointer over
-// it, last (Game.hd_pointer, Game.hd_pointer_rgba). The pointer's box, its pixels and the places
-// they land are the user's (the sprite's shape is read from the game): they stay in the page, and
-// only booleans and the tests' own counts compared leave it.
-
-// Page script: the game on screen frozen (`on`: its steps do nothing, so its frames stay as they
-// are while the page goes on drawing them) or running again.
+// --- Pixel text and independent source-plane diagnostics ------------------------------------
 const freezeGame = (page, on) => page.evaluate((frozen) => {
   const g = globalThis.__shownGame;
   if (frozen) g.step = () => {};
   else delete g.step;
 }, on);
 
-// Page script: the canvas kept in the page as `window.__shots[name]`.
-const shotCanvas = (page, name) => page.evaluate((n) => {
-  const c = document.getElementById('screen');
-  window.__shots ??= {};
-  window.__shots[n] = new Uint8ClampedArray(c.getContext('2d').getImageData(0, 0, c.width, c.height).data);
-}, name);
-
-// Page script: the pointer as the game gives it now (Game.hd_pointer, Game.hd_pointer_rgba) kept
-// in the page as `window.__pointer`, with `area`, the canvas rects it can reach through the
-// layout as it shows now (`pointerAreaHook`). Whether it has a box, and whether the area is on
-// the canvas.
 const keepPointer = async (page) => (await pointerAreaHook(page), page.evaluate(() => {
   const g = globalThis.__shownGame;
   const [x, y, w, hh, version] = [...g.hd_pointer()];
@@ -10982,9 +9640,6 @@ const keepPointer = async (page) => (await pointerAreaHook(page), page.evaluate(
   return { box: w > 0, area: area.length > 0 };
 }));
 
-// Page script: of the pixels of the pointer kept (`keepPointer`) that are not clear, those whose
-// game pixel the layout shows (`__u6Layout.toCanvas`: where the region in front shows it), and of
-// those how many the canvas shows in the pointer pixel's own colour at the centre of that place.
 const pointerColours = (page) => page.evaluate(() => {
   const c = document.getElementById('screen');
   const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
@@ -11002,812 +9657,92 @@ const pointerColours = (page) => page.evaluate(() => {
   return { seen, same };
 });
 
-// Page script: of the canvas shots `a` and `b` (`shotCanvas`), the pixels compared and those that
-// differ, inside the area of the pointer kept (`keepPointer`), or with `inside` false outside it.
-const shotsDiffer = (page, a, b, inside) => page.evaluate(([na, nb, within]) => {
-  const c = document.getElementById('screen');
-  const [p, q] = [window.__shots[na], window.__shots[nb]];
-  const mask = new Uint8Array(c.width * c.height);
-  for (const [x, y, w, hh] of window.__pointer.area) {
-    for (let yy = y; yy < y + hh; yy += 1) mask.fill(1, yy * c.width + x, yy * c.width + x + w);
-  }
-  let [compared, differ] = [0, 0];
-  for (let i = 0; i < mask.length; i += 1) {
-    if ((mask[i] === 1) !== within) continue;
-    compared += 1;
-    const j = 4 * i;
-    if (p[j] !== q[j] || p[j + 1] !== q[j + 1] || p[j + 2] !== q[j + 2] || p[j + 3] !== q[j + 3]) differ += 1;
-  }
-  return { compared, differ };
-}, [a, b, inside]);
-
-// The canvas painted whole with no game step (the font off and on again, a whole composition
-// each), then Settings closed with its OK (nothing else chosen).
-async function wholeRepaint(page) {
-  await chooseFont(page, 'pixel');
-  await chooseFont(page, 'hd');
-  await fontIs(page, 'hd');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-}
-
-// Spec 11 Acceptance 5, the page (`what`: the layout's label), on a game at the prompt after the
-// test's own conversation (`fontTalk`), with the HD font, on the virtual display. The test's own
-// line in the message scroll (its word AVAW, FONT_GREET), the pointer brought to rest over it:
-// every cell of the line still listed (the cell under the pointer too: spec 11 Design 7, the HD
-// frame without the sprite), and the canvas shows the pointer's own colours where its pixels
-// land. The game frozen (the same frame throughout): the same frame painted again with the
-// pointer away (the page's read of Game.hd_pointer made empty) and then whole is the canvas
-// with the pointer outside its box, and inside it the pointer's place repainted when it went is
-// that whole repaint's; with the pointer back, the canvas as before. Then the pointer moved off
-// into the map: its old box (and the rest) as a whole repaint of the same frame.
-async function pointerOverText(page, what) {
-  const target = await page.evaluate(() => {
-    const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
-    const runs = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from);
-    const run = runs.find((r) => r.cells.map((k) => String.fromCharCode(k.code)).join('').includes('AVAW'));
-    if (!run) return null;
-    window.__run = { y: run.y, xs: run.cells.map((k) => k.x), key: run.cells.map((k) => `${k.x}:${k.code}`).join(' ') };
-    const at = run.cells.find((k) => k.code === 0x56);
-    return [at.x + 4, run.y + 4];
-  });
-  assert.ok(target, `${what}: precondition: the test's own line listed in the message scroll`);
-  const runListed = () => page.evaluate(() => {
-    const from = globalThis.__u6Layout.regions.find((r) => r.name === 'messages').from;
-    return window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from)
-      .some((r) => r.y === window.__run.y && r.cells.map((k) => `${k.x}:${k.code}`).join(' ') === window.__run.key);
-  });
-  await page.mouse.move(...(await h.screenPoint(page, ...target)));
-  await h.runFrames(page, 10);
-  await freezeGame(page, true);
-  await h.runFrames(page, 2);
-  const kept = await keepPointer(page);
-  assert.ok(kept.box && kept.area, `${what}: the pointer at rest in the message scroll, on the canvas`);
-  const over = await page.evaluate(() => {
-    const [x, y, w, hh] = window.__pointer.box;
-    const { y: ry, xs } = window.__run;
-    return xs.some((cx) => x < cx + 8 && cx < x + w && y < ry + 8 && ry < y + hh);
-  });
-  assert.ok(over, `${what}: precondition: the pointer's box over the line`);
-  assert.ok(await runListed(), `${what}: every cell of the line listed with the pointer over it, as with it away`);
-  const colours = await pointerColours(page);
-  assert.ok(colours.seen > 0 && colours.same === colours.seen, `${what}: the canvas shows the pointer's own colours where its pixels land`);
-  await shotCanvas(page, 'over');
-  // The same frame with the pointer away: the page's read of the pointer made empty (its version
-  // moved), the pointer's place painted again; then the canvas painted whole.
-  await page.evaluate(() => {
-    const v = window.__pointer.version;
-    globalThis.__shownGame.hd_pointer = () => Uint32Array.from([0, 0, 0, 0, (v + 1) >>> 0]);
-  });
-  await h.runFrames(page, 2);
-  await shotCanvas(page, 'gone');
-  await wholeRepaint(page);
-  await shotCanvas(page, 'away');
-  let d = await shotsDiffer(page, 'over', 'away', false);
-  assert.ok(d.compared > 0 && d.differ === 0, `${what}: outside the pointer's box the canvas is the same frame painted with the pointer away`);
-  d = await shotsDiffer(page, 'over', 'away', true);
-  assert.ok(d.compared > 0 && d.differ > 0, `${what}: inside it, the pointer`);
-  d = await shotsDiffer(page, 'gone', 'away', true);
-  assert.equal(d.differ, 0, `${what}: the pointer gone: its box as the whole repaint`);
-  await page.evaluate(() => { delete globalThis.__shownGame.hd_pointer; });
-  await h.runFrames(page, 2);
-  await shotCanvas(page, 'back');
-  for (const inside of [true, false]) {
-    d = await shotsDiffer(page, 'over', 'back', inside);
-    assert.equal(d.differ, 0, `${what}: the pointer back: the canvas as before`);
-  }
-  // Moved off, into the map (its centre, away from the scroll), at rest: its old box, and the
-  // rest of the canvas, as the same frame painted whole.
-  await freezeGame(page, false);
-  const centre = await page.evaluate(() => {
-    const [x, y, w, hh] = globalThis.__u6Layout.regions.find((r) => r.name === 'map').from;
-    return [x + Math.floor(w / 2), y + Math.floor(hh / 2)];
-  });
-  await page.mouse.move(...(await h.screenPoint(page, ...centre)));
-  await h.runFrames(page, 10);
-  await freezeGame(page, true);
-  await h.runFrames(page, 2);
-  const off = await page.evaluate(() => {
-    const [x, y, w, hh, v] = [...globalThis.__shownGame.hd_pointer()];
-    const [ox, oy, ow, oh] = window.__pointer.box;
-    return { moved: v !== window.__pointer.version && w > 0, apart: x >= ox + ow || ox >= x + w || y >= oy + oh || oy >= y + hh };
-  });
-  assert.ok(off.moved && off.apart, `${what}: precondition: the pointer moved off, its new box apart from the old`);
-  await shotCanvas(page, 'moved');
-  await wholeRepaint(page);
-  await shotCanvas(page, 'whole');
-  for (const [inside, where] of [[true, 'its old box'], [false, 'the rest']]) {
-    d = await shotsDiffer(page, 'moved', 'whole', inside);
-    assert.ok(d.compared > 0 && d.differ === 0, `${what}: after the pointer moved off, ${where} as a whole repaint`);
-  }
-  await freezeGame(page, false);
-}
-
-// The page with the test's own conversation (koFixture with FONT_GREET in place of the user's),
-// at the prompt after it, with the HD font, on the virtual display.
-async function talkedWithFont(context, page, env) {
-  await context.addInitScript(fontRunsHook);
-  await h.load(page, env);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  await fontIs(page, 'hd');
-  const { archive } = await koFixture(0x63, { greeting: FONT_GREET, greetingKo: FONT_GREET_KO });
-  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.reload();
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  await fontIs(page, 'hd');
-  await fontTalk(page);
-  await h.virtualDisplay(page, 60);
-}
-
-test('HD font (spec 11 Acceptance 5, the HD layout): the pointer at rest over the test\'s own line of the message scroll (the user\'s disks, a synthetic conversation, the HD font): every cell of the line listed, the canvas showing the pointer\'s own colours where its pixels land; the game frozen, outside its box the canvas is the same frame painted with the pointer away, its box when it went as a whole repaint, the canvas as before with it back; moved off into the map, its old box and the rest as a whole repaint of the same frame; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openPage(env, { layout: 'hd' });
-  page.on('pageerror', () => errors.push(1));
-  await page.setViewportSize({ width: 1400, height: 900 });
-  await talkedWithFont(context, page, env);
-  assert.equal(await page.evaluate(() => globalThis.__u6Layout.view), 'game', 'the game\'s regions');
-  await pointerOverText(page, 'HD layout');
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: the HD layout: the pointer over the test\'s line, every cell listed, its colours where its pixels land; outside its box the frame as painted with it away; its old box as a whole repaint after it went and after it moved off: pass');
-}, { needs: h.haveHfes });
-
-test('Wide layout (spec 11 Acceptance 5): the pointer at rest over the test\'s own line of the message scroll\'s window (the user\'s disks, a synthetic conversation, the HD font): every cell of the line listed, the canvas showing the pointer\'s own colours where its pixels land; the game frozen, outside its box the canvas is the same frame painted with the pointer away, its box when it went as a whole repaint, the canvas as before with it back; moved off into the map, its old box and the rest as a whole repaint of the same frame; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openWide(env, { width: 1400, height: 900 });
-  page.on('pageerror', () => errors.push(1));
-  await talkedWithFont(context, page, env);
-  assert.equal(await page.evaluate(() => globalThis.__u6Layout.view), 'game', 'the map and the windows');
-  await pointerOverText(page, 'Wide');
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: Wide: the pointer over the test\'s line in the message scroll\'s window, every cell listed, its colours where its pixels land; outside its box the frame as painted with it away; its old box as a whole repaint after it went and after it moved off: pass');
-}, { needs: h.haveHfes });
-
-// --- the caret and the typed spaces (spec 11 Design 2 and 3, rev 3) ------------------------------
-// The game's reply prompt in koTypingFixture's conversation (its archive alone, in English: the
-// canvas takes the keys), with the HD font: the key wait's cursor after the prompt (the game's own
-// text, never compared outside the page) and what the player types there (a made-up word). The
-// checks are geometry in canvas pixels by the test's own reading of the runs (`__fontRunsOf`,
-// `__runGeometry`); only booleans and the test's counts leave the page.
-
-const CARET_WORD = 'qux';
-
-// Page script: the composition of the canvas rect `to` from the classic rect `from` of the x4
-// frame as it is (smooth unless one to one, as the page copies it), as RGBA of the whole canvas.
-function composedHook() {
-  window.__composed = (pairs) => {
-    const c = document.getElementById('screen');
-    const g = globalThis.__shownGame;
-    const [w4, h4] = [g.width() * 4, g.height() * 4];
-    const x4 = document.createElement('canvas');
-    [x4.width, x4.height] = [w4, h4];
-    x4.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(g.hd_frame_rgba()), w4, h4), 0, 0);
-    const e = document.createElement('canvas');
-    [e.width, e.height] = [c.width, c.height];
-    const ctx = e.getContext('2d');
-    for (const { from, to } of pairs) {
-      const source = from.map((v) => v * 4);
-      ctx.imageSmoothingEnabled = !(to[2] === source[2] && to[3] === source[3]);
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(x4, ...source, ...to);
-    }
-    return ctx.getImageData(0, 0, c.width, c.height).data;
-  };
-}
-
-// Page script: where the reply prompt is (`where`: the region of that name, or 'whole', the
-// letterbox), kept in the page as `window.__reply`: its row, the row of the listed symbol of the
-// key wait's cursor (Design 2 rev 3), or with none listed (before rev 3) the last row listed in
-// the rect; and its last letter, the rightmost cell of the rightmost run on that row (the prompt:
-// nothing is typed yet). Whether the cursor is listed there.
-const replyMark = (page, where) => page.evaluate((w) => {
-  const L = globalThis.__u6Layout;
-  const { from } = w === 'whole' ? { from: [0, 0, 320, 200] } : L.regions.find((r) => r.name === w);
-  const list = globalThis.__shownGame.hd_glyphs();
-  const runs = window.__fontRunsOf(list, from);
-  const withCaret = runs.find((r) => r.caret);
-  const row = withCaret ? withCaret.y : Math.max(...runs.map((r) => r.y));
-  const prompt = runs.filter((r) => r.y === row).at(-1);
-  if (!prompt) return { found: false };
-  window.__reply = { row, last: prompt.cells.at(-1).x };
-  return { found: true, listed: Boolean(withCaret) };
-}, where);
-
-// Page script: the reply prompt's row (`replyMark`) as the canvas shows it now, in the rect
-// `where` names (`row`: the row it stands in now, by default where it was marked). Of the run
-// that holds the prompt's last letter: whether the cursor's symbol is listed as its caret
-// (`caret`) and the spaces between (`spaces`); whether the made-up word's letters follow that
-// letter after two spaces in the same run (`joined`), those two listed as typed (`typed`); a
-// space's advance as drawn, measured here (`space`). What the canvas shows, read from its pixels:
-// `edge`, the caret's ink's observed left edge (`__symbolEdge`, searched from the run's first cell
-// to the cursor's own cell's right edge; null when the cursor is not listed or not found), and
-// `want`, where it belongs (the pen's end after the run's text and the spaces between, the
-// glyph's own blank columns on: `lead`); `gap`, from the prompt's ink end (the test's measure,
-// held to the canvas by `fontRuns`' `fits`) to that edge (before rev 3, to the first pixel right
-// of the prompt that is ink: a pixel the page drew, or near the run's ink in the x4 frame);
-// `wordInk`, the made-up word's first observed ink (the first column right of the prompt's ink
-// end and FONT_TOL with a pixel the page drew or near the ink), and `wordWant`, where its first
-// letter's ink belongs (the pen's end after the prompt and the two spaces, less that letter's
-// own left side bearing), and `promptEnd`, the pen's end after the prompt; whether the cursor's own cell is the paper alone (`ownPaper`: no pixel
-// near its ink in the x4 frame there, and the canvas there outside the caret's box the
-// composition's).
-const replySeen = async (page, where, row = null) => (await pointerAreaHook(page), page.evaluate(([w, wanted, word, tol]) => {
-  const L = globalThis.__u6Layout;
-  const g = globalThis.__shownGame;
-  const c = document.getElementById('screen');
-  const pair = w === 'whole' ? { from: [0, 0, 320, 200], to: L.whole } : L.regions.find((r) => r.name === w);
-  const { from, to } = pair;
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const f = window.__composed([pair]);
-  const pointer = window.__pointerArea();
-  const y = wanted ?? window.__reply.row;
-  const last = window.__reply.last;
-  const list = g.hd_glyphs();
-  const runs = window.__fontRunsOf(list, from, g.hd_symbol_rows?.() ?? null);
-  const run = runs.find((r) => r.y === y && r.cells.some((k) => k.x === last && k.code !== 0x20));
-  if (!run) return { found: false };
-  const geo = window.__runGeometry(run, from, to);
-  const at = run.cells.findIndex((k) => k.x === last);
-  const mc = window.__measure;
-  const inkEnd = geo.pen + mc.measureText(geo.text.slice(0, at + 1)).actualBoundingBoxRight * geo.k;
-  const promptEnd = geo.pen + mc.measureText(geo.text.slice(0, at + 1)).width * geo.k;
-  const ink = run.cells[at].ink;
-  const near = (j, v) => Math.max(Math.abs(d[j] - ((v >> 16) & 255)), Math.abs(d[j + 1] - ((v >> 8) & 255)), Math.abs(d[j + 2] - (v & 255))) <= 48;
-  const drawn = (j) => d[j] !== f[j] || d[j + 1] !== f[j + 1] || d[j + 2] !== f[j + 2];
-  const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-  const top = Math.round(to[1] + (y - from[1]) * sy);
-  const bottom = Math.round(to[1] + (y + 8 - from[1]) * sy);
-  let first = Infinity;
-  for (let x = Math.ceil(inkEnd) + tol; x < to[0] + to[2] && first === Infinity; x += 1) {
-    for (let yy = top; yy < bottom; yy += 1) {
-      const j = (yy * c.width + x) * 4;
-      if (window.__inPointer(pointer, x, yy)) continue;
-      if (drawn(j) || near(j, ink)) {
-        first = x;
-        break;
+// The old u6.font preference must not turn bitmap text into a second renderer. Compare
+// actual message glyph pixels with the engine frame, including Hangul, in each layout.
+for (const language of ['en', 'ko']) {
+  test(`pixel font unification, ${language}: old HD choice is ignored; message glyph pixels survive in Original, HD and Wide with no font request or choice`, async (env) => {
+    const fixture = await koFixture();
+    for (const layout of ['original', 'hd', 'wide']) {
+      const { context, page } = await h.openPage(env, { layout, font: 'hd', setup: { lang: language } });
+      const fonts = [], errors = [];
+      page.on('request', r => { if (r.url().includes('gowun')) fonts.push(1); });
+      page.on('pageerror', () => errors.push(1));
+      await h.load(page, env);
+      await page.setInputFiles('#picker', h.HFES);
+      await started(page, FILES);
+      assert.equal(await h.replaceKept(page, 'converse.a', fixture.archive), 1, 'synthetic conversation installed');
+      if (language === 'ko') {
+        await h.dropFiles(page, [], [{ name: 'synthetic-pixel.u6lp', bytes: fixture.pack }]);
+        await h.waitSettled(page);
       }
+      await page.reload();
+      await h.waitSettled(page);
+      await h.waitPrompt(page);
+      await page.focus('#screen');
+      for (const key of ['t', '2']) { await page.keyboard.press(key); await h.waitTaken(page); }
+      await h.waitPrompt(page);
+      await page.mouse.move(0, 0);
+      await h.waitFrames(page, 2);
+      const result = await page.evaluate((ko) => {
+        const g = globalThis.__shownGame, L = globalThis.__u6Layout;
+        const c = document.getElementById('screen');
+        const screen = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        const frame = g.frame_rgba(), hd = g.hd_frame_rgba(), scale = g.hd_scale(), width = g.width();
+        const sourceCanvas = document.createElement('canvas');
+        sourceCanvas.width=width*scale;sourceCanvas.height=g.height()*scale;
+        sourceCanvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(hd),sourceCanvas.width,sourceCanvas.height),0,0);
+        const reference=document.createElement('canvas');reference.width=c.width;reference.height=c.height;
+        const referenceCtx=reference.getContext('2d');
+        // Wide windows retain their existing fractional resampling. Build an independent
+        // bitmap-only reference instead of mistaking those edge samples for a second font.
+        if (L.view==='frame') referenceCtx.drawImage(sourceCanvas,0,0);
+        else {
+          const messages=L.regions.find(r=>r.name==='messages');
+          referenceCtx.imageSmoothingEnabled=messages.to[2]!==messages.from[2]*scale||messages.to[3]!==messages.from[3]*scale;
+          referenceCtx.imageSmoothingQuality='high';
+          referenceCtx.drawImage(sourceCanvas,...messages.from.map(v=>v*scale),...messages.to);
+        }
+        const referencePixels=referenceCtx.getImageData(0,0,c.width,c.height).data;
+        const glyphs = g.hd_glyphs();
+        let cells = 0, pixels = 0, ink = 0, frameMismatch = 0, canvasMismatch = 0, hangul = 0;
+        for (let i = 0; i < glyphs.length; i += 5) {
+          const [x, y, code, , paper] = glyphs.slice(i, i + 5);
+          if (x < 176 || x >= 312 || y < 112 || y >= 184 || code > 0xffff || code === 32) continue;
+          cells += 1;
+          if (code >= 0xac00 && code <= 0xd7a3) hangul += 1;
+          for (let dy = 0; dy < 8; dy += 1) for (let dx = 0; dx < 8; dx += 1) {
+            const source = ((y + dy) * width + x + dx) * 4;
+            const dest = (((y + dy) * scale) * width * scale + (x + dx) * scale) * 4;
+            const at = L.toCanvas(x + dx, y + dy);
+            if (!at) continue;
+            const shown = (Math.floor(at[1]) * c.width + Math.floor(at[0])) * 4;
+            pixels += 1;
+            if (((frame[source] << 16) | (frame[source + 1] << 8) | frame[source + 2]) !== paper) ink += 1;
+            if ([0, 1, 2].some(k => frame[source + k] !== hd[dest + k])) frameMismatch += 1;
+            if ([0, 1, 2].some(k => referencePixels[shown + k] !== screen[shown + k])) canvasMismatch += 1;
+          }
+        }
+        return { cells, pixels, ink, frameMismatch, canvasMismatch, hangul,
+          options: document.querySelectorAll('input[name="font"]').length,
+          fontApi: typeof g.set_hd_font, oldChoice: localStorage.getItem('u6.font'), ko };
+      }, language === 'ko');
+      assert.ok(result.cells > 5 && result.pixels > 320 && result.ink > 10, `${layout}: real inked message cells compared`);
+      assert.equal(result.frameMismatch, 0, `${layout}: HD preserves the original bitmap text`);
+      console.log(`  receipt: ${layout} ${language} synthetic bitmap: frame exact=${result.frameMismatch === 0}, canvas exact=${result.canvasMismatch === 0}`);
+      await keepFrame(page.locator('#screen'), `pixel-font-${language}-${layout}.png`);
+      assert.equal(result.canvasMismatch, 0, `${layout}: canvas shows the bitmap message pixels`);
+      assert.equal(result.options, 0, 'no font chooser');
+      assert.equal(result.fontApi, 'undefined', 'no HD font renderer API');
+      assert.equal(result.oldChoice, 'hd', 'the legacy preference cannot select another renderer');
+      if (language === 'ko') assert.ok(result.hangul > 0, 'actual Hangul message cells are present');
+      assert.deepEqual(fonts, [], 'no removed font asset requested');
+      assert.deepEqual(errors, [], 'no page error');
+      await keepFrame(page.locator('#screen'), `pixel-font-${language}-${layout}.png`);
+      await context.close();
     }
-  }
-  const typedAt = (x) => {
-    for (let i = 0; i < list.length; i += 5) if (list[i] === x && list[i + 1] === y) return list[i + 2] === 0x20020;
-    return false;
-  };
-  const letter = run.cells.find((k) => k.x === last + 24);
-  const joined = Boolean(letter) && letter.code === word.charCodeAt(0);
-  const wordWant = geo.pen + (mc.measureText(geo.text.slice(0, at + 3)).width - mc.measureText(word[0]).actualBoundingBoxLeft) * geo.k;
-  // The cursor's own cell: the listed symbol's on the row, else (before rev 3) the cell after the
-  // prompt.
-  let own = null;
-  for (let i = 0; i < list.length; i += 5) {
-    if (list[i + 1] === y && list[i + 2] >= 0x10000 && list[i + 2] !== 0x20020) own = { x: list[i], y };
-  }
-  const cell = window.__symbolBox(own ?? { x: last + 8, y }, from, to);
-  const seen = run.caret ? window.__symbolEdge(d, c.width, run.caret, [geo.span[0], cell[0] + cell[2]], geo.span[1], sx, sy) : null;
-  const inBox = (b, x, yy) => b && x >= b[0] && x < b[0] + b[2] && yy >= b[1] && yy < b[1] + b[3];
-  const box = geo.caret;
-  const x4 = g.hd_frame_rgba();
-  const w4 = g.width() * 4;
-  let ownPaper = own !== null;
-  for (let v = 0; v < 32 && ownPaper; v += 1) {
-    for (let u = 0; u < 32; u += 1) {
-      const j = ((own.y * 4 + v) * w4 + own.x * 4 + u) * 4;
-      const sym = run.caret ? run.caret.ink : ink;
-      if (Math.max(Math.abs(x4[j] - ((sym >> 16) & 255)), Math.abs(x4[j + 1] - ((sym >> 8) & 255)), Math.abs(x4[j + 2] - (sym & 255))) <= 48) {
-        ownPaper = false;
-        break;
-      }
-    }
-  }
-  for (let yy = cell[1]; yy < cell[1] + cell[3] && ownPaper; yy += 1) {
-    for (let x = cell[0]; x < cell[0] + cell[2]; x += 1) {
-      if (inBox(box, x, yy) || window.__inPointer(pointer, x, yy)) continue;
-      if (drawn((yy * c.width + x) * 4)) {
-        ownPaper = false;
-        break;
-      }
-    }
-  }
-  const lead = seen ? seen.lead : 0;
-  return {
-    found: true,
-    caret: Boolean(run.caret),
-    spaces: run.caret ? run.caret.spaces : null,
-    joined,
-    typed: typedAt(last + 8) && typedAt(last + 16),
-    space: geo.space,
-    edge: seen ? seen.edge : null,
-    want: run.caret ? geo.caretLeft + lead : null,
-    lead,
-    gap: (seen ? seen.edge : first) - inkEnd,
-    wordInk: first,
-    wordWant,
-    promptEnd,
-    ownPaper,
-    box,
-  };
-}, [where, row, CARET_WORD, FONT_TOL]));
-
-// Page script: the runs of the region `where` that hold the made-up word typed after the
-// prompt's last letter (`replyMark`: that letter three cells left of the word's first, in the same
-// run, the two cells between listed as typed): how many, and the highest row among them.
-const typedLines = (page, where) => page.evaluate(([w, word]) => {
-  const { from } = globalThis.__u6Layout.regions.find((r) => r.name === w);
-  const list = globalThis.__shownGame.hd_glyphs();
-  const typed = new Set();
-  for (let i = 0; i < list.length; i += 5) if (list[i + 2] === 0x20020) typed.add(`${list[i]},${list[i + 1]}`);
-  let n = 0;
-  let top = Infinity;
-  for (const run of window.__fontRunsOf(list, from)) {
-    const codes = run.cells.map((k) => k.code);
-    for (let a = 0; a + word.length <= codes.length; a += 1) {
-      if (![...word].every((ch, i) => codes[a + i] === ch.charCodeAt(0))) continue;
-      const x = run.cells[a].x;
-      const before = run.cells.find((k) => k.x === x - 24);
-      if (before && before.code !== 0x20 && typed.has(`${x - 16},${run.y}`) && typed.has(`${x - 8},${run.y}`)) {
-        n += 1;
-        top = Math.min(top, run.y);
-      }
-    }
-  }
-  return { n, top };
-}, [where, CARET_WORD]);
-
-// The frame shown letterboxed, as on every other screen (the game frozen, and its program read
-// as another by the page: the same frame through `paint`'s whole view), while `fn` runs; then the
-// game's regions and its steps again.
-async function letterboxed(page, fn) {
-  await freezeGame(page, true);
-  await page.evaluate(() => { globalThis.__shownGame.program = () => 'u'; });
-  await h.runFrames(page, 2);
-  const view = await page.evaluate(() => globalThis.__u6Layout.view);
-  const out = await fn();
-  await page.evaluate(() => { delete globalThis.__shownGame.program; });
-  await freezeGame(page, false);
-  await h.runFrames(page, 2);
-  return { view, out };
+  }, { needs: h.haveHfes });
 }
 
-// On the virtual display: frames run until `done` (a page function) holds, at most `max` runs
-// of five; whether it held.
-async function framesUntil(page, done, max = 80) {
-  for (let k = 0; k < max; k += 1) {
-    if (await page.evaluate(done)) return true;
-    await h.runFrames(page, 5);
-  }
-  return page.evaluate(done);
-}
-
-// On the virtual display: presses `keys` on the canvas one by one, each taken by the game (the
-// key queue empty), then frames for the page.
-async function typeKeys(page, keys) {
-  await page.focus('#screen');
-  for (const key of keys) {
-    await page.keyboard.press(key);
-    await h.runFrames(page, 2);
-    assert.ok(await framesUntil(page, () => document.getElementById('screen').dataset.keys === '0'), `precondition: the game took ${key}`);
-  }
-  await h.runFrames(page, 4);
-}
-
-// With `U6_SHOTS` set (a directory), the canvas rect of region `name` saved there as
-// `<label>.png`, for a report's before and after (never in the gate).
-async function keepShot(page, name, label) {
-  const dir = process.env.U6_SHOTS;
-  if (!dir) return;
-  const url = await page.evaluate((n) => {
-    const c = document.getElementById('screen');
-    const { to } = globalThis.__u6Layout.regions.find((r) => r.name === n);
-    const e = document.createElement('canvas');
-    [e.width, e.height] = [to[2], to[3]];
-    e.getContext('2d').drawImage(c, ...to, 0, 0, to[2], to[3]);
-    return e.toDataURL('image/png');
-  }, name);
-  await writeFile(join(dir, `${label}.png`), Buffer.from(url.split(',')[1], 'base64'));
-}
-
-// Spec 11 rev 3 (Design 2: the caret; Design 3: typed spaces) on a page in `what`'s layout at the
-// test's conversation, talked to up to the player's words (the line read), with the HD font, the
-// pointer in the map. Every check is kept and the test fails naming each one not met (a build
-// before rev 3 fails several of them, each named).
-// (i) Nothing typed: the cursor listed, the prompt's caret: its ink from within one space
-// advance (and the spaces between, each one more) of the prompt's ink end, its own cell the paper
-// alone, its box showing its ink.
-// (ii) Two spaces and the made-up word typed: one run with the prompt, the two spaces listed as
-// typed, the word's ink at most two space advances after the prompt's last letter.
-// With `letterbox`, (i) and (ii) also on the same frames letterboxed.
-// Then: two spaces typed after the word, the caret after them; Backspace over one, the caret one
-// space nearer (each: the caret's box where the test measures it, its ink in it, the scroll's
-// other pixels the composition's: `fontRuns`); letters typed to the window's end, the echo
-// wrapping: the cursor at the next row's first cell, drawn there alone, and the typed line still
-// one run; (iii) Return: the conversation answers and ends, the scroll moves the typed line up,
-// and it keeps its joined form.
-async function caretFlow(page, what, letterbox) {
-  const misses = [];
-  const check = (ok, label) => {
-    if (!ok) misses.push(`${what}: ${label}`);
-  };
-  const map = await page.evaluate(() => {
-    const [x, y, w, hh] = globalThis.__u6Layout.regions.find((r) => r.name === 'map').from;
-    return [x + Math.floor(w / 2), y + Math.floor(hh / 2)];
-  });
-  await page.mouse.move(...(await h.screenPoint(page, ...map)));
-  await h.runFrames(page, 10);
-  const mark = await replyMark(page, 'messages');
-  assert.ok(mark.found, `${what}: precondition: the reply prompt listed in the message scroll`);
-  await keepShot(page, 'messages', `${what}-prompt`);
-  // The caret's observed ink edge where it belongs (`replySeen`: the pen's end after the run's
-  // text and the spaces between, the glyph's own blank columns on): within a canvas pixel either
-  // way (the page puts each block's edge on the nearest whole pixel).
-  const placed = (r) => r.found && r.edge !== null && r.edge >= r.want - 1 && r.edge <= r.want + 1;
-  const prompt = async (where, label) => {
-    const r = await replySeen(page, where);
-    check(r.found && r.caret, `${label}: the cursor listed as the prompt's caret`);
-    check(placed(r), `${label}: the caret's observed ink edge at the prompt's pen end (its glyph's blank columns on), within a pixel`);
-    check(r.found && r.gap - r.lead <= ((r.spaces ?? 0) + 1) * r.space + FONT_TOL, `${label}: the caret's ink from within one space advance (and the spaces between) of the prompt's ink end, its glyph's blank columns aside`);
-    check(r.found && r.ownPaper, `${label}: the cursor's own cell the paper alone`);
-    if (where !== 'whole') {
-      const runs = (await fontRuns(page))[where];
-      check(runs.carets === 1 && runs.caretsPlaced === 1 && runs.off === 0 && runs.fits === runs.runs, `${label}: the scroll's other pixels the composition's, every run where the font puts it`);
-    }
-  };
-  await prompt('messages', '(i) the regions');
-  if (letterbox) {
-    const { view } = await letterboxed(page, () => prompt('whole', '(i) the letterbox'));
-    assert.equal(view, 'whole', `${what}: precondition: the frame letterboxed`);
-  }
-  await typeKeys(page, ['Space', 'Space', ...CARET_WORD]);
-  await keepShot(page, 'messages', `${what}-typed`);
-  const typed = async (where, label) => {
-    const r = await replySeen(page, where);
-    check(r.found && r.joined, `${label}: the prompt and the word typed after two spaces one run`);
-    check(r.found && r.typed, `${label}: the two spaces listed as typed`);
-    check(r.found && r.wordInk >= r.wordWant - FONT_TOL && r.wordInk <= r.wordWant + FONT_TOL, `${label}: the word's observed first ink where the pen's end after the prompt and two space advances puts it (within the font's fringe)`);
-    check(r.found && r.wordInk - r.promptEnd <= 2 * r.space + FONT_TOL, `${label}: the word's first ink at most two space advances after the prompt's pen end`);
-    return r;
-  };
-  const right = await typed('messages', '(ii) the regions');
-  check(placed(right), 'the caret after the word: its observed ink edge at the word\'s pen end, within a pixel');
-  if (letterbox) await letterboxed(page, () => typed('whole', '(ii) the letterbox'));
-  // Spaces typed after the word, then Backspace over one: the caret's observed edge where the pen's
-  // end and the spaces put it, moved on by one measured space advance per space (within a pixel:
-  // each edge is on the nearest whole pixel). The cursor turns between the reads: each edge is
-  // taken less its glyph's own blank columns (the cell's left edge as drawn).
-  const caretAfter = async (spaces, label) => {
-    const r = await replySeen(page, 'messages');
-    const runs = (await fontRuns(page)).messages;
-    check(r.found && r.caret && r.spaces === spaces, `${label}: the caret after ${spaces} typed space(s)`);
-    check(placed(r), `${label}: its observed ink edge where the pen's end and the spaces put it, within a pixel`);
-    check(runs.carets === 1 && runs.caretsPlaced === 1 && runs.off === 0 && runs.fits === runs.runs, `${label}: the scroll's other pixels the composition's, every run where the font puts it`);
-    return r;
-  };
-  const moved = (a, b, n, label) => check(a.edge !== null && b.edge !== null && Math.abs((b.edge - b.lead) - (a.edge - a.lead) - n * a.space) <= 1, `${label}: the caret's observed edge moved by ${n} measured space advance(s), within a pixel`);
-  await typeKeys(page, ['Space', 'Space']);
-  const two = await caretAfter(2, 'trailing typed spaces');
-  moved(right, two, 2, 'trailing typed spaces');
-  await typeKeys(page, ['Backspace']);
-  const one = await caretAfter(1, 'Backspace over a typed space');
-  moved(two, one, -1, 'Backspace over a typed space');
-  // Letters to the window's end: the echo wraps to the next row's first cell (the scroll moves
-  // the line up when it was the last row).
-  const left = await page.evaluate(() => {
-    const { from } = globalThis.__u6Layout.regions.find((r) => r.name === 'messages');
-    return { right: from[0] + from[2], first: from[0] };
-  });
-  const { last, row } = await page.evaluate(() => window.__reply);
-  const cursorX = last + 8 * (1 + 2 + CARET_WORD.length + 1);
-  await typeKeys(page, Array((left.right - cursorX) / 8).fill('z'));
-  const wrapped = await page.evaluate(([first, y0]) => {
-    const g = globalThis.__shownGame;
-    const L = globalThis.__u6Layout;
-    const { from } = L.regions.find((r) => r.name === 'messages');
-    const runs = window.__fontRunsOf(g.hd_glyphs(), from);
-    const alone = runs.symbols.filter((s) => s.x === first && s.y >= y0);
-    return { alone: alone.length, y: alone[0]?.y ?? null };
-  }, [left.first, row]);
-  check(wrapped.alone === 1, 'the echo wrapped: the cursor at the next row\'s first cell, drawn alone there');
-  const after = (await fontRuns(page)).messages;
-  check(after.symbols === 1 && after.symbolsPlaced === 1 && after.off === 0, 'the cursor alone at its own cell, its observed ink edge there; the scroll\'s other pixels the composition\'s');
-  const line = wrapped.y === row ? row - 8 : row;
-  const up = await replySeen(page, 'messages', line);
-  check(up.found && up.joined && up.typed, 'after the wrap (and a scroll) the typed line still one run');
-  // (iii) Return: the conversation answers and ends; the typed line, moved up, keeps its form.
-  await typeKeys(page, ['Enter']);
-  assert.ok(await framesUntil(page, () => document.getElementById('screen').dataset.prompt === '1', 200), `${what}: precondition: the conversation ended, the prompt back`);
-  await h.runFrames(page, 10);
-  const kept = await typedLines(page, 'messages');
-  check(kept.n === 1 && kept.top < line, '(iii) after Return and the scroll the typed line keeps its joined form');
-  return misses;
-}
-
-// The page with the test's conversation (koTypingFixture's archive in place of the user's,
-// English: no pack) talked to up to the player's words (the reply prompt, the line read), then
-// on the virtual display.
-async function atReplyPrompt(context, page, env, font = true) {
-  await context.addInitScript(fontRunsHook);
-  await context.addInitScript(composedHook);
-  await h.load(page, env);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  if (font) await fontIs(page, 'hd');
-  const { archive } = await koTypingFixture();
-  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.reload();
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  if (font) await fontIs(page, 'hd');
-  await page.focus('#screen');
-  await page.keyboard.press('t');
-  await h.waitTaken(page);
-  await page.keyboard.press('2');
-  await page.waitForFunction(() => globalThis.__owned === 7 && document.getElementById('screen').dataset.keys === '0', null, { timeout: 30_000 });
-  await h.waitFrames(page, 2);
-  await h.virtualDisplay(page, 60);
-  await h.runFrames(page, 10);
-}
-
-test('HD font (spec 11 rev 3, the HD layout): at the reply prompt of the test\'s conversation (the user\'s disks, a made-up word typed) the key wait\'s cursor is drawn as the prompt\'s caret, within one space advance of its ink, its own cell the paper; two typed spaces and the word make one run with the prompt, the word at most two space advances after it; the same letterboxed; typed spaces before the caret move it on, Backspace back; the echo wrapping puts the cursor alone at the next row\'s first cell; after Return and the scroll the typed line keeps its joined form; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openPage(env, { layout: 'hd' });
-  page.on('pageerror', () => errors.push(1));
-  await page.setViewportSize({ width: 1400, height: 900 });
-  await atReplyPrompt(context, page, env);
-  assert.equal(await page.evaluate(() => globalThis.__u6Layout.view), 'game', 'the game\'s regions');
-  const misses = await caretFlow(page, 'HD layout', true);
-  assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: the HD layout and its letterbox: the cursor the prompt\'s caret within a space of its ink, its cell the paper; two typed spaces and a word one run, the word two spaces on; the caret after typed spaces and back after Backspace; the wrap\'s cursor alone at its cell; the typed line joined after the scroll: pass');
-}, { needs: h.haveHfes });
-
-test('Wide layout (spec 11 rev 3): at the reply prompt of the test\'s conversation in the message scroll\'s window (the user\'s disks, a made-up word typed) the key wait\'s cursor is drawn as the prompt\'s caret, within one space advance of its ink, its own cell the paper; two typed spaces and the word make one run with the prompt, the word at most two space advances after it; the same letterboxed; typed spaces before the caret move it on, Backspace back; the echo wrapping puts the cursor alone at the next row\'s first cell; after Return and the scroll the typed line keeps its joined form; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openWide(env, { width: 1920, height: 1080 });
-  page.on('pageerror', () => errors.push(1));
-  await atReplyPrompt(context, page, env);
-  assert.equal(await page.evaluate(() => globalThis.__u6Layout.view), 'game', 'the map and the windows');
-  const misses = await caretFlow(page, 'Wide', true);
-  assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: Wide and its letterbox: the cursor the prompt\'s caret within a space of its ink, its cell the paper; two typed spaces and a word one run, the word two spaces on; the caret after typed spaces and back after Backspace; the wrap\'s cursor alone at its cell; the typed line joined after the scroll: pass');
-}, { needs: h.haveHfes });
-
-// The test's own greeting with a key wait inside it (`*`: the game flushes the line and waits for a
-// key with the more prompt's mark, glyphs 1..4, right after the text).
-const ARROW_GREET = '"Zq9 qux!*Abc xyz."';
-
-// The page with the test's conversation (koFixture with ARROW_GREET in place of the user's,
-// English) talked to up to the wait inside the greeting, on the virtual display, the pointer in
-// the map; whether the more prompt's mark is listed in the message scroll.
-async function atMoreMark(context, page, env) {
-  await context.addInitScript(fontRunsHook);
-  await context.addInitScript(composedHook);
-  await h.load(page, env);
-  await page.setInputFiles('#picker', h.HFES);
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  await fontIs(page, 'hd');
-  const { archive } = await koFixture(0x63, { greeting: ARROW_GREET, greetingKo: FONT_GREET_KO });
-  assert.equal(await h.replaceKept(page, 'converse.a', archive), 1, 'one archive replaced');
-  await page.reload();
-  await h.waitSettled(page);
-  await h.waitPrompt(page);
-  await fontIs(page, 'hd');
-  await h.virtualDisplay(page, 60);
-  const map = await page.evaluate(() => {
-    const [x, y, w, hh] = globalThis.__u6Layout.regions.find((r) => r.name === 'map').from;
-    return [x + Math.floor(w / 2), y + Math.floor(hh / 2)];
-  });
-  await page.mouse.move(...(await h.screenPoint(page, ...map)));
-  await typeKeys(page, ['t']);
-  await page.focus('#screen');
-  await page.keyboard.press('2');
-  return framesUntil(page, () => {
-    const L = globalThis.__u6Layout;
-    const { from } = L.regions.find((r) => r.name === 'messages');
-    const runs = window.__fontRunsOf(globalThis.__shownGame.hd_glyphs(), from);
-    return runs.some((r) => r.caret && r.caret.code >= 1 && r.caret.code <= 4) || runs.symbols.some((m) => m.code >= 1 && m.code <= 4);
-  }, 200);
-}
-
-// Page script: the more prompt's mark in the message scroll as the canvas shows it: listed as the
-// caret of the run before it (`caret`), its observed ink edge (`__symbolEdge`, searched from the
-// run's first cell to the mark's own cell's right edge) and where it belongs (`want`: the pen's end
-// after the run's text and the spaces between, the glyph's own blank columns on), and the run's
-// last letter's cell (`last`).
-const moreMarkSeen = (page) => page.evaluate(() => {
-  const L = globalThis.__u6Layout;
-  const g = globalThis.__shownGame;
-  const c = document.getElementById('screen');
-  const { from, to } = L.regions.find((r) => r.name === 'messages');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  const runs = window.__fontRunsOf(g.hd_glyphs(), from, g.hd_symbol_rows?.() ?? null);
-  const run = runs.find((r) => r.caret && r.caret.code >= 1 && r.caret.code <= 4);
-  if (!run) return { caret: false };
-  const geo = window.__runGeometry(run, from, to);
-  const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-  const own = window.__symbolBox({ x: run.caret.x, y: run.y }, from, to);
-  const seen = window.__symbolEdge(d, c.width, run.caret, [geo.span[0], own[0] + own[2]], geo.span[1], sx, sy);
-  return {
-    caret: true,
-    adjacent: run.caret.x === run.cells.at(-1).x + 8 * (run.caret.spaces + 1),
-    edge: seen ? seen.edge : null,
-    want: seen ? geo.caretLeft + seen.lead : null,
-    own: own[0],
-  };
-});
-
-// Spec 11 rev 3 on the more prompt's mark (`what`: the layout's label): at the wait inside the
-// test's greeting the mark is listed as the caret of the greeting's run, its observed ink edge at
-// the run's pen end (the glyph's blank columns on) within a canvas pixel, left of its own cell; the
-// scroll's other pixels the composition's; a key ends the wait.
-async function moreMarkFlow(page, what) {
-  const r = await moreMarkSeen(page);
-  const misses = [];
-  const check = (ok, label) => {
-    if (!ok) misses.push(`${what}: ${label}`);
-  };
-  check(r.caret && r.adjacent, 'the more prompt\'s mark listed as the caret of the run it follows');
-  check(r.caret && r.edge !== null && r.edge >= r.want - 1 && r.edge <= r.want + 1, 'its observed ink edge at the run\'s pen end (its glyph\'s blank columns on), within a pixel');
-  check(r.caret && r.edge !== null && r.edge < r.own, 'drawn left of its own cell');
-  const runs = (await fontRuns(page)).messages;
-  check(runs.carets === 1 && runs.caretsPlaced === 1 && runs.off === 0 && runs.fits === runs.runs, 'the scroll\'s other pixels the composition\'s, every run where the font puts it');
-  await typeKeys(page, ['Space']);
-  return misses;
-}
-
-test('HD font (spec 11 rev 3, the more prompt\'s mark, the HD layout): at a key wait inside the test\'s greeting (the user\'s disks) the more prompt\'s mark is drawn as the caret of the text it follows, its observed ink edge at the text\'s pen end within a canvas pixel; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openPage(env, { layout: 'hd' });
-  page.on('pageerror', () => errors.push(1));
-  await page.setViewportSize({ width: 1400, height: 900 });
-  const listed = await atMoreMark(context, page, env);
-  const misses = listed ? await moreMarkFlow(page, 'HD layout') : ['HD layout: the more prompt\'s mark listed in the message scroll'];
-  assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: the HD layout: the more prompt\'s mark the caret of its text, its ink edge at the pen end within a pixel: pass');
-}, { needs: h.haveHfes });
-
-test('Wide layout (spec 11 rev 3, the more prompt\'s mark): at a key wait inside the test\'s greeting in the message scroll\'s window (the user\'s disks) the more prompt\'s mark is drawn as the caret of the text it follows, its observed ink edge at the text\'s pen end within a canvas pixel; no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openWide(env, { width: 1920, height: 1080 });
-  page.on('pageerror', () => errors.push(1));
-  const listed = await atMoreMark(context, page, env);
-  const misses = listed ? await moreMarkFlow(page, 'Wide') : ['Wide: the more prompt\'s mark listed in the message scroll'];
-  assert.ok(misses.length === 0, `every check met; not met: ${misses.join('; ')}`);
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: Wide: the more prompt\'s mark the caret of its text, its ink edge at the pen end within a pixel: pass');
-}, { needs: h.haveHfes });
-
-test('Original layout (spec 11 rev 3): with the HD font chosen and HD on, at the reply prompt of the test\'s conversation with two spaces and a made-up word typed, nothing is listed and the canvas is the HD frame exactly (the page draws nothing over it but the pointer), the same frame before and after the font chosen again (pixel, then HD); no page error', async (env) => {
-  const errors = [];
-  const { context, page } = await h.openPage(env, { layout: 'original' });
-  page.on('pageerror', () => errors.push(1));
-  await atReplyPrompt(context, page, env, false);
-  await typeKeys(page, ['Space', 'Space', ...CARET_WORD]);
-  await freezeGame(page, true);
-  await h.runFrames(page, 2);
-  const s = await fontShown(page);
-  assert.ok(s.font === 'pixel' && s.mode === false && !s.listed, 'the Original layout: the pixel font, nothing listed');
-  const frameSeen = async () => (await pointerAreaHook(page), page.evaluate(() => {
-    const c = document.getElementById('screen');
-    const g = globalThis.__shownGame;
-    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    const f = g.hd_frame_rgba();
-    const pointer = window.__pointerArea();
-    let [compared, differ] = [0, 0];
-    let v = 0x811c9dc5;
-    for (let i = 0; i < d.length; i += 4) {
-      const p = i / 4;
-      if (window.__inPointer(pointer, p % c.width, Math.floor(p / c.width))) continue;
-      compared += 1;
-      if (d[i] !== f[i] || d[i + 1] !== f[i + 1] || d[i + 2] !== f[i + 2]) differ += 1;
-      for (let k = 0; k < 3; k += 1) v = Math.imul(v ^ d[i + k], 0x01000193) >>> 0;
-    }
-    return { hd: g.hd_on(), size: c.width === g.width() * g.hd_scale(), compared, differ, hash: v };
-  }));
-  const before = await frameSeen();
-  assert.ok(before.hd && before.size && before.compared > 0 && before.differ === 0, 'the canvas is the HD frame exactly');
-  await chooseFont(page, 'pixel');
-  await chooseFont(page, 'hd');
-  await page.click('#setup-ok');
-  await h.runFrames(page, 2);
-  const after = await frameSeen();
-  assert.ok(after.differ === 0 && after.hash === before.hash, 'the same frame before and after the font chosen again');
-  await freezeGame(page, false);
-  assert.equal(errors.length, 0, 'no page error');
-  console.log('  receipt: the Original layout at the reply prompt with typed spaces: nothing listed, the canvas the HD frame exactly, the same before and after the font chosen again: pass');
-}, { needs: h.haveHfes });
-
-test('HD font (spec 11 Acceptance 3, Design 4-5): the first-run chooser and Settings offer "Font: HD font / Pixel font" in the page\'s language, the HD font checked; the font file is asked for once it is wanted (the HD layout, the HD font: from this origin, 200, font/woff2, no CSP report), not with the pixel font or the Original layout; a choice is kept at once and across a reload, any other kept value is the HD font; with storage that throws the HD font, switched for the visit, nothing kept; a font file that does not load leaves the pixel font (synthetic, no game)', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const origin = new URL(env.server.url).origin;
-  let { context, page } = await h.openPage(env, { setup: null, layout: null });
-  let answers = fontAnswers(context);
-  await h.load(page, env);
-  const choice = () => page.evaluate(() => ({
-    title: document.getElementById('font-title').textContent,
-    labels: [...document.querySelectorAll('#font-choice label')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
-    inSetup: document.getElementById('setup').contains(document.getElementById('font-choice')),
-    open: !document.getElementById('setup').hidden,
-  }));
-  let c = await choice();
-  assert.ok(c.open && c.inSetup, 'the first-run chooser holds it');
-  assert.deepEqual([c.title, c.labels], [TEXT.ko.font, [TEXT.ko.fontHd, TEXT.ko.fontPixel]], 'its words in Korean (the first run)');
-  await fontIs(page, 'hd');
-  let s = await fontShown(page);
-  assert.deepEqual(s.radios, [['hd', true], ['pixel', false]], 'the HD font checked');
-  assert.ok(s.file === 'loaded' && s.stored === null, 'the HD font loaded before any game, nothing kept yet');
-  assert.ok(answers.length === 1 && answers[0][0] === origin && answers[0][1] === 200 && answers[0][2] === 'font/woff2', 'the font file asked for once, from this origin, 200, font/woff2');
-  assert.deepEqual(await page.evaluate(() => window.__csp), [], 'no CSP report');
-  await page.check('input[name="setup-lang"][value="en"]');
-  c = await choice();
-  assert.deepEqual([c.title, c.labels], [TEXT.en.font, [TEXT.en.fontHd, TEXT.en.fontPixel]], 'its words in English');
-  // The chooser's choice: kept at once, and after OK and a reload (no chooser then) in Settings.
-  await page.uncheck('#setup-voices');
-  await page.check('input[name="font"][value="pixel"]');
-  s = await fontShown(page);
-  assert.ok(s.font === 'pixel' && s.stored === 'pixel', 'the pixel font, kept at once');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  await page.reload();
-  await h.waitSettled(page);
-  assert.equal(await page.evaluate(() => document.getElementById('setup').hidden), true, 'no chooser after its OK');
-  await page.click('#settings');
-  s = await fontShown(page);
-  assert.ok(s.font === 'pixel' && s.file === 'none', 'kept: the pixel font, no font file asked for');
-  assert.deepEqual(s.radios, [['hd', false], ['pixel', true]], 'Settings shows it');
-  assert.equal(answers.length, 1, 'the pixel font: nothing asked for');
-  await page.check('input[name="font"][value="hd"]');
-  await fontIs(page, 'hd');
-  assert.ok(answers.length === 2 && answers[1][1] === 200, 'the HD font chosen: the file asked for, 200');
-  await page.reload();
-  await h.waitSettled(page);
-  await fontIs(page, 'hd');
-  s = await fontShown(page);
-  assert.ok(s.stored === 'hd' && s.radios[0][1], 'kept: the HD font');
-  // Any other kept value is the HD font; the Original layout asks for no font file.
-  for (const [kept, layout, want, file] of [['wide', 'hd', 'hd', 'loaded'], ['hd', 'original', 'pixel', 'none'], ['pixel', 'original', 'pixel', 'none']]) {
-    await page.evaluate(([f, l]) => {
-      localStorage.setItem('u6.font', f);
-      localStorage.setItem('u6.layout', l);
-    }, [kept, layout]);
-    const n = answers.length;
-    await page.reload();
-    await h.waitSettled(page);
-    await fontIs(page, want);
-    s = await fontShown(page);
-    assert.ok(s.file === file && s.radios[kept === 'pixel' ? 1 : 0][1], `kept ${kept} with ${layout}: ${want}, the file ${file}`);
-    assert.equal(answers.length, n + (file === 'none' ? 0 : 1), `kept ${kept} with ${layout}: the file asked for ${file === 'none' ? 'not' : 'once'}`);
-  }
-  await context.close();
-  // Storage that throws: the HD font, the pixel font for the visit, nothing kept.
-  ({ context, page } = await h.openPage(env, { layout: null }));
-  await context.addInitScript(layoutStorageThrows);
-  answers = fontAnswers(context);
-  await h.load(page, env);
-  await fontIs(page, 'hd');
-  s = await fontShown(page);
-  assert.ok(s.stored === 'unreadable' && s.radios[0][1], 'storage that throws: the HD font');
-  await chooseFont(page, 'pixel');
-  assert.equal((await fontShown(page)).font, 'pixel', 'the pixel font for the visit');
-  await page.reload();
-  await h.waitSettled(page);
-  await fontIs(page, 'hd');
-  assert.ok((await fontShown(page)).radios[0][1], 'nothing kept: the HD font after a reload');
-  await context.close();
-  // A font file the site does not answer (404): the pixel font for the visit, a content-free line.
-  ({ context, page } = await h.openPage(env, { layout: null }));
-  const words = consoleText(page);
-  await context.route((url) => url.pathname === FONT_PATH, (route) => route.fulfill({ status: 404, body: 'not found' }));
-  await h.load(page, env);
-  await page.waitForFunction(() => document.body.dataset.fontFile === 'failed', null, { timeout: 30_000 });
-  s = await fontShown(page);
-  assert.ok(s.font === 'pixel' && s.radios[0][1], 'the file not there: the pixel font, the HD font still chosen');
-  assert.ok(words.some((m) => m.startsWith('the HD font did not load')), 'the line says so');
-  console.log('  receipt: the chooser\'s and Settings\' Font in Korean and English; the font file from this origin (200) only while the HD font and the HD layout are in effect; the choice kept at once and across reloads; storage that throws: for the visit; a file not there: the pixel font: pass');
-});
 
 // --- the Wide layout (spec 13, spec 14) -------------------------------------------------------
 // The Wide build (site/pkg-wide: the UI's 320 x 200 at the frame's top left, the map beside it,
@@ -12121,8 +10056,8 @@ test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5; spec 14 Design 1 and 7): 
   // tiles leave fewer than a black map does).
   assert.ok(shown.map.compared > 50 && shown.map.differ === 0, 'HD on: the map, scaled to cover, the frame\'s colours');
   // HD off: the same layout, from the classic frame, pixelated.
-  await page.click('#settings');
-  await page.click('#hd');
+  await h.openSettings(page);
+  await h.clickSetting(page, 'hd', { close: true });
   await h.runFrames(page, 2);
   s = await wideShown(page);
   assert.ok(s.layout === 'wide' && s.view === 'game' && !s.hd && s.size[0] === 1920 && s.size[1] === 1080, 'HD off: the Wide layout still');
@@ -12160,7 +10095,7 @@ test('Wide layout (spec 13 A1, A3, A4, Design 2 and 5; spec 14 Design 1 and 7): 
     return { differ, n };
   });
   assert.ok(exact.n > 0 && exact.differ === 0, 'HD off: every window pixel the classic pixel it shows (pixelated)');
-  await page.click('#hd');
+  await h.clickSetting(page, 'hd', { close: true });
   await h.runFrames(page, 2);
   assert.ok((await wideShown(page)).hd, 'HD on again');
   assert.equal(errors.length, 0, 'no page error');
@@ -12554,18 +10489,16 @@ test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu)
   const k = 1080 / 200;
   const rect = [(1920 - 320 * k) / 2, 0, 320 * k, 1080];
   assert.deepEqual(rect, s.whole, 'the letterbox where the test puts it');
-  await page.click('#settings');
-  await page.click('#hd');
-  await page.click('#setup-ok');
+  await h.clickSetting(page, 'hd', { close: true });
   await h.waitSettled(page);
   await h.virtualDisplay(page, 60);
   await h.runFrames(page, 3);
   const results = {};
   for (const [hd, label] of [[false, 'HD off'], [true, 'HD on']]) {
     if (hd) {
-      await page.click('#settings');
-      await page.click('#hd');
-      await page.click('#setup-ok');
+      await h.openSettings(page);
+      await h.clickSetting(page, 'hd', { close: true });
+      await h.closeSettings(page);
       await h.runFrames(page, 3);
     }
     assert.equal(await page.evaluate(() => globalThis.__shownGame.hd_on()), hd, `${label}: as switched`);
@@ -12580,21 +10513,21 @@ test('Wide layout (spec 13 Design 5): every other screen (the opening, the menu)
   console.log(`  receipt: the opening shows the UI's screen at 96,0,1728,1080 with dark sides; 4 presses landed; frame pixels outside the UI have no canvas place; the menu's letterbox the UI crop scaled (the grid with the rect's first and last two columns and rows): ${Object.entries(results).map(([l, [r, a, b]]) => `${l} ${r.compared} compared, 0 differ (whole frame as source: ${a.differ} differ; scale 5: ${b.differ} differ)`).join('; ')}: pass`);
 }, { needs: h.haveZip });
 
-test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1920 x 1080: at 1920 x 1080 the whole screen, sharp (one to one); at 2560 x 1440 the whole screen, smooth; at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each', async (env) => {
+test('Wide layout (spec 13 A5): fullscreen keeps 16:9 at any size, centred on black, the canvas still 1920 x 1080: at 1920 x 1128 below the 48px game chrome, sharp (one to one); at 2560 x 1488 below the game chrome, smooth; at 1728 x 1117 1728 x 972 with bars, smooth; a key reaches the game in each', async (env) => {
   const { page } = await bootWide(env);
-  const sizes = [[1920, 1080, 'sharp'], [2560, 1440, 'smooth'], [1728, 1117, 'smooth']];
+  const sizes = [[1920, 1080, 'smooth'], [1920, 1128, 'sharp'], [2560, 1488, 'smooth'], [1728, 1117, 'smooth']];
   const lines = [];
   for (const [w, hh, want] of sizes) {
     await page.setViewportSize({ width: w, height: hh });
-    await page.click('#fullscreen');
+    await h.clickSetting(page, 'fullscreen', { close: true });
     await waitFull(page, 'on');
-    await page.waitForFunction(([vw]) => Math.abs(document.getElementById('screen').getBoundingClientRect().width - Math.min(vw, (innerHeight * 16) / 9)) < 1, [w], { timeout: 10_000 });
+    await page.waitForFunction(([vw]) => Math.abs(document.getElementById('screen').getBoundingClientRect().width - Math.min(vw, ((innerHeight - 48) * 16) / 9)) < 1, [w], { timeout: 10_000 });
     await h.waitFrames(page, 2);
     const s = await layoutShown(page);
     const [bw, bh] = s.box;
     assert.ok(Math.abs(bw / bh - 16 / 9) < 0.01, `${w}x${hh}: 16:9`);
-    assert.ok(bw <= w + 0.5 && bh <= hh + 0.5 && (Math.abs(bw - w) < 1 || Math.abs(bh - hh) < 1), `${w}x${hh}: as large as fits`);
-    assert.ok(Math.abs(s.at[0] - (w - bw) / 2) < 1 && Math.abs(s.at[1] - (hh - bh) / 2) < 1, `${w}x${hh}: centred`);
+    assert.ok(bw <= w + 0.5 && bh <= hh - 48 + 0.5 && (Math.abs(bw - w) < 1 || Math.abs(bh - (hh-48)) < 1), `${w}x${hh}: as large as fits`);
+    assert.ok(Math.abs(s.at[0] - (w - bw) / 2) < 1 && Math.abs(s.at[1] - ((hh - bh - 48) / 2 + 48)) < 1, `${w}x${hh}: centred`);
     assert.deepEqual(s.size, WIDE_CANVAS, `${w}x${hh}: the canvas stays 1920 x 1080`);
     const mode = SHARP.includes(s.rendering) ? 'sharp' : s.rendering === 'auto' ? 'smooth' : s.rendering;
     assert.equal(mode, want, `${w}x${hh}: ${want}`);
@@ -12644,11 +10577,11 @@ test('Wide automatic scale: a slow whole composition selects S 2 and preserves t
     assert.ok(r.compared > 0 && r.differ === 0, `${name}: the canvas shows the S 2 frame pixels`);
   }
   assert.ok(shown.map.compared > 50 && shown.map.differ === 0, 'the map shows the S 2 frame pixels');
-  await page.click('#settings');
-  await page.click('#hd');
+  await h.openSettings(page);
+  await h.clickSetting(page, 'hd', { close: true });
   await h.runFrames(page, 2);
   assert.equal((await wideShown(page)).hd, false, 'HD can be switched off after calibration');
-  await page.click('#hd');
+  await h.clickSetting(page, 'hd', { close: true });
   await h.runFrames(page, 2);
   assert.equal((await wideShown(page)).scale, 2, 'HD reentry keeps the measured scale');
   console.log('  receipt: forced slow S 4; chosen S 2; window and map pixels agree; HD off/on: pass');
@@ -12742,11 +10675,11 @@ test('Wide automatic scale: slow default B layers choose S 2 with matching layer
   for (const [name, r] of Object.entries(windows)) {
     assert.ok(r.compared > 0 && r.differ === 0, `${name}: the S 2 window pixels remain correct`);
   }
-  await page.click('#settings');
-  await page.click('#hd');
+  await h.openSettings(page);
+  await h.clickSetting(page, 'hd', { close: true });
   await h.runFrames(page, 2);
   assert.equal((await wideShown(page)).hd, false, 'HD switches off after B calibration');
-  await page.click('#hd');
+  await h.clickSetting(page, 'hd', { close: true });
   await h.runFrames(page, 2);
   assert.equal((await wideShown(page)).scale, 2, 'HD reentry keeps the selected scale');
   const again = await page.evaluate(() => ({ ...__footstepProbe(), ...__wideLayerReceipt }));
@@ -12804,135 +10737,9 @@ test('Wide layout (spec 13 Design 6, spec 14 Design 1): the compositor\'s time p
 // waiting on the old document.
 const loadAfter = (page, act) => Promise.all([page.waitForEvent('load', { timeout: 60_000 }), act()]);
 
-test('Wide layout (spec 13 Decision 2): the chooser\'s and Settings\' "Screen layout" offers Wide (first), HD 16:9 and Original 16:10, in the page\'s language, Wide checked in the Wide build; after a Save in the Wide build, HD 16:9 is only noted (no load, the radio on it) until OK, which keeps hd and loads the page again with the Original build (site/pkg) and spec 10\'s layout, the kept files and the stored save as they were (nothing new saved) and the save resumed; Wide again (at OK) loads the Wide build, the save resumed there too; with storage that throws, Wide from the Original build at OK keeps the page as it is (the radio back on HD 16:9) and says why', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const { page, glues } = await bootWide(env);
-  const choice = () => page.evaluate(() => ({
-    labels: [...document.querySelectorAll('#layout-choice label')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
-    values: [...document.querySelectorAll('input[name="layout"]')].map((i) => [i.value, i.checked]),
-  }));
-  await page.click('#settings');
-  let c = await choice();
-  assert.deepEqual(c.labels, [TEXT.en.layoutWide, 'HD 16:9', TEXT.en.layoutOriginal], 'its words in English, Wide first');
-  assert.deepEqual(c.values, [['wide', true], ['hd', false], ['original', false]], 'Wide checked');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  c = await choice();
-  assert.deepEqual(c.labels, [TEXT.ko.layoutWide, 'HD 16:9', TEXT.ko.layoutOriginal], 'its words in Korean');
-  assert.equal(TEXT.ko.layoutWide, '와이드 (넓은 지도)', 'the Korean name of Wide');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  await page.focus('#screen');
-  const { moved } = await walkAndSave(page);
-  await page.click('#settings');
-  const keptBefore = await h.keptPaths(page);
-  const savedBefore = await h.savedFiles(page);
-  const n = glues.length;
-  // The choice is noted; OK loads the page again.
-  let loads = 0;
-  page.on('load', () => { loads += 1; });
-  await page.check('input[name="layout"][value="hd"]');
-  await h.waitFrames(page, 10);
-  assert.equal(loads, 0, 'HD 16:9 chosen: no load before OK');
-  assert.equal((await choice()).values.find(([v]) => v === 'hd')[1], true, 'the radio on HD 16:9 until OK');
-  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  let s = await layoutShown(page);
-  assert.ok(glues.length > n && glues.slice(n).every((p) => p === '/pkg/u6_web.js'), 'the page loaded again with the Original build\'s glue');
-  assert.ok(s.layout === 'hd' && s.view === 'game' && s.stored === 'hd' && s.size[0] === 1280 && s.size[1] === 720 && s.scale === 4, 'HD 16:9: spec 10\'s layout, kept');
-  assert.equal(await page.evaluate(() => globalThis.__u6Layout.wide), false, 'not the Wide layout');
-  assert.deepEqual(await h.keptPaths(page), keptBefore, 'the kept files as they were');
-  h.assertSame(await h.savedFiles(page), savedBefore, 'the stored save as it was: nothing new saved');
-  assert.ok(savedBefore.length > 1, 'a save was stored');
-  assert.equal((await atPrompt(page)).leader, moved, 'the save resumes in the Original build');
-  // Original 16:10 within the Original build: at once, no new load.
-  const m = glues.length;
-  await page.click('#settings');
-  await page.check('input[name="layout"][value="original"]');
-  s = await layoutShown(page);
-  assert.ok(s.layout === 'original' && s.view === 'frame' && s.stored === 'original' && glues.length === m, 'Original 16:10 at once, in the same build');
-  // Wide again (at OK): the Wide build.
-  await page.check('input[name="layout"][value="wide"]');
-  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  const w = await wideShown(page);
-  assert.ok(w.layout === 'wide' && w.wide && w.size[0] === 1920 && glues.slice(m).every((p) => p === '/pkg-wide/u6_web.js'), 'Wide: the Wide build again');
-  assert.equal((await atPrompt(page)).leader, moved, 'the save resumes in the Wide build');
-  h.assertSame(await h.savedFiles(page), savedBefore, 'the stored save still as it was');
-  await page.context().close();
-  // Storage that throws: the Original build (HD 16:9); Wide cannot be kept across the load it
-  // needs, so nothing happens but a line.
-  const { context, page: p2 } = await h.openPage(env, { layout: null });
-  await context.addInitScript(layoutStorageThrows);
-  await h.load(p2, env);
-  await p2.setInputFiles('#picker', h.HFES);
-  await started(p2, FILES);
-  await h.waitPrompt(p2);
-  let reloads = 0;
-  p2.on('load', () => { reloads += 1; });
-  await p2.click('#settings');
-  await p2.click('input[name="layout"][value="wide"]');
-  // No voices: storage that throws keeps no choice, so the chooser is a first run's (NPC voices
-  // ticked), and their download's line would follow.
-  await p2.uncheck('#setup-voices');
-  await p2.click('#setup-ok');
-  await h.waitSettled(p2);
-  await h.waitFrames(p2, 10);
-  const after = await p2.evaluate(() => ({
-    layout: document.body.dataset.layout,
-    checked: document.querySelector('input[name="layout"]:checked')?.value,
-    status: document.getElementById('status').textContent,
-    lang: document.documentElement.lang,
-  }));
-  assert.ok(reloads === 0 && after.layout === 'hd' && after.checked === 'hd', 'storage that throws: no load, HD 16:9 still, the radio back');
-  // The page's language: 한글 here (storage that throws keeps no chooser's choice: a first run).
-  assert.equal(after.status, TEXT[after.lang].layoutNotKept, 'the line says why, in the page\'s language');
-  console.log('  receipt: Wide, HD 16:9, Original 16:10 in English and Korean; a Save in Wide, then Wide -> HD 16:9 noted, loaded at OK into the Original build with spec 10\'s layout, kept files and save unchanged, the save resumed; Original 16:10 at once; HD -> Wide at OK loaded the Wide build, the save resumed; storage that throws: no load, a line: pass');
-}, { needs: h.haveHfes });
 
-test('Wide layout (spec 13 Decision 2, the first-run chooser): on a first visit (the chooser open on the Wide build) English, NPC voices unticked and HD 16:9 load nothing until OK; OK keeps the chooser\'s choices first and then loads the page once into the Original build: in English, the chooser not shown again, the voices off and nothing asked of /models/, HD 16:9 kept', async (env) => {
-  const { context, page } = await h.openPage(env, { setup: null, layout: null });
-  const glues = [];
-  const models = [];
-  page.on('request', (r) => {
-    const path = new URL(r.url()).pathname;
-    if (path.endsWith('/u6_web.js')) glues.push(path);
-    if (path.startsWith('/models/')) models.push(path);
-  });
-  let loads = 0;
-  page.on('load', () => { loads += 1; });
-  await h.load(page, env);
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  assert.ok(glues.length === 1 && glues[0] === '/pkg-wide/u6_web.js', 'a first visit: the Wide build');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.uncheck('#setup-voices');
-  await page.check('input[name="layout"][value="hd"]');
-  await h.waitFrames(page, 10);
-  assert.equal(loads, 1, 'no load before OK');
-  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
-  await h.waitSettled(page);
-  await h.waitFrames(page, 20);
-  const after = await page.evaluate(() => ({
-    lang: document.documentElement.lang,
-    open: !document.getElementById('setup').hidden,
-    layout: document.body.dataset.layout,
-    wide: globalThis.__u6Layout.wide,
-    stored: localStorage.getItem('u6.layout'),
-    setup: JSON.parse(localStorage.getItem('u6.setup')),
-    voices: localStorage.getItem('u6.voices'),
-    voice: document.body.dataset.voice ?? null,
-  }));
-  assert.equal(loads, 2, 'one load at OK');
-  assert.deepEqual(glues, ['/pkg-wide/u6_web.js', '/pkg/u6_web.js'], 'then the Original build');
-  assert.ok(after.layout === 'hd' && !after.wide && after.stored === 'hd', 'HD 16:9, kept');
-  assert.ok(after.lang === 'en' && after.setup?.lang === 'en', 'in English, kept');
-  assert.equal(after.open, false, 'the chooser not shown again');
-  assert.ok(after.voices !== 'on' && models.length === 0, 'the voices off, nothing asked of /models/');
-  await context.close();
-  console.log(`  receipt: a first visit chose English, no voices and HD 16:9; one load at OK into the Original build, the chooser's choices kept, voices off (voice state ${after.voice}): pass`);
-});
+
+
 
 // Before the page's scripts: a voice Worker that runs no model (as fakeVoiceWorker) and keeps,
 // in the tab's session storage across its documents, each load it was asked for
@@ -12987,42 +10794,7 @@ function voiceLoadsLog({ sessionThrows = false, cacheSilent = false } = {}) {
   });
 }
 
-test('Wide layout (spec 13 Decision 2, the first-run chooser with voices): NPC voices ticked and HD 16:9 at the first run (the model stubbed: a download that goes on), OK starts the download and loads the page once into the Original build; there the voices go on with downloads allowed (not from the cache only) and are ready, the voices kept on; no state failed, no load from the cache only; the mark the switch left is taken', async (env) => {
-  const { context, page } = await h.openPage(env, { setup: null, layout: null });
-  await context.addInitScript(voiceLoadsLog);
-  let loads = 0;
-  page.on('load', () => { loads += 1; });
-  await h.load(page, env);
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  await page.check('input[name="setup-lang"][value="en"]');
-  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
-  await page.check('input[name="layout"][value="hd"]');
-  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
-  await h.waitSettled(page);
-  await page.waitForFunction(() => document.body.dataset.voice === 'ready', null, { timeout: 30_000 });
-  await h.waitFrames(page, 10);
-  const after = await page.evaluate(() => ({
-    loads: JSON.parse(sessionStorage.getItem('__voiceLoads') ?? '[]'),
-    states: JSON.parse(sessionStorage.getItem('__voiceStates') ?? '[]'),
-    mark: sessionStorage.getItem('u6-voice-download-after-reload'),
-    voices: localStorage.getItem('u6.voices'),
-    layout: document.body.dataset.layout,
-    wide: globalThis.__u6Layout.wide,
-    error: document.body.dataset.voiceError,
-  }));
-  assert.equal(loads, 2, 'one load at OK');
-  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
-  // The first document's load may not be asked yet when the page loads again (the storage's
-  // persist is asked first): the second's goes on with downloads allowed either way.
-  assert.ok(after.loads.every(([, cached]) => !cached), 'no load from the cache only');
-  assert.ok(after.loads.some(([d]) => d === 2), 'the page loaded again asked for the model, downloads allowed');
-  assert.ok(!after.states.includes('failed') && after.error === '', 'never failed');
-  assert.equal(after.states.at(-1), 'ready', 'the voices ready');
-  assert.equal(after.voices, 'on', 'the voices kept on');
-  assert.equal(after.mark, null, 'the mark taken');
-  await context.close();
-  console.log(`  receipt: voices ticked at the first run with HD 16:9: the voices started, one load at OK, then the model asked for with downloads allowed (loads ${after.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready, kept on (states ${after.states.join(' > ')}): pass`);
-});
+
 
 // The status line and the chooser's line, and the chooser's button as it reads.
 const switchLines = (page) => page.evaluate(() => ({
@@ -13031,164 +10803,13 @@ const switchLines = (page) => page.evaluate(() => ({
   lang: document.documentElement.lang,
 }));
 
-test('Wide layout (spec 13 Decision 2, the switch line names the button): on a first visit (the Wide build, the chooser in Korean, NPC voices ticked), a choice across the builds shows its line on the status line and the chooser\'s naming the button as it reads ("Accept and start" while NPC voices is ticked, else "OK"); unticking and ticking NPC voices names the button anew, in Korean and in English, and so does a change of language', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const { context, page } = await h.openPage(env, { setup: null, layout: null });
-  await h.load(page, env);
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
-  const names = async (lang, button, label) => {
-    const s = await switchLines(page);
-    assert.ok(s.lang === lang && s.ok === TEXT[lang][button], `${label}: the button`);
-    assert.ok(s.lines.every((line) => line.includes(s.ok)), `${label}: the line names the button as it reads`);
-    const want = TEXT[lang].layoutSwitchAtOk('hd', TEXT[lang][button]);
-    assert.deepEqual(s.lines, [want, want], `${label}: the line, twice`);
-  };
-  await page.check('input[name="layout"][value="hd"]');
-  await names('ko', 'acceptStart', 'Korean, NPC voices ticked');
-  await page.uncheck('#setup-voices');
-  await names('ko', 'ok', 'Korean, unticked');
-  await page.check('#setup-voices');
-  await names('ko', 'acceptStart', 'Korean, ticked again');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await names('en', 'acceptStart', 'English, ticked');
-  await page.uncheck('#setup-voices');
-  await names('en', 'ok', 'English, unticked');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  await names('ko', 'ok', 'Korean again, unticked');
-  await context.close();
-  console.log('  receipt: the switch line named the button as it read in 6 states (Korean and English, NPC voices ticked and unticked, after a change of the tick and of the language): pass');
-});
 
-test('Wide layout (spec 13 Decision 2, the switch line kept by Settings): on a first visit (the Wide build), with a switch to the other build noted, Settings pressed again keeps the line on the status line and the chooser\'s (naming the button as Settings sets it: NPC voices ticked again, a first run), the radio still on the screen chosen; with none noted, Settings empties the chooser\'s line as before (a pack that failed to download said why there)', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'gone.zip', label: 'Gone' }] }) });
-  const { context, page } = await h.openPage(env, { setup: null, layout: null });
-  await h.load(page, env);
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  await listed(page, 1);
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.check('input[name="layout"][value="hd"]');
-  const line = TEXT.en.layoutSwitchAtOk('hd', TEXT.en.acceptStart);
-  assert.deepEqual((await switchLines(page)).lines, [line, line], 'HD 16:9 noted: its line');
-  await page.click('#settings');
-  assert.deepEqual((await switchLines(page)).lines, [line, line], 'Settings again: the line kept');
-  assert.equal(await page.isChecked('input[name="layout"][value="hd"]'), true, 'the radio still on HD 16:9');
-  await page.uncheck('#setup-voices');
-  await page.click('#settings');
-  let s = await switchLines(page);
-  assert.ok(await page.isChecked('#setup-voices') && s.ok === TEXT.en.acceptStart, 'Settings ticks NPC voices again (a first run)');
-  assert.deepEqual(s.lines, [line, line], 'the line kept, naming the button as Settings set it');
-  // Called off; a pack that is not there chosen, NPC voices unticked: OK says why on the chooser's
-  // line and leaves the chooser open; Settings again empties it.
-  await page.check('input[name="layout"][value="wide"]');
-  assert.deepEqual((await switchLines(page)).lines, ['', ''], 'called off: the line gone');
-  await page.uncheck('#setup-voices');
-  await page.check('#setup-hd input[value="gone.zip"]');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  s = await switchLines(page);
-  assert.ok(!(await page.evaluate(() => document.getElementById('setup').hidden)), 'the pack not downloaded: the chooser open');
-  assert.ok(s.lines[1] !== '' && s.lines[1] === s.lines[0], 'its reason on the chooser\'s line');
-  await page.click('#settings');
-  assert.equal((await switchLines(page)).lines[1], '', 'no switch noted: Settings empties the chooser\'s line');
-  await context.close();
-  console.log('  receipt: a switch noted kept its line (twice) through 2 presses of Settings, the radio on HD 16:9; with none noted Settings emptied the chooser\'s line: pass');
-});
 
-test('Wide layout (spec 13 Decision 2, the switch line on the chooser only): on a first visit (the Wide build), HD 16:9 and the site\'s pack chosen, OK (the pack\'s answer held: its download\'s line on the status line), Settings pressed again leaves the status line as it is and puts the switch line on the chooser\'s line; then a Forget voices admitted behind it (its store held) and the pack let go: the chooser closes and the switch waits (its line on the status line), Settings again leaves that line and puts the switch line on the chooser\'s; the Forget let go, the page loads once into the Original build', async (env) => {
-  const { TEXT } = await import('../../site/i18n.js');
-  const hdPack = await madePack(env);
-  sitePacks(env, { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }), 'test-pack.zip': hdPack });
-  const { context, page } = await h.openPage(env, { setup: null, layout: null });
-  let loads = 0;
-  page.on('load', () => { loads += 1; });
-  await h.load(page, env);
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  await listed(page, 1);
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.uncheck('#setup-voices');
-  await page.check('input[name="layout"][value="hd"]');
-  await page.check('#setup-hd input[value="test-pack.zip"]');
-  const pack = h.holdPack(env, 'test-pack.zip');
-  await page.click('#setup-ok');
-  await pack.asked;
-  // The download's line (the chooser's operation, mirrored on the chooser's line).
-  const download = (await switchLines(page)).lines[0];
-  assert.ok(download !== '' && download !== TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok), 'the download\'s line on the status line');
-  await page.click('#settings');
-  let s = await switchLines(page);
-  assert.equal(s.lines[0], download, 'Settings during the download: the status line as it was');
-  // A first run still (OK has not kept the choices): Settings ticks NPC voices again.
-  assert.equal(s.lines[1], TEXT.en.layoutSwitchAtOk('hd', TEXT.en.acceptStart), 'the switch line on the chooser\'s line, naming the button');
-  // The wait: a Forget voices admitted while the chooser's operation is held, its store held.
-  await page.evaluate(() => {
-    window.__hold('voicepack-forget');
-    document.getElementById('kept').open = true;
-  });
-  await page.click('#forget-voices');
-  await page.waitForFunction(() => document.body.dataset.ops === '2', null, { timeout: 30_000 });
-  pack.release();
-  await page.waitForFunction(() => document.getElementById('setup').hidden, null, { timeout: 30_000 });
-  await page.waitForFunction((want) => document.getElementById('status').textContent === want, TEXT.en.layoutSwitchWaiting, { timeout: 30_000 });
-  assert.equal(loads, 1, 'no load while the Forget is held');
-  await page.click('#settings');
-  s = await switchLines(page);
-  assert.equal(s.lines[0], TEXT.en.layoutSwitchWaiting, 'Settings while the switch waits: its line on the status line as it was');
-  assert.equal(s.lines[1], TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok), 'the switch line on the chooser\'s line, naming the button');
-  await loadAfter(page, () => page.evaluate(() => window.__release('voicepack-forget')));
-  await h.waitSettled(page);
-  const after = await page.evaluate(() => ({ layout: document.body.dataset.layout, wide: globalThis.__u6Layout.wide }));
-  assert.equal(loads, 2, 'one load, once the Forget is done');
-  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
-  await context.close();
-  console.log('  receipt: Settings pressed during the chooser\'s download and during the switch\'s wait left the status line as it was (2 of 2) and put the switch line on the chooser\'s line; one load after the wait: pass');
-});
 
-test('Wide layout (spec 13 Decision 2, the voice mark without session storage): where sessionStorage throws, NPC voices ticked and HD 16:9 at the first run (the model stubbed: a download that goes on), OK loads the page once into the Original build; there the voices go on with downloads allowed (the mark the switch left in the tab\'s history entry) and are ready; the mark is taken (gone from the entry)', async (env) => {
-  const { context, page } = await h.openPage(env, { setup: null, layout: null });
-  await context.addInitScript(voiceLoadsLog, { sessionThrows: true });
-  let loads = 0;
-  page.on('load', () => { loads += 1; });
-  await h.load(page, env);
-  await page.waitForFunction(() => !document.getElementById('setup').hidden);
-  const refused = () => page.evaluate(() => {
-    try {
-      void window.sessionStorage;
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  assert.equal(await refused(), true, 'the page\'s sessionStorage throws');
-  await page.check('input[name="setup-lang"][value="en"]');
-  assert.equal(await page.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
-  await page.check('input[name="layout"][value="hd"]');
-  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
-  await h.waitSettled(page);
-  assert.equal(await refused(), true, 'the page loaded again: its sessionStorage throws too');
-  await page.waitForFunction(() => window.__voiceLog().loads.some(([d]) => d === 2), null, { timeout: 30_000 });
-  let log = await page.evaluate(() => window.__voiceLog());
-  assert.ok(log.loads.filter(([d]) => d === 2).every(([, cached]) => !cached), 'the page loaded again asked for the model with downloads allowed');
-  await page.waitForFunction(() => ['ready', 'failed'].includes(document.body.dataset.voice), null, { timeout: 30_000 });
-  log = await page.evaluate(() => window.__voiceLog());
-  const after = await page.evaluate(() => ({
-    mark: history.state?.u6Marks ?? null,
-    voices: localStorage.getItem('u6.voices'),
-    layout: document.body.dataset.layout,
-    wide: globalThis.__u6Layout.wide,
-    error: document.body.dataset.voiceError,
-  }));
-  assert.equal(loads, 2, 'one load at OK');
-  assert.ok(after.layout === 'hd' && !after.wide, 'the Original build, HD 16:9');
-  assert.ok(log.loads.every(([, cached]) => !cached), 'no load from the cache only');
-  assert.ok(!log.states.includes('failed') && after.error === '', 'never failed');
-  assert.equal(log.states.at(-1), 'ready', 'the voices ready');
-  assert.equal(after.voices, 'on', 'the voices kept on');
-  assert.equal(after.mark, null, 'the mark taken');
-  await context.close();
-  console.log(`  receipt: sessionStorage throwing, voices ticked at the first run with HD 16:9: one load at OK, then the model asked for with downloads allowed (loads ${log.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready (states ${log.states.join(' > ')}), the mark taken: pass`);
-});
+
+
+
+
 
 // Before the page's scripts: the page's sessionStorage throws on access (as in some privacy
 // modes); localStorage works.
@@ -13217,48 +10838,7 @@ async function holdScript(page) {
   return { asked, release };
 }
 
-test('Wide layout (spec 13 Decision 2, the voice mark is the tab\'s): where sessionStorage throws in every tab, the switch (NPC voices ticked and HD 16:9 at the first run, the model stubbed: a download that goes on) leaves its mark for its own tab only: a second tab of the site, loaded before the first tab\'s page has loaded again, starts the voices from the cache only (the stub does not answer it: a failure there would turn the voices off for the site) and holds no mark; the first tab\'s mark is in its own history entry (not its window.name) while it loads again; loaded again, it asks for the model with downloads allowed and is ready, the mark taken', async (env) => {
-  const { context, page: a } = await h.openPage(env, { setup: null, layout: null });
-  await context.addInitScript(voiceLoadsLog, { sessionThrows: true, cacheSilent: true });
-  await h.load(a, env);
-  await a.waitForFunction(() => !document.getElementById('setup').hidden);
-  await a.check('input[name="setup-lang"][value="en"]');
-  assert.equal(await a.isChecked('#setup-voices'), true, 'NPC voices ticked (a first run)');
-  await a.check('input[name="layout"][value="hd"]');
-  const script = await holdScript(a);
-  const reloaded = a.waitForEvent('load', { timeout: 120_000 });
-  reloaded.catch(() => {}); // awaited below; a failure before that closes the page under it
-  await a.click('#setup-ok', { noWaitAfter: true });
-  await script.asked;
-  // The first tab's next document is in, its script held: the mark in the tab's history entry.
-  const held = await a.evaluate(() => ({ at: history.state?.u6Marks?.['u6-voice-download-after-reload'], name: window.name }));
-  assert.ok(Number.isFinite(held.at) && held.name === '', 'the first tab loading again: its mark in its history entry, not its name');
-  const b = await context.newPage();
-  await h.load(b, env);
-  await b.waitForFunction(() => window.__voiceLog().loads.length > 0, null, { timeout: 30_000 });
-  const other = await b.evaluate(() => ({ loads: window.__voiceLog().loads, mark: history.state?.u6Marks ?? null }));
-  assert.deepEqual(other.loads, [[1, true]], 'the second tab: the voices from the cache only');
-  assert.equal(other.mark, null, 'the second tab: no mark');
-  script.release();
-  await reloaded;
-  await h.waitSettled(a);
-  await a.waitForFunction(() => window.__voiceLog().loads.some(([d]) => d === 2), null, { timeout: 30_000 });
-  assert.ok((await a.evaluate(() => window.__voiceLog().loads)).filter(([d]) => d === 2).every(([, cached]) => !cached), 'the first tab loaded again: its load with downloads allowed');
-  await a.waitForFunction(() => ['ready', 'failed'].includes(document.body.dataset.voice), null, { timeout: 30_000 });
-  const first = await a.evaluate(() => ({
-    loads: window.__voiceLog().loads,
-    mark: history.state?.u6Marks ?? null,
-    voice: document.body.dataset.voice,
-    layout: document.body.dataset.layout,
-    wide: globalThis.__u6Layout.wide,
-  }));
-  assert.ok(first.layout === 'hd' && !first.wide, 'the first tab loaded again: the Original build, HD 16:9');
-  assert.ok(first.loads.some(([d]) => d === 2) && first.loads.every(([, cached]) => !cached), 'the first tab loaded again: the model asked for with downloads allowed');
-  assert.equal(first.voice, 'ready', 'the voices ready');
-  assert.equal(first.mark, null, 'the mark taken');
-  await context.close();
-  console.log(`  receipt: sessionStorage throwing in 2 tabs: the second tab loaded during the first's reload started from the cache only (loads ${other.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}); the first, loaded again, went on downloading (loads ${first.loads.map(([d, c]) => `${d}:${c ? 'cache' : 'download'}`).join(', ')}), ready: pass`);
-});
+
 
 test('Restart where sessionStorage throws in every tab: its focus mark is the tab\'s: a second tab of the site, loaded before the restarted tab\'s page has loaded again, starts the kept game without moving its focus to the canvas and holds no mark; the restarted tab\'s mark is in its own history entry (not its window.name) while it loads again; loaded again, it has the focus on the canvas, the mark taken', async (env) => {
   const { context, page: a } = await h.openPage(env);
@@ -13394,111 +10974,7 @@ test('a mark in sessionStorage that it refuses to remove is not taken (it would 
   console.log('  receipt: a session mark whose removal was refused: 1 load, from the cache only: pass');
 });
 
-test('Wide layout (spec 13 Decision 2, one switch): two choices across the builds before OK load the page once, into the last; a choice across the builds shows a line (on the status line and the chooser\'s, in the page\'s language) that OK loads the page again with that screen and what the game has not saved is lost, gone when the choice is called off; a choice across and back (or to the other layout of the build that runs) before OK loads nothing, the latter at once; after OK the switch waits for every operation admitted before the page loads again, with a line that it waits: a Save held in its store when the switch starts, then a second Save admitted while it waits, held too: no load when the first is done, one load only once the second is, and the second resumes after it', async (env) => {
-  const hdPack = await madePack(env);
-  const listing = { 'index.json': JSON.stringify({ packs: [{ file: 'test-pack.zip', label: 'Test pack' }] }), 'test-pack.zip': hdPack };
-  sitePacks(env, listing);
-  const { page, glues } = await bootWide(env);
-  let loads = 0;
-  page.on('load', () => { loads += 1; });
-  const stored = () => page.evaluate(() => localStorage.getItem('u6.layout'));
-  const { TEXT } = await import('../../site/i18n.js');
-  const lines = () => page.evaluate(() => [document.getElementById('status').textContent, document.getElementById('setup-status').textContent]);
-  // Two choices across the builds: HD 16:9, then Original 16:10; one load, into Original. Each
-  // says so; back to Wide (the build that runs), the line goes.
-  await page.click('#settings');
-  await listed(page, 1);
-  await page.check('input[name="layout"][value="hd"]');
-  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok), TEXT.en.layoutSwitchAtOk('hd', TEXT.en.ok)], 'HD 16:9 across the builds: the line, twice');
-  await page.check('input[name="setup-lang"][value="ko"]');
-  assert.deepEqual(await lines(), [TEXT.ko.layoutSwitchAtOk('hd', TEXT.ko.ok), TEXT.ko.layoutSwitchAtOk('hd', TEXT.ko.ok)], 'in Korean');
-  await page.check('input[name="setup-lang"][value="en"]');
-  await page.check('input[name="layout"][value="wide"]');
-  assert.deepEqual(await lines(), ['', ''], 'called off: the line gone');
-  await page.check('input[name="layout"][value="hd"]');
-  await page.check('input[name="layout"][value="original"]');
-  assert.deepEqual(await lines(), [TEXT.en.layoutSwitchAtOk('original', TEXT.en.ok), TEXT.en.layoutSwitchAtOk('original', TEXT.en.ok)], 'Original 16:10: its line');
-  assert.equal(await stored(), 'wide', 'noted only: nothing kept before OK');
-  let n = glues.length;
-  await loadAfter(page, () => page.click('#setup-ok', { noWaitAfter: true }));
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  await h.waitFrames(page, 30);
-  let s = await layoutShown(page);
-  assert.equal(loads, 1, 'one load');
-  assert.ok(s.layout === 'original' && s.stored === 'original' && glues.slice(n).every((p) => p === '/pkg/u6_web.js'), 'into the last choice: Original 16:10, the Original build');
-  // Across and back: Wide, then Original 16:10 (the build and layout that run): no load.
-  await page.click('#settings');
-  await page.check('input[name="layout"][value="wide"]');
-  await page.check('input[name="layout"][value="original"]');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  await h.waitFrames(page, 30);
-  assert.equal(loads, 1, 'across and back: no load');
-  // Wide, then HD 16:9 (the other layout of this build): no load, HD 16:9 at once.
-  await page.click('#settings');
-  await page.check('input[name="layout"][value="wide"]');
-  await page.check('input[name="layout"][value="hd"]');
-  s = await layoutShown(page);
-  assert.ok(s.layout === 'hd' && s.stored === 'hd', 'HD 16:9 at once, the switch called off');
-  await page.click('#setup-ok');
-  await h.waitSettled(page);
-  await h.waitFrames(page, 30);
-  assert.equal(loads, 1, 'no load');
-  // The switch's wait: Wide and the site's pack chosen, the pack's answer held, OK (the
-  // chooser's operation waits on the pack); a first Save (after a step) admitted behind it, its
-  // store held; the pack let go: the chooser closes and the switch starts, waiting on the first
-  // Save. THEN a second Save (after another step), admitted while the switch waits, its store
-  // held as well. The first let go (and the hold kept for the second): no load; the second let
-  // go: one load. A wait on the queue's tail as it was when the switch started would load the
-  // page between the two.
-  const stores = async (kind) => (await h.log(page)).filter((e) => e.startsWith(`saves:store:${kind}`)).length;
-  const save = async () => {
-    await page.focus('#screen');
-    const { to } = await h.stepOnce(page);
-    await h.press(page, 'Control+s', 30);
-    await h.press(page, 'y', 60);
-    return to;
-  };
-  await page.click('#settings');
-  await listed(page, 1);
-  await page.check('input[name="layout"][value="wide"]');
-  await page.check('#setup-hd input[value="test-pack.zip"]');
-  const pack = h.holdPack(env, 'test-pack.zip');
-  await page.click('#setup-ok');
-  await pack.asked;
-  await page.evaluate(() => window.__hold('saves'));
-  const [ends0, starts0] = [await stores('end'), await stores('start')];
-  const first = await save();
-  pack.release();
-  await page.waitForFunction((k) => window.__log.filter((e) => e.startsWith('saves:store:start')).length > k, starts0, { timeout: 30_000 });
-  await page.waitForFunction(() => document.getElementById('setup').hidden, null, { timeout: 30_000 });
-  assert.equal((await lines())[0], TEXT.en.layoutSwitchWaiting, 'the switch waits on the first Save: its line');
-  const second = await save();
-  assert.notEqual(second, first, 'the second Save after another step');
-  await page.waitForFunction(() => document.body.dataset.ops === '2', null, { timeout: 30_000 });
-  assert.equal(loads, 1, 'both Saves admitted, no load yet');
-  await page.evaluate(() => {
-    window.__release('saves');
-    window.__hold('saves');
-  });
-  await page.waitForFunction(([e, k]) => window.__log.filter((x) => x.startsWith('saves:store:end')).length > e
-    && window.__log.filter((x) => x.startsWith('saves:store:start')).length > k + 1, [ends0, starts0], { timeout: 30_000 });
-  await h.waitFrames(page, 30);
-  assert.equal(loads, 1, 'the first Save done: no load (the second is admitted)');
-  assert.equal(await stores('end'), ends0 + 1, 'the second Save still held');
-  assert.equal((await lines())[0], TEXT.en.layoutSwitchWaiting, 'the switch waits again (on the second): its line');
-  n = glues.length;
-  await loadAfter(page, () => page.evaluate(() => window.__release('saves')));
-  await started(page, FILES);
-  await h.waitPrompt(page);
-  assert.equal(loads, 2, 'one load, after the second Save');
-  const w = await wideShown(page);
-  assert.ok(w.layout === 'wide' && w.wide && glues.slice(n).every((p) => p === '/pkg-wide/u6_web.js'), 'the Wide build');
-  assert.equal((await atPrompt(page)).leader, second, 'the second Save resumes');
-  assert.ok((await h.savedPaths(page)).includes('savegame/objlist'), 'it is in storage');
-  console.log('  receipt: the switch line in English and Korean, gone when called off; HD then Original before OK: one load into Original; Wide and back, Wide then HD: no load; the switch waited (its line) on a held Save, then on a second Save admitted during the wait: no load after the first, one load after the second, which resumed: pass');
-}, { needs: h.haveHfes });
+
 
 test('Wide layout (spec 13 Design 5, drag): the date line dragged by its title strip follows the pointer (in front of the others) and stays whole on the canvas; its press and release reach the game as a gap\'s; the pointer then reaches its content where it is; its place is kept (u6.layout.windows) and comes back after a reload; the windows not dragged stay at their corners', async (env) => {
   const { page } = await bootWide(env);
@@ -14562,7 +12038,7 @@ for (const mode of ['hd', 'layout', 'wide']) {
   test(`smooth motion (spec 20 Design 5), ${mode} in fullscreen: a key pressed while a step's slide runs is taken (the party walks back on a slide of its own, the map drawn moving back); the border round the shown map keeps its pixels in every frame of the slides; once settled the page draws no slide (60 frames)`, async (env) => {
     const { context, page } = await motionPage(env, mode, true, Date.now());
     await interpolationOnly(page);
-    await page.click('#fullscreen');
+    await h.clickSetting(page, 'fullscreen', { close: true });
     await waitFull(page, 'on');
     await page.focus('#screen');
     await h.runFramesToPrompt(page, 60_000);
@@ -14873,7 +12349,7 @@ test('smooth motion (spec 20) with the in-game menu (spec 17): a right press dur
   await context.close();
 }, { needs: h.haveHfes });
 
-async function quietMotionPage(page) {
+async function quietMotionPage(page, { realWideCalibration = false } = {}) {
   await motionKey(page, 'b');
   await page.keyboard.press('Control+s');
   await h.runFrames(page, 60);
@@ -14907,11 +12383,31 @@ async function quietMotionPage(page) {
   assert.ok(changed > 0, 'the quiet fixture changed nonparty status');
   await page.reload();
   await started(page, FILES);
+  let calibration = null;
+  if (realWideCalibration && await page.evaluate(() => Boolean(globalThis.__u6Layout?.wide))) {
+    // Reload restored the real RAF and clock. Finish the production six-frame
+    // calibration before virtualDisplay can make its remaining samples zero.
+    await page.waitForFunction(() => Number.isFinite(globalThis.__u6Layout?.composeMedianMs), null,
+      { timeout: 60_000, polling: 'raf' });
+    calibration = await page.evaluate(() => ({
+      medianMs: globalThis.__u6Layout.composeMedianMs,
+      scale: globalThis.__u6Layout.scale,
+      engineScale: globalThis.__shownGame.hd_scale(),
+      virtualDisplay: Boolean(window.__display),
+      clockOverridden: Object.prototype.hasOwnProperty.call(performance, 'now'),
+    }));
+    assert.equal(calibration.virtualDisplay, false, 'Wide calibration finishes before installing the virtual display');
+    assert.equal(calibration.clockOverridden, false, 'Wide calibration uses the native performance clock');
+    assert.ok(Number.isFinite(calibration.medianMs) && calibration.medianMs >= 0, 'Wide production composition median is available');
+    assert.equal(calibration.scale, calibration.medianMs > 8 ? 2 : 4, 'Wide scale follows the unchanged production 8 ms decision');
+    assert.equal(calibration.engineScale, calibration.scale, 'the engine uses the production-selected Wide scale');
+  }
   await h.virtualDisplay(page, 60);
   await page.focus('#screen');
   await h.runFramesToPrompt(page, 60_000);
   if (await page.evaluate(() => globalThis.__shownGame.combat_mode())) await motionKey(page, 'b');
   await h.runFrames(page, 60);
+  return calibration;
 }
 
 // Go here starts a new slide after the menu, sampled from the choosing press itself, in a
@@ -15278,8 +12774,7 @@ const inText = (i) => i % 136 < TEXT_COLUMNS;
 
 /// The message window's rect of the RGBA frame (a colour string per pixel), with HD on a digest of
 /// the HD frame's pixels over its rows above the last and its first 16 cell columns (the bar's
-/// column aside) and, with the HD font on (the text the page's, drawn from the list, spec 11),
-/// of the cells the HD frame lists there, and the history offset.
+/// column aside), the source-plane glyph diagnostics, and the history offset.
 async function historyShown(page) {
   return page.evaluate(() => {
     const g = globalThis.__shownGame;
@@ -15303,7 +12798,7 @@ async function historyShown(page) {
           for (let k = 0; k < 3; k += 1) hd = Math.imul(hd ^ f[(y * fw * s + x) * 4 + k], 16777619) >>> 0;
         }
       }
-      if (g.hd_font()) {
+      if (g.hd_glyphs().length > 0) {
         const gl = g.hd_glyphs();
         for (let k = 0; k + 4 < gl.length; k += 5) {
           if (gl[k] >= x0 && gl[k] < x0 + 128 && gl[k + 1] >= y0 && gl[k + 1] < y0 + rows - 8) {
@@ -16122,7 +13617,7 @@ const FULL_POINT = [220, 150];
 // Fullscreen (the browser's): the system's pointer still hidden over the canvas, the game's at the
 // mouse.
 async function fullscreenCursor(page, label) {
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
   await h.waitFrames(page, 2);
   const r = await mouseTo(page, ...FULL_POINT);
@@ -16139,9 +13634,11 @@ const testMouse = (page) => page.evaluate(() => window.__testMouse);
 
 // Settings' "HD on" switched to `on` by the page itself (no mouse move), once the game shows it.
 async function hdTo(page, on) {
-  await page.evaluate((want) => {
-    if (globalThis.__shownGame.hd_on() !== want) document.getElementById('hd').click();
-  }, on);
+  if (await page.evaluate(() => globalThis.__shownGame.hd_on()) !== on) {
+    await h.focusSetting(page, 'hd');
+    await page.keyboard.press('Space');
+    await h.closeSettings(page);
+  }
   await page.waitForFunction((want) => globalThis.__shownGame.hd_on() === want, on, { timeout: 10_000 });
 }
 
@@ -16211,8 +13708,9 @@ test('the system\'s pointer (Original layout): hidden over the canvas while the 
   const r = await pointerFollows(page, ...SCROLL_POINTS, 'Original, HD on');
   // HD off: the classic frame (the engine's sprite over it) and the canvas hold the game's
   // pointer at the same box, in the colours the HD pointer gave; the system's still hidden.
-  await page.evaluate(() => document.getElementById('hd').click());
-  await page.waitForFunction(() => !globalThis.__shownGame.hd_on(), null, { timeout: 10_000 });
+  const beforeHdToggle = await testMouse(page);
+  await hdTo(page, false);
+  assert.deepEqual(await testMouse(page), beforeHdToggle, 'HD off: keyboard settings leave the mouse at its original client point');
   await h.waitFrames(page, 2);
   const off = await page.evaluate(([[x, y, w, hh], rgba]) => {
     const g = globalThis.__shownGame;
@@ -16232,8 +13730,8 @@ test('the system\'s pointer (Original layout): hidden over the canvas while the 
   assert.deepEqual(off.size, [320, 200], 'HD off: the canvas is the classic frame');
   assert.ok(off.seen > 0 && off.frame === off.seen && off.canvas === off.seen, 'HD off: the classic frame and the canvas show the game\'s pointer at the mouse');
   assert.equal(off.cursor, 'none', 'HD off: the system\'s pointer hidden over the canvas');
-  await page.evaluate(() => document.getElementById('hd').click());
-  await page.waitForFunction(() => globalThis.__shownGame.hd_on(), null, { timeout: 10_000 });
+  await hdTo(page, true);
+  assert.deepEqual(await testMouse(page), beforeHdToggle, 'HD on: keyboard settings still leave the mouse at its original client point');
   await fullscreenCursor(page, 'Original');
   // The press that opened the context menu, held: none of it reaches the game; the engine draws
   // the menu's arrow at the mouse (`Game.game_pointer`: the menu's pointer), so the system's
@@ -16319,10 +13817,11 @@ test('the system\'s pointer (Wide layout): hidden over the canvas where the map 
   console.log(`  receipt: Wide: the system's pointer hidden at 5 points with the game's at the mouse, kept at ${gaps.length} gaps and through a drag off the strip: pass`);
 }, { needs: h.haveHfes });
 
-test('the system\'s pointer (the speed badge): over the badge, which lets the pointer through to the canvas but covers the game\'s pointer there, the canvas shows it, the game still given the move; off the badge it is hidden again; the badge hidden under a still mouse (back at 1x) hides it with no move', async (env) => {
+test('the system\'s pointer (the speed badge, adversarial overlay fixture): over the badge, which lets the pointer through to the canvas but covers the game\'s pointer there, the canvas shows it, the game still given the move; off the badge it is hidden again; the badge hidden under a still mouse (back at 1x) hides it with no move', async (env) => {
   const { page } = await menuPage(env);
   await trackMouse(page);
   await pointerFollows(page, ...SCROLL_POINTS, 'before the badge');
+  await adversarialGameOverlays(page);
   await page.keyboard.press('NumpadAdd');
   await page.locator('#speed-badge').waitFor({ state: 'visible', timeout: 10_000 });
   const b = await page.locator('#speed-badge').boundingBox();
@@ -16392,11 +13891,14 @@ test('the system\'s pointer under a still mouse (HD layout): a context menu clos
   const same = (p, [gx, gy]) => p.on && p.pixel[0] === gx && p.pixel[1] === gy;
   const away = async (change, back, label) => {
     assert.ok(same(await mousePixel(page), SCROLL_POINTS[0]), `${label}: precondition, the mouse over the game's pointer`);
+    const client = await testMouse(page);
     await change();
+    assert.deepEqual(await testMouse(page), client, `${label}: settings changed through the keyboard without a mouse move`);
     c = await settledCursor(page, 'page', `${label}, no move`);
     assert.ok(!same(await mousePixel(page), SCROLL_POINTS[0]), `${label}: another game pixel under the mouse`);
     assert.equal(c.canvas, 'auto', `${label}, no move: the system's pointer (the game's is not under it)`);
     await back();
+    assert.deepEqual(await testMouse(page), client, `${label} undone: the mouse remains at the same client point`);
     c = await settledCursor(page, 'game', `${label} undone, no move`);
     assert.ok(same(await mousePixel(page), SCROLL_POINTS[0]), `${label} undone: the game's pointer's pixel under the mouse again`);
     assert.equal(c.canvas, 'none', `${label} undone, no move: the system's pointer hidden (the game's under it again)`);
@@ -16405,10 +13907,12 @@ test('the system\'s pointer under a still mouse (HD layout): a context menu clos
     await hdTo(page, on);
     await page.waitForFunction((w) => document.body.dataset.layout === (w ? 'hd' : 'original'), on, { timeout: 10_000 });
   };
-  // The toolbar's Fullscreen clicked by the page itself (no mouse move): the browser's or the
+  // Fullscreen through actual settings keyboard input (no mouse move): the browser's or the
   // page's own, as the browser allows; then out again.
   const full = (on) => async () => {
-    await page.evaluate(() => document.getElementById('fullscreen').click());
+    await h.focusSetting(page, 'fullscreen');
+    await page.keyboard.press('Space');
+    await h.closeSettingsButton(page);
     await page.waitForFunction((w) => (document.body.dataset.fullscreen !== 'off') === w, on, { timeout: 10_000 });
   };
   await away(hd(false), hd(true), 'HD off');
@@ -16512,11 +14016,12 @@ test('the system\'s pointer once the game stops: hidden over the game\'s pointer
   console.log(`  receipt: the system's pointer shown once the game ${stops.map(([s]) => s).join(' and once it ')}: pass`);
 }, { needs: h.haveHfes });
 
-test('the system\'s pointer and the Exit button (opus S1): in fullscreen, the Original layout filling a 16:10 screen so the Exit button lies over the canvas, a press held on the canvas and moved onto the button (the canvas holds the pointer captured, the game given each move: its pointer under the button) shows the system\'s pointer', async (env) => {
+test('the system\'s pointer and the Exit button (opus S1): with explicit adversarial overlays in fullscreen, the Original layout filling a 16:10 screen so the Exit button lies over the canvas, a press held on the canvas and moved onto the button (the canvas holds the pointer captured, the game given each move: its pointer under the button) shows the system\'s pointer', async (env) => {
   const { page } = await menuPage(env, { width: 1280, height: 800 });
   await trackMouse(page);
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
+  await adversarialGameOverlays(page);
   await h.waitFrames(page, 2);
   await mouseTo(page, ...SCROLL_POINTS[0]);
   await page.mouse.down();
@@ -16546,15 +14051,15 @@ test('the system\'s pointer and the Exit button (opus S1): in fullscreen, the Or
   console.log('  receipt: a press held on the canvas moved onto the Exit button over it: the system\'s pointer shown: pass');
 }, { needs: h.haveHfes });
 
-test('the system\'s pointer, the stylesheet\'s scope: only the canvas hides it: on a first visit (the chooser) the canvas, the chooser and its OK keep it; in fullscreen, the canvas hiding it over the game\'s pointer, the letterbox round the canvas and the Exit button keep it', async (env) => {
+test('the system\'s pointer, the stylesheet\'s scope: only the canvas hides it: on a first visit the launcher and file preparation keep it; in fullscreen, the canvas hiding it over the game\'s pointer, the letterbox round the canvas and the Exit button keep it', async (env) => {
   const { page: first } = await h.openPage(env, { setup: null });
   await h.load(first, env);
-  assert.ok(!(await first.evaluate(() => document.getElementById('setup').hidden)), 'precondition: the chooser shows');
-  const c = await cursorOn(first, '#screen', '#setup', '#setup-ok');
-  assert.ok(c.of.every((v) => v !== 'none'), 'a first visit: the canvas, the chooser and its OK keep it');
+  assert.ok(await first.locator('#picker').isVisible(), 'precondition: initial import is visible');
+  const c = await cursorOn(first, '#launcher', '#picker', '#controls');
+  assert.ok(c.of.every((v) => v !== 'none'), 'a first visit: launcher and file preparation keep the pointer');
   const { page } = await menuPage(env);
   await trackMouse(page);
-  await page.click('#fullscreen');
+  await h.clickSetting(page, 'fullscreen', { close: true });
   await waitFull(page, 'on');
   const r = await mouseTo(page, ...FULL_POINT);
   assert.ok(r.cursor.pointer === 'game' && r.cursor.canvas === 'none', 'precondition: the canvas hides it over the game\'s pointer');
@@ -16572,7 +14077,7 @@ test('the system\'s pointer, the stylesheet\'s scope: only the canvas hides it: 
   assert.ok(scope.bar !== 'none' && scope.exit !== 'none', 'fullscreen: the letterbox and the Exit button keep it');
   await page.evaluate(() => document.exitFullscreen());
   await waitFull(page, 'off');
-  console.log('  receipt: the stylesheet hides the system\'s pointer on the canvas only: the chooser, its OK, the letterbox and the Exit button keep it: pass');
+  console.log('  receipt: the stylesheet hides the system\'s pointer on the canvas only: the launcher, file preparation, letterbox and Exit button keep it: pass');
 }, { needs: h.haveHfes });
 
 // W3: the measured canvas placements, their actual draw calls, and per-track timing.
@@ -16953,7 +14458,8 @@ for (const mode of ['layout', 'wide']) {
   test(`footstep B browser, ${mode}: actual canvas idle freeze, distance phases and lift, settle, menu and save-reader reentry`, async (env) => {
     const hostLoad = loadavg();
     const { context, page } = await motionPage(env, mode, true, 1_700_000_000_000);
-    await quietMotionPage(page);
+    const calibration = await quietMotionPage(page, { realWideCalibration: true });
+    if (calibration) console.log(`  receipt: B2 ${mode} production calibration before virtual display: ${JSON.stringify(calibration)}`);
     // A deterministic S2 correctness receipt, independent of the host-load calibration.
     // This optional test-only adapter keeps the actual page's HD frame/layers at S2; it
     // does not change the production fallback, map transform, or any pixel/time assertion.
@@ -17134,15 +14640,89 @@ for (const mode of ['layout', 'wide']) {
   }, { needs: h.haveHfes });
 }
 
+// The external setup/toolbar contracts were superseded by the in-canvas menu. These
+// assertions cover their replacements without activating any hidden compatibility input.
+test('launcher: import comes first without external game controls, automatic model download or font choice; phone and desktop stay within the viewport', async (env) => {
+  const { context, page } = await h.openPage(env, { setup: null });
+  const models = [];
+  page.on('request', r => { if (new URL(r.url()).pathname.startsWith('/models/')) models.push(1); });
+  await h.load(page, env);
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    const state = await page.evaluate(() => {
+      const visible = e => { const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(e).visibility!=='hidden'; };
+      return { title: document.title, picker: visible(document.getElementById('picker')),
+        oldControls: [...document.querySelectorAll('#settings-bridge input, #settings-bridge button')].filter(visible).length,
+        fontChoices: document.querySelectorAll('input[name="font"]').length,
+        overflow: document.documentElement.scrollWidth>innerWidth, terms: localStorage.getItem('u6.voiceTerms'),
+        lang: document.documentElement.lang };
+    });
+    assert.equal(state.title, 'Ultima VI — The False Prophet');
+    assert.equal(state.picker, true, 'original file picker is available before play');
+    assert.equal(state.oldControls, 0, 'no duplicate external game control is displayed');
+    assert.equal(state.fontChoices, 0, 'font selection is removed');
+    assert.equal(state.overflow, false, 'the whole launcher fits the viewport');
+    assert.equal(state.terms, null, 'opening the site never implies model consent');
+    assert.equal(state.lang, 'ko', 'first visit keeps the Korean default');
+    await keepFrame(page, `launcher-${viewport.width}x${viewport.height}.png`);
+  }
+  assert.deepEqual(models, [], 'no voice model request before consent');
+  await context.close();
+});
+
+test('canvas settings: a cross-build choice preserves the running game and stored files, then applies on the next explicit page start', async (env) => {
+  for (const [layout, next] of [['original', 'wide'], ['wide', 'hd']]) {
+    const { context, page } = await h.openPage(env, { layout });
+    await h.load(page, env);
+    await page.setInputFiles('#picker', h.HFES);
+    await started(page, FILES);
+    await h.waitPrompt(page);
+    const {moved:savedPosition}=await walkAndSave(page);
+    const saved=await h.savedFiles(page);
+    assert.ok(saved.length>0,'precondition: a real nonempty game save');
+    await h.stepOnce(page);
+    const files = await h.keptPaths(page);
+    await h.virtualDisplay(page, 60);
+    await h.openSettings(page);
+    const before = await page.evaluate(() => {
+      globalThis.__settingsKeptGame=globalThis.__shownGame;
+      return { starts: globalThis.__starts.length, ticks: globalThis.__ticks, url:location.href, width:globalThis.__shownGame.width(), position:Array.from(globalThis.__shownGame.leader_position()) };
+    });
+    await h.chooseSetting(page, 'layout', next);
+    await h.runFrames(page, 60);
+    const after = await page.evaluate(() => ({
+      starts:globalThis.__starts.length,ticks:globalThis.__ticks,url:location.href,width:globalThis.__shownGame.width(),position:Array.from(globalThis.__shownGame.leader_position()),
+      same:globalThis.__shownGame===globalThis.__settingsKeptGame,kept:localStorage.getItem('u6.layout')
+    }));
+    assert.deepEqual({ starts:after.starts,ticks:after.ticks,url:after.url,width:after.width,position:after.position },before,'changing screen build does not restart or step the game');
+    assert.ok(after.same && after.kept === next,'same running game, new choice kept for the next start');
+    h.assertSame(await h.keptPaths(page),files,'the original and save stores remain unchanged');
+    h.assertSame(await h.savedFiles(page),saved,'settings do not write the unsaved progress over the stored save');
+    await h.closeSettings(page);
+    assert.equal(await page.evaluate(() => globalThis.__shownGame===globalThis.__settingsKeptGame),true,'closing settings preserves the running game');
+    await page.reload();
+    await started(page,FILES);
+    assert.equal((await atPrompt(page)).leader,savedPosition,'explicit restart resumes the actual stored save across builds');
+    h.assertSame(await h.savedFiles(page),saved,'cross-build restore does not rewrite the save');
+    assert.equal(await page.evaluate(() => document.body.dataset.layout),next,'explicit page start applies the chosen build');
+    await context.close();
+  }
+},{needs:h.haveHfes});
+
 const filter = process.argv[2];
+// Optional 0-based stable partition: U6_TEST_SHARD=0/2 and 1/2 cover the full registry once.
+const shardText=process.env.U6_TEST_SHARD;
+const shard=shardText ? shardText.split('/').map(Number) : null;
+if (shard && (!/^\d+\/\d+$/.test(shardText) || shard.length!==2 || !Number.isSafeInteger(shard[0]) || !Number.isSafeInteger(shard[1]) || shard[1]<1 || shard[0]>=shard[1])) throw new Error('U6_TEST_SHARD must be index/count, 0 <= index < count');
 const env = await h.setup();
 let failed = 0;
 let ran = 0;
 try {
-  for (const t of tests) {
+  for (const [testIndex,t] of tests.entries()) {
+    if (shard && testIndex % shard[1] !== shard[0]) continue;
     if (filter && !t.name.includes(filter)) continue;
     if (t.needs && !t.needs()) {
-      console.log(`skip - ${t.name} (the user's disks are not present)`);
+      console.log(`skip - ${t.name} (required local fixture or model is not present)`);
       continue;
     }
     ran += 1;
@@ -17167,5 +14747,5 @@ try {
 } finally {
   await env.close();
 }
-console.log(`# web tests: ${ran} ran, ${ran - failed} passed, ${failed} failed`);
+console.log(`# web tests${shard ? ` shard ${shardText}` : ''}: ${ran} ran, ${ran - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

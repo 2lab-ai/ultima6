@@ -4,8 +4,9 @@
 //! change visible frames; these hashes were recorded after inspecting Original/Wide and Korean
 //! private captures and validating click, page, used, reset, full preview and answer behavior.
 //! The synthetic history baseline in ui/tests/scrollback_baseline.rs remains unchanged.
-//! Each digest covers colour indices, sources, palette and HD frames at 2×/4× with HD font
-//! off/on. Only counts and digests are printed; no game text or images enter repository/logs.
+//! Each digest covers colour indices, sources, palette and original-pixel HD frames at 2×/4×.
+//! The retired platform-font outputs are removed; all pixel-frame golden hashes are unchanged.
+//! Only counts and digests are printed; no game text or images enter repository/logs.
 //! Missing archive skips unless U6_REQUIRE_ARCHIVE=1, which fails closed.
 
 use u6_render::hd::Scale;
@@ -24,33 +25,24 @@ use u6_testkit::Quiet;
 /// The visually checked choice UI digests ([`digests`]): the shown frame, the published frame, the HD
 /// frames at 2× and 4× ([`HD`]), each over every tick of the three conversations, and the ticks.
 #[cfg(not(feature = "wide"))]
-const CHOICES: [u64; 7] = [
+const CHOICES: [u64; 5] = [
     0xca87841d744767c1,
     0xca87841d744767c1,
     0xd927294d4ed15cc3,
     0x9c6f11510ca4d641,
-    0xef43974394c87ad3,
-    0xe22cfa9ba8ed12b5,
     54,
 ];
 #[cfg(feature = "wide")]
-const CHOICES: [u64; 7] = [
+const CHOICES: [u64; 5] = [
     0x6a7941ae8515ff99,
     0x6a7941ae8515ff99,
     0x7f52d73fd5108331,
     0xac7e4af1b202c7a9,
-    0x0d919e205dffca85,
-    0x3d3a8b3bfafd1c2d,
     54,
 ];
 
-/// The HD views digested: the scale and the HD font mode.
-const HD: [(Scale, bool); 4] = [
-    (Scale::X2, false),
-    (Scale::X4, false),
-    (Scale::X2, true),
-    (Scale::X4, true),
-];
+/// Pixel-font HD views. The removed platform-font branch is no longer a rendering option.
+const HD: [Scale; 2] = [Scale::X2, Scale::X4];
 
 /// FNV-1a 64 of each word into `h`.
 fn mix(h: &mut u64, words: impl IntoIterator<Item = u64>) {
@@ -77,18 +69,15 @@ fn frame_words(fb: &Framebuffer) -> impl Iterator<Item = u64> + '_ {
 }
 
 /// What an HD view shows after a present that returned `wrote`: whether it wrote, its RGBA when it
-/// did (else the same as before), and the cells it lists for the HD font (none with the mode off).
+/// did (else the same as before), with the original pixel-only golden format's zero marker.
 fn hd_words(v: &HdView, wrote: bool) -> Vec<u64> {
     let mut out = vec![u64::from(wrote)];
     if wrote {
         out.extend(v.rgba().iter().map(|&w| u64::from(w)));
     }
-    let rgb = |c: u6_render::Rgb| (u64::from(c.r) << 16) | (u64::from(c.g) << 8) | u64::from(c.b);
-    out.push(v.glyphs().len() as u64);
-    for g in v.glyphs() {
-        out.push((u64::from(g.x) << 32) | (u64::from(g.y) << 16) | u64::from(g.code));
-        out.push((rgb(g.ink) << 24) | rgb(g.paper));
-    }
+    // Keep the original pixel-only golden format's zero metadata count. Glyph metadata
+    // is now always available, but is independently covered by the glyph/plane tests.
+    out.push(0);
     out
 }
 
@@ -184,11 +173,11 @@ fn converse(state: &State, files: &crate::files::Files, npc: i16, each: &mut imp
 }
 
 /// The digests of the three conversations ([`CHOICES`]'s order); `None` without the zip.
-fn digests() -> Option<[u64; 7]> {
+fn digests() -> Option<[u64; 5]> {
     let files = files()?;
     let base = with_text(&files);
     let blank = Framebuffer::new();
-    let mut out = [0xcbf2_9ce4_8422_2325u64; 7];
+    let mut out = [0xcbf2_9ce4_8422_2325u64; 5];
     let mut ticks = 0u64;
     let mut talked = 0;
     for npc in near(&base) {
@@ -198,10 +187,9 @@ fn digests() -> Option<[u64; 7]> {
         }
         let mut hd: Vec<HdView> = HD
             .into_iter()
-            .map(|(scale, font)| {
+            .map(|scale| {
                 let mut v = HdView::new();
                 v.set(true, scale);
-                v.set_font(font);
                 v
             })
             .collect();
@@ -221,7 +209,7 @@ fn digests() -> Option<[u64; 7]> {
         }
     }
     assert_eq!(talked, 3, "three conversations");
-    out[6] = ticks;
+    out[4] = ticks;
     Some(out)
 }
 
@@ -237,10 +225,10 @@ fn with_no_scroll_three_conversations_show_choice_ui_frames() {
         println!("converse baseline: skipped (no game files)");
         return;
     };
-    println!("converse baseline: ran ({} ticks)", got[6]);
+    println!("converse baseline: ran ({} ticks)", got[4]);
     println!("{got:#018x?}");
     assert_eq!(
         got, CHOICES,
-        "shown, published, HD 2×, HD 4×, HD 2× and 4× with the HD font, ticks"
+        "shown, published, original-pixel HD 2×, original-pixel HD 4×, ticks"
     );
 }
