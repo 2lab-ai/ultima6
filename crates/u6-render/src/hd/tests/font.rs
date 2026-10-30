@@ -1,7 +1,5 @@
-//! Spec 11, the HD font mode, on synthetic glyph cells (row bytes and codes written for these
-//! tests): which cells it lists, what it writes for them, that the mode off is the composition
-//! before it, and that a kept compositor's frame and list are a new one's after every change,
-//! with every cell whose listing changed inside the rect it reported. No game data.
+//! Original pixel text at both HD scales, with source-plane glyph diagnostics independent of
+//! rendering. Synthetic Latin, Hangul, spaces, partial cells and retained-frame regressions.
 
 use super::*;
 use crate::FLAG_INK;
@@ -48,20 +46,46 @@ fn glyph(fb: &mut Framebuffer, code: u16, (col, row): (usize, usize)) {
 /// No row byte set: the rows of a blank glyph (the space's here).
 const BLANK: [u8; 8] = [0; 8];
 
+/// There is one text rendering policy: the original pixel shapes, including Hangul.
+/// Diagnostic glyph metadata must remain available without enabling another font.
+#[test]
+fn pixel_text_and_hangul_are_always_drawn_and_observable() {
+    let mut fb = plane();
+    fb.palette = palette(6);
+    fb.clear(PAPER);
+    glyph(&mut fb, 0x41, (2, 2));
+    glyph(&mut fb, 0xac00, (3, 2));
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        c.compose(&fb, &mut NoImages, scale);
+        assert_eq!(c.glyphs().len(), 2, "glyph diagnostics need no font switch");
+        for at in [(2, 2), (3, 2)] {
+            for (x, y) in cell_pixels(at) {
+                let expected = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                assert!(
+                    block(c.rgba(), scale, (x, y))
+                        .iter()
+                        .all(|&p| p == expected),
+                    "{scale:?}: original glyph pixel ({x}, {y}) remains visible"
+                );
+            }
+        }
+    }
+}
+
 /// A whole space (code 0x20, [`BLANK`]) in cell (col, row): all 64 pixels [`PAPER`].
 fn space(fb: &mut Framebuffer, (col, row): (usize, usize)) {
     glyph_px(fb, 0x20, BLANK, (col * CELL, row * CELL), (INK, PAPER));
 }
 
-/// The composition of a new compositor in the font mode `font`: its frame and its list.
-pub(super) fn fresh_font(
+/// A new compositor's frame and diagnostic list.
+pub(super) fn fresh_glyphs(
     fb: &Framebuffer,
     pics: &Pics,
     scale: Scale,
-    font: bool,
 ) -> (Vec<u32>, Vec<HdGlyph>) {
     let mut c = Compositor::new();
-    c.set_font_mode(font);
+
     c.compose(fb, &mut pics.clone(), scale);
     (c.rgba().to_vec(), c.glyphs().to_vec())
 }
@@ -88,19 +112,10 @@ pub(super) fn cell_pixels((col, row): (usize, usize)) -> impl Iterator<Item = (u
     (0..CELL * CELL).map(move |k| (col * CELL + k % CELL, row * CELL + k / CELL))
 }
 
-/// Spec 11 Acceptance 1: a letter and a syllable (and the ends of both ranges) are listed with
-/// their ink and paper and composed as their paper; a whole space (no ink pixel, all of one
-/// colour) is listed as 0x20 with that colour as its ink and its paper, and composed as it was;
-/// a code under the space, codes past 0x7e (a rune) and past the syllables are not; nor is a cell
-/// of a listed code that is not one whole glyph: all ink, no ink, half under a tile, under one
-/// classic write (the pointer), a pixel of another paper colour, a pixel flagged otherwise, drawn
-/// one pixel off the grid, a pixel of another code, a pixel at another version, an ink pixel of
-/// another colour, its lower half written again classic in the colours it had (only the sources
-/// tell); nor a space with an ink pixel (in the ink's colour, or in the paper's: only the flag
-/// tells), with a pixel of another colour, half under a tile, or its lower half written again
-/// classic in the colour it had. Every cell not listed is the mode off's.
+/// Whole Latin, Hangul and spaces have truthful diagnostics; partial/overwritten glyphs,
+/// runes and control glyphs do not. Every original ink and paper pixel remains visible.
 #[test]
-fn the_hd_font_lists_whole_letters_syllables_and_spaces_only() {
+fn diagnostics_list_whole_letters_syllables_and_spaces_only() {
     let mut pics = Pics::default();
     pics.put(Kind::Tile, 9, (16, 16), art(9, 16, 16, 4), None);
     let letters = [
@@ -189,7 +204,7 @@ fn the_hd_font_lists_whole_letters_syllables_and_spaces_only() {
             fb.set(x, y, fb.get(x, y).unwrap());
         }
         let mut c = Compositor::new();
-        c.set_font_mode(true);
+
         c.compose(&fb, &mut pics, scale);
         let want: Vec<HdGlyph> = letters
             .iter()
@@ -205,102 +220,27 @@ fn the_hd_font_lists_whole_letters_syllables_and_spaces_only() {
             want.as_slice(),
             "{scale:?}: the letters, the syllables and the whole spaces"
         );
-        let (off, none) = fresh_font(&fb, &pics, scale, false);
-        assert!(none.is_empty(), "off: nothing listed");
-        let paper = word(fb.palette[usize::from(PAPER)]);
-        let mut cells = vec![false; WIDTH * HEIGHT];
-        for &(_, at) in &letters {
-            for (x, y) in cell_pixels(at) {
-                cells[y * WIDTH + x] = true;
-                assert!(
-                    block(c.rgba(), scale, (x, y)).iter().all(|&g| g == paper),
-                    "{scale:?}: a listed cell is its paper"
-                );
+        // Listing must not change any pixel. Strip only the text provenance to produce
+        // an independent classic-pixel oracle while retaining the same HD tiles.
+        let mut classic = fb.clone();
+        for (i, src) in fb.src().unwrap().iter().enumerate() {
+            if src.kind == Kind::Glyph {
+                classic.set(i % WIDTH, i / WIDTH, fb.pixels()[i]);
             }
         }
-        // A listed space is its paper, which is every pixel it had: the mode off's blocks (and
-        // left out of `cells`, so the check below holds it to them too).
-        for &(at, colour) in &spaces {
-            let paper = word(fb.palette[usize::from(colour)]);
-            for p in cell_pixels(at) {
-                let b = block(c.rgba(), scale, p);
-                assert!(
-                    b.iter().all(|&g| g == paper) && b == block(&off, scale, p),
-                    "{scale:?}: a listed space is its paper, the pixels it had"
-                );
-            }
-        }
-        let s = scale.factor();
-        let same = (0..c.rgba().len()).all(|i| {
-            let (x, y) = (i % (WIDTH * s) / s, i / (WIDTH * s) / s);
-            cells[y * WIDTH + x] || c.rgba()[i] == off[i]
-        });
-        assert!(same, "{scale:?}: every other cell as with the mode off");
-    }
-}
-
-/// The mode off (the default) composes each glyph pixel as the classic pixel it was before
-/// spec 11 (whole spaces, which the mode on lists, included): the frame is that of the same
-/// colours drawn classic, byte for byte, with the same images asked for (a glyph is never asked
-/// as one, and none here is drawn over the paper, so the paper is not asked for) and nothing
-/// listed; and a compositor switched on and off again writes every block and is a new one's.
-#[test]
-fn with_the_font_mode_off_glyphs_are_the_classic_pixels_they_were() {
-    let mut pics = Pics::default();
-    pics.put(Kind::Tile, 4, (16, 16), art(4, 16, 16, 5), None);
-    let mut fb = plane();
-    fb.palette = palette(7);
-    for k in 0..20 {
-        draw(&mut fb, &pics, Kind::Tile, 4, (k * 16, 64));
-    }
-    for (col, code) in (0..40).zip([0x41u16, 0xac00, 0x20, 0x7f, 0xc1].into_iter().cycle()) {
-        glyph(&mut fb, code, (col, 8 + col % 3));
-    }
-    space(&mut fb, (0, 12));
-    space(&mut fb, (1, 12));
-    let mut classic = fb.clone();
-    for (i, src) in fb.src().unwrap().iter().enumerate() {
-        if src.kind == Kind::Glyph {
-            classic.set(i % WIDTH, i / WIDTH, fb.pixels()[i]);
-        }
-    }
-    assert!(classic.src().unwrap().iter().all(|s| s.kind != Kind::Glyph));
-    for scale in [Scale::X2, Scale::X4] {
-        let (mut a, mut b) = (pics.clone(), pics.clone());
-        let mut c = Compositor::new();
-        assert!(!c.font_mode(), "off by default");
-        c.compose(&fb, &mut a, scale);
-        let mut d = Compositor::new();
-        d.compose(&classic, &mut b, scale);
-        assert!(c.rgba() == d.rgba(), "{scale:?}: byte for byte");
-        assert_eq!(a.asked, b.asked, "{scale:?}: no glyph asked as an image");
-        assert!(c.glyphs().is_empty());
-        c.take_dirty();
-        for font in [true, false] {
-            c.set_font_mode(font);
-            c.compose(&fb, &mut a, scale);
-            assert_eq!(
-                c.take_dirty(),
-                Some([0, 0, WIDTH, HEIGHT]),
-                "{scale:?}: a mode change writes every block"
-            );
-            let (want, list) = fresh_font(&fb, &pics, scale, font);
-            assert!(c.rgba() == want.as_slice() && c.glyphs() == list.as_slice());
-            assert_eq!(list.is_empty(), !font);
-        }
-        assert!(
-            c.rgba() == d.rgba(),
-            "{scale:?}: off again, the classic frame"
+        let mut expected = Compositor::new();
+        expected.compose(&classic, &mut pics.clone(), scale);
+        assert_eq!(
+            c.rgba(),
+            expected.rgba(),
+            "{scale:?}: text retains every original pixel"
         );
     }
 }
 
-/// A change of the mode empties the list at once, before any composition (off, it is empty, as
-/// the mode off's is; on, it waits for a composition in the mode), and the next composition
-/// writes every block and is a new one's, also after a change and back with none between;
-/// setting the mode it is in keeps the list and makes the next composition write nothing.
+/// Recomposition and cache invalidation retain both text pixels and truthful metadata.
 #[test]
-fn a_change_of_the_font_mode_empties_the_list_at_once() {
+fn glyph_diagnostics_survive_recomposition_without_changing_pixels() {
     let pics = Pics::default();
     let mut fb = plane();
     fb.palette = palette(6);
@@ -311,37 +251,143 @@ fn a_change_of_the_font_mode_empties_the_list_at_once() {
         listed(&fb, 0x41, (4, 6), (INK, PAPER)),
         listed(&fb, 0xac00, (5, 6), (INK, PAPER)),
     ];
-    let mut c = Compositor::new();
-    let compose = |c: &mut Compositor, font: bool, what: &str| {
-        c.compose(&fb, &mut pics.clone(), Scale::X2);
-        let (frame, list) = fresh_font(&fb, &pics, Scale::X2, font);
-        assert!(c.rgba() == frame.as_slice(), "{what}: a new one's frame");
-        assert_eq!(c.glyphs(), list.as_slice(), "{what}: a new one's list");
-        c.take_dirty()
-    };
-    c.set_font_mode(true);
-    compose(&mut c, true, "on");
-    assert_eq!(c.glyphs(), want, "on: both listed");
-    c.set_font_mode(true);
-    assert_eq!(c.glyphs(), want, "on again: no change, the list kept");
-    assert_eq!(compose(&mut c, true, "on again"), None, "nothing written");
-    assert_eq!(c.glyphs(), want);
-    c.set_font_mode(false);
-    assert!(c.glyphs().is_empty(), "off: empty at once");
-    c.set_font_mode(true);
-    assert!(c.glyphs().is_empty(), "on again: empty until a composition");
-    let full = Some([0, 0, WIDTH, HEIGHT]);
-    assert_eq!(compose(&mut c, true, "off and on"), full, "every block");
-    assert_eq!(c.glyphs(), want, "off and on: listed again");
-    c.set_font_mode(false);
-    assert!(c.glyphs().is_empty(), "off: empty at once");
-    assert_eq!(compose(&mut c, false, "off"), full, "every block");
-    assert!(c.glyphs().is_empty(), "off: empty after it");
-    c.set_font_mode(false);
-    assert_eq!(compose(&mut c, false, "off again"), None, "nothing written");
-    c.set_font_mode(true);
-    c.set_font_mode(false);
-    assert_eq!(compose(&mut c, false, "on and off"), full, "every block");
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        assert!(c.compose(&fb, &mut pics.clone(), scale));
+        assert_eq!(c.glyphs(), want);
+        c.take_dirty();
+        let before = c.rgba().to_vec();
+        assert!(!c.compose(&fb, &mut pics.clone(), scale));
+        assert_eq!(c.take_dirty(), None);
+        assert_eq!(c.glyphs(), want);
+        assert_eq!(c.rgba(), before);
+        c.forget();
+        assert!(c.compose(&fb, &mut pics.clone(), scale));
+        assert_eq!(c.glyphs(), want);
+        assert_eq!(c.rgba(), before);
+    }
+}
+
+/// Rendering keeps no eager glyph list. Either getter builds the same truthful snapshot,
+/// subsequent getters reuse it, and the next composition invalidates it without scanning.
+#[test]
+fn diagnostic_getters_lazily_cache_the_last_composition_without_rendering_work() {
+    let mut fb = plane();
+    fb.palette = palette(6);
+    fb.clear(PAPER);
+    glyph(&mut fb, 0x41, (1, 1));
+    glyph(&mut fb, 0xac00, (2, 1));
+    space(&mut fb, (3, 1));
+    for (x, y) in cell_pixels((3, 1)) {
+        let src = fb.src_at(x, y).unwrap();
+        fb.set_src(
+            x,
+            y,
+            PAPER,
+            Src {
+                flags: src.flags | FLAG_TYPED,
+                ..src
+            },
+        );
+    }
+    for (x, y) in cell_pixels((4, 1)) {
+        let ink = x % CELL == 0;
+        let src = if ink {
+            Src {
+                ver: 0,
+                id: 5,
+                u: 0,
+                v: (y % CELL) as u16,
+                kind: Kind::Glyph,
+                flags: FLAG_INK | FLAG_PAPER | FLAG_SYMBOL,
+            }
+        } else {
+            Src {
+                ver: 0,
+                id: BITMAP_PAPER,
+                u: x as u16,
+                v: y as u16,
+                kind: Kind::Bitmap,
+                flags: 0,
+            }
+        };
+        fb.set_src(x, y, if ink { INK } else { PAPER }, src);
+    }
+    let expected = [
+        listed(&fb, 0x41, (1, 1), (INK, PAPER)),
+        listed(&fb, 0xac00, (2, 1), (INK, PAPER)),
+        listed(&fb, TYPED_SPACE, (3, 1), (PAPER, PAPER)),
+        listed(&fb, SYMBOL + 5, (4, 1), (INK, PAPER)),
+    ];
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        assert!(c.diagnostics.get().is_none());
+        assert!(c.symbol_rows().is_empty(), "no last composition");
+        assert!(c.compose(&fb, &mut NoImages, scale));
+        assert!(
+            c.diagnostics.get().is_none(),
+            "compose does not scan glyphs"
+        );
+        let pixels = c.rgba().to_vec();
+        c.take_dirty();
+        assert_eq!(
+            c.symbol_rows(),
+            [[0x80; 8]],
+            "symbol getter can initialize first"
+        );
+        assert_eq!(c.glyphs(), expected);
+        let cached = c.diagnostics.get().unwrap() as *const Diagnostics;
+        assert_eq!(c.glyphs(), expected);
+        assert_eq!(c.diagnostics.get().unwrap() as *const Diagnostics, cached);
+        assert_eq!(c.rgba(), pixels, "observations do not draw");
+        assert_eq!(
+            c.take_dirty(),
+            None,
+            "observations do not publish a dirty rect"
+        );
+
+        let mut changed = fb.clone();
+        glyph(&mut changed, 0x42, (1, 1));
+        changed.palette[usize::from(INK)] = Rgb { r: 9, g: 8, b: 7 };
+        for (x, y) in cell_pixels((4, 1)) {
+            changed.set(x, y, PAPER);
+        }
+        assert_eq!(
+            c.glyphs(),
+            expected,
+            "input edits cannot alter the composed snapshot"
+        );
+        c.compose(&changed, &mut NoImages, scale);
+        assert!(
+            c.diagnostics.get().is_none(),
+            "a new composition invalidates the cache"
+        );
+        c.forget();
+        assert!(
+            c.diagnostics.get().is_none(),
+            "forget does not eagerly scan either"
+        );
+        assert_eq!(
+            c.glyphs(),
+            [
+                listed(&changed, 0x42, (1, 1), (INK, PAPER)),
+                listed(&changed, 0xac00, (2, 1), (INK, PAPER)),
+                listed(&changed, TYPED_SPACE, (3, 1), (PAPER, PAPER)),
+            ],
+            "forget preserves the last composition's diagnostics"
+        );
+        assert!(c.symbol_rows().is_empty(), "old symbol rows do not survive");
+        assert!(
+            c.compose(&changed, &mut NoImages, scale),
+            "forget still forces full rendering"
+        );
+        assert!(c.diagnostics.get().is_none());
+        let mut without_plane = Framebuffer::new();
+        without_plane.palette = fb.palette;
+        c.compose(&without_plane, &mut NoImages, scale);
+        assert!(c.diagnostics.get().is_none());
+        assert!(c.glyphs().is_empty() && c.symbol_rows().is_empty());
+    }
 }
 
 /// A scroll moves the glyphs with their cells (`copy_px_within`, as the text scroll does): the
@@ -363,7 +409,7 @@ fn a_scroll_keeps_the_listing() {
     space(&mut fb, (4, 12));
     glyph(&mut fb, 0x20, (5, 12));
     let mut c = Compositor::new();
-    c.set_font_mode(true);
+
     c.compose(&fb, &mut pics.clone(), Scale::X2);
     assert_eq!(c.glyphs().len(), 5, "four letters and the whole space");
     let (xs, ys) = (2 * CELL..6 * CELL, 10 * CELL..13 * CELL);
@@ -391,7 +437,7 @@ fn a_scroll_keeps_the_listing() {
         want,
         "moved up a row, with their codes and colours"
     );
-    let (frame, list) = fresh_font(&fb, &pics, Scale::X2, true);
+    let (frame, list) = fresh_glyphs(&fb, &pics, Scale::X2);
     assert!(c.rgba() == frame.as_slice() && c.glyphs() == list.as_slice());
     assert_eq!(c.take_dirty(), Some([16, 80, 32, 24]), "the window's rows");
     c.compose(&fb, &mut pics.clone(), Scale::X2);
@@ -399,11 +445,10 @@ fn a_scroll_keeps_the_listing() {
     assert_eq!(c.glyphs(), want, "and keeps its list");
 }
 
-/// A cell under the pointer (a classic write over part of it, as the pointer sprite is drawn)
-/// is not listed and shows the pixel font's colours; it leaves the list with every block of it
-/// written, and comes back to it the same way when the glyph is shown whole again.
+/// A pointer invalidates a whole diagnostic cell, but pixel text needs only the pointer's
+/// changed blocks redrawn. Removing the overlay must not expand that dirty rect to a cell.
 #[test]
-fn a_cell_under_the_pointer_is_not_listed() {
+fn a_pointer_changes_only_its_pixels_while_invalidating_a_whole_diagnostic_cell() {
     let pics = Pics::default();
     let mut fb = plane();
     fb.palette = palette(3);
@@ -411,7 +456,7 @@ fn a_cell_under_the_pointer_is_not_listed() {
     glyph(&mut fb, 0x41, (10, 10));
     glyph(&mut fb, 0x42, (11, 10));
     let mut c = Compositor::new();
-    c.set_font_mode(true);
+
     let mut under = fb.clone();
     under.blit(83, 85, 3, 3, &[17; 9], None);
     for scale in [Scale::X2, Scale::X4] {
@@ -423,15 +468,15 @@ fn a_cell_under_the_pointer_is_not_listed() {
             assert_eq!(c.glyphs().len(), n, "{scale:?}: {what}");
             assert_eq!(
                 c.take_dirty(),
-                Some([80, 80, 8, 8]),
-                "{scale:?}: {what}: the cell's every block"
+                Some([83, 85, 3, 3]),
+                "{scale:?}: {what}: only the pointer pixels, no removed font overlay"
             );
-            let (want, list) = fresh_font(frame, &pics, scale, true);
+            let (want, list) = fresh_glyphs(frame, &pics, scale);
             assert!(c.rgba() == want.as_slice() && c.glyphs() == list.as_slice());
         }
-        let (off, _) = fresh_font(&under, &pics, scale, false);
+        let (off, _) = fresh_glyphs(&under, &pics, scale);
         let mut c2 = Compositor::new();
-        c2.set_font_mode(true);
+
         c2.compose(&under, &mut pics.clone(), scale);
         assert!(
             cell_pixels((10, 10)).all(|p| block(c2.rgba(), scale, p) == block(&off, scale, p)),
@@ -442,12 +487,12 @@ fn a_cell_under_the_pointer_is_not_listed() {
 
 /// Random glyph cells (listed codes and others, blank ones among them so that some spaces are
 /// whole, in changing colours), classic writes over them, tiles, scrolls, cells copied
-/// elsewhere, palette changes, mode and scale switches: after each, a kept compositor's frame
-/// and list are a new one's in the same mode, every block that changed is in the rect it
-/// reported, and so is every cell that entered, left or changed in the list (with a composition
-/// that says it wrote), a whole space's too, whose blocks keep their colours.
+/// elsewhere, palette changes and scale switches: after each, a kept compositor's frame
+/// and list are a new one's at the same scale, every block that changed is in the rect it
+/// reported. Diagnostic changes are checked independently: with no font overlay, a list
+/// change does not require writing the whole cell.
 #[test]
-fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
+fn retained_pixel_text_and_diagnostics_equal_a_fresh_composition_after_every_change() {
     let mut pics = Pics::default();
     for id in 0..4u16 {
         pics.put(
@@ -469,7 +514,7 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
     fb.palette = palette(4);
     let mut x = X(0x0bad_cafe_f00d_1234);
     let mut c = Compositor::new();
-    let (mut scale, mut font, mut last_font) = (Scale::X2, true, true);
+    let mut scale = Scale::X2;
     let (mut listed_steps, mut space_steps, mut space_moves) = (0, 0, 0);
     for step in 0..300 {
         for _ in 0..1 + x.below(5) {
@@ -526,28 +571,28 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
                 }
             }
         }
-        match x.below(25) {
-            0 => font = !font,
-            1 => {
-                scale = if scale == Scale::X2 {
-                    Scale::X4
-                } else {
-                    Scale::X2
-                }
-            }
-            _ => {}
+        if x.below(25) == 1 {
+            scale = if scale == Scale::X2 {
+                Scale::X4
+            } else {
+                Scale::X2
+            };
         }
         let before = (c.rgba().to_vec(), c.glyphs().to_vec());
-        let same = c.scale() == scale && last_font == font && step > 0;
-        c.set_font_mode(font);
-        last_font = font;
+        let same = c.scale() == scale && step > 0;
+
         let wrote = c.compose(&fb, &mut pics.clone(), scale);
-        let (want, list) = fresh_font(&fb, &pics, scale, font);
+        let (want, list) = fresh_glyphs(&fb, &pics, scale);
         assert!(c.rgba() == want.as_slice(), "step {step}: the kept frame");
         assert_eq!(c.glyphs(), list.as_slice(), "step {step}: the kept list");
         listed_steps += usize::from(!list.is_empty());
         space_steps += usize::from(list.iter().any(|g| g.code == 0x20));
         let rect = c.take_dirty();
+        assert_eq!(
+            wrote,
+            rect.is_some(),
+            "step {step}: writes and dirty rect agree"
+        );
         let inside = |bx: usize, by: usize| {
             rect.is_some_and(|[x0, y0, w, h]| {
                 (x0..x0 + w).contains(&bx) && (y0..y0 + h).contains(&by)
@@ -569,17 +614,6 @@ fn a_kept_compositor_in_the_font_mode_equals_a_new_one_after_every_change() {
             .copied()
             .collect();
         space_moves += moved.iter().filter(|g| g.code == 0x20).count();
-        for g in &moved {
-            let cell = (usize::from(g.x) / CELL, usize::from(g.y) / CELL);
-            assert!(
-                cell_pixels(cell).all(|(px, py)| inside(px, py)),
-                "step {step}: a cell whose listing changed, whole in the rect"
-            );
-        }
-        assert!(
-            wrote || moved.is_empty(),
-            "step {step}: a list change is a write"
-        );
     }
     assert!(listed_steps > 50, "the list was exercised: {listed_steps}");
     assert!(space_steps > 50, "whole spaces were listed: {space_steps}");

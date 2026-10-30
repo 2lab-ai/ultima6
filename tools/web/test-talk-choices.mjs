@@ -143,10 +143,9 @@ async function enginePage(layout, ko) {
     finally { pack.free(); }
   }
   game.set_hd(true, 4);
-  game.set_hd_font(true);
   const page = { game, clock: 0, node: true };
   await prompt(page);
-  return { page, render: { engine: true, layout, width: game.width(), hd: game.hd_on(), font: game.hd_font(), ko } };
+  return { page, render: { engine: true, layout, width: game.width(), hd: game.hd_on(), font: 'pixel', ko } };
 }
 function tick(page, n = 4) {
   for (let i = 0; i < n; i += 1) { page.clock += 20; page.game.set_clock(page.clock); page.game.step(20); }
@@ -320,8 +319,10 @@ async function cancelledChoicePresses(page) {
   if (page.node) return;
   // Real DOM focus and pointer capture, plus the browser's cancellation notifications.
   // Each interrupted press stays cancelled when the held pointer returns to the same choice.
-  for (const kind of ['toolbar-focus', 'window-blur', 'pointercancel', 'lostcapture']) {
+  for (const kind of ['page-focus', 'window-blur', 'pointercancel', 'lostcapture']) {
     const at = await find(page, 3);
+    await page.focus('#screen');
+    await move(page, ...at);
     const before = await message(page);
     await page.evaluate(() => document.getElementById('screen').addEventListener('pointerdown',
       (event) => { globalThis.__choicePointerId = event.pointerId; }, { once: true }));
@@ -329,7 +330,7 @@ async function cancelledChoicePresses(page) {
     assert.equal((await targets(page))[1], 3, `${kind}: a valid choice is held`);
     // Capture is acquired on the next pointer event, so move while still on the same label.
     await move(page, at[0] + 1, at[1], 1);
-    if (kind === 'toolbar-focus') await page.focus('#settings');
+    if (kind === 'page-focus') await page.focus('#controls summary');
     else if (kind === 'window-blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')));
     else if (kind === 'pointercancel') await page.evaluate(() => document.getElementById('screen')
       .dispatchEvent(new PointerEvent('pointercancel', { pointerId: globalThis.__choicePointerId, buttons: 0 })));
@@ -360,15 +361,14 @@ async function open(layout, ko) {
   await page.reload();
   await h.waitSettled(page);
   await h.waitPrompt(page);
-  await page.waitForFunction(() => document.body.dataset.font === 'hd' && document.body.dataset.fontFile !== 'loading');
   const render = await page.evaluate(() => ({
-    layout: document.body.dataset.layout, font: document.body.dataset.font,
-    hd: globalThis.__shownGame.hd_on(), mode: globalThis.__shownGame.hd_font(), width: globalThis.__shownGame.width(),
+    layout: document.body.dataset.layout, fontOptions: document.querySelectorAll('input[name="font"]').length,
+    hd: globalThis.__shownGame.hd_on(), listed: globalThis.__shownGame.hd_glyphs().length, width: globalThis.__shownGame.width(),
     starts: globalThis.__starts.map((s) => s.locale),
   }));
   assert.equal(render.layout, layout);
-  assert.equal(render.font, 'hd');
-  assert.ok(render.hd && render.mode);
+  assert.equal(render.fontOptions, 0, 'no font choice remains');
+  assert.ok(render.hd && render.listed > 0, 'pixel text retains actual source-plane diagnostics');
   if (ko) assert.ok(render.starts.includes('on'), 'synthetic locale active in browser');
   return { page, render };
 }

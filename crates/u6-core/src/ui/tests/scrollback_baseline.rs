@@ -6,9 +6,9 @@
 //! A scripted run prints and scrolls the message window over a paper with a speck in it, then
 //! takes presses on the bar's column and inside the window, keys, a repeat, a release and text
 //! (each one the game prints a line for) and lines on a timer; no wheel. Each frame digest takes
-//! the colour indices, the sources and the palette; the HD frames at 2× and 4×, with the HD font
-//! off and on (then the cells the frame lists for the page's text too). Digests only (FNV-1a 64),
-//! no pixels.
+//! the colour indices, sources, palette and original-pixel HD frames at 2× and 4×. The removed
+//! platform-font outputs are retired; the original pixel-frame golden hashes remain unchanged.
+//! Digests only (FNV-1a 64), no pixels.
 
 use u6_render::hd::Scale;
 use u6_render::{BITMAP_PAPER, Framebuffer, Src};
@@ -22,33 +22,24 @@ use crate::ui::text::Paper;
 /// The digests of the parent's run ([`digests`]): the shown frame, the published frame, the HD
 /// frames at 2× and 4× ([`HD`]), each over every tick, and the ticks.
 #[cfg(not(feature = "wide"))]
-const PARENT: [u64; 7] = [
+const PARENT: [u64; 5] = [
     0x0b5c_6282_be1c_1455,
     0x0b5c_6282_be1c_1455,
     0x60b9_aa83_7c75_e169,
     0xb4cb_b4c2_b890_5855,
-    0x71dd_33d2_ec52_2322,
-    0x6632_3fc8_3f0d_91f6,
     154,
 ];
 #[cfg(feature = "wide")]
-const PARENT: [u64; 7] = [
+const PARENT: [u64; 5] = [
     0x9a75_332e_bd49_6c55,
     0x9a75_332e_bd49_6c55,
     0xbfe9_5414_095b_d869,
     0x80e5_3000_f856_a855,
-    0x3c8a_0c30_1a75_c022,
-    0xc856_0015_8fc4_9df6,
     154,
 ];
 
-/// The HD views digested: the scale and the HD font mode.
-const HD: [(Scale, bool); 4] = [
-    (Scale::X2, false),
-    (Scale::X4, false),
-    (Scale::X2, true),
-    (Scale::X4, true),
-];
+/// Pixel-font HD views. The removed platform-font branch is no longer a rendering option.
+const HD: [Scale; 2] = [Scale::X2, Scale::X4];
 
 /// A paper all [`PAPER`] but one pixel of colour 7 inside the window's last row (x 200, y 190).
 fn speck() -> u6_formats::bitmap::Bitmap {
@@ -86,18 +77,15 @@ fn frame_words(fb: &Framebuffer) -> impl Iterator<Item = u64> + '_ {
 }
 
 /// What an HD view shows after a present that returned `wrote`: whether it wrote, its RGBA when it
-/// did (else the same as before), and the cells it lists for the HD font (none with the mode off).
+/// did (else the same as before), with the original pixel-only golden format's zero marker.
 fn hd_words(v: &HdView, wrote: bool) -> Vec<u64> {
     let mut out = vec![u64::from(wrote)];
     if wrote {
         out.extend(v.rgba().iter().map(|&w| u64::from(w)));
     }
-    let rgb = |c: u6_render::Rgb| (u64::from(c.r) << 16) | (u64::from(c.g) << 8) | u64::from(c.b);
-    out.push(v.glyphs().len() as u64);
-    for g in v.glyphs() {
-        out.push((u64::from(g.x) << 32) | (u64::from(g.y) << 16) | u64::from(g.code));
-        out.push((rgb(g.ink) << 24) | rgb(g.paper));
-    }
+    // Keep the original pixel-only golden format's zero metadata count. Glyph metadata
+    // is now always available, but is independently covered by the glyph/plane tests.
+    out.push(0);
     out
 }
 
@@ -130,7 +118,7 @@ fn script(t: usize) -> Vec<InputEvent> {
 }
 
 /// The scripted run's digests ([`PARENT`]'s order).
-fn digests() -> [u64; 7] {
+fn digests() -> [u64; 5] {
     let mut s = state();
     s.main.program = Program::Game;
     let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
@@ -189,14 +177,13 @@ fn digests() -> [u64; 7] {
     let blank = Framebuffer::new();
     let mut hd: Vec<HdView> = HD
         .into_iter()
-        .map(|(scale, font)| {
+        .map(|scale| {
             let mut v = HdView::new();
             v.set(true, scale);
-            v.set_font(font);
             v
         })
         .collect();
-    let mut out = [0xcbf2_9ce4_8422_2325u64; 7];
+    let mut out = [0xcbf2_9ce4_8422_2325u64; 5];
     let ticks = usize::from(lines) + 4 + 120;
     for t in 0..ticks {
         let input = t
@@ -210,17 +197,17 @@ fn digests() -> [u64; 7] {
             mix(&mut out[2 + k], hd_words(v, wrote));
         }
     }
-    out[6] = ticks as u64;
+    out[4] = ticks as u64;
     out
 }
 
 #[test]
 fn with_no_scroll_the_frames_are_the_parents() {
     let got = digests();
-    println!("scrollback baseline: ran ({} ticks, synthetic)", got[6]);
+    println!("scrollback baseline: ran ({} ticks, synthetic)", got[4]);
     println!("{got:#018x?}");
     assert_eq!(
         got, PARENT,
-        "shown, published, HD 2×, HD 4×, HD 2× and 4× with the HD font, ticks"
+        "shown, published, original-pixel HD 2×, original-pixel HD 4×, ticks"
     );
 }

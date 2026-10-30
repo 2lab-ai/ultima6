@@ -24,10 +24,10 @@ panel on 100%; timing is taken from traces of the original — a fight turn in t
 takes 301 PAL frames against the original's 277, a quiet step in the castle 31 against 33.
 Open items are in `.prd/browser-port/loop.md`.
 
-### Development branch (unreleased, 2026-10-29)
+### Current controls
 
-The current local branch adds saved grey sight memory, turn playback choices, the ending
-program, and the following controls. These changes have not been deployed to the link above.
+The browser engine includes saved grey sight memory, turn playback choices, the ending
+program, and the following controls.
 
 - Conversations start with Exit, Name and Job in a three-column choice panel. Discovered
   keywords are added; arrows page through them. Used choices turn grey and follow unused
@@ -41,9 +41,16 @@ program, and the following controls. These changes have not been deployed to the
 
 Held-walk continuity follows each mover's actual recent step intervals and starts each new
 track at its current drawn position. English and Korean movement/state regressions pass in
-both layouts. Final browser and native-window verification, the owner's pace judgement,
-and remote integration remain pending; the issue-by-issue record is in
+both layouts. Native-window coverage and a natural full-quest ending remain distinct from
+the automated browser and runtime-fixture checks; the issue-by-issue record is in
 `.prd/objects-menu-fog-motion/loop.md`.
+
+The web launcher keeps file preparation separate from play. Use the in-game Settings entry
+or **F10** to change display, playback, audio and stored-file preferences; **Escape** returns
+to the game. Settings pause gameplay and release held input. Changes that need another
+engine build or language restart are marked for the next start so unsaved progress is kept.
+Game text always uses pixel glyphs, including the Korean bitmap font. HD art is a separate
+setting and remains available. See [the settings contract](.prd/24-ingame-settings.md).
 
 ## How it was built
 
@@ -70,7 +77,7 @@ tools/speech/fetch-models.sh                        # the voice model into site/
 scripts/deploy-web.sh main                          # Cloudflare Pages project ultima6
 ```
 
-Turn playback has its own `Turns` choice beside Speed: Original (default), Quick (2×), Fast (4×), or Instant. It changes drawing waits and held-pointer walking only; the game rules, music and opening keep their timing. Space or Escape during a world turn skips the rest of its playback. The native runner accepts `--turns original|quick|fast|instant`.
+Turn playback has its own choice in the in-game Play settings: Original (default), Quick (2×), Fast (4×), or Instant. It changes drawing waits and held-pointer walking only; the game rules, music and opening keep their timing. Space or Escape during a world turn skips the rest of its playback. The native runner accepts `--turns original|quick|fast|instant`.
 
 ## Packs from your own copy
 

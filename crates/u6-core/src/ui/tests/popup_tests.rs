@@ -1591,20 +1591,16 @@ fn shown_frame(e: &Engine) -> (Vec<u8>, Vec<u6_render::Rgb>, Option<Vec<u6_rende
     )
 }
 
-/// Spec 17 Presentation (round 2, opus MUST 2): in the HD font mode the menu's glyphs are listed
-/// for the HD font: the heading's, the enabled entry's, and the disabled entry's flagged
-/// half-toned (the page draws its HD glyph so); with the mode off nothing is listed and the screen
-/// frame (which the HD frame scales then) holds the classic checker. Closed and presented, the HD
-/// frame is the one before it opened, byte for byte (gpt f2 MUST 1), and so is the shown frame
-/// with its palette and source plane (gpt f2 SHOULD 2).
+/// The menu preserves original pixel/checker text while exposing truthful glyph diagnostics.
+/// Closing restores both the HD frame and the original shown frame, palette and source plane.
 #[test]
-fn the_hd_font_lists_the_menus_cells_the_disabled_row_half_toned() {
+fn pixel_menu_diagnostics_list_the_disabled_row_half_toned() {
     let s = prompt();
     let mut e = checkered_engine(&s);
     let blank = Framebuffer::new();
     let mut hd = HdView::new();
     hd.set(true, Scale::X2);
-    hd.set_font(true);
+
     hd.present(Some(&e), &blank);
     let (hd_before, shown_before) = (hd.rgba().to_vec(), shown_frame(&e));
     let o = Open::new(&menu(), AT, &s, &[]);
@@ -1646,9 +1642,13 @@ fn the_hd_font_lists_the_menus_cells_the_disabled_row_half_toned() {
     assert_eq!(listed(3, b"Go here", 1).len(), 6, "Go here's letters");
     let halftoned = hd.glyphs().iter().filter(|g| g.halftone).count();
     assert_eq!(halftoned, 3, "only the disabled row's cells");
-    hd.set_font(false);
+
     hd.present(Some(&e), &blank);
-    assert!(hd.glyphs().is_empty(), "the pixel font: nothing listed");
+    assert_eq!(
+        hd.glyphs().iter().filter(|g| g.halftone).count(),
+        3,
+        "diagnostics stay while pixel text is drawn"
+    );
     // The classic checker in the screen frame: of 'U' only the pixels with (x + y) even are ink.
     let (ux, uy) = ((col0 + 1) * 8, (row0 + 2) * 8);
     let ink = (0..64)
@@ -1663,7 +1663,22 @@ fn the_hd_font_lists_the_menus_cells_the_disabled_row_half_toned() {
         })
         .count();
     assert_eq!(ink, 16, "the classic checker");
-    hd.set_font(true);
+    for k in 0..64 {
+        let (x, y) = ((ux + k % 8) as usize, (uy + k / 8) as usize);
+        let frame = e.screen_frame();
+        let colour = frame.palette[usize::from(frame.get(x, y).unwrap())];
+        let expected = u32::from_le_bytes([colour.r, colour.g, colour.b, 255]);
+        for sy in 0..2 {
+            for sx in 0..2 {
+                assert_eq!(
+                    hd.rgba()[(y * 2 + sy) * u6_render::WIDTH * 2 + x * 2 + sx],
+                    expected,
+                    "the HD frame preserves each disabled glyph checker pixel"
+                );
+            }
+        }
+    }
+
     e.tick(&[InputEvent::Key(Key::Escape)], 16);
     assert!(e.context_menu().is_none(), "closed");
     hd.present(Some(&e), &blank);

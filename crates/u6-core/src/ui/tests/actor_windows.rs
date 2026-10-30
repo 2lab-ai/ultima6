@@ -338,15 +338,15 @@ mod wide {
         }
     }
 
-    /// Spec 14 rev 3: the text in the slots is on the HD font's 8-pixel grid. With the HD font
-    /// mode on, the compositor lists in each slot the cells it lists in the panel area of that
+    /// Spec 14 rev 3: text in the slots retains its 8-pixel grid. Diagnostics in each slot
+    /// list the same cells as the panel area of that
     /// view drawn alone (`u6_render::hd` `glyph_cell`), moved by the slot's offset.
     #[test]
-    fn the_slots_text_shows_in_the_hd_font() {
+    fn the_slots_pixel_text_has_matching_glyph_diagnostics() {
         use u6_render::hd::{Compositor, NoImages, Scale};
         let listed = |fb: &Framebuffer, at: (usize, usize)| -> Vec<(usize, usize, u16)> {
             let mut c = Compositor::new();
-            c.set_font_mode(true);
+
             c.compose(fb, &mut NoImages, Scale::X2);
             c.glyphs()
                 .iter()

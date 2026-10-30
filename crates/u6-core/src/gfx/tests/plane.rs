@@ -921,11 +921,11 @@ fn the_key_wait_symbol_names_the_paper_under_it() {
             "without the paper's colours"
         );
     }
-    // The HD font mode: the symbol over the paper listed, its rows given; the one over the
+    // Glyph diagnostics: the symbol over the paper listed, its rows given; the one over the
     // spellbook and the one without the paper's colours not.
     let listed = |fb: &Framebuffer| {
         let mut c = Compositor::new();
-        c.set_font_mode(true);
+
         c.compose(fb, &mut NoImages, Scale::X2);
         (c.glyphs().to_vec(), c.symbol_rows().to_vec())
     };

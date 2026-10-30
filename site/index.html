@@ -3,154 +3,91 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ultima VI</title>
-  <style>
-    /* The HD font (spec 11; site/fonts/NOTICE.txt), from this origin, for the game's text the page
-       draws on the HD layout's canvas: loaded (document.fonts.load) only while it is wanted. */
-    @font-face {
-      font-family: "U6 Gowun Batang";
-      src: url("fonts/gowun-batang.woff2") format("woff2");
-      font-display: block;
-    }
-    :root { color-scheme: dark; }
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: #0b0b0f;
-      color: #e6e6eb;
-      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-    }
-    main {
-      max-width: 992px;
-      margin: 0 auto;
-      padding: 16px;
-    }
-    h1 { font-size: 1.25rem; margin: 0 0 12px; }
-    h2 { font-size: 1rem; margin: 0 0 4px; }
-    canvas {
-      display: block;
-      width: 100%;
-      height: auto;
-      aspect-ratio: 320 / 200;
-      background: #000;
-      image-rendering: pixelated;
-      image-rendering: crisp-edges;
-      outline: 3px solid transparent;
-      outline-offset: 3px;
-    }
-    /* The ring says the game has the keyboard (also after a scripted focus, so not :focus-visible),
-       and so while a line is typed in the hidden input that takes Korean (spec 08 K5a). */
-    canvas:focus, #screen-box:focus-within canvas { outline-color: #ffd166; }
-    /* The game draws its own pointer over its screen at the mouse (the engine's sprite; with HD
-       the page draws it over the HD frame), so while a game runs `game` (data-program; `u`, the
-       opening and the menu, takes no mouse and leaves its pointer where it is) the system's
-       pointer is hidden over the canvas where the engine's sprite is drawn under the mouse
-       (data-pointer="game", app.js `gameUnder`, from Game.game_pointer); elsewhere it shows: a
-       gap or a margin of the HD layout, a Wide window's frame or title strip, a window dragged,
-       a press the context menu takes, the speed badge (it lets the pointer through to the canvas
-       but covers the game's), the game's pointer hidden or moved by the game itself, a layout
-       changed under a still mouse until it moves, no mouse (a touch or a pen). The page's own
-       controls over the screen box (the context menu, the Exit button) and the fullscreen
-       letterbox round the canvas are not the canvas, and keep it. Near the frame's last column and
-       row the game's arrow is clipped by the frame's edge (in the Original layout's corner pixel
-       only a few of its pixels show), as on the original's screen; the system's stays hidden. */
-    body[data-state="running"] #screen[data-program="game"][data-pointer="game"] { cursor: none; }
-    /* That input: on the canvas, unseen and out of the pointer's way, but able to take focus. */
-    #ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0;
-           opacity: 0; pointer-events: none; }
-    /* The speed badge lies over the canvas: the canvas keeps its box, and the pointer passes
-       through the badge to it. */
-    #screen-box { position: relative; }
-    #speed-badge { position: absolute; top: 6px; left: 6px; padding: 0 6px; border-radius: 4px;
-                   background: rgba(11, 11, 15, 0.8); color: #ffd166; font-size: 0.875rem;
-                   pointer-events: none; }
-    /* Fullscreen (the browser's, or .full where the page cannot ask for it): the screen box fills
-       the screen in black, the canvas as large as fits with the game's aspect ratio, centred, its
-       pixels as the page draws them; the Exit button at the top right while the pointer moves. */
-    #screen-box:fullscreen, #screen-box.full { display: flex; align-items: center; justify-content: center;
-                                               background: #000; }
-    #screen-box.full { position: fixed; inset: 0; z-index: 10; }
-    #screen-box:fullscreen canvas, #screen-box.full canvas { width: min(100vw, 160vh); outline: none; }
-    @supports (height: 100dvh) {
-      #screen-box.full canvas { width: min(100vw, 160dvh); }
-    }
-    /* The HD layout in effect (spec 10, data-layout on the body), and the Wide layout (spec 13,
-       the Wide build): the canvas box 16:9, on the page as wide as the column allows up to 1280
-       CSS px (the column widened to hold that), in fullscreen as large as the screen allows with
-       16:9, at any size. */
-    body:is([data-layout="hd"], [data-layout="wide"]) main { max-width: 1312px; }
-    body:is([data-layout="hd"], [data-layout="wide"]) #screen { aspect-ratio: 16 / 9; }
-    body:is([data-layout="hd"], [data-layout="wide"]) #screen-box:fullscreen canvas,
-    body:is([data-layout="hd"], [data-layout="wide"]) #screen-box.full canvas { width: min(100vw, calc(100vh * 16 / 9)); }
-    @supports (height: 100dvh) {
-      body:is([data-layout="hd"], [data-layout="wide"]) #screen-box.full canvas { width: min(100vw, calc(100dvh * 16 / 9)); }
-    }
-    #fullscreen-exit { position: absolute; top: 8px; right: 8px; margin: 0; }
-    #fullscreen-exit[hidden] { display: none; }
-    /* In fullscreen the Exit button and the speed badge keep their boxes while hidden, unseen and
-       out of the pointer's way, so the page keeps the context menu off their parts of the canvas
-       at all times (spec 17: app.js overCanvas); either shows at any time there. */
-    body:is([data-fullscreen="on"], [data-fullscreen="css"]) :is(#fullscreen-exit, #speed-badge)[hidden] {
-      display: inline-block; visibility: hidden; }
-    /* The toolbar under the game screen: on a narrow screen its controls wrap; "behind" keeps its
-       place while hidden, so a wider label never moves them. */
-    #playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-    #playback button { margin-left: 0; }
-    #speed-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-    #speed-shown { display: inline-block; min-width: 5.5em; text-align: center; }
-    #behind { color: #ff9a9a; }
-    #behind[hidden] { display: inline; visibility: hidden; }
-    #drop {
-      margin-top: 12px;
-      padding: 12px 16px;
-      border: 2px dashed #555a66;
-      border-radius: 8px;
-      overflow-wrap: anywhere;
-    }
-    #drop[hidden] { display: none; }
-    #drop.over { border-color: #9ab8ff; background: #141a2a; }
-    #drop label { display: block; margin: 0 0 8px; }
-    input[type="file"] { max-width: 100%; color: inherit; }
-    button { margin-left: 8px; color: inherit; background: #1d2230; border: 1px solid #555a66;
-             border-radius: 4px; padding: 2px 8px; }
-    button:disabled, input:disabled { opacity: 0.5; }
-    :is(button, input):focus-visible { outline: 3px solid #ffd166; outline-offset: 2px; }
-    #status { margin: 12px 0 0; min-height: 1.5em; color: #b9c3d6; white-space: pre-wrap; }
-    #restart { margin: 8px 0 0; }
-    #controls { margin-top: 12px; }
-    #controls ul { margin: 4px 0 0; padding-left: 20px; }
-    #notices { margin-top: 16px; color: #9a9aa6; font-size: 0.75rem; }
-    a { color: #9ab8ff; }
-    /* The first-run chooser (and Settings): above the game screen until a choice is made. */
-    #setup { margin: 0 0 16px; padding: 12px 16px; border: 2px solid #9ab8ff; border-radius: 8px;
-             background: #141a2a; }
-    #setup[hidden] { display: none; }
-    #setup fieldset { margin: 0 0 8px; padding: 4px 12px 8px; border: 1px solid #555a66;
-                      border-radius: 4px; }
-    #setup label { display: inline-block; margin-right: 16px; }
-    #setup label[hidden] { display: none; }
-    #setup p { margin: 0 0 8px; }
-    #setup p[hidden] { display: none; }
-    #setup button { margin-left: 0; }
-    #kept { margin: 0 0 8px; }
-    #kept button { margin: 4px 8px 0 0; }
-    /* Voices (spec 09): the terms shown before the first download, and the chip while on. */
-    #voice-terms { margin-top: 12px; padding: 12px 16px; border: 2px solid #ffd166; border-radius: 8px;
-                   background: #16161d; }
-    #voice-terms[hidden] { display: none; }
-    #voice-terms p { margin: 0 0 8px; }
-    #voice-terms button { margin-left: 0; margin-right: 8px; }
-    #voice-restrictions, #setup-restrictions { max-height: 16em; overflow: auto; margin: 0 0 8px;
-                          padding: 8px; border: 1px solid #555a66; white-space: pre-wrap; font-size: 0.875rem; }
-    #setup-terms[hidden] { display: none; }
-    #voice-chip { padding: 0 6px; border: 1px solid #9ab8ff; border-radius: 4px; color: #9ab8ff;
-                  font-size: 0.875rem; }
-    #voice-chip[hidden] { display: none; }
-  </style>
+  <meta name="theme-color" content="#080808">
+  <meta name="description" content="Play Ultima VI in your browser using your own Amiga game files.">
+  <title>Ultima VI — The False Prophet</title>
+  <link rel="stylesheet" href="./shell.css">
 </head>
 <body>
-  <main>
-    <h1>Ultima VI</h1>
+  <a class="skip-link" href="#main" data-i18n="skipToGame">Skip to the game</a>
+  <main id="main" tabindex="-1">
+    <header class="masthead">
+      <p class="wordmark">ULTIMA VI <span aria-hidden="true">/</span> AMIGA</p>
+      <a class="source-link" href="https://github.com/2lab-ai/ultima6" target="_blank" rel="noopener noreferrer"
+         data-i18n="sourceCode">Source ↗</a>
+    </header>
+    <section id="launcher" aria-labelledby="launcher-title">
+      <div class="launcher-heading">
+        <p class="edition">The False Prophet</p>
+        <h1 id="launcher-title">Ultima VI</h1>
+        <p class="launcher-lead" data-i18n="launcherLead">Your own copy. A new way to play.</p>
+        <p class="launcher-description" data-i18n="launcherDescription">The Amiga adventure, running in your browser.</p>
+      </div>
+      <div class="launcher-action">
+        <section id="drop" hidden aria-labelledby="drop-title">
+          <h2 id="drop-title" data-i18n="importTitle">Begin your journey</h2>
+          <p class="import-description" data-i18n="dropLine">Open your original Ultima VI archive or disk files.</p>
+          <label class="file-choice" for="picker">
+            <span id="picker-label" data-i18n="chooseFiles">Open game files</span>
+            <span class="file-arrow" aria-hidden="true">↗</span>
+            <input id="picker" type="file" multiple disabled aria-labelledby="picker-label" aria-describedby="file-privacy file-formats">
+          </label>
+          <p id="file-formats" class="file-formats" data-i18n="fileFormats">ZIP, HFE or ADF · You can also drop files here.</p>
+          <p id="file-privacy" class="file-privacy" data-i18n="filePrivacy">Files stay in this browser. Your saved journey returns on your next visit.</p>
+        </section>
+        <p class="loading-label" data-i18n="loadingLibrary">Preparing your game…</p>
+      </div>
+    </section>
+    <section id="game-stage" aria-label="Ultima VI">
+    <div id="screen-box">
+      <div id="game-chrome">
+        <button id="game-settings-open" type="button" data-i18n="settings" aria-haspopup="dialog">Settings</button>
+        <span class="game-settings-shortcut" aria-hidden="true">F10</span>
+        <span id="speed-badge" hidden aria-hidden="true" data-i18n-title="badgeTitle"
+              title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
+        <button id="fullscreen-exit" type="button" hidden data-i18n="exitFullscreen">Exit fullscreen</button>
+      </div>
+      <canvas id="screen" width="320" height="200" tabindex="0"
+              data-i18n-label="canvasLabel"
+              aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
+    </div>
+    </section>
+    <div id="feedback">
+      <p id="feedback-summary" role="status" aria-live="polite" hidden></p>
+      <details id="load-details" open>
+        <summary data-i18n="loadingDetails">Loading details</summary>
+        <p id="status" role="status" aria-live="polite">Loading engine…</p>
+      </details>
+      <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
+      <p class="engine-recovery" data-i18n="engineRecovery">Reload this page to try again. Your saved files are kept.</p>
+    </div>
+    <div class="page-bottom">
+    <details id="controls">
+      <summary data-i18n="controls">Controls</summary>
+      <ul>
+        <li data-i18n="keyWalk">Walk: the arrow keys, or click the map</li>
+        <li data-i18n="keyCommands">T talk, L look, G get, D drop, M move, U use</li>
+        <li data-i18n="keyCombat">A attack, B combat, C cast, R rest</li>
+        <li data-i18n="keyPass">Space: pass a turn</li>
+        <li data-i18n="keySave">Ctrl-S save, Ctrl-R restore</li>
+        <li data-i18n="keySpeed">- and +: slower and faster</li>
+        <li data-i18n="keyTurnSkip">Space or Escape during a turn skips its remaining playback</li>
+        <li data-i18n="keySettings">F10: game settings</li>
+        <li data-i18n="keyOpening">Escape skips the opening</li>
+      </ul>
+    </details>
+    <footer id="notices">
+      <span data-i18n="noticeMmpx">HD: MMPX (MIT licence)</span> <a id="mmpx-notice" href="NOTICE.txt"
+        data-i18n="voiceTermsNotice">Notice</a> &middot; <span data-i18n="noticeVoice">Voices: the
+        Supertonic-3 model (Open RAIL-M)</span> <a id="voice-license-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt"
+        data-i18n="voiceTermsLicense">Licence</a> <a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
+        data-i18n="voiceTermsNotice">Notice</a>
+    </footer>
+    </div>
+    <noscript><p data-i18n="needsJavascript">JavaScript and WebAssembly are needed to play. Your game files stay on this device.</p></noscript>
+    <!-- Compatibility controls for the game's settings controller. These are never an external UI:
+         the visible settings and their accessible interaction surface live in the game screen. -->
+    <div id="settings-bridge" hidden inert aria-hidden="true">
     <section id="setup" hidden aria-labelledby="setup-title">
       <h2 id="setup-title" data-i18n="settings">Settings</h2>
       <fieldset>
@@ -170,10 +107,6 @@
           <span data-i18n="layoutWide">Wide (larger map)</span></label> <label><input type="radio" name="layout"
           value="hd"> HD 16:9</label> <label><input type="radio" name="layout" value="original"> <span
           data-i18n="layoutOriginal">Original 16:10</span></label></p>
-        <p id="font-choice" role="radiogroup" aria-labelledby="font-title"><span id="font-title"
-          data-i18n="font">Font</span>: <label><input type="radio" name="font" value="hd" checked> <span
-          data-i18n="fontHd">HD font</span></label> <label><input type="radio" name="font" value="pixel"> <span
-          data-i18n="fontPixel">Pixel font</span></label></p>
         <div id="setup-hd">
           <label><input type="radio" name="setup-hd" value=""> <span data-i18n="mmpx">MMPX (no pack)</span></label>
           <label id="setup-dropped" hidden><input type="radio" name="setup-hd" value=":dropped"> <span
@@ -206,14 +139,6 @@
       <button id="setup-ok" type="button" data-i18n="acceptStart">Accept and start</button>
       <p id="setup-status" role="status" aria-live="polite"></p>
     </section>
-    <div id="screen-box">
-      <canvas id="screen" width="320" height="200" tabindex="0"
-              data-i18n-label="canvasLabel"
-              aria-label="Game screen. Click it or Tab to it; then arrow keys walk and letter keys are game commands. Tab leaves it."></canvas>
-      <span id="speed-badge" hidden aria-hidden="true" data-i18n-title="badgeTitle"
-            title="Game speed: - slower, = or + faster, unless the game is using that key: while a line or a name is typed, in the stats and inventory panels (- and + pick the member), in a party list that scrolls, and in the opening's menu. The keypad - and + and the Speed buttons always change it.">1&times;</span>
-      <button id="fullscreen-exit" type="button" hidden data-i18n="exitFullscreen">Exit fullscreen</button>
-    </div>
     <div id="playback" role="toolbar" aria-label="Game" data-i18n-label="toolbar">
       <button id="fullscreen" type="button" aria-pressed="false" data-i18n="fullscreen">Fullscreen</button>
       <button id="mute" type="button" aria-pressed="false">Mute</button>
@@ -257,34 +182,7 @@
       <button id="voice-accept" type="button" data-i18n="voiceAccept">Accept and download</button><button
         id="voice-decline" type="button" data-i18n="voiceDecline">Cancel</button>
     </section>
-    <section id="drop" hidden>
-      <label for="picker" id="drop-title" data-i18n="dropLine">Drop your Ultima VI files (the archive.org
-        zip) here, or choose them. They never leave this browser.</label>
-      <input id="picker" type="file" multiple disabled>
-    </section>
-    <p id="status" role="status" aria-live="polite">Loading engine&hellip;</p>
-    <button id="restart" type="button" hidden data-i18n="restart">Restart</button>
-    <details id="controls">
-      <summary data-i18n="controls">Controls</summary>
-      <ul>
-        <li data-i18n="keyWalk">Walk: the arrow keys, or click the map</li>
-        <li data-i18n="keyCommands">T talk, L look, G get, D drop, M move, U use</li>
-        <li data-i18n="keyCombat">A attack, B combat, C cast, R rest</li>
-        <li data-i18n="keyPass">Space: pass a turn</li>
-        <li data-i18n="keySave">Ctrl-S save, Ctrl-R restore</li>
-        <li data-i18n="keySpeed">- and +: slower and faster</li>
-        <li data-i18n="keyTurnSkip">Space or Escape during a turn skips its remaining playback</li>
-        <li data-i18n="keyOpening">Escape skips the opening</li>
-      </ul>
-    </details>
-    <footer id="notices">
-      <span data-i18n="noticeMmpx">HD: MMPX (MIT licence)</span> <a id="mmpx-notice" href="NOTICE.txt"
-        data-i18n="voiceTermsNotice">Notice</a> &middot; <span data-i18n="noticeVoice">Voices: the
-        Supertonic-3 model (Open RAIL-M)</span> <a id="voice-license-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/LICENSE.txt"
-        data-i18n="voiceTermsLicense">Licence</a> <a id="voice-terms-link" href="models/supertonic3/724fb5abbf5502583fb520898d45929e62f02c0b/NOTICE.txt"
-        data-i18n="voiceTermsNotice">Notice</a>
-    </footer>
-    <noscript><p>This page needs JavaScript and WebAssembly.</p></noscript>
+    </div>
   </main>
   <script type="module" src="./app.js"></script>
 </body>

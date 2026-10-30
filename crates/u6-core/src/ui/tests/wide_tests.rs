@@ -1082,10 +1082,10 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
         // The tile beside them is still the tile's.
         let tile = c.rgba()[(24 * n) * WIDTH * n + 16 * n];
         assert_eq!(tile, word(fb.palette[5]));
-        // Spec 11, the HD font mode: both cells listed with their ink and paper, each block the
-        // paper; the tile is as before.
+        // Both cells remain observable with their ink and paper, and retain their original
+        // pixel shapes alongside the HD tile.
         let mut c = Compositor::new();
-        c.set_font_mode(true);
+
         c.compose(&fb, &mut Tile(vec![5; 256]), scale);
         let (ink, paper) = (fb.palette[usize::from(INK)], fb.palette[usize::from(PAPER)]);
         let listed = |x: u16, code: u16| HdGlyph {
@@ -1100,9 +1100,19 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
             c.glyphs(),
             [listed(24, 0xac00), listed(32, u16::from(b'A'))]
         );
-        for y in 16 * n..24 * n {
-            let row = &c.rgba()[y * WIDTH * n..][24 * n..40 * n];
-            assert!(row.iter().all(|&g| g == word(paper)), "the paper at {n}x");
+        for y in 16..24 {
+            for x in 24..40 {
+                let expected = word(fb.palette[usize::from(fb.get(x, y).unwrap())]);
+                for sy in 0..n {
+                    for sx in 0..n {
+                        assert_eq!(
+                            c.rgba()[(y * n + sy) * WIDTH * n + x * n + sx],
+                            expected,
+                            "Latin and Hangul pixels ({x}, {y}) remain at {n}x"
+                        );
+                    }
+                }
+            }
         }
         assert_eq!(c.rgba()[(24 * n) * WIDTH * n + 16 * n], tile);
     }
@@ -1111,7 +1121,7 @@ fn a_hangul_cell_composes_as_a_latin_cell_does_at_2x_and_4x() {
 /// Spec 11 Acceptance 1 on the text path: twelve lines in the ten rows of the message scroll
 /// (so its rows have scrolled up three times), the plane on and off. With it, every pixel has
 /// the colour it has without it; every glyph pixel names its cell's code and its place, with the
-/// ink flag exactly on its rows' set bits, also on the rows moved up; the HD font lists the
+/// ink flag exactly on its rows' set bits, also on the rows moved up; glyph diagnostics list the
 /// letter and the syllable of every line at their cells, in the ink and paper the frame shows,
 /// not the space; and the key wait's cursor, below the last line, is classic.
 #[test]
@@ -1190,7 +1200,7 @@ fn the_scroll_names_its_glyphs_and_the_hd_font_lists_its_letters() {
         })
         .collect();
     let mut c = Compositor::new();
-    c.set_font_mode(true);
+
     c.compose(fb, &mut NoImages, Scale::X2);
     assert_eq!(
         c.glyphs(),

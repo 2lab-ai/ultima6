@@ -1,11 +1,5 @@
-//! Glyph cells over the paper (the text windows show the HD paper in place, spec 07 HD0): a
-//! glyph's clear pixel drawn over the paper ([`FLAG_PAPER`]) whose colour is the paper's there
-//! shows the HD paper's block of its own place, with the font mode off and in a cell the mode
-//! does not list; a cell the mode lists shows the HD paper at each pixel drawn over the paper
-//! where the paper's colour is the cell's paper colour, and its flat paper colour elsewhere; ink
-//! pixels, other colours, pixels past the paper and glyphs not drawn over the paper (over the
-//! spellbook, in the paper's colour) are as before. On a synthetic paper with a synthetic pack
-//! image; no game data.
+//! Pixel glyphs over HD paper: only clear pixels with matching paper colour use the HD
+//! background. Ink remains the original pixel shape, including Hangul. Synthetic data only.
 
 use super::font::{INK, PAPER, SHAPE, glyph_px, listed};
 use super::*;
@@ -19,7 +13,7 @@ const PH: usize = 64;
 /// [`SHAPE`] there, and (9, 9), an ink pixel.
 const OTHER: u8 = 5;
 
-/// A cell drawn: code, cell, the glyph's rows, its paper colour, whether the HD font mode lists
+/// A cell drawn: code, cell, the glyph's rows, its paper colour, whether diagnostics list
 /// it, and whether it is drawn over the paper ([`FLAG_PAPER`] on its pixels).
 type Cell = (u16, (usize, usize), [u8; 8], u8, bool, bool);
 
@@ -29,12 +23,12 @@ const CELLS: [Cell; 8] = [
     (0x41, (1, 1), SHAPE, PAPER, true, true),
     // A letter in another paper colour than the paper's.
     (0x42, (3, 1), SHAPE, 3, true, true),
-    // A code the mode does not list (a control code, as the key wait's cursor), in the paper's
+    // A code diagnostics do not list (a control code, as the key wait's cursor), in the paper's
     // colour.
     (0x05, (5, 1), SHAPE, PAPER, false, true),
     // A whole space in the paper's colour.
     (0x20, (7, 1), [0; 8], PAPER, true, true),
-    // A letter and a code the mode does not list, in the paper's colour, over the spellbook
+    // A letter and a code diagnostics do not list, in the paper's colour, over the spellbook
     // ([`spellbook`]): not over the paper.
     (0x44, (9, 1), SHAPE, PAPER, true, false),
     (0x06, (10, 1), SHAPE, PAPER, false, false),
@@ -102,19 +96,9 @@ fn draw_cell(
     }
 }
 
-/// The frame by the rule, from the layout (no compositor): a paper pixel its block of the HD
-/// paper (the pack's image when given, else MMPX); a glyph pixel in a cell the mode lists (with
-/// `font`) the HD paper at its own place over the cell's paper colour where it is drawn over the
-/// paper and the paper's colour there is that colour, else that colour flat; any other glyph
-/// pixel without ink drawn over the paper the HD paper at its own place where its colour is the
-/// paper's there; every other pixel its colour.
-fn want(
-    fb: &Framebuffer,
-    pics: &Pics,
-    pack: Option<&TestPack>,
-    scale: Scale,
-    font: bool,
-) -> Vec<u32> {
+/// Independent pixel oracle: images use their HD blocks, clear glyph pixels matching the
+/// paper use that background, and every ink pixel keeps its original colour.
+fn want(fb: &Framebuffer, pics: &Pics, pack: Option<&TestPack>, scale: Scale) -> Vec<u32> {
     let s = scale.factor();
     let ow = WIDTH * s;
     let pal = |i: u8| word(fb.palette[usize::from(i)]);
@@ -136,26 +120,15 @@ fn want(
             .map(|c| u32::from_le_bytes(over_ref(c, under.to_le_bytes())))
             .collect()
     };
-    // The paper colour of the listed cell holding (x, y): the colour of its clear pixels.
-    let listed_paper = |x: usize, y: usize| {
-        let (col, row) = (x / CELL, y / CELL);
-        CELLS.iter().find(|c| c.4 && c.1 == (col, row))?;
-        let clear = (0..CELL * CELL)
-            .map(|k| (col * CELL + k % CELL, row * CELL + k / CELL))
-            .find(|&(x, y)| fb.src_at(x, y).unwrap().flags & FLAG_INK == 0)?;
-        fb.get(clear.0, clear.1).map(pal)
-    };
     let mut out = vec![0u32; ow * HEIGHT * s];
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let src = fb.src_at(x, y).unwrap();
             let classic = pal(fb.get(x, y).unwrap());
             let on = src.flags & FLAG_PAPER != 0;
-            let block = match (src.kind, listed_paper(x, y).filter(|_| font)) {
-                (Kind::Bitmap, _) => hd_block((usize::from(src.u), usize::from(src.v)), classic),
-                (Kind::Glyph, Some(p)) if on && paper_at(x, y) == Some(p) => hd_block((x, y), p),
-                (Kind::Glyph, Some(p)) => vec![p; s * s],
-                (Kind::Glyph, None)
+            let block = match src.kind {
+                Kind::Bitmap => hd_block((usize::from(src.u), usize::from(src.v)), classic),
+                Kind::Glyph
                     if on && src.flags & FLAG_INK == 0 && paper_at(x, y) == Some(classic) =>
                 {
                     hd_block((x, y), classic)
@@ -170,22 +143,15 @@ fn want(
     out
 }
 
-/// A new compositor's frame in mode `font` with `pack`.
-fn fresh_in(
-    fb: &Framebuffer,
-    pics: &Pics,
-    pack: Option<&TestPack>,
-    scale: Scale,
-    font: bool,
-) -> Vec<u32> {
+/// A new compositor's pixel-text frame with `pack`.
+fn fresh_in(fb: &Framebuffer, pics: &Pics, pack: Option<&TestPack>, scale: Scale) -> Vec<u32> {
     let mut c = Compositor::new();
-    c.set_font_mode(font);
     c.set_pack(pack.map(|p| Rc::new(p.clone()) as Rc<dyn Pack>));
     c.compose(fb, &mut pics.clone(), scale);
     c.rgba().to_vec()
 }
 
-/// With the font mode off: the clear pixels of the glyphs in the paper's colour show the HD
+/// The clear pixels of the glyphs in the paper's colour show the HD
 /// paper's block of their own place; the one over the paper's other colour, the ink pixels, the
 /// cell of another paper colour and the cell past the paper are their classic colours. A kept
 /// compositor follows a pack set and a cell redrawn in another paper colour and back as a new one
@@ -196,13 +162,10 @@ fn a_glyphs_clear_pixels_of_the_papers_colour_show_the_hd_paper_in_place() {
     for scale in [Scale::X2, Scale::X4] {
         let mut c = Compositor::new();
         c.compose(&fb, &mut pics.clone(), scale);
-        assert!(
-            c.rgba() == want(&fb, &pics, None, scale, false),
-            "{scale:?}: MMPX"
-        );
+        assert!(c.rgba() == want(&fb, &pics, None, scale), "{scale:?}: MMPX");
         c.set_pack(Some(Rc::new(pack.clone())));
         c.compose(&fb, &mut pics.clone(), scale);
-        let with_pack = want(&fb, &pics, Some(&pack), scale, false);
+        let with_pack = want(&fb, &pics, Some(&pack), scale);
         assert!(c.rgba() == with_pack, "{scale:?}: the pack's paper");
         let classic = |x: usize, y: usize| {
             vec![word(fb.palette[usize::from(fb.get(x, y).unwrap())]); scale.factor().pow(2)]
@@ -226,93 +189,94 @@ fn a_glyphs_clear_pixels_of_the_papers_colour_show_the_hd_paper_in_place() {
             draw_cell(&mut fb, 0x41, SHAPE, (1, 1), paper, true);
             c.compose(&fb, &mut pics.clone(), scale);
             assert!(
-                c.rgba() == fresh_in(&fb, &pics, Some(&pack), scale, false),
+                c.rgba() == fresh_in(&fb, &pics, Some(&pack), scale),
                 "{scale:?}: redrawn in {paper}"
             );
-            assert!(c.rgba() == want(&fb, &pics, Some(&pack), scale, false));
+            assert!(c.rgba() == want(&fb, &pics, Some(&pack), scale));
         }
     }
 }
 
-/// With the font mode on: each cell it lists shows the HD paper at the pixels where the paper's
-/// colour is the cell's paper colour (its ink pixels too: the platform draws the character over
-/// it) and its paper colour flat at the paper's other colour, past the paper and in the cell of
-/// another paper colour; the cell it does not list is as with the mode off; the list is as before.
-/// A kept compositor follows a pack set, a mode change and a cell redrawn as a new one would.
+/// The diagnostic list coexists with original ink over the pack's HD background.
 #[test]
-fn a_listed_cell_over_the_paper_shows_the_hd_paper_where_its_paper_is_the_papers() {
+fn listed_latin_and_hangul_ink_stays_visible_over_hd_paper() {
     let (pics, pack, mut fb) = scene();
     for scale in [Scale::X2, Scale::X4] {
         let mut c = Compositor::new();
-        c.set_font_mode(true);
+        c.set_pack(Some(Rc::new(pack.clone())));
         c.compose(&fb, &mut pics.clone(), scale);
-        assert!(
-            c.rgba() == want(&fb, &pics, None, scale, true),
-            "{scale:?}: MMPX"
-        );
         let list: Vec<HdGlyph> = CELLS
             .iter()
             .filter(|c| c.4)
             .map(|&(code, at, _, paper, _, _)| {
-                let ink = if code == 0x20 { paper } else { INK };
-                listed(&fb, code, at, (ink, paper))
+                listed(
+                    &fb,
+                    code,
+                    at,
+                    (if code == 0x20 { paper } else { INK }, paper),
+                )
             })
             .collect();
-        assert_eq!(
-            c.glyphs(),
-            list.as_slice(),
-            "{scale:?}: the cells listed as before"
-        );
-        c.set_pack(Some(Rc::new(pack.clone())));
-        c.compose(&fb, &mut pics.clone(), scale);
-        assert!(
-            c.rgba() == want(&fb, &pics, Some(&pack), scale, true),
-            "{scale:?}: the pack's paper"
-        );
-        let flat = |i: u8| vec![word(fb.palette[usize::from(i)]); scale.factor().pow(2)];
-        assert!(
-            block(c.rgba(), scale, (8, 8)) != flat(PAPER),
-            "{scale:?}: an ink pixel shows HD"
-        );
-        assert!(
-            block(c.rgba(), scale, (12, 10)) != flat(PAPER),
-            "{scale:?}: a clear pixel shows HD"
-        );
-        for (p, colour, what) in [
-            ((13, 10), PAPER, "the paper's other colour"),
-            ((9, 9), PAPER, "the other colour under ink"),
-            ((28, 10), 3, "another paper colour"),
-            ((116, 10), PAPER, "past the paper"),
-        ] {
-            assert!(
-                block(c.rgba(), scale, p) == flat(colour),
-                "{scale:?}: {what}: flat"
-            );
-        }
-        for font in [false, true] {
-            c.set_font_mode(font);
-            c.compose(&fb, &mut pics.clone(), scale);
-            assert!(
-                c.rgba() == fresh_in(&fb, &pics, Some(&pack), scale, font),
-                "{scale:?}: mode {font}"
+        assert_eq!(c.glyphs(), list);
+        assert_eq!(c.rgba(), want(&fb, &pics, Some(&pack), scale));
+        let ink = vec![word(fb.palette[usize::from(INK)]); scale.factor().pow(2)];
+        for at in [(8, 8), (9, 9), (16, 56)] {
+            assert_eq!(
+                block(c.rgba(), scale, at),
+                ink,
+                "{scale:?}: Latin/Hangul ink remains"
             );
         }
         for paper in [3, PAPER] {
             draw_cell(&mut fb, 0x41, SHAPE, (1, 1), paper, true);
             c.compose(&fb, &mut pics.clone(), scale);
-            assert!(
-                c.rgba() == fresh_in(&fb, &pics, Some(&pack), scale, true),
-                "{scale:?}: redrawn in {paper}"
-            );
-            assert!(c.rgba() == want(&fb, &pics, Some(&pack), scale, true));
+            assert_eq!(c.rgba(), fresh_in(&fb, &pics, Some(&pack), scale));
+            assert_eq!(c.rgba(), want(&fb, &pics, Some(&pack), scale));
         }
     }
 }
 
-/// Text not drawn over the paper (no [`FLAG_PAPER`]: over the spellbook here) stays as it was
-/// before the paper showed behind text, though its paper colour is the paper's there: a listed
-/// cell flat in its paper colour with the font mode on, every pixel classic with it off; the same
-/// cells drawn over the paper show the HD paper.
+/// A layer with the same source and pixels can reuse the published pixel-text block,
+/// including its HD paper. Listing the glyph for diagnostics must not disable that reuse.
+#[test]
+fn a_listed_pixel_text_layer_reuses_its_original_ink_and_hd_paper() {
+    let (pics, pack, fb) = scene();
+    let mut layer = crate::motion::LayerPixels::clear(8, 8, 8, 8);
+    for y in 0..8 {
+        for x in 0..8 {
+            let i = y * 8 + x;
+            layer.pixels[i] = fb.get(x + 8, y + 8).unwrap();
+            layer.src[i] = fb.src_at(x + 8, y + 8).unwrap();
+            layer.drawn[i] = true;
+        }
+    }
+    for scale in [Scale::X2, Scale::X4] {
+        let mut c = Compositor::new();
+        c.set_pack(Some(Rc::new(pack.clone())));
+        c.compose(&fb, &mut pics.clone(), scale);
+        let expected = want(&fb, &pics, Some(&pack), scale);
+        let s = scale.factor();
+        let mut out = Vec::new();
+        for observe in [false, true] {
+            if observe {
+                assert!(c.glyphs().iter().any(|g| g.x == 8 && g.y == 8));
+            }
+            c.compose_layer(&layer, &fb.palette, &mut pics.clone(), scale, &mut out);
+            for y in 0..8 * s {
+                for x in 0..8 * s {
+                    assert_eq!(
+                        out[y * 8 * s + x],
+                        expected[(8 * s + y) * WIDTH * s + 8 * s + x],
+                        "{scale:?}, diagnostics {observe}: layer pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Text outside the paper retains its original pixels, even where its paper colour matches
+/// the paper bitmap. The same clear glyph pixels over the paper can show its HD image.
 #[test]
 fn a_glyph_not_drawn_over_the_paper_shows_no_paper_in_its_colour() {
     let (pics, pack, fb) = scene();
@@ -324,18 +288,14 @@ fn a_glyph_not_drawn_over_the_paper_shows_no_paper_in_its_colour() {
     };
     for scale in [Scale::X2, Scale::X4] {
         let n = scale.factor().pow(2);
-        for font in [false, true] {
-            let frame = fresh_in(&fb, &pics, Some(&pack), scale, font);
+        {
+            let frame = fresh_in(&fb, &pics, Some(&pack), scale);
             for (x, y) in pixels() {
-                let index = if font && x < 80 {
-                    PAPER
-                } else {
-                    fb.get(x, y).unwrap()
-                };
+                let index = fb.get(x, y).unwrap();
                 let flat = vec![word(fb.palette[usize::from(index)]); n];
                 assert!(
                     block(&frame, scale, (x, y)) == flat,
-                    "{scale:?}, font {font}: ({x}, {y}) not over the paper"
+                    "{scale:?}: ({x}, {y}) not over the paper"
                 );
             }
         }
@@ -343,7 +303,7 @@ fn a_glyph_not_drawn_over_the_paper_shows_no_paper_in_its_colour() {
         for (code, at) in [(0x44, (9, 1)), (0x06, (10, 1))] {
             draw_cell(&mut over, code, SHAPE, at, PAPER, true);
         }
-        let frame = fresh_in(&over, &pics, Some(&pack), scale, false);
+        let frame = fresh_in(&over, &pics, Some(&pack), scale);
         let shown = pixels()
             .filter(|&(x, y)| over.src_at(x, y).unwrap().flags & FLAG_INK == 0)
             .filter(|&(x, y)| {
@@ -376,7 +336,7 @@ fn a_paper_pixel_flagged_off_colour_is_its_classic_block() {
     );
     for scale in [Scale::X2, Scale::X4] {
         let classic = vec![word(fb.palette[usize::from(PAPER)]); scale.factor().pow(2)];
-        let frame = fresh_in(&fb, &pics, Some(&pack), scale, false);
+        let frame = fresh_in(&fb, &pics, Some(&pack), scale);
         assert!(
             block(&frame, scale, (x, y)) != classic,
             "{scale:?}: unflagged, the paper's block"
@@ -386,11 +346,11 @@ fn a_paper_pixel_flagged_off_colour_is_its_classic_block() {
             ..named
         };
         fb.set_src(x, y, PAPER, off);
-        for font in [false, true] {
-            let frame = fresh_in(&fb, &pics, Some(&pack), scale, font);
+        {
+            let frame = fresh_in(&fb, &pics, Some(&pack), scale);
             assert!(
                 block(&frame, scale, (x, y)) == classic,
-                "{scale:?}, font {font}: flagged off-colour, the classic block"
+                "{scale:?}: flagged off-colour, the classic block"
             );
         }
         fb.set_src(x, y, PAPER, named);

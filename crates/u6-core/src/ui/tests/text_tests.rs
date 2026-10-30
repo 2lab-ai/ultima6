@@ -209,10 +209,10 @@ fn coloured_plane() -> Framebuffer {
     fb
 }
 
-/// The HD font mode's list of `fb` and its symbols' rows.
+/// The diagnostic glyph list of `fb` and its symbols' rows.
 fn listed(fb: &Framebuffer) -> (Vec<u6_render::hd::HdGlyph>, Vec<[u8; 8]>) {
     let mut c = u6_render::hd::Compositor::new();
-    c.set_font_mode(true);
+
     c.compose(fb, &mut u6_render::hd::NoImages, u6_render::hd::Scale::X2);
     (c.glyphs().to_vec(), c.symbol_rows().to_vec())
 }
@@ -238,7 +238,7 @@ fn as_before_rev3(fb: &Framebuffer, paper: &text::Paper) -> Framebuffer {
 /// symbol named then list the letters alone). An ink pixel of the symbol of the paper's own colour
 /// there names the paper as before and is still one of its rows. Without the paper's colours the
 /// symbol is classic and the letters alone are listed. One pixel of the cell written again
-/// classic: not listed. With the HD font off, the HD frame is byte for byte the one of the
+/// classic: not listed. With pixel text, the HD frame is byte for byte the one of the
 /// sources of before rev 3.
 #[test]
 fn a_symbol_after_two_letters_over_the_paper_is_listed_third() {
@@ -296,7 +296,7 @@ fn a_symbol_after_two_letters_over_the_paper_is_listed_third() {
             b.compose(&old, &mut NoImages, scale);
             assert!(
                 a.rgba() == b.rgba(),
-                "{what}, {scale:?}: the HD font off, as before rev 3"
+                "{what}, {scale:?}: pixel text, as before rev 3"
             );
         }
         let mut broken = fb.clone();
@@ -398,19 +398,11 @@ impl u6_render::hd::Images for PaperImage {
     }
 }
 
-/// Spec 11 Design 2 (rev 3), the old cell of a symbol over a paper of more than one colour (the
-/// key wait's symbol after two letters, the HD font mode on, the paper's HD image at 2×): one ink
-/// pixel of the symbol where the paper's own colour is the ink's (named the paper, unflagged) and
-/// one where it is another (named a symbol) are both in the symbol's rows; and every pixel of the
-/// cell is composed as the same frame with no symbol drawn there, the paper alone.
-///
-///
-/// The ink pixel of the paper's colour names the paper unflagged (as before rev 3, so the HD
-/// font off is unchanged); in the listed cell the paper's HD block shows only where the paper's
-/// colour is the cell's paper colour, else the cell's flat paper (K12 review round 2: before it
-/// the paper's own block, the ink's colour, showed there).
+/// A symbol over multi-colour HD paper keeps its original ink. Diagnostic rows still record
+/// both ink pixels, including one whose colour matches the underlying paper and is therefore
+/// represented by the original paper source rule. No glyph cell is erased for another font.
 #[test]
-fn a_symbols_old_cell_over_a_paper_of_two_colours_is_the_paper_alone() {
+fn a_symbols_original_ink_remains_visible_over_hd_paper() {
     use u6_render::hd::{Compositor, Scale, symbol_glyph};
     let font = font();
     let w = *state().ui.text.win();
@@ -456,7 +448,7 @@ fn a_symbols_old_cell_over_a_paper_of_two_colours_is_the_paper_alone() {
     );
     let compose = |fb: &Framebuffer| {
         let mut c = Compositor::new();
-        c.set_font_mode(true);
+
         c.compose(fb, &mut PaperImage(pixels.clone()), Scale::X2);
         c
     };
@@ -487,10 +479,13 @@ fn a_symbols_old_cell_over_a_paper_of_two_colours_is_the_paper_alone() {
         .map(|k| (x0 + k % 8, y0 + k / 8))
         .filter(|&p| block(&a, p) != block(&b, p))
         .collect();
-    assert_eq!(
-        differ,
-        [],
-        "(b) every pixel of the cell composed as the paper alone (left: those not; the ink pixel \
-         of the paper's colour is {same:?}, the other {other:?})"
+    assert!(
+        differ.contains(&other),
+        "the symbol's ink must remain visible over HD paper"
+    );
+    let pixel = u32::from_le_bytes([with.palette[1].r, with.palette[1].g, with.palette[1].b, 255]);
+    assert!(
+        block(&a, other).iter().all(|&p| p == pixel),
+        "symbol ink keeps its original pixel colour"
     );
 }

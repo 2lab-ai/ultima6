@@ -89,20 +89,8 @@
 // frame and title strip are gaps as in the HD layout; every other screen shows the UI's 320 ×
 // 200 letterboxed.
 //
-// The HD font (spec 11; the chooser's and Settings' "Font", kept in localStorage, the HD font
-// unless the pixel font was chosen): while the HD layout is in effect the page loads the font
-// from this origin (site/fonts/gowun-batang.woff2, document.fonts.load) and, once it has it,
-// sets the compositor's HD font mode (Game.set_hd_font): each letter or syllable cell of the
-// game's text is its paper in the ×4 frame and listed (Game.hd_glyphs, whole spaces too), and
-// after the regions are copied the page draws the listed characters in the font over their
-// cells' places on the canvas in runs (a row's neighbouring cells, one space joining words, two
-// or more ending the run, a space the player typed never): each run one line from its first
-// cell's left edge, at 0.85 of the cell's height there, at the font's natural width (narrowed to
-// its cells should it be wider), each character in its own ink. The game's symbols (the key
-// wait's cursor, the more prompt's mark) are listed too, their cells the paper, with their
-// pixels (Game.hd_symbol_rows): one after a run is drawn as its caret, where the run's text and
-// the spaces after it end; one after no run at its own cell. Until the font is loaded, with the
-// pixel font chosen, with Original or with HD off, the game's own pixel font shows, as before.
+// Game text always uses its original bitmap glyphs, including the Korean bitmap layer.
+// HD packs replace images only. Legacy font preferences are deliberately ignored.
 //
 // The pointer over the HD frame (spec 11 Design 7): the HD frame is composed without the game's
 // pointer sprite (the original's is a hardware sprite above the screen), so its blocks and its
@@ -110,14 +98,14 @@
 // of the pointer alone composes nothing. With HD on the page draws the pointer itself, last
 // (Game.hd_pointer: its box in frame pixels and a version; Game.hd_pointer_rgba: its pixels):
 // through every region whose frame rect its box meets, as that region maps the frame's pixels,
-// pixelated, clipped to the region and to what the paint copied there, after the region's HD font
+// pixelated and clipped to the region and to what the paint copied there, above source text
 // characters (in Wide the map's before the windows in front of it, each window's over its
 // content, at full opacity); in the whole view likewise, and on 07's canvas (HD on with Original)
 // at its scale. When its version moves, the page paints the canvas under its old and new boxes as
 // for a dirty rect of the HD frame there (the regions they touch and the runs listed there), then
 // the pointer. With HD off the classic frame holds the sprite, as before.
 //
-// Fullscreen (the toolbar's Fullscreen): #screen-box (the canvas, its badge, the hidden input
+// Fullscreen (the in-game setting): #screen-box (the canvas, its chrome, the hidden input
 // that takes Korean) goes fullscreen, the canvas as large as fits with the game's aspect ratio,
 // centred on black, drawn as on the page; the canvas takes the focus, and where the browser has
 // the Keyboard Lock API, Escape is locked to the game while it lasts (holding it leaves). An Exit
@@ -235,6 +223,7 @@ import {
   storeLocalePack, storePack, storeSaves, storeVoicePack,
 } from './store.js';
 import { TEXT } from './i18n.js';
+import { createGameSettings } from './game-settings.mjs';
 import { probeWideScale } from './wide-scale.mjs';
 import { CACHE_PREFIX, REVISION } from './voice/model.js';
 import { createVoices } from './voice/player.js';
@@ -251,9 +240,11 @@ const forgetKo = document.getElementById('forget-ko');
 const mute = document.getElementById('mute');
 const hdButton = document.getElementById('hd');
 const layoutChoices = document.querySelectorAll('input[name="layout"]');
-const fontChoices = document.querySelectorAll('input[name="font"]');
 const restart = document.getElementById('restart');
 const statusLine = document.getElementById('status');
+const feedbackSummary = document.getElementById('feedback-summary');
+const loadDetails = document.getElementById('load-details');
+let feedbackProblem = false;
 const badge = document.getElementById('speed-badge');
 const slower = document.getElementById('slower');
 const faster = document.getElementById('faster');
@@ -285,7 +276,7 @@ const fullscreenButton = document.getElementById('fullscreen');
 const fullscreenExit = document.getElementById('fullscreen-exit');
 
 // One-shot marks for the page loaded next (`setMark`, `takeMark`): Restart asked for the focus
-// on the canvas; the switch to the other build (`switchBuild`) cut a download of the voice model
+// on the canvas; an older build may have left a mark for a voice-model download
 // the visitor started, so the page it loads goes on with downloads allowed.
 const FOCUS_AFTER_RELOAD = 'u6-focus-after-reload';
 const VOICE_DOWNLOAD_AFTER_RELOAD = 'u6-voice-download-after-reload';
@@ -344,15 +335,22 @@ let leaving = false; // the page is loading again into the other build: the game
 // -misses), object names (data-locale-look-hits / -misses) and books (data-locale-book-hits /
 // -misses), and on the body data-locale-pack-texts = the pack's object names and books (counts
 // only), data-fullscreen = off, on (the browser's) or css (the page's own), data-layout = the
-// screen layout in effect (hd: HD on with the HD layout chosen; else original), data-font = the
-// font the game's text is drawn in on the canvas (hd: the HD font, chosen with the HD layout in
-// effect and loaded, as the page last set it; after a trap as it was; else pixel),
-// data-font-file = the HD font file's state (none: not asked for, loading, loaded, failed).
+// screen layout in effect. Compatibility diagnostics data-font='pixel' and data-font-file='none'
+// identify the single bitmap path; no alternate font is loaded or selected.
 // The drop line shows only while no game files are kept (`filesKept` false once the storage said
 // so) or loaded (a game on screen).
 let filesKept = null; // whether this browser keeps game files; null until the restore asked
 function reflect(state) {
+  const previousState = document.body.dataset.state;
   if (state) document.body.dataset.state = state;
+  const currentState = document.body.dataset.state;
+  const previousFeedback = document.body.dataset.feedback;
+  updateFeedback();
+  if (feedbackSummary && loadDetails) {
+    const summarized = currentState === 'running' || currentState === 'idle';
+    if (feedbackProblem || !summarized || queued > 0) loadDetails.open = true;
+    else if (previousState !== currentState || previousFeedback === 'loading') loadDetails.open = false;
+  }
   const live = game && !crashed;
   canvas.dataset.files = String(live ? game.game_files() : 0);
   canvas.dataset.saves = String(live ? game.save_files() : 0);
@@ -377,6 +375,7 @@ function storedSetup() {
 }
 
 let lang = storedSetup()?.lang ?? 'en';
+let runningLang = lang; // Language selected when the current game was booted.
 
 // The page's text `key` in its language (a function of `args` where the line shows values).
 function t(key, ...args) {
@@ -388,20 +387,40 @@ function t(key, ...args) {
 // `say` writes one key's line and remembers it, so a change of language rewrites it.
 let mirror = false;
 let said = null;
-// Whether the chooser's line shows the switch line (`showSwitchOnChooser`), which a change of
-// OK's label or of the language writes again (`refreshSwitchLine`).
-let switchShown = false;
-function setStatus(text) {
+// These outcomes must remain visible even when their translated wording does not
+// contain an English or Korean failure term (for example, a mixed-file refusal).
+const STATUS_PROBLEMS = new Set([
+  'noFiles', 'nothingImported', 'dropTwoPacks', 'dropPackAndFiles',
+  'dropKoPackAndFiles', 'dropVoicePackAndFiles', 'packRefused', 'packNotAPack',
+  'koPackRefused', 'koPackMismatch', 'voicePackRefused',
+]);
+function updateFeedback() {
+  if (!feedbackSummary || !loadDetails) return;
+  const state = document.body.dataset.state;
+  const summarized = state === 'running' || state === 'idle';
+  document.body.dataset.feedback = feedbackProblem ? 'error' : queued > 0 ? 'loading' : 'ready';
+  feedbackSummary.hidden = !summarized;
+  if (!summarized) return;
+  feedbackSummary.textContent = feedbackProblem ? statusLine.textContent.split('\n')[0]
+    : queued > 0 ? menuText('Preparing the browser...', '브라우저를 준비하는 중입니다.')
+      : state === 'running' ? t('gameReady')
+        : menuText('Ready for your original files.', '원본 파일을 가져올 준비가 되었습니다.');
+}
+function setStatus(text, problem = false) {
   said = null;
   statusLine.textContent = text;
-  if (mirror) {
-    setupStatus.textContent = text;
-    switchShown = false;
+  const wasProblem = feedbackProblem;
+  feedbackProblem = problem || /failed|cannot|could not|did not|not kept|not loaded|too large|stopped|unexpected|실패|오류|초과|거부|못했|못합니다|못했습니다/i.test(String(text));
+  updateFeedback();
+  if (loadDetails) {
+    if (feedbackProblem || queued > 0) loadDetails.open = true;
+    else if (wasProblem) loadDetails.open = false;
   }
+  if (mirror) setupStatus.textContent = text;
 }
 
 function say(key, ...args) {
-  setStatus(t(key, ...args));
+  setStatus(t(key, ...args), STATUS_PROBLEMS.has(key));
   said = [key, args];
 }
 
@@ -421,8 +440,7 @@ function setLang(next) {
   showSpeed();
   showStorage();
   // The switch line names OK as it reads now (relabelled above).
-  if (said && said[0] !== 'layoutSwitchAtOk') say(said[0], ...said[1]);
-  refreshSwitchLine();
+  if (said) say(said[0], ...said[1]);
 }
 
 function message(err) {
@@ -446,10 +464,11 @@ function enqueue(what, op) {
   document.body.dataset.ops = String(queued);
   const run = async () => {
     try {
-      await op();
+      return await op();
     } catch (err) {
       console.error(err);
       setStatus(t('failed', t(what), message(err)));
+      return false;
     } finally {
       queued -= 1;
       document.body.dataset.ops = String(queued);
@@ -467,7 +486,7 @@ const MAX_RENDER_S = 0.25; // at most per frame (a tab back from the background)
 const LOUD_UP_TO = 4; // above this speed (and at Max) the music fades out
 const FADE_S = 0.05 / 3; // the fade's time constant: ~95% of the way in 50 ms
 const audio = {
-  ctx: null, node: null, gain: null, voiceGain: null, ready: false, muted: false,
+  ctx: null, node: null, gain: null, voiceGain: null, ready: false, muted: (() => { try { return localStorage.getItem('u6.muted') === 'on'; } catch { return false; } })(),
   queued: 0, at: 0, posted: 0, received: 0, // the worklet's last report, frames posted since
 };
 
@@ -561,6 +580,7 @@ function applyGain() {
 // Mute sets both gains: the music's (applyGain) and the voices'.
 function setMuted(muted) {
   audio.muted = muted;
+  remember('u6.muted', muted ? 'on' : 'off');
   applyGain();
   if (audio.voiceGain) audio.voiceGain.gain.value = muted ? 0 : 1;
   mute.textContent = t(muted ? 'unmute' : 'mute');
@@ -581,6 +601,7 @@ const VOICE_ERRORS = {
 };
 
 let voiceState = 'off';
+let reflectedSettingsVoice = '';
 let voiceError = '';
 let voiceQuiet = false; // a start from the cache at page load: no progress lines
 let voiceFree = null; // this browser's room for the site, once asked (bytes, -1 unknown)
@@ -596,8 +617,10 @@ const remember = (key, value) => {
   try {
     if (value === null) localStorage.removeItem(key);
     else localStorage.setItem(key, value);
+    return true;
   } catch {
     // No storage: the choice lasts until the page is left.
+    return false;
   }
 };
 const voicesWanted = () => stored(VOICES_KEY) === 'on';
@@ -630,6 +653,15 @@ function reflectVoice() {
   put(voiceChip, 'hidden', !on);
   put(voiceOnGpu, 'hidden', !(voiceState === 'ready' && st.path === 'gpu'));
   put(voiceOnCpu, 'hidden', !(voiceState === 'ready' && st.path === 'cpu'));
+  const menuState = `${voiceState}:${voiceError}:${st.path}`;
+  if (menuState !== reflectedSettingsVoice) {
+    reflectedSettingsVoice = menuState;
+    if (settingsMenu?.open) {
+      if (voiceState === 'failed') settingsMenu.notify(menuText(`Voice failed: ${voiceError}. Retry voices.`, `음성 실패: ${voiceError}. 다시 켜세요.`));
+      else if (voiceState === 'ready' && settingsMenu.section === 'audio') settingsMenu.notify(menuText('Voice ready.', '음성 준비 완료.'));
+      else settingsMenu.refresh();
+    }
+  }
 }
 
 // The player's state changed: loading (its progress on the status line, unless quiet), ready (the
@@ -687,7 +719,7 @@ function toggleVoices() {
 function showTerms() {
   voiceTerms.hidden = false;
   document.getElementById('voice-restrictions').textContent = RESTRICTIONS;
-  voiceState = 'terms';
+  if (!voiceIsOn()) voiceState = 'terms';
   voiceError = '';
   reflectVoice();
   voiceFree = -1;
@@ -696,7 +728,8 @@ function showTerms() {
     voiceFree = Number.isFinite(quota) && Number.isFinite(usage) ? Math.max(0, quota - usage) : -1;
     showStorage();
   }).catch(() => {});
-  voiceAccept.focus();
+  settingsMenu?.terms('Supertonic-3 / Open RAIL-M',
+    `${lang === 'ko' ? '약 400 MB를 이 브라우저에 저장합니다. 대사는 외부로 전송하지 않습니다.' : 'About 400 MB is kept in this browser. Dialogue stays on this device.'}\n\n${RESTRICTIONS}`);
 }
 
 function acceptTerms() {
@@ -782,6 +815,7 @@ async function forgetVoiceModel() {
     }
   });
   say(modelGone && packGone ? 'voiceForgot' : 'voiceForgetFailed');
+  return modelGone && packGone;
 }
 
 // --- the voice pack (spec 09 Design 4) ---------------------------------------------------------
@@ -1020,18 +1054,6 @@ function localeLine() {
   return localeShown === 'mismatch' ? `\n${t('koPackMismatch', localeWhy)}` : '';
 }
 
-// The game on screen again from the kept files (the save as stored), when what it should show
-// of the pack is not what it shows, or (`changed`: a new pack) it should show the new one:
-// `note` first in the status; else just `note`.
-async function restartForLocale(note, changed = false) {
-  const differs = (localeShown !== 'off') !== wantLocale();
-  if (game && !crashed && (differs || (changed && wantLocale()))) {
-    await pausingSaves(() => restoreKept(false, note));
-  } else {
-    setStatus(note);
-  }
-}
-
 // A Korean pack from `source` (DROPPED, or the listed file it was downloaded as): read (at most
 // max_locale_pack_bytes), checked whole by the engine, kept in this browser in place of the one
 // before, with its source. One that does not check out is refused with the rule it breaks and
@@ -1075,11 +1097,10 @@ async function installLocalePack(file, source) {
   return { loaded: true, line };
 }
 
-// A dropped Korean pack: installed, and the game on screen restarts with it when the page is in
-// 한글.
+// A dropped Korean pack is stored for the next start; never restart unsaved play.
 async function loadLocalePackFile(file) {
   const { loaded, line } = await installLocalePack(file, DROPPED);
-  if (loaded) await restartForLocale(line, true);
+  if (loaded) setStatus(line + (game ? `\n${nextStartNotice()}` : ''));
 }
 
 // The pack kept from the last visit, loaded before the first game starts, with its source: one
@@ -1147,8 +1168,8 @@ async function hostedLocalePack() {
   }
 }
 
-// "Forget the Korean pack": off the page at once, out of the browser's storage, and the game on
-// screen restarted in English if it had it. The site's pack is not loaded again until the page
+// "Forget the Korean pack": out of the browser's storage; the running game's language stays
+// until its next start. The site's pack is not loaded again until the page
 // goes to 한글 again or the next visit.
 async function forgetKoPack() {
   koPack?.free();
@@ -1157,13 +1178,17 @@ async function forgetKoPack() {
   hostedForgot = true;
   reflectLocale();
   let line = t('koPackForgot');
+  let removed = true;
   try {
     await forgetLocalePack();
   } catch (err) {
     console.warn(`could not remove the Korean pack: ${errorKind(err)}`);
     line = t('koPackForgetFailed');
+    removed = false;
   }
-  await restartForLocale(line);
+  if (game) setStatus(removed ? menuText('Korean pack removed from this browser. The running game keeps its language until next start.', '한글 팩을 브라우저에서 지웠습니다. 현재 게임의 언어는 다음 시작까지 유지합니다.') : line);
+  else setStatus(line);
+  return removed;
 }
 
 // --- saves ---------------------------------------------------------------------------------
@@ -1404,7 +1429,16 @@ let drawnHd = false; // that frame was its HD frame
 // is composed whole, with no new frame too. With HD on, a move of the pointer alone
 // (Game.hd_pointer: the HD frame is composed without it) draws too: the canvas under its old and
 // new boxes, then the pointer (spec 11 Design 7). The pointer is read once a draw, here.
+let settingsMenu = null;
+let settingsPausedAt = 0;
+let settingsPausedMs = 0;
+let settingsMutedAudio = false;
 function draw() {
+  settingsMenu?.beforeGameDraw();
+  drawGame();
+  settingsMenu?.afterGameDraw();
+}
+function drawGame() {
   const version = game.frame_version();
   const hd = game.hd_on();
   const view = viewFor(hd);
@@ -1583,6 +1617,8 @@ let hdOn = storedHd();
 
 const MEMORY_KEY = 'u6.memory'; // localStorage: 'off' when the remembered sight is switched off
 const MOTION_KEY = 'u6.motion'; // localStorage: 'off' when smooth motion is switched off
+let memoryOn = storedMemory();
+let motionOn = storedMotion();
 
 // The stored choice of the remembered sight (spec 18); unreadable storage or any other value is
 // on.
@@ -1608,7 +1644,8 @@ function storedMotion() {
 function hdScale() {
   const box = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  return box.width * dpr >= 3 * 320 && box.height * dpr >= 3 * 200 ? 4 : 2;
+  const height = settingsMenu?.open ? box.width * 200 / 320 : box.height;
+  return box.width * dpr >= 3 * 320 && height * dpr >= 3 * 200 ? 4 : 2;
 }
 
 // Settings' "HD on", "Screen layout" (the build switch chosen, while one is pending; none while
@@ -1618,9 +1655,8 @@ function showHd() {
   const screen = switchTo ?? layoutChoice;
   for (const input of layoutChoices) {
     input.checked = input.value === screen;
-    input.disabled = switching;
+    input.disabled = false;
   }
-  for (const input of fontChoices) input.checked = input.value === fontChoice;
 }
 
 // How the browser scales the canvas into its box: pixelated (each canvas pixel a sharp block)
@@ -1642,30 +1678,22 @@ function fitRendering(hd) {
       && Math.abs(box.height * dpr - k * canvas.height) < 0.5;
     want = whole ? '' : 'auto';
   }
+  if (settingsMenu?.open) want = 'pixelated';
   if (canvas.style.imageRendering !== want) canvas.style.imageRendering = want;
 }
 
 // The game on screen shows HD as chosen, at the scale for the box now (S 4 with the HD layout,
 // WIDE_S in Wide), drawn at once with no new game frame (the canvas takes the size of the frame
 // it shows: `draw`). The layout in effect goes on the body first, since it sets the box. The text
-// in the HD font while it is chosen and loaded with the HD layout in effect, or HD on in Wide
-// (asked for here when it is wanted and not yet), else in the pixel font. After a trap nothing
-// changes (the canvas keeps what it showed in the box it had, as for HD on or off) until the
-// reload; the font file's state still shows.
+// stays in the original pixel font. After a trap the last frame stays until reload.
 function applyHd() {
-  if (crashed) {
-    reflectFont();
-    return;
-  }
+  if (crashed) return;
   showLayout();
-  if (fontWanted()) loadFont();
-  fontDrawn = fontOn();
-  reflectFont();
+  document.body.dataset.font = 'pixel';
+  document.body.dataset.fontFile = 'none';
   if (!game) return;
   game.set_hd(hdOn, WIDE ? WIDE_S : layoutOn() ? LAYOUT_S : hdScale());
-  game.set_hd_font(fontDrawn);
-  // Rebuild posed pixels/layers at the selected scale before the synchronous first paint.
-  // This presents the current state; it does not take an engine step or advance its clock.
+  // Present is a view change only: no engine step or clock advance.
   game.present();
   draw();
   fitRendering(game.hd_on());
@@ -1933,8 +1961,7 @@ function paintPointer(ctx, from, to, clip) {
 // The canvas from the ×4 frame for `view`: everything (`dirty` null: the letterbox's sides or the
 // paper round the regions, and every region), or the regions that rect of the ×4 frame touches (a
 // one-to-one region only that part of it, a scaled one whole: a part scaled on its own would not
-// meet its neighbours'); then the HD font's characters over what it copied (`paintGlyphs`), and
-// last the pointer over what it copied (`paintPointer`). A rect that meets what the band is
+// meet its neighbours'); then the pointer over what it copied (`paintPointer`). A rect that meets what the band is
 // taken from (PAPER_SOURCES) paints everything, and so does any rect when the samples' median in
 // the ×4 frame now is not the parchment the canvas shows (a rect that meets a sample alone does
 // not: one covered sample leaves the median as it was). A one-to-one region with cells listed in
@@ -1942,7 +1969,6 @@ function paintPointer(ctx, from, to, clip) {
 // cells changes, so a part copied alone could keep pixels of the run before.
 function paint(view, dirty) {
   const ctx = canvas.getContext('2d');
-  const glyphs = game.hd_font() ? listedGlyphs() : [];
   if (view === WHOLE_VIEW) {
     if (!dirty) {
       ctx.fillStyle = LAYOUT_FILL;
@@ -1955,9 +1981,7 @@ function paint(view, dirty) {
     // last frame once the game itself ended (Ctrl-Q, Y: the launcher ends in `game`). The whole
     // screen is one region here: runs of two windows side by side do not join, since the
     // windows' borders are not listed cells and so end a run.
-    if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], LAYOUT_WHOLE, LAYOUT_WHOLE);
     paintPointer(ctx, [0, 0, SCREEN_W, SCREEN_H], LAYOUT_WHOLE, LAYOUT_WHOLE);
-    paintedGlyphs = glyphs;
     return;
   }
   if (dirty && PAPER_SOURCES.some((source) => overlap(source, dirty))) dirty = null;
@@ -1972,19 +1996,17 @@ function paint(view, dirty) {
     ctx.imageSmoothingEnabled = !one;
     ctx.imageSmoothingQuality = 'high';
     let copied = to;
-    if (one && !listedIn(glyphs, from) && !listedIn(paintedGlyphs, from)) {
+    if (one) {
       const [x, y, w, h] = part;
       copied = [to[0] + x - source[0], to[1] + y - source[1], w, h];
       ctx.drawImage(x4, x, y, w, h, ...copied);
     } else {
       ctx.drawImage(x4, ...source, ...to);
     }
-    if (glyphs.length > 0) paintGlyphs(ctx, glyphs, from, to, copied);
     copies.push([from, to, copied]);
   }
   // Last, the pointer through every region it reaches, over what was copied (spec 11 Design 7).
   for (const [from, to, copied] of copies) paintPointer(ctx, from, to, copied);
-  paintedGlyphs = glyphs;
 }
 
 // The paper under and round the game's regions, from the ×4 frame now (LAYOUT_PAPER): the band's
@@ -2140,108 +2162,22 @@ globalThis.__u6Layout = {
   },
 };
 
-// The switch to the other build (spec 13 Decision 2): the screen chosen across the builds while
-// the chooser (or Settings: the same panel) is open, the latest choice, until its OK
-// (`switchBuild`); null for none. `switching`: OK started it and the page is to load again.
+// A different engine build is kept for the next start; never reload unsaved play.
 let switchTo = null;
-let switching = false;
-
-// The chooser's and Settings' "Screen layout" changed. Within the build this page loaded: kept,
-// on the game on screen at once, and a switch to the other build chosen before is called off.
-// Across the builds: only noted (`switchTo`, the latest choice), for the chooser's OK, which
-// switches after it kept the chooser's other choices (`applySetup`); a line says so
-// (`showSwitchLine`). While the page is loading again into the other build, nothing (the
-// choices are disabled).
 function chooseLayout(value) {
-  if (switching) return;
   const next = value === 'wide' || value === 'original' ? value : 'hd';
   if ((next === 'wide') !== WIDE) {
-    switchTo = next;
+    const kept = remember(LAYOUT_KEY, next);
+    switchTo = kept ? next : null;
     showHd();
-    showSwitchLine();
-    return;
+    setStatus(kept ? nextStartNotice() : menuText('Cannot keep layout. Current game unchanged.', '화면 배치를 보관하지 못했습니다. 현재 진행은 유지합니다.'));
+    return kept;
   }
   switchTo = null;
-  showSwitchLine();
   layoutChoice = next;
-  try {
-    localStorage.setItem(LAYOUT_KEY, layoutChoice);
-  } catch {
-    // No storage: the choice lasts until the page is left.
-  }
+  remember(LAYOUT_KEY, next);
   showHd();
   applyHd();
-}
-
-// The chooser's OK with a switch to the other build noted (`switchTo`): once (`switching`), the
-// page loads again into it after every operation admitted before is done: the queue's tail is
-// awaited again until no operation came after it (a Save of the game on screen meanwhile is
-// stored first), then the choice is kept and the page loads again at once, the game stepped no
-// more (`frame`), with nothing new saved: the game starts from the kept files and its own stored
-// save, which carry over (no state of the window or the view is saved). Storage that does not
-// keep the choice would bring back the build the page left: the switch is called off, the
-// radios show the build that runs, and a line says why.
-async function switchBuild() {
-  if (switching || switchTo === null) return;
-  switching = true;
-  showHd();
-  // Waiting on an operation other than the chooser's own (the one that calls this): a line says
-  // the page loads again once it is done, again after each that came meanwhile.
-  for (let seen = null; seen !== tail;) {
-    if (seen !== null || queued > 1) say('layoutSwitchWaiting');
-    seen = tail;
-    await seen;
-  }
-  const next = switchTo;
-  try {
-    localStorage.setItem(LAYOUT_KEY, next);
-  } catch {
-    switchTo = null;
-    switching = false;
-    showHd();
-    showSwitchLine();
-    say('layoutNotKept');
-    return;
-  }
-  // A download of the voice model the visitor started (not a start from the cache) goes on in
-  // the page loaded next, which would otherwise start the voices from the cache only (as it does
-  // with no storage for the mark).
-  if (!voiceQuiet && (voiceState === 'checking' || voiceState === 'loading')) setMark(VOICE_DOWNLOAD_AFTER_RELOAD);
-  leaving = true;
-  location.reload();
-}
-
-// What the line of a switch to the other build names: the screen noted (`switchTo`) and OK as it
-// reads now ("Accept and start" while NPC voices is ticked: `showVoiceTerms`).
-function switchWords() {
-  return [switchTo, t(setupOk.dataset.i18n)];
-}
-
-// The switch line on the chooser's line only, in the page's language.
-function showSwitchOnChooser() {
-  setupStatus.textContent = t('layoutSwitchAtOk', ...switchWords());
-  switchShown = true;
-}
-
-// The line of a switch to the other build noted for OK: on the status line and the chooser's;
-// gone from both with the switch called off.
-function showSwitchLine() {
-  if (switchTo !== null) {
-    say('layoutSwitchAtOk', ...switchWords());
-    showSwitchOnChooser();
-    return;
-  }
-  if (said?.[0] === 'layoutSwitchAtOk') setStatus('');
-  if (switchShown) setupStatus.textContent = '';
-  switchShown = false;
-}
-
-// The switch line written again where it shows (OK relabelled, another language): on both lines
-// while the status line shows it, else on the chooser's only (the status line says something
-// else since: a wait, a download).
-function refreshSwitchLine() {
-  if (said?.[0] === 'layoutSwitchAtOk') showSwitchLine();
-  else if (switchShown && switchTo !== null) showSwitchOnChooser();
 }
 
 // --- the Wide layout (spec 13) -----------------------------------------------------------------
@@ -2546,8 +2482,7 @@ function composeWide(view, hd, version, meta) {
 // null; else the box round the canvas rects that show the part of the frame `dirty` touches: of
 // the map that part, WIDE_PAD wider, all of it with cells listed in it now or at the paint
 // before; of a window shown its whole content) the map, then each window shown over it: its
-// frame, its title and its content; then the HD font's characters over each region copied
-// (`paintGlyphs`, within the clip: copied again just before), and last the pointer through that
+// frame, title and bitmap content; then the pointer through that
 // region (`paintPointer`, over the HD frame only: the classic frame holds the sprite), so a
 // window in front covers the map's pointer as it covers the map. The HD frame is scaled smoothly
 // (a one-to-one window copied as it is), the classic frame pixelated.
@@ -2555,16 +2490,13 @@ function paintWide(view, dirty) {
   const ctx = canvas.getContext('2d');
   const s = wideSrcScale;
   const smooth = s > 1;
-  const glyphs = drawnHd && game.hd_font() ? listedGlyphs() : [];
   if (view === WHOLE_VIEW) {
     ctx.fillStyle = LAYOUT_FILL;
     ctx.fillRect(0, 0, WIDE_W, WIDE_H);
     ctx.imageSmoothingEnabled = smooth;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(wideSrc, 0, 0, SCREEN_W * s, SCREEN_H * s, ...WIDE_WHOLE);
-    if (glyphs.length > 0) paintGlyphs(ctx, glyphs, [0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE, WIDE_WHOLE);
     paintPointer(ctx, [0, 0, SCREEN_W, SCREEN_H], WIDE_WHOLE, WIDE_WHOLE);
-    paintedGlyphs = glyphs;
     return;
   }
   let clip = [0, 0, WIDE_W, WIDE_H];
@@ -2572,9 +2504,7 @@ function paintWide(view, dirty) {
     const rects = [];
     const map = wideMap;
     const part = overlap(map.from.map((v) => v * s), dirty);
-    if (part && (listedIn(glyphs, map.from) || listedIn(paintedGlyphs, map.from))) {
-      rects.push(map.to);
-    } else if (part) {
+    if (part) {
       const [kx, ky] = [map.to[2] / (map.from[2] * s), map.to[3] / (map.from[3] * s)];
       const x0 = Math.floor(map.to[0] + (part[0] - map.from[0] * s) * kx) - WIDE_PAD;
       const y0 = Math.floor(map.to[1] + (part[1] - map.from[1] * s) * ky) - WIDE_PAD;
@@ -2597,25 +2527,27 @@ function paintWide(view, dirty) {
   ctx.beginPath();
   ctx.rect(...clip);
   ctx.clip();
+  // Repeated filtered draws can retain one-channel rounding from the old
+  // destination even for opaque input. Clear only the dirty clip before
+  // composing its map and windows, so overlay removal restores exact pixels.
+  ctx.clearRect(...clip);
   ctx.imageSmoothingEnabled = smooth;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(wideSrc, ...wideMap.from.map((v) => v * s), ...wideMap.to);
-  if (glyphs.length > 0) paintGlyphs(ctx, glyphs, wideMap.from, wideMap.to, overlap(wideMap.to, clip));
   paintPointer(ctx, wideMap.from, wideMap.to, overlap(wideMap.to, clip));
   for (const win of shownWindows()) {
-    if (overlap(win.outer, clip)) paintWindow(ctx, win, s, smooth, glyphs, clip);
+    if (overlap(win.outer, clip)) paintWindow(ctx, win, s, smooth, clip);
   }
   ctx.restore();
-  paintedGlyphs = glyphs;
 }
 
 // Window `win` on the canvas (within the clip `clip` the caller set): its frame, its title
 // (`windowTitle`, fitted to its strip), lighter while it is the active one, its content from the
 // offscreen frame at scale `s` (`smooth`: the HD frame, scaled smoothly unless one to one), the
-// HD font's characters over the content (`glyphs`); the content and the characters at
+// source bitmap text stays in that content, dimmed at
 // WINDOW_DIM over the border's ink while it is dimmed; then the pointer over the content, at full
 // opacity (the original's is a sprite above the screen, never part of a window).
-function paintWindow(ctx, win, s, smooth, glyphs, clip) {
+function paintWindow(ctx, win, s, smooth, clip) {
   const [x, y, w, h] = win.outer;
   const active = windowActive(win);
   ctx.fillStyle = active ? WINDOW_INK.line : WINDOW_INK.border;
@@ -2644,7 +2576,6 @@ function paintWindow(ctx, win, s, smooth, glyphs, clip) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(wideSrc, ...source, ...win.to);
   const copied = overlap(win.to, clip);
-  if (glyphs.length > 0 && copied) paintGlyphs(ctx, glyphs, win.from, win.to, copied);
   if (dim) ctx.globalAlpha = 1;
   paintPointer(ctx, win.from, win.to, copied);
 }
@@ -2834,299 +2765,6 @@ function giveHiddenRects() {
   game.set_menu_hidden(Int32Array.from(rects.flat()));
 }
 
-// --- the HD font (spec 11) ---------------------------------------------------------------------
-
-const FONT_KEY = 'u6.font'; // localStorage: 'pixel' when the viewer chose the pixel font
-const FONT_FAMILY = 'U6 Gowun Batang'; // index.html's @font-face: site/fonts/gowun-batang.woff2
-const GLYPH_CELL = 8; // a character's cell, in game pixels
-const GLYPH_SPACE = 0x20; // a listed space: no ink, it joins the words beside it (Design 3)
-const GLYPH_SYMBOL = 0x10000; // | its glyph: a listed symbol, drawn from its rows (Design 2 rev 3)
-const GLYPH_TYPED = 0x20000; // | 0x20: a listed space the player typed, never ending a run (rev 3)
-// | a letter's or a space's code: the cell drawn half-toned (spec 17: a disabled entry of the
-// context menu), its glyph painted as a checker at the canvas's pixel grid (`paintHalftone`).
-const GLYPH_HALFTONE = 0x40000;
-const FONT_EM = 0.85; // the font's size: of the height the cell has on the canvas
-// A run's ink keeps this far inside its cells at either end, in canvas pixels (it starts this far
-// in, and a run is narrowed to its cells less this either side): the rasteriser's anti-aliased
-// fringe reaches about a pixel past the ink box the font measures (measured on Chromium, the
-// shipped woff2 at 0.85 em: 'A' at the pen, the fringe one pixel left of it).
-const GLYPH_INSET = 1;
-
-// The stored choice: 'pixel', else (any other value, none, storage that cannot be read) 'hd'.
-function storedFont() {
-  try {
-    return localStorage.getItem(FONT_KEY) === 'pixel' ? 'pixel' : 'hd';
-  } catch {
-    return 'hd';
-  }
-}
-
-let fontChoice = storedFont();
-let fontFile = 'none'; // the font file: none (not asked for yet), loading, loaded, failed
-let fontDrawn = false; // the game's text is drawn in the HD font (as `applyHd` set it last)
-let paintedGlyphs = []; // the cells the last `paint` drew (Game.hd_glyphs then)
-let symbolRows = new Uint8Array(0); // the listed symbols' pixels (Game.hd_symbol_rows) with them
-// How far below its cell's centre a character's baseline lies, in ems of the font (once loaded:
-// half a syllable's ink height less its depth, so the syllables are centred in their cells and
-// ASCII stands on the same baseline, where the font puts it beside them).
-let glyphDrop = 0;
-
-// The HD font is wanted (chosen, with the HD layout in effect, or HD on in the Wide build: its
-// windows show the text as the HD layout's regions do), and drawn (wanted and loaded).
-const fontWanted = () => (WIDE ? hdOn : layoutOn()) && fontChoice === 'hd';
-const fontOn = () => fontWanted() && fontFile === 'loaded';
-
-// The font in effect and the file's state on the body (data-font, data-font-file).
-function reflectFont() {
-  put(document.body.dataset, 'font', fontDrawn ? 'hd' : 'pixel');
-  put(document.body.dataset, 'fontFile', fontFile);
-}
-
-// Asks for the font file once (this origin's, index.html's @font-face) and measures it; then the
-// game on screen shows its text in it at once (`applyHd`). A file that does not load leaves the
-// pixel font for the visit, with a line that names nothing of the game (so does a browser with
-// no document.fonts: the call is in the promise's chain, never thrown at the caller).
-function loadFont() {
-  if (fontFile !== 'none') return;
-  fontFile = 'loading';
-  const face = `100px "${FONT_FAMILY}"`;
-  Promise.resolve()
-    .then(() => document.fonts.load(face, '한'))
-    .then((faces) => {
-      if (faces.length === 0) throw new Error('no face');
-      const ctx = document.createElement('canvas').getContext('2d');
-      ctx.font = face;
-      const m = ctx.measureText('한');
-      glyphDrop = (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 200;
-      fontFile = 'loaded';
-    })
-    .catch(() => {
-      fontFile = 'failed';
-      console.warn('the HD font did not load: the text stays in the pixel font');
-    })
-    .finally(applyHd);
-}
-
-// Whether `glyphs` (Game.hd_glyphs) lists a cell in the classic rect `from`.
-function listedIn(glyphs, from) {
-  for (let i = 0; i < glyphs.length; i += 5) {
-    if (overlap([glyphs[i], glyphs[i + 1], GLYPH_CELL, GLYPH_CELL], from)) return true;
-  }
-  return false;
-}
-
-// The game's listed cells now (Game.hd_glyphs), the symbols' pixels with them (`symbolRows`).
-function listedGlyphs() {
-  const glyphs = game.hd_glyphs();
-  symbolRows = glyphs.length > 0 ? game.hd_symbol_rows() : new Uint8Array(0);
-  return glyphs;
-}
-
-// The runs of `glyphs` (Game.hd_glyphs: x, y, code, ink and paper per cell, in raster order)
-// whose cells lie in the classic rect `from` (Design 3): listed cells of one row, each the next
-// one's left neighbour, of one paper; one listed space joins the cells either side of it, two or
-// more end the run (a space the player typed, GLYPH_TYPED, joins them whatever the spaces beside
-// it: rev 3), and so does a cell not listed; a run's spaces at either end are left out. Each run:
-// its row `y`, its `paper` and its cells [x, code, ink, half] left to right (a space's ink null:
-// it goes with the text it stands in; `half`: drawn half-toned, GLYPH_HALFTONE, the code without
-// it). A listed symbol (GLYPH_SYMBOL: Design 2 rev 3) ends the cells before it:
-// after a run of them (directly, or after the spaces that follow it) it is that run's `caret`,
-// else one of the returned list's `symbols`; each { x, y, ink, rows (its 8 rows from
-// `symbolRows`, bit 7 leftmost), spaces (those between it and the run) }.
-function glyphRuns(glyphs, from) {
-  const runs = [];
-  runs.symbols = [];
-  // The cells being read: their row and paper, where the next would be, the spaces since the
-  // last character (the game's `spaces`, all of them `gap`), the run open (null after two of the
-  // game's spaces) and the last run of them.
-  let chain = null;
-  let symbols = 0; // the symbols of the whole list so far: their rows' place in `symbolRows`
-  const end = () => {
-    if (chain?.run) runs.push(chain.run);
-    if (chain) chain.run = null;
-  };
-  for (let i = 0; i < glyphs.length; i += 5) {
-    const [x, y, listed, ink, paper] = [glyphs[i], glyphs[i + 1], glyphs[i + 2], glyphs[i + 3], glyphs[i + 4]];
-    const half = (listed & GLYPH_HALFTONE) !== 0;
-    const code = listed & ~GLYPH_HALFTONE;
-    const symbol = code >= GLYPH_SYMBOL && code < GLYPH_TYPED;
-    const at = symbol ? 8 * symbols : 0;
-    if (symbol) symbols += 1;
-    if (!overlap([x, y, GLYPH_CELL, GLYPH_CELL], from)) continue;
-    if (!chain || y !== chain.y || x !== chain.next || paper !== chain.paper) {
-      end();
-      chain = { y, paper, next: x, spaces: 0, gap: 0, run: null, last: null };
-    }
-    chain.next = x + GLYPH_CELL;
-    if (code === GLYPH_SPACE || code === (GLYPH_TYPED | GLYPH_SPACE)) {
-      chain.gap += 1;
-      if (code === GLYPH_SPACE) chain.spaces += 1;
-      if (chain.spaces > 1) end();
-      continue;
-    }
-    if (symbol) {
-      const rows = symbolRows.length >= at + 8 ? symbolRows.subarray(at, at + 8) : null;
-      const mark = { x, y, ink, rows, spaces: chain.gap };
-      if (chain.last) chain.last.caret = mark;
-      else runs.symbols.push(mark);
-      end();
-      chain = null;
-      continue;
-    }
-    if (!chain.run) {
-      chain.run = { y, paper, cells: [], caret: null };
-      chain.last = chain.run;
-    } else {
-      for (let k = chain.gap; k >= 1; k -= 1) chain.run.cells.push([x - k * GLYPH_CELL, GLYPH_SPACE, null, half]);
-    }
-    chain.spaces = 0;
-    chain.gap = 0;
-    chain.run.cells.push([x, code, ink, half]);
-  }
-  end();
-  return runs;
-}
-
-// A listed symbol's pixels (`rows`: 8 rows, bit 7 leftmost) in its ink, its cell's top left at
-// canvas (x, y), each game pixel sx × sy canvas pixels with its edges on the nearest whole canvas
-// pixel (sharp, as the pixel font's blocks): one path, filled once.
-function paintSymbol(ctx, { rows, ink }, x, y, sx, sy) {
-  if (!rows) return;
-  ctx.beginPath();
-  for (let v = 0; v < GLYPH_CELL; v += 1) {
-    for (let u = 0; u < GLYPH_CELL; u += 1) {
-      if ((rows[v] & (0x80 >> u)) === 0) continue;
-      const [x0, x1] = [Math.round(x + u * sx), Math.round(x + (u + 1) * sx)];
-      const [y0, y1] = [Math.round(y + v * sy), Math.round(y + (v + 1) * sy)];
-      ctx.rect(x0, y0, x1 - x0, y1 - y0);
-    }
-  }
-  ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
-  ctx.fill();
-}
-
-// The half-toned cells of a run (`cells` as `glyphRuns` gives them, `half` set), their text drawn
-// already: every second canvas pixel of their places, in a checker at the canvas's pixel grid
-// (each place's pixels whose x + y is even), the run's `paper` again, as the game draws a
-// disabled entry with every second pixel of its letters left out. A place is its cell's rect on
-// the canvas (`x0`: where game pixel column 0 would lie, `top` the run's top, `sx` canvas pixels
-// per game pixel across, `h` the cell's height), its edges on whole pixels outward; the clip
-// keeps the checker on the pixels copied again.
-function paintHalftone(ctx, cells, paper, [x0, top], sx, h) {
-  checkerTile ??= document.createElement('canvas');
-  if (checkerTile.width !== 2) {
-    checkerTile.width = 2;
-    checkerTile.height = 2;
-  }
-  const t = checkerTile.getContext('2d');
-  t.clearRect(0, 0, 2, 2);
-  t.fillStyle = `#${paper.toString(16).padStart(6, '0')}`;
-  t.fillRect(0, 0, 1, 1);
-  t.fillRect(1, 1, 1, 1);
-  ctx.fillStyle = ctx.createPattern(checkerTile, 'repeat');
-  ctx.beginPath();
-  for (const [x, , , half] of cells) {
-    if (!half) continue;
-    const left = Math.floor(x0 + x * sx);
-    const right = Math.ceil(x0 + (x + GLYPH_CELL) * sx);
-    ctx.rect(left, Math.floor(top), right - left, Math.ceil(top + h) - Math.floor(top));
-  }
-  ctx.fill();
-}
-let checkerTile = null; // the 2 × 2 tile `paintHalftone` repeats
-
-// The runs of `glyphs` (`glyphRuns`) in the classic rect `from` that the canvas rect `to` shows,
-// drawn there over the canvas rect `copied` alone (the part just copied from the ×4 frame, where
-// their cells are their paper): each run one line of text from the left edge of its first cell's
-// place (its ink from GLYPH_INSET inside that edge), at FONT_EM of the cell's height there, on
-// the baseline `glyphDrop` puts, at the font's natural width without kerning, or narrowed to its
-// cells' width less the inset at each end when wider (horizontally only: the ink stays within its
-// cells); each character in its own ink, the parts of one ink drawn one after another, each where
-// the text before it ends. A run's caret (Design 2 rev 3) is drawn after it: its cell's left edge
-// where the run's text and the spaces after it end (their advances in the font, narrowed as the
-// run is), on the run's row; a symbol after no run at its own cell (`paintSymbol`). A run is
-// drawn only over pixels copied again just before (a region copied whole while it has
-// characters: `paint`), so never twice over itself (its anti-aliased edges would thicken).
-function paintGlyphs(ctx, glyphs, from, to, copied) {
-  const [sx, sy] = [to[2] / from[2], to[3] / from[3]];
-  const h = GLYPH_CELL * sy;
-  const size = FONT_EM * h;
-  let ready = false;
-  const prepare = () => {
-    if (ready) return;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(...copied);
-    ctx.clip();
-    ctx.font = `${size}px "${FONT_FAMILY}"`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
-    // No kerning (Design 3): a run's width is its characters' advances, so a part drawn on its
-    // own stands where the whole text would put it.
-    ctx.fontKerning = 'none';
-    ready = true;
-  };
-  const runs = glyphRuns(glyphs, from);
-  for (const { y, paper, cells, caret } of runs) {
-    const left = to[0] + (cells[0][0] - from[0]) * sx;
-    const top = to[1] + (y - from[1]) * sy;
-    const span = (cells.at(-1)[0] + GLYPH_CELL - cells[0][0]) * sx;
-    // A caret stands within the cells up to its own.
-    const reach = caret ? (caret.x + GLYPH_CELL - cells[0][0]) * sx : span;
-    if (!overlap([left, top, reach, h], copied)) continue;
-    prepare();
-    // Every code is under 0x10000: one character of the string per cell. The pen starts
-    // GLYPH_INSET inside the span, and further right as far as the first character's ink reaches
-    // left of the pen, and the run is narrowed when its width (or its ink's) is wider than the
-    // span less an inset either side: the ink, and its anti-aliased fringe, stay in the span.
-    const text = cells.map(([, code]) => String.fromCharCode(code)).join('');
-    const m = ctx.measureText(text);
-    const lead = Math.max(0, m.actualBoundingBoxLeft);
-    const natural = Math.max(m.width, lead + m.actualBoundingBoxRight);
-    const room = span - 2 * GLYPH_INSET;
-    const k = natural > room ? room / natural : 1;
-    const pen = left + GLYPH_INSET + lead * k;
-    ctx.setTransform(k, 0, 0, 1, pen, top + h / 2 + glyphDrop * size);
-    for (let a = 0; a < cells.length;) {
-      const ink = cells[a][2];
-      let b = a + 1;
-      while (b < cells.length && (cells[b][2] === null || cells[b][2] === ink)) b += 1;
-      ctx.fillStyle = `#${ink.toString(16).padStart(6, '0')}`;
-      ctx.fillText(text.slice(a, b), a === 0 ? 0 : ctx.measureText(text.slice(0, a)).width, 0);
-      a = b;
-    }
-    if (cells.some(([, , , half]) => half)) {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      paintHalftone(ctx, cells, paper, [to[0] - from[0] * sx, top], sx, h);
-    }
-    if (caret) {
-      const at = pen + ctx.measureText(text + ' '.repeat(caret.spaces)).width * k;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      paintSymbol(ctx, caret, at, top, sx, sy);
-    }
-  }
-  for (const symbol of runs.symbols) {
-    const [left, top] = [to[0] + (symbol.x - from[0]) * sx, to[1] + (symbol.y - from[1]) * sy];
-    if (!overlap([left, top, GLYPH_CELL * sx, h], copied)) continue;
-    prepare();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    paintSymbol(ctx, symbol, left, top, sx, sy);
-  }
-  if (ready) ctx.restore();
-}
-
-// The chooser's and Settings' "Font" changed: kept, on the game on screen at once.
-function chooseFont(value) {
-  fontChoice = value === 'pixel' ? 'pixel' : 'hd';
-  try {
-    localStorage.setItem(FONT_KEY, fontChoice);
-  } catch {
-    // No storage: the choice lasts until the page is left.
-  }
-  showHd();
-  applyHd();
-}
-
 // --- the HD pack -------------------------------------------------------------------------------
 
 let hdPack = null; // the HdPack loaded, set on every game put on screen; null without one
@@ -3200,7 +2838,7 @@ function attachPack(next, source = '') {
   hdPack = next;
   packSource = next ? source : '';
   reflectPack();
-  if (!setup.hidden) showHdChoice();
+
 }
 
 // A dropped pack (`refusal`: why its directory or manifest already refuses it, '' if nothing
@@ -3269,10 +2907,11 @@ async function forgetHdPack() {
     await forgetPack();
   } catch (err) {
     say('packForgetFailed', message(err));
-    return;
+    return false;
   }
   keepSource('');
   say('packForgot');
+  return true;
 }
 
 // "HD on" changed: HD as it says, kept, on the game on screen at once.
@@ -3304,12 +2943,17 @@ function frame(now) {
   }
   const dt = now - last;
   last = now;
+  if (settingsMenu?.open) {
+    // Pausing is outside the engine: no pace, step, clock, save, RNG or input call.
+    requestAnimationFrame(frame);
+    return;
+  }
   if (dt > 0 && dt <= LONG_FRAME_MS) interval += (dt - interval) / 8;
   try {
     // The rects the canvas hides now, before the steps (a right press among their events opens
     // the menu where the player sees it).
     giveHiddenRects();
-    game.set_clock(now);
+    game.set_clock(now - settingsPausedMs);
     const due = game.pace(dt);
     const budget = budget_ms(interval);
     const start = performance.now();
@@ -3400,14 +3044,16 @@ async function boot(next, origin) {
   hiddenGiven = null; // the new game has none until the next frame gives them
   owner = next;
   next.set_voices(voice.ready);
-  next.set_sight_memory(storedMemory());
-  next.set_motion(storedMotion());
-  next.set_attack_suspended(!setup.hidden);
+  next.set_sight_memory(memoryOn);
+  next.set_motion(motionOn);
+  next.set_attack_suspended(settingsMenu?.open ?? false);
   voice.newGame();
   old?.free();
   drawnGame = null; // the freed game's frame is not this one's
   drawnVersion = -1;
   saveSeen = 0;
+  settingsPausedMs = 0;
+  if (settingsMenu?.open) settingsPausedAt = performance.now();
   paceGame(next);
   try {
     attachAudio(next);
@@ -3417,6 +3063,7 @@ async function boot(next, origin) {
   }
   if (hdPack) next.set_hd_pack(hdPack);
   attachLocale(next);
+  runningLang = lang;
   applyHd();
   reflectPack();
   reflectLocale();
@@ -3530,7 +3177,7 @@ async function importFiles(dropped) {
       if (imported) {
         await restoreKept(true, `${lead}${t('savesImported', imported.length)}`, imported);
       } else {
-        setStatus(`${lead}${t('nothingImported')}`);
+        setStatus(`${lead}${t('nothingImported')}`, true);
       }
       return;
     }
@@ -3567,7 +3214,7 @@ async function importFiles(dropped) {
     reflect();
     const kept = keptNow ? t('filesKept', next.game_files()) : t('filesNotKept');
     const resumed = next.save_files() > 0 ? t('resumed') : '';
-    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}${localeLine()}\n${t('howToPlay')}`);
+    setStatus(`${lead}${report}\n${t('started')}${resumed}${saved}${kept}${localeLine()}\n${t('howToPlay')}`, localeShown === 'mismatch');
   } finally {
     if (started) {
       if (!crashed) next.release_kept();
@@ -3617,7 +3264,7 @@ async function restoreKept(focus, note = '', imported = null) {
     if (focus) canvas.focus();
     const saved = imported ? await adoptSaves(imported) : '';
     const what = t(next.save_files() > 0 ? 'keptResumed' : 'keptNew');
-    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}${localeLine()}\n${t('howToPlay')}`);
+    setStatus(`${lead}${report}\n${t('startedKept', what)}${saved}${localeLine()}\n${t('howToPlay')}`, localeShown === 'mismatch');
   } finally {
     if (!started) next.free();
   }
@@ -3645,6 +3292,7 @@ async function forgetKept() {
   filesKept = false;
   reflect();
   say(game ? 'forgotFilesRunning' : 'forgotFiles');
+  return true;
 }
 
 // The stored save removed: a save job taken before writes nothing, and the game on screen owns
@@ -3661,6 +3309,7 @@ async function forgetSaved() {
     saveSeen = game.save_generation();
   }
   say('forgotSave');
+  return true;
 }
 
 // Runs `op` (an import, which may replace the running game) with no Save taken meanwhile.
@@ -3773,101 +3422,8 @@ async function listPacks() {
   return (await packIndex()).packs;
 }
 
-// Whether the chooser shows the first run's defaults (no choice kept, or one an older page kept:
-// `setupStale`), until its OK keeps a choice.
 let setupFirst = false;
-
-// OK waits for the chooser's list (`setupListing`: the `showPacks` in flight) and for the OK
-// before it, on the queue (`setupApplying`): a press before the list is in would take no HD entry.
-let setupListing = 0;
-let setupApplying = false;
-function reflectSetupOk() {
-  setupOk.disabled = setupListing > 0 || setupApplying;
-}
-
-// The chooser's HD entries checked as the pack active now: MMPX for none (on the first run none
-// yet: `showPacks` checks the first pack listed, once the list is in), "Dropped pack" (shown only
-// then) for a dropped one, the listed one it was downloaded as (none checked when that one is
-// not listed: OK leaves the HD as it is).
-function showHdChoice() {
-  setupDropped.hidden = packSource !== DROPPED;
-  const active = setupFirst && packSource === '' ? null : packSource;
-  for (const input of setupHd.querySelectorAll('input')) input.checked = input.value === active;
-}
-
-// The chooser's listed HD entries, after MMPX (and "Dropped pack"): each pack listed, by its label
-// (as text); the active one checked unless another entry was checked meanwhile, and on the first
-// run with no pack active the first one listed (MMPX when none is). Its data-packs is the count
-// listed, once the list is in (for scripts and tests). OK is disabled until then, whatever the
-// listing gave (none, when it failed).
-async function showPacks() {
-  setupListing += 1;
-  reflectSetupOk();
-  try {
-    const packs = await listPacks();
-    for (const row of setupHd.querySelectorAll('label[data-pack]')) row.remove();
-    for (const { file, label } of packs) {
-      const input = Object.assign(document.createElement('input'), { type: 'radio', name: 'setup-hd', value: file });
-      const text = document.createElement('span');
-      text.textContent = label;
-      const row = document.createElement('label');
-      row.dataset.pack = file;
-      row.append(input, ' ', text);
-      setupHd.append(row);
-      if (file === packSource && !setupHd.querySelector('input:checked')) input.checked = true;
-    }
-    if (setupFirst && packSource === '' && !setupHd.querySelector('input:checked')) {
-      (setupHd.querySelector('label[data-pack] input') ?? setupHd.querySelector('input[value=""]')).checked = true;
-    }
-    setupHd.dataset.packs = String(packs.length);
-  } finally {
-    setupListing -= 1;
-    reflectSetupOk();
-  }
-}
-
-// The chooser's NPC voices as checked: the model's use restrictions shown, and OK read as their
-// acceptance, only while it is (a switch line shown names OK as it reads now).
-function showVoiceTerms() {
-  setupTerms.hidden = !setupVoices.checked;
-  setupOk.dataset.i18n = setupVoices.checked ? 'acceptStart' : 'ok';
-  setupOk.textContent = t(setupOk.dataset.i18n);
-  refreshSwitchLine();
-}
-
-// Opens the chooser on the language, the HD choice and the voices now (NPC voices checked on the
-// first run, else while the voices are on), its line empty unless a switch to the other build is
-// pending (noted, or under way): then the switch line, on the chooser's line only (the status
-// line keeps what it says: a wait, a download).
-function openSetup() {
-  releaseKeys();
-  for (const input of setup.querySelectorAll('input[name="setup-lang"]')) input.checked = input.value === lang;
-  setup.hidden = false;
-  game?.set_attack_suspended(true);
-  showHdChoice();
-  setupVoices.checked = setupFirst || voiceIsOn();
-  setupRestrictions.textContent = RESTRICTIONS;
-  showVoiceTerms();
-  if (switchTo !== null) {
-    showSwitchOnChooser();
-  } else {
-    setupStatus.textContent = '';
-    switchShown = false;
-  }
-  showPacks();
-}
-
-// Keeps the choice made (the language now) and closes the chooser.
-function keepSetup() {
-  try {
-    localStorage.setItem(SETUP_KEY, JSON.stringify({ lang, version: SETUP_VERSION }));
-  } catch {
-    // No storage: the choice lasts until the page is left.
-  }
-  setupFirst = false;
-  setup.hidden = true;
-  game?.set_attack_suspended(false);
-}
+function openSetup() { settingsMenu?.show(); }
 
 // A listed pack: downloaded (its progress on the status line), then loaded and kept as a dropped
 // one (`loadPackFile`). Returns whether it was loaded.
@@ -3916,71 +3472,8 @@ async function downloadPack(name) {
   return loadPackFile(file, told.refusal, name);
 }
 
-// OK: the voices as NPC voices says, at once (`applyVoices`); the language is kept, and the HD
-// entry checked becomes the active pack, on the queue (so after a restore or a load queued
-// before): the active pack's own entry (or none checked) changes nothing; MMPX removes the active
-// pack, whatever its source; another listed pack is downloaded and loaded, the chooser open and
-// saying what the status line says until it is (it stays open with the reason when it is not).
-// Then, the chooser closed and its choices kept, a switch to the other build noted by "Screen
-// layout" (`switchBuild`).
-function applySetup() {
-  const chosen = setupHd.querySelector('input:checked')?.value;
-  applyVoices();
-  setupApplying = true;
-  reflectSetupOk();
-  enqueue('opPack', async () => {
-    mirror = true;
-    try {
-      if (chosen === undefined || chosen === packSource || chosen === DROPPED) {
-        keepSetup();
-      } else if (chosen === '') {
-        await forgetHdPack();
-        keepSetup();
-      } else if (await downloadPack(chosen)) {
-        keepSetup();
-      }
-      // Spec 13 Decision 2: a switch to the other build chosen in the chooser, once it kept
-      // the choices above (the language, the voices, the pack): the page loads again into it
-      // (which starts the game in the language kept, so none of the restarts below).
-      if (setup.hidden && switchTo !== null) {
-        switchBuild();
-        return;
-      }
-      // Spec 08 K6: in 한글 the site's Korean pack, when it should be loaded, restarts the game on
-      // screen for it as a drop does.
-      if (setup.hidden && lang === 'ko') {
-        const hosted = await hostedLocalePack();
-        if (hosted?.loaded) await restartForLocale(hosted.line, true);
-      }
-      // Spec 08: a switch of the language the game on screen shows the Korean pack in or not
-      // restarts it from the kept files (the save untouched).
-      if (setup.hidden && game && !crashed && (localeShown !== 'off') !== wantLocale()) {
-        await pausingSaves(() => restoreKept(false));
-      }
-    } catch (err) {
-      console.error(err);
-      setStatus(t('failed', t('opPack'), message(err)));
-    } finally {
-      mirror = false;
-      setupApplying = false;
-      reflectSetupOk();
-    }
-  });
-}
-
-// NPC voices at OK: checked, the model's use restrictions the chooser shows are accepted and the
-// voices start, exactly as at Accept on the Voices terms (the acceptance kept, the model
-// downloaded, warmed up, ready; on the CPU without WebGPU), unless they are on already;
-// unchecked, voices that are on go off, and nothing is asked of /models/.
-function applyVoices() {
-  if (setupVoices.checked && !voiceIsOn()) {
-    gesture();
-    acceptTerms();
-  } else if (!setupVoices.checked && voiceIsOn()) {
-    voiceOff();
-    reflectVoice();
-  }
-}
+// The hidden compatibility button only closes the in-game menu.
+function applySetup() { settingsMenu?.hide(); }
 
 // --- typing Korean (spec 08 Design 4, slice K5a) -------------------------------------------
 
@@ -4095,7 +3588,7 @@ function closeLine() {
 // already on the input (a script gave it, the keys before the line went through it); the input
 // is in the tab order only while the line is open, so Tab from the canvas passes it by outside.
 function followLine() {
-  const wanted = game && !crashed && localeShown === 'on';
+  const wanted = game && !crashed && !settingsMenu?.open && localeShown === 'on';
   if (!wanted) {
     if (ime) {
       closeLine();
@@ -4205,6 +3698,7 @@ async function leaveFullscreen() {
 // back. Each press goes with its event's time (`timeStamp`, the animation frames' timeline: the
 // held walk's interval, spec 19 O1c).
 function gameKey(e) {
+  if (settingsMenu?.key(e)) return;
   gesture();
   if (!game || crashed) return;
   if (e.metaKey) {
@@ -4216,7 +3710,7 @@ function gameKey(e) {
   // Spec 19 O1c: while Ctrl or Alt is down a held walk pauses, as in the native window; nothing
   // is let go. A chord with Alt is not the game's (the browser's Alt shortcuts).
   game.set_modifiers(e.ctrlKey || e.altKey);
-  game.set_control_action(setup.hidden && e.ctrlKey && !e.altKey && !e.metaKey);
+  game.set_control_action(!settingsMenu?.open && e.ctrlKey && !e.altKey && !e.metaKey);
   if (e.altKey) return;
   if (VOICE_CANCEL_KEYS.has(e.key)) voice.cancel();
   const by = speedKey(e);
@@ -4225,8 +3719,8 @@ function gameKey(e) {
     changeSpeed(by);
   } else if (
     e.repeat
-      ? game.key_repeat(e.code, e.key, e.ctrlKey, e.timeStamp)
-      : game.key_down(e.code, e.key, e.ctrlKey, e.timeStamp)
+      ? game.key_repeat(e.code, e.key, e.ctrlKey, e.timeStamp - settingsPausedMs)
+      : game.key_down(e.code, e.key, e.ctrlKey, e.timeStamp - settingsPausedMs)
   ) {
     e.preventDefault();
   }
@@ -4239,9 +3733,9 @@ function gameKey(e) {
 // (or the line input in its place) loses the focus a held key must walk no further (spec 19 O1c:
 // the context menu, a toolbar control, Settings, Tab): every held key is let go then.
 function gameKeyUp(e) {
-  if (!game || crashed) return;
+  if (!game || crashed || settingsMenu?.open) return;
   game.set_modifiers(e.ctrlKey || e.altKey);
-  game.set_control_action(setup.hidden && e.ctrlKey && !e.altKey && !e.metaKey);
+  game.set_control_action(!settingsMenu?.open && e.ctrlKey && !e.altKey && !e.metaKey);
   game.key_up(e.code);
 }
 function releaseKeys(event) {
@@ -4277,15 +3771,12 @@ mute.addEventListener('click', () => {
 hdButton.addEventListener('change', toggleHd);
 turnsChoice.addEventListener('change', changeTurns);
 for (const input of layoutChoices) input.addEventListener('change', () => chooseLayout(input.value));
-for (const input of fontChoices) input.addEventListener('change', () => chooseFont(input.value));
 settings.addEventListener('click', () => {
   openSetup();
-  setup.querySelector('input[name="setup-lang"]:checked')?.focus();
 });
 for (const input of setup.querySelectorAll('input[name="setup-lang"]')) {
   input.addEventListener('change', () => setLang(input.value));
 }
-setupVoices.addEventListener('change', showVoiceTerms);
 setupOk.addEventListener('click', applySetup);
 // A box that grows or shrinks (the window, the zoom) may want the other scale, and the Wide
 // layout's canvas (HD on or off) the other rendering.
@@ -4392,7 +3883,7 @@ document.addEventListener('visibilitychange', () => {
 // dragged: the rest of the screen), so a layout, a view or a box changed under a still mouse
 // shows the system's pointer until the mouse moves again.
 function gameUnder(x, y) {
-  if (!game || crashed || leaving) return 'page';
+  if (!game || crashed || leaving || settingsMenu?.covers(x, y)) return 'page';
   const inside = (r) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
   const box = canvas.getBoundingClientRect();
   if (!inside(box)) return 'page';
@@ -4417,10 +3908,11 @@ function showGamePointer() {
 }
 
 function sendPointer(e) {
-  if (!game || crashed || !setup.hidden) return;
+  if (settingsMenu?.pointer(e)) return;
+  if (!game || crashed) return;
   // Pointer modifiers also cover Ctrl pressed before the canvas acquired focus.
   game.set_modifiers(e.ctrlKey || e.altKey);
-  game.set_control_action(setup.hidden && e.ctrlKey && !e.altKey && !e.metaKey);
+  game.set_control_action(!settingsMenu?.open && e.ctrlKey && !e.altKey && !e.metaKey);
   const id = e.pointerId;
   if (releasedHeld) {
     releasedHeld &= e.buttons & 3;
@@ -4449,6 +3941,7 @@ function sendPointer(e) {
   showGamePointer();
 }
 canvas.addEventListener('pointerdown', (e) => {
+  if (settingsMenu?.pointer(e)) return;
   canvas.focus();
   keepCanvas = false; // a press on the canvas gives a line being read the hidden input again
   releasedHeld = 0;
@@ -4474,7 +3967,7 @@ function releaseUnfinished(e) {
   // The buttons the game holds now, and those released before still held (kept with them).
   const [held, kept] = [sentButtons, releasedHeld];
   game.set_control_action(false);
-  if ((!dragged && game.reading_by_click()) || !setup.hidden) {
+  if ((!dragged && game.reading_by_click()) || settingsMenu?.open) {
     sentButtons = 0;
     game.pointer(-1, -1, 0);
     showGamePointer();
@@ -4483,8 +3976,8 @@ function releaseUnfinished(e) {
   }
   releasedHeld = kept | held;
 }
-canvas.addEventListener('pointercancel', releaseUnfinished);
-canvas.addEventListener('lostpointercapture', releaseUnfinished);
+canvas.addEventListener('pointercancel', (e) => { if (!settingsMenu?.pointer(e)) releaseUnfinished(e); });
+canvas.addEventListener('lostpointercapture', (e) => { if (!settingsMenu?.pointer(e)) releaseUnfinished(e); });
 canvas.addEventListener('contextmenu', (e) => {
   if (game && !crashed) e.preventDefault();
 });
@@ -4518,6 +4011,7 @@ function wheelPixel(e) {
   return pixelAt(e.clientX, e.clientY, box, true);
 }
 canvas.addEventListener('wheel', (e) => {
+  if (settingsMenu?.wheel(e)) return;
   if (!game || crashed || e.ctrlKey) {
     wheelCarry = 0;
     return;
@@ -4533,7 +4027,7 @@ canvas.addEventListener('wheel', (e) => {
   if (lines !== 0) game.wheel(at[0], at[1], lines);
 }, { passive: false });
 canvas.addEventListener('pointermove', (e) => {
-  if (wheelCarry === 0 || !game || crashed) return;
+  if (settingsMenu?.open || wheelCarry === 0 || !game || crashed) return;
   const at = wheelPixel(e);
   if (!at || !game.wheel(at[0], at[1], 0)) wheelCarry = 0;
 });
@@ -4546,7 +4040,7 @@ window.addEventListener('keydown', () => {
 
 // A press anywhere off the canvas (capture: before the page's own controls take it).
 document.addEventListener('pointerdown', (e) => {
-  if (e.target === canvas || !game || crashed) return;
+  if (e.target === canvas || e.target.closest?.('#game-settings-open') || !game || crashed || settingsMenu?.open) return;
   closeMenu();
 }, true);
 // The game's context menu closed by a press of the page's (`Game.dismiss_menu`): in order with
@@ -4730,6 +4224,169 @@ function takeFocusFlag() {
   return takeMark(FOCUS_AFTER_RELOAD);
 }
 
+// --- in-game settings ------------------------------------------------------------------------
+// Preferences are presentation policy. Language and cross-build changes are kept for the next
+// start, rather than replacing a live game's unsaved state. All other choices take effect while
+// the engine is paused; no setting calls step, tick, the command reader or a save operation.
+let availableSettingsPacks = [];
+let selectedArtwork = null;
+let artworkFailed = false;
+const menuText = (en, ko) => lang === 'ko' ? ko : en;
+const settingOption = (value, en, ko = en) => ({ value, label: menuText(en, ko) });
+const onOff = () => [settingOption('on', 'On', '켜기'), settingOption('off', 'Off', '끄기')];
+function setting(id, en, ko, value, options = [], disabled = false) {
+  return { id, label: menuText(en, ko), value, options, disabled,
+    valueLabel: options.find(o => o.value === value)?.label ?? '' };
+}
+function settingsRows(section) {
+  if (section === 'display') {
+    const packs = [settingOption('', 'MMPX', 'MMPX')];
+    if (packSource === DROPPED) packs.push(settingOption(DROPPED, 'Imported pack', '가져온 팩'));
+    for (const pack of availableSettingsPacks) packs.push({ value: pack.file, label: pack.label });
+    return [
+      { ...setting('language', 'Language', '언어', lang, [settingOption('en', 'English'), settingOption('ko', 'Korean', '한국어')]), valueLabel: `${lang === 'ko' ? menuText('Korean', '한국어') : 'English'}${game && runningLang !== lang ? menuText(' / next start', ' / 다음 시작') : ''}` },
+      { ...setting('layout', 'Layout', '화면 배치', switchTo ?? layoutChoice,
+        [settingOption('wide', 'Wide', '와이드'), settingOption('hd', 'HD 16:9'), settingOption('original', 'Original 16:10', '원본 16:10')]), valueLabel: `${(switchTo ?? layoutChoice) === 'wide' ? menuText('Wide', '와이드') : (switchTo ?? layoutChoice) === 'hd' ? 'HD 16:9' : menuText('Original 16:10', '원본 16:10')}${switchTo !== null ? menuText(' / next start', ' / 다음 시작') : ''}` },
+      setting('hd', 'HD artwork', 'HD 그림', hdOn ? 'on' : 'off', onOff()),
+      { ...setting('pack', 'Artwork pack', '그림 팩', selectedArtwork ?? packSource, packs, queued > 0), valueLabel: `${packs.find(p => p.value === (selectedArtwork ?? packSource))?.label ?? ''}${artworkFailed ? menuText(' (failed)', ' (실패)') : ''}` },
+      setting('memory', 'Remembered sight', '시야 기억', memoryOn ? 'on' : 'off', onOff()),
+      setting('motion', 'Movement effects', '이동 효과', motionOn ? 'on' : 'off', onOff()),
+      setting('windows-reset', 'Reset window positions', '창 위치 초기화', '', [], !WIDE || !shown_map || crashed),
+      setting('fullscreen', 'Fullscreen', '전체화면', fullNow() ? 'on' : 'off', onOff()),
+    ];
+  }
+  if (section === 'play') return [
+    setting('speed', 'Game speed', '게임 속도', speedName(speedAt), SPEEDS.map((n, i) => settingOption(speedName(i), n === 0 ? 'Max' : `${n}x`, n === 0 ? '최대' : `${n}x`))),
+    setting('turns', 'Turn speed', '턴 속도', String(turnFactor), [settingOption('1', 'Original', '원본'), settingOption('2', 'Quick', '빠르게'), settingOption('4', 'Fast', '더 빠르게'), settingOption('0', 'Instant', '즉시')]),
+  ];
+  if (section === 'audio') return [
+    setting('mute', 'Mute all sound', '모든 소리 끄기', audio.muted ? 'on' : 'off', onOff()),
+    { ...setting('voices', 'NPC voices', 'NPC 음성', voiceIsOn() ? 'on' : 'off', onOff()), valueLabel: voiceIsOn() ? menuText(voiceState === 'ready' ? 'Ready' : 'Loading', voiceState === 'ready' ? '준비됨' : '불러오는 중') : voiceState === 'failed' ? menuText('Failed / retry', '실패 / 재시도') : menuText('Off', '끄기') },
+    setting('voice-terms', 'Voice licence', '음성 이용약관', ''),
+  ];
+  return [
+    setting('import', 'Import files', '파일 가져오기', '', [], queued > 0),
+    setting('forget-files', 'Remove original files', '원본 파일 지우기', '', [], queued > 0),
+    setting('forget-save', 'Remove saved game', '저장 게임 지우기', '', [], queued > 0),
+    setting('forget-hd', 'Remove artwork pack', '그림 팩 지우기', '', [], queued > 0),
+    setting('forget-ko', 'Remove Korean pack', '한글 팩 지우기', '', [], queued > 0),
+    setting('forget-voices', 'Remove voice model', '음성 모델 지우기', '', [], queued > 0),
+  ];
+}
+function nextStartNotice() { return menuText('Applies next start. Current game kept.', '다음 시작에 적용. 현재 진행 유지.'); }
+async function changeSetting(id, value) {
+  if (id === 'language') {
+    setLang(value);
+    const kept = remember(SETUP_KEY, JSON.stringify({ lang, version: SETUP_VERSION }));
+    return kept ? nextStartNotice() : menuText('Language could not be kept.', '언어 설정을 보관하지 못했습니다.');
+  }
+  if (id === 'layout') {
+    const otherBuild = (value === 'wide') !== WIDE;
+    const kept = chooseLayout(value);
+    if (otherBuild) return kept ? nextStartNotice() : menuText('Layout could not be kept.', '화면 배치를 보관하지 못했습니다.');
+  } else if (id === 'hd') {
+    hdButton.checked = value === 'on';
+    toggleHd();
+  } else if (id === 'pack') {
+    if (value !== packSource && value !== DROPPED) {
+      selectedArtwork = value; artworkFailed = false;
+      let loaded = false;
+      await enqueue('opPack', async () => {
+        if (value === '') loaded = await forgetHdPack();
+        else loaded = await downloadPack(value);
+      });
+      artworkFailed = !loaded;
+      return loaded ? menuText('Artwork selection updated.', '그림 팩 선택 적용.') : menuText('Pack failed. Choose another.', '팩 불러오기 실패. 다른 팩을 고르세요.');
+    }
+  } else if (id === 'memory' || id === 'motion') {
+    if (id === 'memory') memoryOn = value === 'on'; else motionOn = value === 'on';
+    remember(id === 'memory' ? MEMORY_KEY : MOTION_KEY, value);
+    if (game && !crashed) {
+      if (id === 'memory') game.set_sight_memory(value === 'on');
+      else game.set_motion(value === 'on');
+      game.present(); draw();
+    }
+  } else if (id === 'speed') {
+    const next = SPEEDS.findIndex((_, i) => speedName(i) === value);
+    if (next >= 0) changeSpeed(next - speedAt);
+  } else if (id === 'turns') {
+    turnsChoice.value = value; changeTurns();
+  } else if (id === 'mute') {
+    setMuted(value === 'on'); gesture();
+  } else if (id === 'voices') {
+    gesture(); toggleVoices();
+  } else if (id === 'fullscreen') {
+    if (value === 'on') await enterFullscreen(); else await leaveFullscreen();
+  }
+  return '';
+}
+async function settingAction(id) {
+  if (id === 'windows-reset') {
+    remember(WINDOWS_KEY, null); placeWide(shown_map()); repaintWide();
+    return menuText('Window positions reset.', '창 위치를 초기화했습니다.');
+  }
+  if (id === 'voice-terms') { showTerms(); return ''; }
+  if (id === 'terms-accept') { if (!voiceIsOn()) { gesture(); acceptTerms(); } return menuText('Loading voice model.', '음성 모델을 불러옵니다.'); }
+  if (id === 'terms-decline') { if (!voiceIsOn()) declineTerms(); return ''; }
+  if (id === 'terms-license' || id === 'terms-notice') {
+    const suffix = id === 'terms-license' ? 'LICENSE.txt' : 'NOTICE.txt';
+    const link = [...document.querySelectorAll('#voice-terms a')].find(a => a.href.endsWith(suffix));
+    if (link) window.open(link.href, '_blank', 'noopener');
+    return '';
+  }
+  if (id === 'import') { picker.click(); return ''; }
+  const deletes = {
+    'forget-files': ['opForgetFiles', forgetKept, menuText('Original files', '원본 파일')],
+    'forget-save': ['opForgetSave', forgetSaved, menuText('Saved game', '저장 게임')],
+    'forget-hd': ['opForgetPack', forgetHdPack, menuText('Artwork pack', '그림 팩')],
+    'forget-ko': ['opForgetKo', forgetKoPack, menuText('Korean pack', '한글 팩')],
+    'forget-voices': ['opForgetVoices', forgetVoiceModel, menuText('Voice model', '음성 모델')],
+  };
+  if (id?.startsWith('confirmed:')) {
+    const action = deletes[id.slice(10)];
+    if (!action) return '';
+    const removed = id === 'confirmed:forget-voices' ? await action[1]() : await enqueue(action[0], action[1]);
+    return removed ? menuText('Selected data removed.', '선택한 자료 삭제 완료.') : menuText('Could not remove data.', '자료를 지우지 못했습니다.');
+  }
+  if (deletes[id]) settingsMenu.confirm(menuText('Remove browser data?', '브라우저 자료 삭제?'),
+    menuText(`Remove ${deletes[id][2].toLowerCase()} from this browser? This cannot be undone. Other saved data is kept.`,
+      `이 브라우저의 ${deletes[id][2]}만 지웁니다. 되돌릴 수 없습니다. 다른 보관 자료는 유지합니다.`), `confirmed:${id}`);
+  return '';
+}
+settingsMenu = createGameSettings({
+  canvas, language: () => lang, sections: settingsRows,
+  onOpen() {
+    selectedArtwork = packSource; artworkFailed = false;
+    settingsPausedAt = performance.now();
+    releaseKeys();
+    if (game && !crashed) { game.set_control_action(false); game.set_attack_suspended(true); }
+    if (dragged) { dragged = null; keepWindows(); }
+    wheelCarry = 0;
+    if (ime) closeLine();
+    voice.cancel();
+    settingsMutedAudio = audio.ctx?.state === 'running';
+    if (settingsMutedAudio) audio.ctx.suspend().catch(() => {});
+    listPacks().then(packs => { availableSettingsPacks = packs; if (settingsMenu.open) settingsMenu.refresh(); });
+  },
+  onClose() {
+    const now = performance.now();
+    settingsPausedMs += Math.max(0, now - settingsPausedAt);
+    last = now;
+    releaseKeys();
+    if (game && !crashed) { game.set_control_action(false); game.set_attack_suspended(false); }
+    if (settingsMutedAudio) audio.ctx?.resume().catch(() => {});
+    settingsMutedAudio = false;
+    // Rebuild the view only, never replay input accumulated while the menu was open.
+    if (game && !crashed) { drawnVersion = -1; wideStale = true; applyHd(); }
+  },
+  onChange: changeSetting, onAction: settingAction,
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'F10' || settingsMenu.open) {
+    if (settingsMenu.key(e)) e.stopImmediatePropagation();
+  }
+}, { capture: true });
+
 // A choice kept before this version counts as none, once: the chooser opens as on a first run
 // (on 한글, whatever the browser's language), and its OK keeps the current record.
 const setupStale = storedSetup() !== null && storedSetup().version !== SETUP_VERSION;
@@ -4742,21 +4399,23 @@ setLang(lang);
 say('loadingEngine');
 showHd();
 showLayout();
-// The HD font asked for at once when it is wanted, so it is in before the first game's frame.
-if (fontWanted()) loadFont();
-reflectFont();
+// One bitmap text path; old font preferences have no effect.
+document.body.dataset.font = 'pixel';
+document.body.dataset.fontFile = 'none';
 showFullscreen();
 canvas.dataset.behind = '0';
 reflectVoice();
 // Voices turned on in an earlier visit come back from this browser's cache only; a download the
-// switch to the other build cut (`switchBuild`) goes on, downloads allowed.
+// older build interrupted continues with its explicit download permission.
 const voiceDownload = takeVoiceDownload();
 if (voicesWanted() && termsAccepted()) startVoices({ cachedOnly: !voiceDownload });
 // Restart's mark, taken as the page loads (its age is the reload's; an engine that fails to load
 // leaves none behind), is applied once the kept game is back (`opRestore`).
 const focusAfterReload = takeFocusFlag();
 // The chooser first while no choice of this version is kept.
-if (setupFirst) openSetup();
+setup.hidden = true;
+setupFirst = false;
+remember(SETUP_KEY, JSON.stringify({ lang, version: SETUP_VERSION }));
 enqueue('opEngine', async () => {
   try {
     ({
@@ -4768,6 +4427,7 @@ enqueue('opEngine', async () => {
     if (WIDE) placeWide(shown_map());
   } catch (err) {
     reflect('failed');
+    restart.hidden = false;
     throw new Error(t('engineFailed', message(err)));
   }
   stepMs = step_ms();

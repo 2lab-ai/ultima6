@@ -4,6 +4,8 @@ type: spec
 tags: [ultima6, hd, font, korean, text]
 ---
 
+> Superseded on 2026-10-30 by [spec 24](24-ingame-settings.md): the selectable HD font is removed; pixel text and Korean bitmap support are retained. The historical design below is preserved for context.
+
 # 11 — HD font: text drawn at the HD layout's own size
 
 Status: shipped (2026-10-23, in production at https://ultima6.2lab.ai from main ba3a639; deploys 3 and 4 of `hd-layout-font-register/loop.md`; Design 3 revised after deploy 3's captures). Not in this unit: F2 (Design 6). Rev 2 (2026-10-24, from deploy 15's captures): Design 7, the pointer drawn over the HD text; Design 2's exclusion of a cell under the pointer sprite is withdrawn; shipped in deploy 16 (main afaac84). Rev 3 (2026-10-25, from deploy 18's playtest in 한글 with the HD font, Wide and the owner's MacBook capture: the reply prompt's cursor about 110 canvas px right of its colon at 1920 × 1080, the more prompt's mark about two cells right of its text, a reply begun with two typed spaces drawn far right of its prompt): Design 2 lists the game's symbols drawn over the paper and the page draws one after a run as that run's caret; Design 3's spaces the player typed join the run. User item 2 of `hd-layout-font-register/ssot.md`, verbatim: "hd 해상도에 맞게 한글 폰트 개선해줘. 처음 설정에 니가 만든 기본 폰트랑 hd 화면에 맞는 적절한 폰트 사용해줘." It builds on 10 (the layout) and 08 (the Hangul cells).

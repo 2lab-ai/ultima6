@@ -19,8 +19,8 @@
 //!   bitmap's as the file holds them ([`u6_hdpack::bitmap_hash`]), both before the colour table.
 //!
 //! [`HdView`] is the HD frame a platform shows of its engine: the switch, the scale, the pack
-//! ([`HdPack`], spec 07 H2), the HD font mode (spec 11) and when to compose (the web page's
-//! `Game::set_hd`, `Game::set_hd_pack`, `Game::set_hd_font` and `Game::present` are it). It is
+//! ([`HdPack`], spec 07 H2), and when to compose (the web page's
+//! `Game::set_hd`, `Game::set_hd_pack` and `Game::present` are it). It is
 //! composed from the published frame, without the pointer sprite (spec 11 Design 7).
 
 use std::rc::Rc;
@@ -51,7 +51,7 @@ use crate::state::State;
 pub struct HdView {
     on: bool,
     scale: Scale,
-    /// Moves at every change of `on`, `scale`, the pack or the font mode.
+    /// Moves at every change of `on`, `scale` or the pack.
     version: u64,
     compositor: Compositor,
     images: ImageCache,
@@ -96,7 +96,7 @@ impl HdView {
         self.on
     }
 
-    /// Moves at every change of the switch, the scale, the pack or the font mode: what the
+    /// Moves at every change of the switch, the scale or the pack: what the
     /// images of one composition are made under.
     pub fn version(&self) -> u64 {
         self.version
@@ -115,28 +115,10 @@ impl HdView {
         self.compositor.has_pack()
     }
 
-    /// Spec 11: the HD font mode on (`hd`) or off ([`Compositor::set_font_mode`]); true when it
-    /// changed (the setting moves, so the next [`HdView::present`] composes, when on).
-    pub fn set_font(&mut self, hd: bool) -> bool {
-        if self.compositor.font_mode() == hd {
-            return false;
-        }
-        self.compositor.set_font_mode(hd);
-        self.version += 1;
-        true
-    }
-
-    /// Whether the HD font mode is on ([`HdView::set_font`]).
-    pub fn font(&self) -> bool {
-        self.compositor.font_mode()
-    }
-
-    /// Spec 11: the cells the HD frame lists for the HD font, its letters and syllables and the
-    /// whole spaces between them ([`Compositor::glyphs`]): those of
-    /// its last composition while HD and the HD font mode are on, else none (the frame shown then
-    /// is not one this view composed with the mode).
+    /// Whole glyph cells of the last HD composition, exposed for diagnostics only. Pixel
+    /// text is always rendered directly; this list is empty while HD is off.
     pub fn glyphs(&self) -> &[HdGlyph] {
-        if self.on && self.compositor.font_mode() {
+        if self.on {
             self.compositor.glyphs()
         } else {
             &[]

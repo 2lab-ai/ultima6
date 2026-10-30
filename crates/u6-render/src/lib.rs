@@ -68,8 +68,7 @@ pub enum Kind {
     /// [`FLAG_INK`] on its set pixels, [`FLAG_PAPER`] on those drawn over the paper,
     /// [`FLAG_TYPED`] on a typed cell's, [`FLAG_SYMBOL`] on a symbol's ink pixels. No image:
     /// shown classic (a clear pixel drawn over the paper in the paper's colour at its place shows
-    /// the HD paper there, [`hd`]), or by the HD font mode ([`hd::Compositor::set_font_mode`]) as
-    /// a listed glyph.
+    /// the HD paper there, [`hd`]). Whole cells are listed as diagnostic glyph metadata.
     Glyph = 4,
 }
 
@@ -86,8 +85,8 @@ pub const FLAG_OVERLAY: u8 = 1;
 /// of [`FLAG_OVERLAY`], which only a tile's pixel carries): of a cell drawn half-toned, as
 /// 0x134044's checker shows what cannot be had (a disabled entry of the context menu), on each
 /// pixel of the cell: of the glyph's set pixels only those with (x + y) & 1 = 0 drawn, in its
-/// ink ([`FLAG_INK`] on them alone), every other one in its paper. Shown as without it; the HD
-/// font mode lists the cell half-toned ([`hd::HdGlyph::halftone`]).
+/// ink ([`FLAG_INK`] on them alone), every other one in its paper. Shown as without it; glyph
+/// diagnostics list the cell half-toned ([`hd::HdGlyph::halftone`]).
 pub const FLAG_HALFTONE: u8 = 1;
 /// [`Src::flags`]: the pixel is an outline pixel, painted in the outline colour over an opaque
 /// colour-0 pixel of the record.
@@ -106,13 +105,13 @@ pub const FLAG_PAPER: u8 = 8;
 pub const FLAG_PAPER_OFF: u8 = 16;
 /// Spec 11 Design 2 (rev 3) [`Src::flags`] of a [`Kind::Glyph`] pixel, with [`FLAG_INK`] and
 /// [`FLAG_PAPER`]: an ink pixel of a glyph the game draws as a symbol over the paper (the key
-/// wait's cursor, the more prompt's mark), [`Src::id`] that glyph's code. Shown classic, as the
-/// ink pixel of a cell the HD font mode does not list; the mode lists the cell as a symbol
+/// wait's cursor, the more prompt's mark), [`Src::id`] that glyph's code. Shown classic;
+/// diagnostics list the cell as a symbol
 /// ([`hd::SYMBOL`]).
 pub const FLAG_SYMBOL: u8 = 32;
 /// Spec 11 Design 3 (rev 3) [`Src::flags`] of a [`Kind::Glyph`] pixel: of a cell the line editor
-/// echoed (a character the player typed), on each pixel of the cell. Shown as without it; the HD
-/// font mode lists a whole space typed apart from the game's own ([`hd::TYPED_SPACE`]).
+/// echoed (a character the player typed), on each pixel of the cell. Shown as without it; glyph
+/// diagnostics list a whole space typed apart from the game's own ([`hd::TYPED_SPACE`]).
 pub const FLAG_TYPED: u8 = 64;
 /// Spec 18 [`Src::flags`] of a [`Kind::Tile`] pixel: drawn from the remembered sight (a cell in
 /// view that was seen and is out of sight now), its colour index the record's plus [`GREY`]. The

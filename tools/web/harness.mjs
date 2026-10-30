@@ -3,7 +3,7 @@
 // time and never written anywhere.
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { chromium } from 'playwright';
@@ -536,6 +536,7 @@ export async function setup(root = SITE) {
   const packHolds = new Map();
   const server = await serve({
     root,
+    modelsRoot: process.env.U6_MODELS_ROOT ? MODELS : undefined,
     packs: async (request) => {
       const path = new URL(request.url).pathname;
       const name = decodeURIComponent(path.slice('/packs/'.length));
@@ -582,7 +583,8 @@ export function holdPack(env, name) {
 }
 
 /// The voice model as tools/speech/fetch-models.sh hosts it under site/models/ (spec 09 V2).
-export const MODELS = join(SITE, 'models');
+if (process.env.U6_MODELS_ROOT && !isAbsolute(process.env.U6_MODELS_ROOT)) throw new Error('U6_MODELS_ROOT must be an absolute local path');
+export const MODELS = process.env.U6_MODELS_ROOT ? resolve(process.env.U6_MODELS_ROOT) : join(SITE, 'models');
 export const haveModels = () => existsSync(join(MODELS, 'supertonic3')) && existsSync(join(MODELS, 'onnxruntime-web'));
 
 /// The version of the chooser's record (site/app.js SETUP_VERSION).
@@ -593,16 +595,16 @@ export const CHOSEN = { lang: 'en' };
 
 /// A fresh context (empty storage) and page with the hooks; `gated` adds the store and glue
 /// wrappers; `gameFirst` (default) starts `game` without the launcher's `u` (the page itself is
-/// unchanged); `setup` is the chooser's choice the page finds kept (`CHOSEN`: no chooser), as a
-/// record of this version, or a string kept as it is (a record of an older page), null for a
-/// first visit (the chooser shows); `gpu`: in the Chromium with WebGPU; `locale`: the
+/// unchanged); `setup` seeds the stored language preference (`CHOSEN`: English), as a
+/// current record or an older record kept verbatim; null exercises the initial Korean
+/// import-first launcher; `gpu`: in the Chromium with WebGPU; `locale`: the
 /// browser's language (navigator.language), en-US unless a test asks, whatever the machine's;
 /// `layout`: the screen layout the page finds kept (spec 10 Design 7: `original` unless a test
 /// asks for `hd` or `wide`, so every click test keeps its 320 x 200 box and the Original build;
 /// null keeps none, the page's default: the Wide build, spec 13), kept only while the page keeps
 /// none (a choice the page made survives a reload);
-/// `font`: the font the page finds kept (spec 11 Design 5: `pixel` or `hd`; null, the default,
-/// keeps none: the page's default, the HD font), kept likewise only while the page keeps none;
+/// `font`: an obsolete stored preference (`pixel` or `hd`) used only to verify it is ignored;
+/// null keeps none. All game text now uses the bitmap pixel font;
 /// `memory`: the remembered sight the page finds kept (spec 18, `u6.memory`: `off` unless a test
 /// asks for `on`, so every test that compares the map with the original's keeps its black; null
 /// keeps none, the page's default: on), kept likewise only while the page keeps none;
@@ -692,6 +694,140 @@ export async function load(page, env) {
   const response = await page.goto(env.server.url);
   await waitSettled(page);
   return response;
+}
+
+// Canvas settings are exercised through real key/pointer input. u6Settings exposes only
+// geometry and state, so the tests cannot invoke menu actions or bypass their hit testing.
+const SETTINGS_SECTIONS = {
+  language: 'display', layout: 'display', hd: 'display', pack: 'display',
+  memory: 'display', motion: 'display', 'windows-reset': 'display', fullscreen: 'display',
+  speed: 'play', turns: 'play', mute: 'audio', voices: 'audio', 'voice-terms': 'audio',
+  import: 'files', 'forget-files': 'files', 'forget-save': 'files',
+  'forget-hd': 'files', 'forget-ko': 'files', 'forget-voices': 'files',
+};
+
+export async function openSettings(page) {
+  await page.waitForFunction(() => Boolean(window.u6Settings));
+  if (!await page.evaluate(() => window.u6Settings.open)) {
+    await page.focus('#screen');
+    await page.keyboard.press('F10');
+  }
+  await page.waitForFunction(() => window.u6Settings.open);
+}
+
+export async function closeSettings(page) {
+  for (let n = 0; n < 3 && await page.evaluate(() => Boolean(window.u6Settings?.open)); n += 1) {
+    await page.focus('#screen');
+    await page.keyboard.press('Escape');
+  }
+  await page.waitForFunction(() => !window.u6Settings?.open);
+}
+
+async function settingsClickRect(page, item) {
+  assert.ok(item && !item.disabled, 'settings item is present and enabled');
+  const [x, y, width, height] = item.rect;
+  assert.ok(width > 0 && height > 0, 'settings item has a hit rectangle');
+  await page.mouse.click(x + width / 2, y + height / 2);
+}
+
+export async function settingsItem(page, id) {
+  await openSettings(page);
+  const section = SETTINGS_SECTIONS[id];
+  if (section) {
+    const nav = await page.evaluate((key) => window.u6Settings.items.find((item) => item.id === key), `nav-${section}`);
+    await settingsClickRect(page, nav);
+  }
+  const seen = new Set();
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const state = await page.evaluate((key) => ({
+      page: window.u6Settings.page,
+      item: window.u6Settings.items.find((item) => item.id === key),
+      next: window.u6Settings.items.find((item) => item.id === 'next'),
+      previous: window.u6Settings.items.find((item) => item.id === 'previous'),
+    }), id);
+    if (state.item) return state.item;
+    if (seen.has(state.page)) break;
+    seen.add(state.page);
+    const next = state.next && !state.next.disabled ? state.next : state.previous;
+    if (!next || next.disabled) break;
+    await settingsClickRect(page, next);
+  }
+  assert.fail(`settings item ${id} is reachable`);
+}
+
+export async function clickSetting(page, id, { close = false } = {}) {
+  await settingsClickRect(page, await settingsItem(page, id));
+  if (close) {
+    if (id === 'fullscreen') await closeSettingsButton(page);
+    else await closeSettings(page);
+  }
+}
+
+// Escape may also leave native fullscreen. Select the actual menu Close button
+// when a test must preserve fullscreen, without moving a still mouse.
+export async function closeSettingsButton(page) {
+  await focusSetting(page, 'close');
+  await page.keyboard.press('Space');
+  await page.waitForFunction(() => !window.u6Settings?.open);
+}
+
+export async function focusSetting(page, id) {
+  await openSettings(page);
+  await page.focus('#screen');
+  const focusVisible = async (key) => {
+    for (let n = 0; n < 40; n += 1) {
+      if (await page.evaluate(() => window.u6Settings.focused) === key) return;
+      await page.keyboard.press('Tab');
+    }
+    assert.fail(`keyboard focus reaches visible settings item ${key}`);
+  };
+  const section = SETTINGS_SECTIONS[id];
+  if (section) {
+    await focusVisible(`nav-${section}`);
+    await page.keyboard.press('Enter');
+  }
+  const seen = new Set();
+  for (let n = 0; n < 16; n += 1) {
+    const state = await page.evaluate(key => ({page:window.u6Settings.page,
+      found:window.u6Settings.items.some(item=>item.id===key),
+      next:window.u6Settings.items.some(item=>item.id==='next'&&!item.disabled),
+      previous:window.u6Settings.items.some(item=>item.id==='previous'&&!item.disabled)}),id);
+    if (state.found) { await focusVisible(id); return; }
+    if (seen.has(state.page)) break;
+    seen.add(state.page);
+    const next=state.next?'next':state.previous?'previous':null;
+    if (!next) break;
+    await focusVisible(next);
+    await page.keyboard.press('Enter');
+  }
+  assert.fail(`keyboard focus reaches settings item ${id}`);
+}
+
+export async function chooseSetting(page, id, value, { close = false } = {}) {
+  const wanted = String(value);
+  const seen = new Set();
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const item = await settingsItem(page, id);
+    if (String(item.value) === wanted) {
+      if (close) await closeSettings(page);
+      return;
+    }
+    assert.ok(!seen.has(String(item.value)), `settings ${id} offers the requested value`);
+    seen.add(String(item.value));
+    await settingsClickRect(page, item);
+    await waitSettled(page);
+    await page.waitForFunction(([key, before]) => {
+      const now = window.u6Settings.items.find((entry) => entry.id === key);
+      return !now || String(now.value) !== before;
+    }, [id, String(item.value)], { timeout: 30_000 });
+  }
+  assert.fail(`settings ${id} reaches its requested value`);
+}
+
+export async function forgetSetting(page, id) {
+  await clickSetting(page, id);
+  await clickSetting(page, 'confirm-accept');
+  await closeSettings(page);
 }
 
 /// Waits until no operation is queued (the restore at load included).
